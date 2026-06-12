@@ -54,16 +54,18 @@
 # the IPv6 disables go through /proc writes); the realistic BUM flood
 # path is present via Type 3 IMET from all nodes plus static all-zero
 # VXLAN FDB rows standing in for an IMET-driven flood programmer
-# (foreign to the daemon's FDB diff, ADR-0054 §5/§7); the
-# BUM-flood-only DF-enforcement limit (a drained/non-DF AC does not
-# block known unicast — asserts are on route state and the
-# receive-side handover, never on the drained AC dropping unicast);
-# and the CE "speaks on recovery" ARP broadcast — the GARP pattern
+# (foreign to the daemon's FDB diff, ADR-0054 §5/§7); and the CE
+# "speaks on recovery" ARP broadcast — the GARP pattern
 # real CEs emit after maintenance — as the DF re-winner's legitimate
 # AC re-learn stimulus (with the ADR-0085 same-ESI local bias and the
 # VXLAN-port move observation both landed, the recovered pe1 simply
 # originates no Type 2 for the CE MAC until its kernel relearns it on
-# the AC).
+# the AC). The M66-era BUM-flood-only DF-enforcement limit is closed
+# here: the PEs bind their AC, so the single-active whole-port gate
+# holds the non-DF's eth2 in bridge-port state `disabled` (all
+# traffic blocked, known unicast included) and re-opens it on DF
+# promotion — the driver script asserts the disabled/forwarding
+# transitions across the failover cycle.
 #
 # gRPC authorization: the PEs run `enforcement = "tier"` with two
 # principals — an operator (bearer-token TCP listener) and an

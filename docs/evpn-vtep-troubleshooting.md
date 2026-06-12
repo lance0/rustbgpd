@@ -399,6 +399,62 @@ immediate cleanup, `bridge fdb del <mac> dev vxlanNNN nhid <id>`
 the stale rows by hand, or flip the knob back to `true`, restart
 once to re-adopt cleanly, then flip back to `false`.
 
+## Single-active AC gate: port disabled (or not) unexpectedly
+
+For a single-active Ethernet Segment **with an `interface` binding**,
+the dataplane enforces the RFC 7432 non-DF rule at the whole-port
+level: the bound AC bridge port is held in STP state `disabled`
+(every frame blocked, known unicast included) while this PE is
+non-DF for **every** member VNI of the ES or the ES is drained, and
+`forwarding` when it is the DF. This rides the same
+`apply_bum_enforcement` knob as the BUM flood flags.
+
+**Fast check**: `bridge -d link show dev <ac-port>` — look at the
+`state` field — and the `evpn_es_ac_gate{esi, state}` gauge on the
+Prometheus endpoint (`blocked` / `forwarding` / `mixed-roles`; the
+state with value 1 is current).
+
+**The AC is not blocked but the PE is non-DF**:
+
+1. **No binding** — only segments with
+   `[[ethernet_segments]].interface` can be gated (the binding is
+   the port handle). Unbound single-active segments fall back to
+   BUM-flood-only enforcement; bind the AC to get full enforcement.
+2. **Mixed roles** — `evpn_es_ac_gate{state="mixed-roles"} == 1`
+   means RFC 8584 service carving elected this PE DF for some member
+   VNIs and non-DF for others. The gate is per *port*, not per VLAN,
+   so blocking would break the DF VNIs; the port stays forwarding
+   and only the per-VNI BUM flood flags enforce. The daemon logs a
+   structured warning when entering this state. Single-VNI ESes
+   never hit it.
+3. **`apply_bum_enforcement = false`** — observe-only posture; no
+   port mutation at all.
+4. **Binding doesn't resolve** — the bound name must currently be a
+   bridge port (enslaved to a bridge). The daemon warns
+   `bound interface is not a bridge port` when it cannot resolve the
+   handle.
+5. **Kernel carrier reset window** — the kernel itself re-enables a
+   disabled port when carrier returns (`br_port_carrier_check`), so
+   immediately after a carrier flap the port can briefly read
+   `forwarding` until the next reconcile pass re-blocks it (kernel
+   event wake or the periodic dump, ≤ 60 s).
+
+**The AC is blocked and you didn't expect it**:
+
+1. **Drained ES** — any drain reason (operator or link, including
+   the post-carrier-return recovery hold-off) blocks the AC; that is
+   the maintenance semantic. Check
+   `evpn_es_drained{esi, reason}` / `rustbgpctl evpn es`.
+2. **This PE lost DF election** for every member VNI — check
+   `evpn_df_role{esi, vni, role}`.
+3. A crash-stopped daemon can leave the port disabled (clean
+   shutdown restores forwarding; a kill cannot). The next daemon
+   start re-evaluates and re-opens it if this PE is DF, and a
+   carrier flap re-enables it kernel-side regardless.
+
+**Do not run kernel STP on a bound AC** — STP and the gate write the
+same per-port state and will fight.
+
 ## IP-VRF stuck in `NotReady`
 
 Gate 9 slice 6 surfaces per-VRF readiness via gRPC

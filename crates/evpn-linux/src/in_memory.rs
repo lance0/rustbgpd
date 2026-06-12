@@ -74,6 +74,11 @@ struct State {
     /// flag triplet — the in-memory backend doesn't have a real
     /// kernel to inspect.
     bum_port_flags: std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags>,
+    /// Recorded `SetAcPortState` calls keyed by ifindex (`true` =
+    /// blocked / `BR_STATE_DISABLED`). Tests assert the reconciler
+    /// gated the right AC ports; applies are also mirrored into the
+    /// fake kernel's `bridge_ports` state.
+    ac_port_states: std::collections::BTreeMap<u32, bool>,
     /// Recorded FDB nexthop state — tracks per-VTEP nexthops and
     /// groups installed via [`NexthopOps`]. ADR-0059 slice 3b's
     /// coordinator drives this; tests stage it pre-startup to
@@ -200,6 +205,7 @@ impl InMemoryDataplane {
                 failures: VecDeque::new(),
                 apply_count: 0,
                 bum_port_flags: std::collections::BTreeMap::new(),
+                ac_port_states: std::collections::BTreeMap::new(),
                 l3_routes: BTreeMap::new(),
                 l3_neighbors: BTreeMap::new(),
                 l3_vxlan_fdb: BTreeMap::new(),
@@ -363,6 +369,22 @@ impl InMemoryDataplane {
             }
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 state.bum_port_flags.insert(*ifindex, *flags);
+            }
+            DataplaneOp::SetAcPortState { ifindex, blocked } => {
+                state.ac_port_states.insert(*ifindex, *blocked);
+                // Mirror into the fake kernel's bridge-port inventory
+                // so the level-triggered observed-state diff sees the
+                // apply on the next dump, like the real kernel.
+                let new_state = if *blocked {
+                    crate::ac_gate::BR_STATE_DISABLED
+                } else {
+                    crate::ac_gate::BR_STATE_FORWARDING
+                };
+                for port in state.kernel.bridge_ports.values_mut() {
+                    if port.ifindex == *ifindex {
+                        port.state = Some(new_state);
+                    }
+                }
             }
             // Gate 9 slice 6c L3 ops mutate the fake's L3 kernel maps
             // with the same replace-on-add / idempotent-remove
@@ -791,6 +813,27 @@ impl InMemoryHandle {
         &self,
     ) -> std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags> {
         self.state.lock().expect("poisoned").bum_port_flags.clone()
+    }
+
+    /// Snapshot the recorded `SetAcPortState` calls by ifindex
+    /// (`true` = blocked). Tests use this to assert the reconciler
+    /// gated the expected AC ports.
+    #[must_use]
+    pub fn ac_port_states(&self) -> std::collections::BTreeMap<u32, bool> {
+        self.state.lock().expect("poisoned").ac_port_states.clone()
+    }
+
+    /// Stage (or overwrite) one named bridge port in the fake
+    /// kernel's link inventory — the AC-gate resolver's resolution
+    /// surface. `state` is the raw `BR_STATE_*` scalar. Overwriting
+    /// an existing entry simulates kernel-driven drift (e.g. the
+    /// carrier check re-enabling a disabled port).
+    pub fn set_bridge_port(&self, name: &str, ifindex: u32, state: Option<u8>) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .insert_bridge_port(name, ifindex, state);
     }
 
     /// Pre-load a kernel-side nexthop op so the actor's startup

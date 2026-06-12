@@ -325,6 +325,7 @@ pub(crate) async fn apply_op(
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
         DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddL3Neighbor { .. }
@@ -335,10 +336,11 @@ pub(crate) async fn apply_op(
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. } => {
             // BUM port-flag ops are routed through `linux::bum_filter`,
-            // L3 ops through `linux::l3`, and ADR-0059 FDB-NHG ops
-            // through the reconcile actor's coordinator (which calls
-            // `NexthopOps` and `linux::fdb_nhg` directly). They never
-            // reach this single-dst FDB helper.
+            // AC-gate ops through `linux::ac_gate`, L3 ops through
+            // `linux::l3`, and ADR-0059 FDB-NHG ops through the
+            // reconcile actor's coordinator (which calls `NexthopOps`
+            // and `linux::fdb_nhg` directly). They never reach this
+            // single-dst FDB helper.
             unreachable!("non-single-dst-FDB op routed to FDB apply helper")
         }
     };
@@ -387,6 +389,7 @@ pub(crate) async fn apply_op(
             Ok(())
         }
         DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddL3Neighbor { .. }

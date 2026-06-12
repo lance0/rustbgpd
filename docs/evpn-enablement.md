@@ -615,16 +615,30 @@ Shipped pieces:
    `true` in v0.23.0 after the Gate 8b 24 h MAC-churn soak
    (2026-05-16) and the M37 local-origination 24 h MAC-churn soak
    (2026-05-19) both passed clean.
-3. **Per-ESI label allocator** — `EsiLabelAllocator` assigns stable
+3. **Single-active whole-port AC gate** — the RFC 7432 §14.1.1
+   complement to the flood flags: for a single-active ES **with an
+   ADR-0085 `interface` binding**, the non-DF PE's bound AC bridge
+   port is held in `IFLA_BRPORT_STATE` `disabled` (all traffic
+   blocked, known unicast included) and re-opened on DF promotion;
+   a drained ES blocks too (maintenance semantic). Rides the same
+   `apply_bum_enforcement` knob. Whole-port, not per-VLAN: RFC 8584
+   service carving that splits DF roles across member VNIs falls
+   back to BUM-only enforcement, surfaced via a warning + the
+   `evpn_es_ac_gate` gauge (`blocked` / `forwarding` /
+   `mixed-roles`). Unbound segments stay BUM-flood-only — binding
+   the AC is what provides the port handle. Do not run kernel STP
+   on a bound AC. See `docs/evpn-vtep-troubleshooting.md` for the
+   triage section; M67 asserts the transitions in CI.
+4. **Per-ESI label allocator** — `EsiLabelAllocator` assigns stable
    labels per ESI, avoids deterministic synthesizer collisions, and
    threads the allocated label through both the EAD-per-ES NLRI MPLS
    label field and the ESI Label extended community.
-4. **ESI-aware MAC origination** — Type 2 routes originated for MACs
+5. **ESI-aware MAC origination** — Type 2 routes originated for MACs
    learned on a VNI in a configured `[[ethernet_segments]]` block
    carry that segment's ESI. Config rejects a VNI shared across
    multiple local segments until learned-port-to-ESI disambiguation
    is plumbed.
-5. **Aliasing receive-side projection + FDB-NHG dataplane** — the
+6. **Aliasing receive-side projection + FDB-NHG dataplane** — the
    projection layer combines non-zero-ESI Type 2 routes with
    EAD-per-EVI routes and populates `RemoteMacEntry::alias_vtep_ips`
    + `alias_group_key`. ADR-0059 wires the kernel side: multi-homed
@@ -633,7 +647,7 @@ Shipped pieces:
    keyed by `(VNI, ESI, EthernetTag)`. Receive-path ECMP fans out
    across every observed alias VTEP. M40 hosted smoke
    validates the end-to-end path against FRR EVPN-MH 10.3.1.
-6. **Mass-withdraw receive-side filter** — every supervisor pass
+7. **Mass-withdraw receive-side filter** — every supervisor pass
    snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes
    whose `(origin VTEP next-hop, ESI)` is not active. This gives
    level-triggered whole-segment withdrawal within the dataplane

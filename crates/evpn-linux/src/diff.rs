@@ -1207,6 +1207,7 @@ mod tests {
                     );
                 }
                 DataplaneOp::SetBumPortFlags { .. }
+                | DataplaneOp::SetAcPortState { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
                 | DataplaneOp::AddL3Neighbor { .. }

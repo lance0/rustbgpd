@@ -62,6 +62,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   statements` per match (no new RPC, authz unchanged), the CLI text
   renderer prints a `statements:` section, and `--json` gains a
   run-stable `statements` array per match.
+- **Single-active non-DF full AC blocking: the whole-port
+  attachment-circuit gate.** RFC 7432 single-active redundancy
+  requires the non-DF PE to block **all** traffic on the segment AC —
+  known unicast included — but Gate 8b's DF enforcement only set the
+  per-port BUM flood flags (correct for all-active, insufficient for
+  single-active: the non-DF bridge still forwarded known unicast, so
+  a dual-homed CE could see duplicate delivery or have its return
+  path pulled to the non-forwarding PE). The dataplane now also
+  drives the bound AC bridge port's whole-port state
+  (`IFLA_BRPORT_STATE`): blocked (`state disabled`) while this PE is
+  non-DF for **every** member VNI of the ES or the ES is drained
+  (maintenance semantic — the ADR-0085 recovery hold-off keeps the
+  port blocked until the segment re-converges), forwarding when DF.
+  Scope and caveats, stated plainly: the gate applies only to
+  **single-active segments with an ADR-0085 `interface` binding**
+  (the binding provides the port handle; unbound segments stay
+  BUM-flood-only — one more reason to bind), it is gated behind the
+  same `apply_bum_enforcement` knob as the flood flags, and it is
+  **per port, not per VLAN** — when RFC 8584 service carving splits
+  the DF roles across an ES's member VNIs the port stays forwarding
+  with BUM-only enforcement and the condition is surfaced via a
+  structured warning plus the new
+  `evpn_es_ac_gate{esi, state="blocked"|"forwarding"|"mixed-roles"}`
+  gauge (single-VNI ESes, the common case, always get full
+  enforcement). The reconciler diffs desired against the *observed*
+  kernel port state every pass because the kernel re-enables a
+  disabled port when carrier returns — that drift self-heals on the
+  next reconcile wake. Removing the ES/binding (or daemon shutdown)
+  restores the port to forwarding; a disabled port is never left
+  orphaned. Do not run kernel STP on a bound AC — both would fight
+  over the same per-port state. Proven in CI by new M67 asserts
+  (non-DF blocked at steady state, promoted DF re-opened before the
+  flood-path relearn, demoted PE re-blocked after the revert) and a
+  privileged netns round-trip that also pins the flood-flag
+  non-clobber (the gate message carries only the state attribute).
+
 - **M67 interop proof for the ADR-0085 link-driven Ethernet Segment
   drain: a real AC failure drives the failover end-to-end, no RPC in
   the path.** New `kernel-dataplane` CI job — the M66 sibling with

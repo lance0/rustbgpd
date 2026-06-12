@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_evpn::{
-    BumEnforcementTable, DfAlgorithm, DfCandidate, DfElection, DfRole, EthernetSegment,
-    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalEadPerEsOriginator,
+    AcGateState, BumEnforcementTable, DfAlgorithm, DfCandidate, DfElection, DfRole,
+    EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalEadPerEsOriginator,
     LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction, RedundancyMode,
     SameEsiBiasTable,
 };
@@ -254,7 +254,7 @@ pub(crate) fn spawn_with_local_bias(
         metrics,
         shutdown: daemon_shutdown.clone(),
         drained_esis: Arc::new(BTreeSet::new()),
-        bound_esis: BTreeSet::new(),
+        es_link_bindings: EsLinkBindings::default(),
     };
     let join = tokio::spawn(segment_loop(
         runtime,
@@ -286,11 +286,13 @@ struct SegmentRuntime {
     /// startup, election, and snapshot reapplication all skip it, so a
     /// SIGHUP/runtime snapshot republish cannot resurrect the routes.
     drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
-    /// ESIs with an `[[ethernet_segments]].interface` binding in the
-    /// committed config (ADR-0085 decision 1) — derived from the
-    /// binding watch. Only bound segments can be bias-eligible:
-    /// unbound segments have unknowable AC health (decision 5).
-    bound_esis: BTreeSet<EthernetSegmentIdentifier>,
+    /// Resolved `[[ethernet_segments]].interface` bindings in the
+    /// committed config (ADR-0085 decision 1) — mirrored from the
+    /// binding watch. Bound-ness gates bias eligibility (decision 5:
+    /// unbound segments have unknowable AC health), and the bound
+    /// link name is the port handle the single-active AC gate ships
+    /// to the dataplane.
+    es_link_bindings: EsLinkBindings,
 }
 
 /// Per-ESI runtime state.
@@ -330,10 +332,11 @@ async fn segment_loop(
     // for the lifetime of the actor task and assignments stay
     // stable across reconfiguration within that lifetime.
     let mut esi_label_allocator = rustbgpd_evpn::EsiLabelAllocator::new();
-    // Bound-ESI projection before the first snapshot publish so the
-    // initial bias-eligibility table sees startup bindings.
+    // Binding projection before the first snapshot publish so the
+    // initial bias-eligibility table and AC-gate rows see startup
+    // bindings.
     if let Some(rx) = es_link_bindings_rx.as_mut() {
-        runtime.bound_esis = rx.borrow_and_update().keys().copied().collect();
+        runtime.es_link_bindings = rx.borrow_and_update().clone();
     }
     let startup_segments = segments_rx.borrow().as_ref().clone();
     rebuild_segment_states(
@@ -438,13 +441,13 @@ async fn segment_loop(
             changed = bindings_changed(&mut es_link_bindings_rx) => {
                 if changed.is_ok() {
                     if let Some(rx) = es_link_bindings_rx.as_mut() {
-                        runtime.bound_esis =
-                            rx.borrow_and_update().keys().copied().collect();
+                        runtime.es_link_bindings = rx.borrow_and_update().clone();
                     }
-                    // Bound-ness only affects bias eligibility — the
-                    // BUM-enforcement table is binding-agnostic, so
-                    // republish just the bias snapshot.
-                    publish_same_esi_bias_snapshot(&runtime, &by_esi);
+                    // Bindings shape both snapshots: bias eligibility
+                    // (bound-ness) and the AC-gate rows riding the
+                    // BUM-enforcement table (the bound link name is
+                    // the gate's port handle).
+                    publish_dataplane_snapshots(&runtime, &by_esi);
                 } else {
                     // Bindings publisher gone (daemon teardown / test
                     // rig). Keep the last-known bound set — the drain
@@ -927,18 +930,139 @@ fn publish_bum_enforcement_snapshot(
     let Some(tx) = &runtime.bum_enforcement_tx else {
         return;
     };
-    let table = Arc::new(build_bum_enforcement_table(&runtime.instances, by_esi));
-    debug!(
-        rows = table.len(),
-        "EVPN segment: published BUM enforcement intent"
+    let mut table = build_bum_enforcement_table(&runtime.instances, by_esi);
+    populate_ac_gates(
+        &mut table,
+        &runtime.es_link_bindings,
+        &runtime.drained_esis,
+        by_esi,
     );
-    tx.send_replace(table);
+    publish_enforcement_table(runtime, tx, table);
 }
 
 fn publish_empty_bum_enforcement_snapshot(runtime: &SegmentRuntime) {
     if let Some(tx) = &runtime.bum_enforcement_tx {
-        tx.send_replace(Arc::new(BumEnforcementTable::new()));
+        publish_enforcement_table(runtime, tx, BumEnforcementTable::new());
     }
+}
+
+/// `send_replace` plus the AC-gate operator surface: the per-ES
+/// `evpn_es_ac_gate` gauge tracks every published gate row (cleared
+/// for rows that left the table), and entering the mixed-roles
+/// partial-enforcement condition logs a transition-only structured
+/// warning — both diffed against the previously published table so
+/// the 10 s re-election sweep's identical republishes stay silent.
+fn publish_enforcement_table(
+    runtime: &SegmentRuntime,
+    tx: &watch::Sender<Arc<BumEnforcementTable>>,
+    table: BumEnforcementTable,
+) {
+    let prev = tx.borrow().clone();
+    for entry in table.ac_gates() {
+        let esi_str = format_esi(entry.esi);
+        runtime
+            .metrics
+            .set_evpn_es_ac_gate(esi_str.as_str(), entry.state.as_str());
+        if entry.state == AcGateState::MixedRoles
+            && prev.ac_gate(entry.esi).map(|e| e.state) != Some(AcGateState::MixedRoles)
+        {
+            warn!(
+                esi = esi_str.as_str(),
+                interface = entry.interface.as_str(),
+                "single-active ES has split DF roles across its member VNIs \
+                 (RFC 8584 service carving): the whole-port AC gate stays \
+                 forwarding and only per-VNI BUM flood flags enforce — \
+                 partial enforcement until the roles converge"
+            );
+        }
+    }
+    for prev_entry in prev.ac_gates() {
+        if table.ac_gate(prev_entry.esi).is_none() {
+            runtime
+                .metrics
+                .clear_evpn_es_ac_gate(format_esi(prev_entry.esi).as_str());
+        }
+    }
+    debug!(
+        rows = table.len(),
+        ac_gates = table.ac_gates_len(),
+        "EVPN segment: published BUM enforcement intent"
+    );
+    tx.send_replace(Arc::new(table));
+}
+
+/// Attach the single-active AC-gate rows to the enforcement table —
+/// the "single-active non-DF full AC blocking" half of Gate 8b
+/// (RFC 7432 §14.1.1: the non-DF must block ALL traffic on the
+/// segment AC, known unicast included; the BUM flood flags alone
+/// cover only the flood classes). One row per single-active ES with
+/// an ADR-0085 `interface` binding; see [`ac_gate_state_for_es`] for
+/// the role/drain → state rule.
+fn populate_ac_gates(
+    table: &mut BumEnforcementTable,
+    bindings: &EsLinkBindings,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) {
+    for (esi, state) in by_esi {
+        let Some(binding) = bindings.get(esi) else {
+            continue;
+        };
+        let Some(gate) = ac_gate_state_for_es(
+            state.config.redundancy_mode,
+            drained_esis.contains(esi),
+            &state.config.member_vnis,
+            &state.last_roles,
+        ) else {
+            continue;
+        };
+        table.set_ac_gate(*esi, binding.interface.clone(), gate);
+    }
+}
+
+/// Pure AC-gate rule for one **bound** ES. Returns `None` when no
+/// gate row applies (all-active: every member PE forwards known
+/// unicast by design — RFC 7432 §14.1.2 — so the port is never
+/// gated). For single-active:
+///
+/// - **drained** (any reason) → `Blocked`. A drained ES has
+///   withdrawn and must not attract traffic; blocking the AC is the
+///   maintenance semantic, and the ADR-0085 recovery hold-off keeps
+///   the port blocked until the segment has re-converged.
+/// - **non-DF for EVERY member VNI** → `Blocked`. The kernel gate is
+///   per PORT, not per VLAN, so blocking is only safe when no member
+///   VNI elects this PE as DF.
+/// - **DF and non-DF split across member VNIs** (RFC 8584 service
+///   carving) → `MixedRoles`: the port stays forwarding (a port
+///   block would break the DF VNIs) and the caller surfaces the
+///   partial-enforcement condition via gauge + warning.
+/// - **otherwise** (DF everywhere, or roles not yet known for every
+///   member VNI — e.g. mid-election) → `Forwarding`. Incomplete
+///   roles fail open, matching the BUM table's posture for the same
+///   window.
+pub(crate) fn ac_gate_state_for_es(
+    redundancy_mode: RedundancyMode,
+    drained: bool,
+    member_vnis: &BTreeSet<EvpnInstanceId>,
+    roles: &BTreeMap<EvpnInstanceId, DfRole>,
+) -> Option<AcGateState> {
+    if !redundancy_mode.is_single_active() {
+        return None;
+    }
+    if drained {
+        return Some(AcGateState::Blocked);
+    }
+    let any_df = roles.values().any(|r| r.is_df());
+    let any_non_df = roles.values().any(|r| !r.is_df());
+    let all_member_roles_known =
+        !member_vnis.is_empty() && member_vnis.iter().all(|v| roles.contains_key(v));
+    Some(if any_df && any_non_df {
+        AcGateState::MixedRoles
+    } else if any_non_df && all_member_roles_known {
+        AcGateState::Blocked
+    } else {
+        AcGateState::Forwarding
+    })
 }
 
 /// ADR-0085 decision 5: publish the per-`(ESI, VNI)` same-ESI
@@ -955,8 +1079,10 @@ fn publish_same_esi_bias_snapshot(
     let Some(tx) = &runtime.same_esi_bias_tx else {
         return;
     };
+    let bound_esis: BTreeSet<EthernetSegmentIdentifier> =
+        runtime.es_link_bindings.keys().copied().collect();
     let table = build_same_esi_bias_table_from_roles(
-        &runtime.bound_esis,
+        &bound_esis,
         &runtime.drained_esis,
         by_esi.iter().flat_map(|(&esi, state)| {
             state
@@ -2532,7 +2658,7 @@ mod tests {
             metrics: BgpMetrics::new(),
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
-            bound_esis: BTreeSet::new(),
+            es_link_bindings: EsLinkBindings::default(),
         };
         let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
@@ -2676,6 +2802,240 @@ mod tests {
         assert!(table.is_eligible(esi(1), vni(100)));
         assert!(!table.is_eligible(esi(1), vni(200)));
         assert_eq!(table.len(), 1);
+    }
+
+    // -- Single-active AC gate (whole-port blocking) -----------------
+
+    /// Role matrix for the pure per-ES gate rule. The caller
+    /// ([`populate_ac_gates`]) only invokes it for BOUND segments, so
+    /// bound-ness is implicit here; unbound coverage lives in
+    /// `ac_gate_rows_require_binding_and_single_active`.
+    #[test]
+    fn ac_gate_state_matrix() {
+        use RedundancyMode::{AllActive, SingleActive};
+
+        let members: BTreeSet<EvpnInstanceId> = [vni(100), vni(200)].into_iter().collect();
+        let roles = |pairs: &[(u32, DfRole)]| -> BTreeMap<EvpnInstanceId, DfRole> {
+            pairs.iter().map(|&(v, r)| (vni(v), r)).collect()
+        };
+
+        // All-active never gates the port, role state irrespective.
+        assert_eq!(
+            ac_gate_state_for_es(AllActive, false, &members, &roles(&[])),
+            None
+        );
+        assert_eq!(
+            ac_gate_state_for_es(
+                AllActive,
+                false,
+                &members,
+                &roles(&[(100, DfRole::NonDf), (200, DfRole::NonDf)])
+            ),
+            None
+        );
+
+        // Drained single-active blocks regardless of (cleared) roles —
+        // the maintenance semantic; the recovery hold-off keeps it
+        // blocked until the segment re-converges.
+        assert_eq!(
+            ac_gate_state_for_es(SingleActive, true, &members, &roles(&[])),
+            Some(AcGateState::Blocked)
+        );
+
+        // Non-DF for EVERY member VNI → block the whole port.
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &members,
+                &roles(&[(100, DfRole::NonDf), (200, DfRole::NonDf)])
+            ),
+            Some(AcGateState::Blocked)
+        );
+
+        // DF everywhere → forwarding.
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &members,
+                &roles(&[(100, DfRole::Df), (200, DfRole::Df)])
+            ),
+            Some(AcGateState::Forwarding)
+        );
+
+        // RFC 8584 service carving split the roles → the port-level
+        // gate must NOT block (it would break the DF VNI); fall back
+        // to BUM-only enforcement and surface mixed-roles.
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &members,
+                &roles(&[(100, DfRole::Df), (200, DfRole::NonDf)])
+            ),
+            Some(AcGateState::MixedRoles)
+        );
+
+        // Roles incomplete (mid-election: one member VNI not yet
+        // resolved) → fail open to forwarding; "non-DF everywhere"
+        // cannot be claimed for an unknown VNI.
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &members,
+                &roles(&[(100, DfRole::NonDf)])
+            ),
+            Some(AcGateState::Forwarding)
+        );
+        assert_eq!(
+            ac_gate_state_for_es(SingleActive, false, &members, &roles(&[])),
+            Some(AcGateState::Forwarding)
+        );
+
+        // Single-VNI ES — the common case (and the M66/M67 shape) —
+        // gets full enforcement either way.
+        let one_member: BTreeSet<EvpnInstanceId> = [vni(100)].into_iter().collect();
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &one_member,
+                &roles(&[(100, DfRole::NonDf)])
+            ),
+            Some(AcGateState::Blocked)
+        );
+        assert_eq!(
+            ac_gate_state_for_es(
+                SingleActive,
+                false,
+                &one_member,
+                &roles(&[(100, DfRole::Df)])
+            ),
+            Some(AcGateState::Forwarding)
+        );
+    }
+
+    /// Table-level rule: rows exist only for bound single-active
+    /// segments; unbound and all-active segments produce none.
+    #[test]
+    fn ac_gate_rows_require_binding_and_single_active() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+        let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let runtime = SegmentRuntime {
+            instances,
+            rib_tx,
+            bum_enforcement_tx: None,
+            same_esi_bias_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+            drained_esis: Arc::new(BTreeSet::new()),
+            es_link_bindings: EsLinkBindings::default(),
+        };
+        let mut sa_bound = segment(esi(0x31), &[100]);
+        sa_bound.redundancy_mode = RedundancyMode::SingleActive;
+        let mut sa_unbound = segment(esi(0x32), &[100]);
+        sa_unbound.redundancy_mode = RedundancyMode::SingleActive;
+        let aa_bound = segment(esi(0x33), &[100]); // all-active default
+        rebuild_segment_states(
+            &runtime,
+            &mut by_esi,
+            &mut alloc,
+            vec![sa_bound, sa_unbound, aa_bound],
+        );
+        // Mark every member VNI non-DF so a row, if any, is Blocked.
+        for state in by_esi.values_mut() {
+            state.last_roles.insert(vni(100), DfRole::NonDf);
+        }
+
+        let bindings: EsLinkBindings = Arc::new(
+            [
+                (
+                    esi(0x31),
+                    crate::config::EsLinkBinding {
+                        interface: "eth2".to_string(),
+                        recovery_delay: Duration::from_secs(30),
+                    },
+                ),
+                (
+                    esi(0x33),
+                    crate::config::EsLinkBinding {
+                        interface: "eth3".to_string(),
+                        recovery_delay: Duration::from_secs(30),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut table = BumEnforcementTable::new();
+        populate_ac_gates(&mut table, &bindings, &BTreeSet::new(), &by_esi);
+
+        let row = table.ac_gate(esi(0x31)).expect("bound single-active row");
+        assert_eq!(row.interface, "eth2");
+        assert_eq!(row.state, AcGateState::Blocked);
+        assert!(
+            table.ac_gate(esi(0x32)).is_none(),
+            "unbound single-active cannot be gated (no port handle)"
+        );
+        assert!(
+            table.ac_gate(esi(0x33)).is_none(),
+            "all-active is never gated"
+        );
+        assert_eq!(table.ac_gates_len(), 1);
+    }
+
+    /// Drain interaction at the table level: a drained bound
+    /// single-active ES rows out as Blocked even though drain cleared
+    /// its `last_roles`.
+    #[test]
+    fn ac_gate_blocks_drained_bound_single_active_es() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+        let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let runtime = SegmentRuntime {
+            instances,
+            rib_tx,
+            bum_enforcement_tx: None,
+            same_esi_bias_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+            drained_esis: Arc::new(BTreeSet::new()),
+            es_link_bindings: EsLinkBindings::default(),
+        };
+        let mut sa = segment(esi(0x41), &[100]);
+        sa.redundancy_mode = RedundancyMode::SingleActive;
+        rebuild_segment_states(&runtime, &mut by_esi, &mut alloc, vec![sa]);
+        // Drain semantics: last_roles is cleared (drain_segment_state
+        // takes it); the gate must still block.
+
+        let bindings: EsLinkBindings = Arc::new(
+            [(
+                esi(0x41),
+                crate::config::EsLinkBinding {
+                    interface: "eth2".to_string(),
+                    recovery_delay: Duration::from_secs(30),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let drained: BTreeSet<EthernetSegmentIdentifier> = [esi(0x41)].into_iter().collect();
+        let mut table = BumEnforcementTable::new();
+        populate_ac_gates(&mut table, &bindings, &drained, &by_esi);
+        assert_eq!(
+            table.ac_gate(esi(0x41)).map(|e| e.state),
+            Some(AcGateState::Blocked),
+            "drained ES must block its AC (maintenance semantic)"
+        );
     }
 
     // -- ADR-0084 Ethernet Segment drain/undrain ---------------------

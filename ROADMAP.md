@@ -248,19 +248,22 @@ has it, no broad performance sprints without profile evidence.
   `ObservedOnVxlanPort` observation and the originator drops the stale local
   claim, live or drained. Low-priority operational polish
   once core convergence is complete.
-- **Single-active non-DF full AC blocking.** The Gate 8b dataplane DF
-  enforcement sets the bridge-port BUM-flood flags only
-  (`IFLA_BRPORT_{UNICAST,MCAST,BCAST}_FLOOD`), which is the correct
-  all-active scope — but RFC 7432 single-active semantics require the
-  non-DF PE to block **all** traffic on the segment AC, known unicast
-  included. Today a single-active non-DF suppresses MAC *origination*
-  (control plane) yet its bridge still forwards unicast on the AC, so a
-  dual-homed CE can transiently see duplicate delivery or have its
-  return path pulled to the non-forwarding PE. Needs a per-role
-  all-traffic port gate (e.g. bridge port `state disabled` or an
-  equivalent single-netlink toggle) driven by the same DF-role map that
-  feeds the BUM filter, with the drain path reusing it. Distinct from
-  the deferred all-active local-bias item.
+- **Single-active non-DF full AC blocking — RESOLVED** (2026-06-12,
+  the ADR-0085 binding follow-on). The non-DF PE of a **bound**
+  single-active ES now blocks its whole AC: the dataplane drives the
+  bound bridge port's `IFLA_BRPORT_STATE` (`disabled` when non-DF for
+  every member VNI or drained, `forwarding` when DF) through the same
+  DF-role flow and `apply_bum_enforcement` knob as the BUM filter,
+  with the drain path reusing it (any drain reason blocks; the
+  recovery hold-off keeps it blocked until re-convergence) and M67
+  asserting the transitions across a real failover. Remaining
+  limitations, by design: unbound single-active segments stay
+  BUM-flood-only (no port handle — bind the AC for full enforcement),
+  and the gate is per PORT, not per VLAN — RFC 8584 service carving
+  that splits DF roles across member VNIs falls back to BUM-only
+  enforcement (warned + `evpn_es_ac_gate{state="mixed-roles"}` gauge;
+  per-VLAN state would need `vlan_filtering` + per-VLAN STP state).
+  Distinct from the deferred all-active local-bias item.
 - **Wedged post-Established advertisement path (observed once, CI,
   2026-06-12 — mechanism identified and reproduced 2026-06-12;
   RESOLVED by session-identity stamping, see below).**
@@ -319,16 +322,10 @@ has it, no broad performance sprints without profile evidence.
   Type 1/4; local originator withdraws Type 2) over independent
   channels, so the EAD-per-ES-before-MAC ordering that maximizes the
   remote receivers' single-active backup-swap window is convergent but
-  not guaranteed. Assessed 2026-06-12: the coordinator already
-  PUBLISHES segment-side first (EADs before the originator's MAC
-  withdrawals — `apply_ethernet_segment_drain`), so the favorable
-  order is best-effort today; guaranteeing it needs a consumption
-  ack/generation-confirm seam in the segment actor before the
-  originator publish. Deferred: M67 measured the link-driven drain
-  blackout at 100-300 ms WITHOUT pinned ordering, so the ack plumbing
-  would buy a narrower transient that measurement says is already
-  acceptable. Revisit only if a soak or scale test shows the
-  unknown-unicast gap mattering. Either order converges.
+  not guaranteed. A small cross-actor sequencing step (withdraw EADs,
+  then MACs) would pin the §8.2-style fast-signal ordering and shrink
+  the unknown-unicast gap during a drain handover. Polish on the drain
+  primitive, not correctness — either order converges.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
