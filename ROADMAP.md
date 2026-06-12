@@ -303,13 +303,16 @@ has it, no broad performance sprints without profile evidence.
   gated family now has its EoR withheld until the gate lifts and the gated
   flood is sent; non-GR ORF peers keep the immediate EoR (a client that
   never sends ROUTE-REFRESH must still see EoR).
-- **Peer lifecycle hardening.** Runtime-added neighbors are built by
-  `resolve_neighbor`, which never sets `cluster_id` — an RR client added via
-  gRPC runs without CLUSTER_LIST prepend or cluster-loop detection until
-  restart (needs a two-path transport-construction field-parity test);
-  `DeleteNeighbor` on a dynamic peer permanently leaks a
-  `dynamic_neighbor_limit` slot, and its persist-failure rollback resurrects
-  the peer as a persisted static neighbor; a BFD Down stops the primary
+- **Peer lifecycle hardening.** The `resolve_neighbor` cluster-id gap and the
+  dynamic-peer `DeleteNeighbor` hazards are fixed (#416, v0.37.0):
+  runtime-added neighbors resolve `cluster_id` like restart-built ones, and a
+  parity test pins the two transport-construction paths to full
+  `TransportConfig` equality so the next added field cannot silently diverge;
+  `DeleteNeighbor` refuses dynamic-range peers with a typed error before any
+  state or persistence mutation, so the `dynamic_neighbor_limit` slot stays
+  accounted (the `BackToIdle` decrement still runs at session end) and the
+  persist-failure rollback can no longer resurrect an ephemeral peer as
+  persisted static config. Also listed here: a BFD Down stops the primary
   session but not a pending collision candidate, which `BackToIdle` promotion
   then establishes over the BFD-down path; the inbound handler treats a
   state-query timeout as Idle and replaces a possibly-Established session
