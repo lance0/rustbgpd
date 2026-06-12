@@ -267,8 +267,8 @@ has it, no broad performance sprints without profile evidence.
   receipts. Remaining follow-up: revisiting the RIB channel capacity
   default against the bench convergence shapes now that overflow is a pacing
   knob rather than a correctness cliff.
-- **Graceful-restart session-boundary hygiene.** Three of the four leaks
-  GR flaps bypassing `PeerDown` cleanup caused are fixed: ORF filters and
+- **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
+  cleanup; three of the four resulting state leaks are fixed: ORF filters and
   the ORF initial-advertisement gate surviving into the new session (#415),
   the configured LLGR stale time being consumed at GR→LLGR promotion (a
   peer re-establishing during LLGR always got the 360 s default), and a
