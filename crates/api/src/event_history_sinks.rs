@@ -379,7 +379,7 @@ mod tests {
         let event = OtcRouteBlockedEvent {
             peer: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
             direction: rustbgpd_transport::OtcDirection::Ingress,
-            reason: "ingress_from_customer_rsclient",
+            reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::IngressFromCustomerRsclient,
             prefixes: vec!["203.0.113.0/24".to_string()],
             local_role: Some(rustbgpd_wire::BgpRole::Provider),
             remote_role: Some(rustbgpd_wire::BgpRole::Customer),

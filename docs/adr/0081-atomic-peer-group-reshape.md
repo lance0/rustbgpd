@@ -187,7 +187,10 @@ One reshape engine, two front doors.
    shares ADR-0076's deferral — a rollback-capable dynamic-range reshape
    executor (delete/re-add is wrong for ephemeral peers) is its own
    future ADR, and `apply_peer_group_change` must not silently bounce
-   dynamic members in the meantime.
+   dynamic members in the meantime. *(The transaction-path half of this
+   deferral is closed by ADR-0086: a post-persist graceful reset reaches
+   live dynamic sessions there. The targeted-RPC/SIGHUP skip semantics
+   stay as written here.)*
 5. **`DeletePeerGroup` keeps its still-referenced guard**
    (`policy.rs:1094-1103`) and therefore never reshapes members; it is
    out of scope beyond inheriting the same code path.

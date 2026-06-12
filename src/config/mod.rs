@@ -1491,7 +1491,9 @@ pub enum EffectiveNeighborImpactKind {
     /// live-policy transaction executor.
     PolicyChain,
     /// Resolved transport/session state or peer-group membership moved. These
-    /// impacts need a rollback-capable session reconfigure executor.
+    /// impacts route to the session reshape executor: static members get a
+    /// rollback-capable in-place reconfigure; live dynamic sessions get a
+    /// post-persist graceful reset and re-accept under the committed config.
     SessionReshape,
 }
 
@@ -1516,14 +1518,17 @@ impl EffectiveNeighborImpactKind {
 pub struct EffectiveNeighborImpact {
     pub address: String,
     pub reasons: Vec<String>,
-    /// Operator-visible impact kind. `policy_chain` is currently committable by
-    /// the live-policy executor; `session_reshape` needs a dedicated session
-    /// reconfigure executor before transactions can commit it.
+    /// Operator-visible impact kind. `policy_chain` commits through the
+    /// live-policy executor; `session_reshape` commits through the session
+    /// reshape executor (static members are reconfigured in place, live
+    /// dynamic sessions are gracefully reset to re-accept under the committed
+    /// config) unless mixed with `policy_chain` impacts.
     pub kind: EffectiveNeighborImpactKind,
     /// True when `address` identifies a `[[dynamic_neighbors]]` range rather
-    /// than a static neighbor. Skipped from `--diff`; used only to keep
-    /// transaction classification precise while dynamic live-policy execution
-    /// remains staged behind its own executor.
+    /// than a static neighbor. Skipped from `--diff`; used to route the
+    /// impact to the matching executor arm (dynamic ranges expand to live
+    /// sessions inside the peer manager rather than resolving to a static
+    /// neighbor record).
     #[serde(skip)]
     pub is_dynamic_range: bool,
 }
@@ -1778,8 +1783,10 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if !diff.effective_neighbor_impact.is_empty() {
         // A live-impact transaction is committable only when every impacted
         // entry belongs to one executor family. Pure resolved-policy-chain
-        // moves use the live-policy executor. Static-only session reshapes use
-        // the peer reconfigure executor. Dynamic session reshapes and mixed
+        // moves use the live-policy executor. Session reshapes use the peer
+        // reconfigure executor: static members are reconfigured in place with
+        // captured priors, and live dynamic sessions are gracefully reset
+        // after persist so they re-accept under the committed config. Mixed
         // policy/session impacts remain rejected until they have a combined
         // rollback story.
         let all_policy_chain = diff
@@ -1790,7 +1797,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             class
                 .supported_sections
                 .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
-        } else if static_session_reshape_transaction(diff) {
+        } else if session_reshape_transaction(diff) {
             class
                 .supported_sections
                 .push(TRANSACTION_SESSION_RESHAPE_SECTION.to_string());
@@ -1891,13 +1898,26 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     class
 }
 
-fn static_session_reshape_transaction(diff: &ConfigDiff) -> bool {
+fn session_reshape_transaction(diff: &ConfigDiff) -> bool {
     if !diff.neighbors.added.is_empty() || !diff.neighbors.removed.is_empty() {
         return false;
     }
-    if !diff.effective_neighbor_impact.iter().all(|impact| {
-        impact.kind == EffectiveNeighborImpactKind::SessionReshape && !impact.is_dynamic_range
-    }) {
+    // A `[[dynamic_neighbors]]` record edit (range add/remove, peer-group
+    // reassignment) belongs to the dynamic-neighbor executor family, and a
+    // reassigned range cannot be applied to sessions accepted under the old
+    // group anyway — so any record-level dynamic change keeps the impact out
+    // of the reshape family. With records unchanged, a dynamic-range
+    // `SessionReshape` impact is a pure peer-group field reshape, which the
+    // executor commits by gracefully resetting the affected live dynamic
+    // sessions (they re-accept under the committed config on reconnect).
+    if diff.dynamic_neighbors_changed {
+        return false;
+    }
+    if !diff
+        .effective_neighbor_impact
+        .iter()
+        .all(|impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape)
+    {
         return false;
     }
     if diff.neighbors.changed.is_empty() {

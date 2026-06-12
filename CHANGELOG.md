@@ -11,6 +11,58 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Peer-group field edits now reach live dynamic sessions on the
+  config-transaction path (ADR-0086, closes the ADR-0081 decision-4
+  deferral).** A peer-group edit affecting a `[[dynamic_neighbors]]`
+  range (e.g. `hold_time`) previously classified as unsupported
+  "effective neighbor inheritance impact" and was rejected by
+  `ApplyConfigTransaction` / gNMI Set, while the live sessions kept
+  their old config until a natural reconnect. The session reshape
+  executor now commits it: static members are reconfigured in place
+  with captured priors exactly as before, and — only after the
+  transaction persists — the live dynamic sessions accepted by each
+  affected range are gracefully reset (Cease NOTIFICATION with an
+  RFC 8203 shutdown communication, `"peer-group configuration
+  change"`). The remote's reconnect is re-accepted under the committed
+  config (snapshot staging advances the accept matcher before
+  persist), and `dynamic_neighbor_limit` slot accounting stays owned
+  by the normal session-idle reaping — the reset never delete/re-adds
+  an ephemeral peer. A failed transaction never flaps a dynamic peer
+  (pinned by test); a session that cannot be signaled keeps its
+  running config until reconnect and is reported in the apply
+  response, never silently swallowed. Dynamic-range peer-group
+  *reassignments* remain outside the reshape family (a
+  `[[dynamic_neighbors]]` record edit; sessions accepted under the
+  old group cannot be live-reassigned), and SIGHUP / targeted
+  peer-group RPCs deliberately keep their no-preview skip semantics
+  (see ADR-0086).
+- **Canonical ingress reason-label contract
+  (`crates/telemetry/src/reason_labels.rs`).** The reason strings
+  that ingress route-rejection mechanisms report are now a single
+  typed vocabulary shared by every surface — Prometheus label values,
+  log-line `reason` tokens, and the structured `OTC_ROUTE_BLOCKED`
+  event payload — instead of free-form `&str` literals repeated per
+  call site. `OtcBlockReason` (RFC 9234: `ingress_from_customer_rsclient`,
+  `ingress_peer_mismatch`, `malformed_length`,
+  `egress_to_upstream_via_otc`) is enforced at compile time through
+  the `bgp_otc_routes_blocked_total` recorder and the transport event
+  payload; `RrLoopReason` (`originator_id`, `cluster_list`) pins the
+  RFC 4456 §8 log token. Tests pin the exact strings — renaming one
+  now fails a test and must be called out as a breaking observability
+  change. **No metric names, label sets, or metric label values
+  changed.** One log-only token changed: the debug-level
+  "Route reflector loop detected" line's `reason` field is now
+  snake_case per the contract — `ORIGINATOR_ID` → `originator_id`,
+  `CLUSTER_LIST` → `cluster_list`. `docs/OPERATIONS.md` gains an
+  "Ingress rejection / route-leak detection" metric table listing the
+  canonical reason values per metric, plus the previously
+  undocumented `bgp_fib_routes_rejected_total{reason="link_local_next_hop_scope_missing"}`
+  row; `docs/deployment.md` now uses the real metric names
+  (`bgp_as_path_loop_detected_total`, `bgp_rr_loop_detected_total`,
+  `bgp_max_prefix_exceeded_total` — the `_total` suffix was missing —
+  and the nonexistent `bgp_routes_received_total` /
+  `bgp_routes_installed_total` references were replaced with
+  `bgp_rib_prefixes` / `bgp_rib_loc_prefixes`).
 - **Coordinator-level invariant tests for the EVPN cross-actor seams
   (the ROADMAP seam audit).** The Ethernet Segment lifecycle spans
   the segment actor (Type 1/4, DF election, bias/AC-gate snapshots),
@@ -437,6 +489,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   group-teardown path. The per-VNI `apply_aliasing_ecmp = false`
   off-switch governs the single-active indirection too (falls back to
   single-dst at the active PE, no backup pre-create).
+
+- **Kernel-side EVPN dataplane drift now repairs within the reconcile
+  actor's 50 ms coalesce window instead of the 60 s periodic dump
+  (poll-cadence tail sweep).** The notify task's existing netlink feeds
+  gain two drift classes on the same kernel-event wake channel the
+  IP-VRF route observation already uses: an `AF_BRIDGE` `RTM_DELNEIGH`
+  on a managed VXLAN port (a programmed remote-MAC row swept by
+  `bridge fdb del`/flush — unicast, BUM flood, and NHG-backed rows
+  alike) and, via a new `RTNLGRP_LINK` subscription on the notify
+  socket, link drift on the EVPN surface: bridge-port flag/state writes
+  (the BUM-filter and AC-gate enforcement targets, including the
+  single-active non-DF port block), VXLAN/managed-bridge topology
+  bring-up and teardown, and AC-port enslavement. Classifiers keep
+  container-runtime veth churn and VNI-less-bridge noise out of the
+  wake path; external in-place FDB *replaces* (no delete emitted) and
+  ports of not-yet-VNI-resolved bridges still ride the periodic dump,
+  which is retained unchanged as the backstop. The remaining
+  fixed-cadence loops were swept and stay deliberately: BMP statistics
+  (RFC 7854 interval reporting), BFD protocol timers, MRT dump
+  rotation, the originator/segment/dataplane/FIB/blackhole poll ticks
+  (all already event-driven; the ticks are their backstops), and the
+  FIB/blackhole 30 s kernel-drift bound (no kernel event feed behind
+  `UnicastFib` yet — noted on the roadmap).
 
 ### Fixed
 

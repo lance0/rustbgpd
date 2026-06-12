@@ -31,8 +31,11 @@
 //!    originator gates on its own local claim, so plain remote-MAC
 //!    programming echoes (which dominate this shape, and carry
 //!    `NTF_EXT_LEARNED`) cost one cheap lookup each.
-//!    `RTM_DELNEIGH` on the VXLAN port stays dropped — a remote row
-//!    withdrawing says nothing about local AC state.
+//!    `RTM_DELNEIGH` on the VXLAN port stays dropped *as an
+//!    observation* — a remote row withdrawing says nothing about
+//!    local AC state — but fires the reconcile-wake path instead
+//!    ([`classify_fdb_drift`]): a static remote-MAC row vanishing
+//!    from the VXLAN port is kernel-side drift of programmed state.
 //! 2. Drop if `NTF_EXT_LEARNED` on a non-VXLAN port — programmed
 //!    rows never land there from us, so these are a foreign
 //!    controller's entries, not kernel local learns.
@@ -80,6 +83,7 @@ use std::net::IpAddr;
 
 use netlink_packet_route::{
     AddressFamily,
+    link::{InfoKind, LinkAttribute, LinkInfo, LinkMessage},
     neighbour::{
         NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
     },
@@ -219,7 +223,9 @@ fn classify_bridge_fdb(
     // `NTF_EXT_LEARNED` and is precisely the usurpation signal.
     //
     // `RTM_DELNEIGH` on the VXLAN port stays dropped — a remote row
-    // being withdrawn says nothing about local AC state.
+    // being withdrawn says nothing about local AC state. (It DOES
+    // indicate dataplane drift; [`classify_fdb_drift`] handles that
+    // on the separate reconcile-wake path.)
     let ifindex = msg.header.ifindex;
     if let Some(&vni_raw) = cache.vxlan_ifindex_to_vni.get(&ifindex) {
         if !matches!(kind, NeighEventKind::New) {
@@ -494,6 +500,106 @@ pub(crate) fn classify_route(msg: &RouteMessage, _kind: RouteEventKind) -> bool 
         msg.header.protocol,
         RouteProtocol::Kernel | RouteProtocol::Static | RouteProtocol::Boot
     )
+}
+
+/// `RTM_DELNEIGH` (`AF_BRIDGE`) drift classifier — does this delete
+/// indicate kernel-side drift of dataplane-*programmed* FDB state?
+///
+/// Remote-MAC rows — unicast and BUM flood, plain and NHG-backed —
+/// live exclusively on the VXLAN port of a managed VNI, and they are
+/// static (`NUD_PERMANENT`-shaped) rows that never age out on their
+/// own. A delete on that port is therefore either external
+/// interference (`bridge fdb del` / a flush sweeping the port) or the
+/// echo of our own withdraw. Both are safe to wake the reconcile
+/// actor on: the pass re-diffs the kernel against intent, so the
+/// interference case re-installs the row within the coalesce window
+/// (50 ms default) instead of waiting for the 60 s periodic dump, and
+/// the self-echo case (withdraws are reconcile-driven and bursty)
+/// coalesces into a single no-op pass.
+///
+/// `RTM_NEWNEIGH` on the VXLAN port deliberately does NOT wake: every
+/// remote-MAC install we perform echoes one, so waking there would
+/// re-dump after every programming pass. The cost is that an external
+/// in-place *modification* (`bridge fdb replace` with a wrong dst) is
+/// only repaired by the periodic dump — flush/delete is the
+/// overwhelmingly common interference shape.
+///
+/// This is a reconcile-wake classifier, fully independent of
+/// [`classify_neigh`]'s observation pipeline: the observation side
+/// still drops VXLAN-port deletes (a remote row withdrawing says
+/// nothing about local AC state).
+#[must_use]
+pub(crate) fn classify_fdb_drift(msg: &NeighbourMessage, cache: &LinkCache) -> bool {
+    matches!(msg.header.family, AddressFamily::Bridge)
+        && cache.vxlan_ifindex_to_vni.contains_key(&msg.header.ifindex)
+}
+
+/// `RTM_NEWLINK` / `RTM_DELLINK` drift classifier — should the
+/// reconcile actor wake for this link change?
+///
+/// The BUM-filter and AC-gate reconcilers enforce bridge-port flags
+/// (`flood` / `mcast_flood` / `learning`) and port `state` — all
+/// surfaced by the kernel as link notifications on `RTNLGRP_LINK`
+/// (`br_ifinfo_notify`). Before this classifier existed those drifts
+/// were only repaired by the 60 s periodic dump.
+///
+/// Wakes on:
+///
+/// 1. A managed VXLAN port or a port of a VNI-resolved bridge
+///    (`vxlan_ifindex_to_vni` / `bridge_port_to_vni`) — port state,
+///    flag, carrier, and enslavement changes on exactly the surface
+///    the BUM / AC-gate diffs enforce.
+/// 2. A VNI-resolved bridge itself (`vxlan_attach_count >= 1`) —
+///    bridge-level attribute drift and teardown.
+/// 3. Any VXLAN-kind link (`IFLA_INFO_KIND == "vxlan"`) — topology
+///    bring-up/teardown: the create/enslave events that turn a
+///    `NotReady` instance `Ready`. VXLAN devices are EVPN-specific
+///    and rare, so this arm cannot become a churn source.
+/// 4. A link whose `Controller` (master) is a VNI-resolved bridge —
+///    a new AC port being enslaved.
+///
+/// Deliberately does NOT wake on ports of VNI-less bridges (container
+/// runtimes churn veths on their own bridges constantly) or on
+/// non-VXLAN link creation. Mid-bring-up bridges that have no VXLAN
+/// attached yet fall in that drop set; the VXLAN attach itself (arm 3)
+/// and the periodic dump cover them. Our own port-flag/state writes
+/// echo a `NEWLINK` and cost one coalesced no-op pass — they are rare
+/// (DF transitions, topology changes), so no self-echo guard is
+/// needed.
+#[must_use]
+pub(crate) fn classify_link_event(msg: &LinkMessage, cache: &LinkCache) -> bool {
+    let ifindex = msg.header.index;
+    if cache.vxlan_ifindex_to_vni.contains_key(&ifindex)
+        || cache.bridge_port_to_vni.contains_key(&ifindex)
+    {
+        return true;
+    }
+
+    let is_managed_bridge = |idx: u32| {
+        cache
+            .bridges
+            .values()
+            .any(|b| b.vxlan_attach_count >= 1 && b.ifindex == idx)
+    };
+    if is_managed_bridge(ifindex) {
+        return true;
+    }
+
+    let mut controller = None;
+    for attr in &msg.attributes {
+        match attr {
+            LinkAttribute::Controller(idx) => controller = Some(*idx),
+            LinkAttribute::LinkInfo(infos)
+                if infos
+                    .iter()
+                    .any(|info| matches!(info, LinkInfo::Kind(InfoKind::Vxlan))) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    controller.is_some_and(is_managed_bridge)
 }
 
 fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
@@ -1303,5 +1409,134 @@ mod tests {
         );
         assert!(classify_route(&msg, RouteEventKind::New));
         assert!(classify_route(&msg, RouteEventKind::Del));
+    }
+
+    // --- FDB-drift reconcile-wake classifier (`classify_fdb_drift`) ---
+
+    /// `bridge fdb del <mac> dev vxlan100` (or a flush sweeping the
+    /// VXLAN port) must wake the reconcile actor — a programmed
+    /// remote-MAC row vanished and only a re-diff can repair it.
+    #[test]
+    fn fdb_drift_wakes_on_delete_on_managed_vxlan_port() {
+        let cache = cache_for(100, /* vxlan */ 11, /* eth0 */ 22);
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            11,
+            NeighbourFlags::ExtLearned,
+            Some(vec![0xaa; 6]),
+        );
+        assert!(classify_fdb_drift(&msg, &cache));
+    }
+
+    /// A delete on a local AC port is a kernel age-out, already
+    /// surfaced as `LocalMacObservation::Aged` to the originator —
+    /// not programmed-state drift, so no reconcile wake.
+    #[test]
+    fn fdb_drift_ignores_delete_on_ac_port() {
+        let cache = cache_for(100, 11, 22);
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            22,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
+        assert!(!classify_fdb_drift(&msg, &cache));
+    }
+
+    /// Non-bridge families and unmanaged ifindexes stay quiet — IP
+    /// neighbour churn must not turn into reconcile dumps.
+    #[test]
+    fn fdb_drift_ignores_foreign_family_and_unmanaged_port() {
+        let cache = cache_for(100, 11, 22);
+        let inet = neigh_msg(
+            AddressFamily::Inet,
+            11,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
+        assert!(!classify_fdb_drift(&inet, &cache));
+        let unmanaged = neigh_msg(
+            AddressFamily::Bridge,
+            77,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
+        assert!(!classify_fdb_drift(&unmanaged, &cache));
+    }
+
+    // --- Link-drift reconcile-wake classifier (`classify_link_event`) ---
+
+    fn link_msg(ifindex: u32, controller: Option<u32>, kind: Option<InfoKind>) -> LinkMessage {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        if let Some(master) = controller {
+            msg.attributes.push(LinkAttribute::Controller(master));
+        }
+        if let Some(kind) = kind {
+            msg.attributes
+                .push(LinkAttribute::LinkInfo(vec![LinkInfo::Kind(kind)]));
+        }
+        msg
+    }
+
+    /// `bridge link set dev eth0 flood on` / an external port-state
+    /// write emits `RTM_NEWLINK` for the port — the exact surface the
+    /// BUM-filter and AC-gate diffs enforce, so it must wake.
+    #[test]
+    fn link_event_wakes_on_managed_bridge_port_and_vxlan_port() {
+        let cache = cache_for(100, /* vxlan */ 11, /* eth0 */ 22);
+        assert!(classify_link_event(&link_msg(22, Some(99), None), &cache));
+        assert!(classify_link_event(&link_msg(11, Some(99), None), &cache));
+    }
+
+    /// Changes on the VNI-resolved bridge itself (ifindex 99 in the
+    /// fixture) wake, as does a brand-new port being enslaved to it.
+    #[test]
+    fn link_event_wakes_on_managed_bridge_and_new_enslavement() {
+        let cache = cache_for(100, 11, 22);
+        assert!(classify_link_event(&link_msg(99, None, None), &cache));
+        // New AC port (ifindex unknown to the cache) enslaved to the
+        // managed bridge.
+        assert!(classify_link_event(&link_msg(33, Some(99), None), &cache));
+    }
+
+    /// VXLAN-kind links wake regardless of cache state — the
+    /// create/enslave events of topology bring-up arrive before the
+    /// cache knows the ifindex.
+    #[test]
+    fn link_event_wakes_on_vxlan_kind_link() {
+        let cache = LinkCache::default();
+        assert!(classify_link_event(
+            &link_msg(44, None, Some(InfoKind::Vxlan)),
+            &cache
+        ));
+    }
+
+    /// Container-runtime churn must stay quiet: veths without a
+    /// master, veths enslaved to a VNI-less bridge, and non-VXLAN
+    /// link creation are not EVPN surface.
+    #[test]
+    fn link_event_ignores_unmanaged_links() {
+        let mut cache = cache_for(100, 11, 22);
+        // docker0-shaped bridge: known to the inventory, no VXLAN.
+        cache.bridges.insert(
+            "docker0".to_string(),
+            BridgeLink {
+                ifindex: 50,
+                vxlan_attach_count: 0,
+                ..BridgeLink::default()
+            },
+        );
+        // Bare veth.
+        assert!(!classify_link_event(&link_msg(60, None, None), &cache));
+        // veth enslaved to the VNI-less bridge.
+        assert!(!classify_link_event(&link_msg(60, Some(50), None), &cache));
+        // The VNI-less bridge itself flapping operstate.
+        assert!(!classify_link_event(&link_msg(50, None, None), &cache));
+        // Non-VXLAN link creation (a new bridge with no VXLAN yet).
+        assert!(!classify_link_event(
+            &link_msg(61, None, Some(InfoKind::Bridge)),
+            &cache
+        ));
     }
 }

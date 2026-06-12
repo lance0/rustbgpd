@@ -231,8 +231,10 @@ has it, no broad performance sprints without profile evidence.
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
-  drain needs — name + `IFF_LOWER_UP`; the wider bridge/VXLAN inventory
-  stays poll-based until something else needs eventing); learned-port-to-ESI
+  drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep
+  added `RTNLGRP_LINK` eventing on the notify socket so EVPN-surface link
+  drift wakes the reconcile actor (the inventory itself is still rebuilt
+  by dump — now event-triggered rather than periodic-only); learned-port-to-ESI
   disambiguation so one local VNI
   can participate in multiple Ethernet Segments; same-ESI local bias in the
   remote-MAC projection — **RESOLVED** (ADR-0085 decision 5, slice 3): M66
@@ -414,14 +416,23 @@ has it, no broad performance sprints without profile evidence.
   state query now distinguishes a deadline expiry from an exited session
   task, and a timeout drops the inbound connection instead of treating the
   existing — possibly Established — session as Idle and replacing it
-  (RFC 4271 §6.8); a dead session task still accepts the inbound. What
-  remains: peer-group field edits still don't reach live dynamic sessions
-  (pairs with the deferred dynamic reconfigure executor). (The per-peer
-  Prometheus series leak listed here previously was fixed — deleted peers
-  now reap their label series.)
+  (RFC 4271 §6.8); a dead session task still accepts the inbound.
+  Peer-group field edits now reach live dynamic sessions on the transaction
+  path (`[Unreleased]`, ADR-0086): the session reshape executor gracefully
+  resets affected dynamic sessions after persist so they re-accept under the
+  committed config. What remains: SIGHUP and the targeted peer-group RPCs
+  still leave live dynamic sessions on their running config until reconnect
+  (deliberate — no plan preview on those paths; see ADR-0086's deferral).
+  (The per-peer Prometheus series leak listed here previously was fixed —
+  deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
-  `reason` labels across the remaining ingress filter paths; per-feature counter
-  unit-test coverage. Per-statement attribution within a matched import chain —
+  `reason` labels across the remaining ingress filter paths — **shipped in
+  `[Unreleased]`**: the canonical vocabulary is pinned in
+  `crates/telemetry/src/reason_labels.rs` (typed `OtcBlockReason` /
+  `RrLoopReason` shared by the metric labels, log tokens, and the structured
+  OTC event; exact strings pinned by tests; documented per metric in
+  `docs/OPERATIONS.md` "Ingress rejection / route-leak detection").
+  Per-statement attribution within a matched import chain —
   **shipped in `[Unreleased]`**: each `policy explain` permit/deny match carries
   a statement trace (policy + statement identity, matched conditions with
   stable labels, default-action fallthrough, `before -> after` attribute
@@ -793,13 +804,29 @@ branch is between features.
   actor exited, i.e. daemon teardown), so tracked rather than fixed;
   the clean fix is to GC after the last actor publish succeeds, or to
   push the restored set on rollback. ADR-0084 carries an annotation.
-- [ ] **Poll-cadence tail sweep.** The dataplane intent recompute went
+- [x] **Poll-cadence tail sweep.** The dataplane intent recompute went
   event-driven with the 5 s poll demoted to a backstop, and segment
   re-election subscribes to the EVPN event broadcast with a 10 s backstop
-  tick. Sweep the remaining fixed-cadence loops (originator RIB repoll,
-  reconciler passes) and convert the ones with an available event source to
-  the same event-driven + poll-backstop shape; each conversion so far has
-  turned seconds of repair latency into milliseconds.
+  tick. The sweep found the originator RIB repoll already converted (RIB
+  broadcast + local-MAC netlink observations; its 5 s tick is the backstop
+  plus the duplicate-MAC quarantine recovery sweep, whose ≤5 s tail on a
+  minutes-long quarantine window isn't worth a deadline timer) and the
+  reconcile actor already event-driven for intent and custom-table route
+  changes — what was missing was kernel-side drift eventing: programmed
+  remote-MAC rows flushed off a managed VXLAN port and bridge-port
+  flag/state drift (BUM-filter / AC-gate surface) repaired only on the
+  60 s periodic dump. **Converted:** the notify task now wakes the
+  reconcile actor on `AF_BRIDGE` FDB deletes on managed VXLAN ports and on
+  classified `RTNLGRP_LINK` events (port flags/state, VXLAN/managed-bridge
+  topology, enslavement), repairing within the 50 ms coalesce window; the
+  periodic dump stays as the backstop. **Stays on cadence, deliberately:**
+  BMP statistics (RFC 7854 interval reporting), BFD protocol timers, MRT
+  dump rotation, and the retained backstop ticks themselves. **Follow-up
+  inventory (demand-shaped):** the FIB runtime and blackhole reconcilers
+  bound *kernel*-side drift at 30 s — RIB-side changes are already
+  event-driven — and converting them needs an `RTNLGRP_IPV4/6_ROUTE`
+  subscription surfaced through the `UnicastFib` seam (the evpn-linux
+  notify task is the template).
 
 - [x] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
   `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Multi-PR batches keep
@@ -878,13 +905,19 @@ branch is between features.
   the candidate snapshot, re-apply resolved chains to affected live sessions
   with captured priors, persist with ack, and restore live chains plus the
   snapshot on failure.
-- [x] **Config transaction static peer-group/session reshape executor.**
+- [x] **Config transaction peer-group/session reshape executor.**
   Peer-group field edits and static-neighbor peer-group reassignments that
   reshape existing static sessions now commit as transactions: stage the
   candidate snapshot, reconfigure affected peers with captured prior configs,
   persist with ack, and restore live peers plus the snapshot on failure.
-  Dynamic-range session reshapes remain deferred until accepted dynamic sessions
-  can be targeted with equivalent rollback semantics.
+  Dynamic-range session reshapes shipped in `[Unreleased]` (ADR-0086): after a
+  successful persist, the executor gracefully resets the live dynamic sessions
+  accepted by an affected range (Cease + RFC 8203 shutdown communication);
+  each remote's reconnect is re-accepted under the committed config and the
+  accept-slot accounting stays owned by the normal `BackToIdle` reaping.
+  Dynamic-range peer-group *reassignments* stay outside the reshape family (a
+  `[[dynamic_neighbors]]` record edit; sessions accepted under the old group
+  cannot be live-reassigned).
 - [x] **Config transaction commit-confirmed core.**
   `ApplyConfigTransaction` can now enter a singleton pending-confirm state with
   `confirm_id` and a bounded confirm timer. Confirm makes the change permanent;

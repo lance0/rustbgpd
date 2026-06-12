@@ -787,11 +787,18 @@ pe1_ac_up \
     && ok "pe1 AC $AC_IF admin-up injected" \
     || fail "could not bring pe1's AC back up"
 
-# Strict-ish: every sub-second sample through up+${HOLD_SAMPLE_WINDOW_MS}ms
-# must still read 1 — an early release breaks ADR-0085 decision 3.
-# Framed as "still held at t+3s", not an exact-duration measure: the
-# 5s hold-off leaves 2s of margin for scrape latency.
+# Strict-ish: every sample through up+${HOLD_SAMPLE_WINDOW_MS}ms must
+# still read 1 — an early release breaks ADR-0085 decision 3. Framed
+# as "still held at t+3s", not an exact-duration measure: the 5s
+# hold-off leaves 2s of margin for scrape latency. Anti-vacuity is a
+# DEEP sample (one all-good read at elapsed >= ${HOLD_DEEP_MS}ms),
+# not a raw sample count: on a loaded runner each docker-exec scrape
+# can take >600ms, so a count requirement measures the runner's exec
+# throughput instead of the hold-off (observed: 3 samples, all '1',
+# assert failed — the invariant HELD).
+HOLD_DEEP_MS="2000"
 hold_held=1
+hold_deep=0
 hold_samples=0
 while :; do
     elapsed=$(( $(now_ms) - up_ms ))
@@ -802,15 +809,29 @@ while :; do
         hold_held=0
         break
     fi
+    [ "$elapsed" -ge "$HOLD_DEEP_MS" ] && hold_deep=1
     sleep 0.2
 done
-if [ "$hold_held" -eq 1 ] && [ "$hold_samples" -ge 5 ]; then
-    ok "recovery hold-off held: link gauge still 1 on all $hold_samples samples through up+${HOLD_SAMPLE_WINDOW_MS}ms"
+if [ "$hold_held" -eq 1 ] && [ "$hold_deep" -eq 1 ]; then
+    ok "recovery hold-off held: link gauge 1 on all $hold_samples samples through up+${HOLD_SAMPLE_WINDOW_MS}ms (deep sample >= ${HOLD_DEEP_MS}ms)"
+elif [ "$hold_held" -eq 1 ]; then
+    fail "recovery hold-off vacuous: $hold_samples samples all read 1 but none landed at >= ${HOLD_DEEP_MS}ms (runner too slow to sample the window)"
 else
-    fail "recovery hold-off broken: gauge read '${gauge:-?}' before up+${HOLD_SAMPLE_WINDOW_MS}ms (samples=$hold_samples)"
+    fail "recovery hold-off broken: gauge read '${gauge:-?}' at ${elapsed}ms, before up+${HOLD_SAMPLE_WINDOW_MS}ms (samples=$hold_samples)"
     docker exec "$PE1" tail -40 /var/log/rustbgpd.log >&2 || true
 fi
-assert_pe1_routes_absent "mid-hold-off (carrier back, still drained)"
+# The mid-hold-off route check is only meaningful while the hold-off
+# is still pending: on a loaded runner the sampling loop plus the RIB
+# queries can overrun the ${RECOVERY_DELAY_SECS}s hold-off itself, at
+# which point routes legitimately return and the assert would blame
+# the daemon for the runner's latency. Phase 3's release check below
+# still proves the routes return only after the hold-off.
+mid_elapsed=$(( $(now_ms) - up_ms ))
+if [ "$mid_elapsed" -lt $(( RECOVERY_DELAY_SECS * 1000 - 500 )) ]; then
+    assert_pe1_routes_absent "mid-hold-off (carrier back, still drained)"
+else
+    log "  SKIP mid-hold-off route check: ${mid_elapsed}ms already elapsed (runner latency ate the window)"
+fi
 
 log "[phase 3] ...then the link reason must release"
 release_ok=0
