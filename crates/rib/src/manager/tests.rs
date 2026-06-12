@@ -8840,6 +8840,20 @@ async fn explain_best_path_returns_candidates_without_winner() {
         crate::best_path::BestPathReason::HigherLocalPref
     );
     assert_eq!(loser.vs_best_ordering, std::cmp::Ordering::Greater);
+    assert_eq!(loser.vs_best_detail, "local_pref 100 < 200");
+    assert_eq!(
+        loser.multipath,
+        crate::best_path::MultipathEligibility::None
+    );
+
+    // Winner attribution: with one competitor, that competitor is the
+    // runner-up — the winner's decisive step is the same ladder step,
+    // rendered winner-side.
+    assert_eq!(
+        explain.best_reason,
+        Some(crate::best_path::BestPathReason::HigherLocalPref)
+    );
+    assert_eq!(explain.best_reason_detail, "local_pref 200 > 100");
 
     drop(tx);
     handle.await.unwrap();
@@ -8858,6 +8872,141 @@ async fn explain_best_path_no_candidates() {
     assert!(explain.candidates.is_empty());
     assert!(explain.peer.is_none());
     assert_eq!(explain.add_path_send_max, 0);
+    assert!(explain.best_reason.is_none());
+    assert!(explain.best_reason_detail.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Single-path prefix: the winner is trivial — no runner-up exists, so
+/// there is no decisive step to report (`best_reason = None`; the API
+/// layer renders that as "`only_path`").
+#[tokio::test]
+async fn explain_best_path_single_path_has_no_best_reason() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        announced: vec![make_route_with_lp(prefix, peer, 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
+    assert_eq!(
+        explain.best.as_ref().map(|r| r.peer),
+        Some(IpAddr::V4(peer))
+    );
+    assert!(explain.candidates.is_empty());
+    assert!(explain.best_reason.is_none());
+    assert!(explain.best_reason_detail.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Tiebreaker attribution across a multi-step elimination matrix: each
+/// loser reports the step that eliminated it (with compared values),
+/// the winner reports the step that beat the *runner-up* (the deepest-
+/// surviving competitor), and the multipath cut is classified per
+/// candidate. Also pins explain-vs-comparator agreement: the route the
+/// explain calls best must be the `best_path_cmp` minimum.
+#[tokio::test]
+async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
+    use crate::best_path::{BestPathReason, MultipathEligibility, best_path_cmp};
+
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let winner_peer = Ipv4Addr::new(1, 0, 0, 1);
+    let sibling_peer = Ipv4Addr::new(1, 0, 0, 2); // exact AS_PATH twin → ECMP-eligible, runner-up
+    let relax_peer = Ipv4Addr::new(1, 0, 0, 4); // same AS_PATH length, different ASN
+    let aspath_peer = Ipv4Addr::new(1, 0, 0, 5); // longer AS_PATH
+    let lp_peer = Ipv4Addr::new(1, 0, 0, 6); // lower LOCAL_PREF
+
+    let routes = [
+        (winner_peer, vec![65001], 200),
+        (sibling_peer, vec![65001], 200),
+        (relax_peer, vec![65009], 200),
+        (aspath_peer, vec![65001, 65002], 200),
+        (lp_peer, vec![65001], 100),
+    ];
+    let all: Vec<Route> = routes
+        .iter()
+        .map(|(peer, asns, lp)| make_multipath_route(prefix, *peer, asns.clone(), *lp))
+        .collect();
+    for route in &all {
+        tx.send(RibUpdate::RoutesReceived {
+            peer: route.peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
+
+    // Agreement: explain's winner == the comparator's minimum over the
+    // same input set.
+    let expected_best = all.iter().min_by(|a, b| best_path_cmp(a, b)).unwrap();
+    let best = explain.best.as_ref().expect("best route");
+    assert_eq!(best.peer, expected_best.peer);
+    assert_eq!(best.peer, IpAddr::V4(winner_peer));
+
+    // Winner attribution: the runner-up is the ECMP sibling (ties every
+    // attribute step, loses on peer address), so the winning step is
+    // the final tiebreaker.
+    assert_eq!(explain.best_reason, Some(BestPathReason::LowerPeerAddress));
+    assert_eq!(explain.best_reason_detail, "peer 1.0.0.1 < 1.0.0.2");
+
+    // Each loser: the step that eliminated it + compared values +
+    // multipath-cut classification.
+    let by_peer = |peer: Ipv4Addr| {
+        explain
+            .candidates
+            .iter()
+            .find(|c| c.route.peer == IpAddr::V4(peer))
+            .unwrap_or_else(|| panic!("candidate {peer} missing"))
+    };
+
+    let sibling = by_peer(sibling_peer);
+    assert_eq!(sibling.vs_best_reason, BestPathReason::LowerPeerAddress);
+    assert_eq!(sibling.vs_best_detail, "peer 1.0.0.2 > 1.0.0.1");
+    assert_eq!(sibling.multipath, MultipathEligibility::Eligible);
+
+    let relax = by_peer(relax_peer);
+    assert_eq!(relax.vs_best_reason, BestPathReason::LowerPeerAddress);
+    assert_eq!(relax.vs_best_detail, "peer 1.0.0.4 > 1.0.0.1");
+    assert_eq!(relax.multipath, MultipathEligibility::RelaxOnly);
+
+    let aspath = by_peer(aspath_peer);
+    assert_eq!(aspath.vs_best_reason, BestPathReason::ShorterAsPath);
+    assert_eq!(aspath.vs_best_detail, "as_path_len 2 > 1");
+    assert_eq!(aspath.multipath, MultipathEligibility::None);
+
+    let lp = by_peer(lp_peer);
+    assert_eq!(lp.vs_best_reason, BestPathReason::HigherLocalPref);
+    assert_eq!(lp.vs_best_detail, "local_pref 100 < 200");
+    assert_eq!(lp.multipath, MultipathEligibility::None);
 
     drop(tx);
     handle.await.unwrap();

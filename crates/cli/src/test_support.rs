@@ -42,6 +42,7 @@ pub(crate) struct MockState {
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
+    pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -816,13 +817,35 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         request: Request<server_proto::ExplainBestPathRequest>,
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
+        *self.state.last_explain_best_path.lock().await = Some(req.clone());
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
-            best_route: None,
-            candidates: vec![],
+            best_route: Some(server_proto::Route {
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+                next_hop: "198.51.100.1".to_string(),
+                peer_address: "198.51.100.1".to_string(),
+                ..Default::default()
+            }),
+            candidates: vec![server_proto::BestPathCandidate {
+                route: Some(server_proto::Route {
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "198.51.100.2".to_string(),
+                    peer_address: "198.51.100.2".to_string(),
+                    ..Default::default()
+                }),
+                vs_best_reason: "higher_local_pref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 0,
+                vs_best_detail: "local_pref 100 < 200".to_string(),
+                multipath: "none".to_string(),
+            }],
             peer_address: req.peer_address,
             add_path_send_max: 0,
+            best_reason: "higher_local_pref".to_string(),
+            best_reason_detail: "local_pref 200 > 100".to_string(),
         }))
     }
 

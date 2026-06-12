@@ -877,6 +877,21 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
         prefix: explain.prefix.addr_string(),
         prefix_length: u32::from(explain.prefix.prefix_len()),
         best_route: explain.best.as_ref().map(|r| route_to_proto(r, true)),
+        // The step that selected the winner (vs the runner-up). A best
+        // route with no competing candidates is the trivial winner:
+        // "only_path". The no-best-route case never reaches this
+        // conversion — the handler maps it to NOT_FOUND.
+        best_reason: explain.best_reason.map_or_else(
+            || {
+                if explain.best.is_some() {
+                    "only_path".to_string()
+                } else {
+                    String::new()
+                }
+            },
+            |reason| reason.to_string(),
+        ),
+        best_reason_detail: explain.best_reason_detail,
         candidates: explain
             .candidates
             .into_iter()
@@ -891,6 +906,8 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
                         std::cmp::Ordering::Greater => "worse".to_string(),
                     },
                     advertised_path_id: c.advertised_path_id,
+                    vs_best_detail: c.vs_best_detail,
+                    multipath: c.multipath.to_string(),
                 }
             })
             .collect(),
@@ -1165,6 +1182,14 @@ impl proto::rib_service_server::RibService for RibService {
                     req.peer_address
                 ))
             })?;
+        // No paths in any Adj-RIB-In for this prefix: there is nothing
+        // to explain, so say so instead of returning an empty trace.
+        if explain.best.is_none() {
+            return Err(Status::not_found(format!(
+                "no paths for prefix {}/{} in any Adj-RIB-In",
+                req.prefix, req.prefix_length
+            )));
+        }
         Ok(Response::new(explain_best_path_to_proto(explain)))
     }
 
@@ -1937,6 +1962,140 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    /// Service wired to a stub RIB manager that answers every
+    /// `ExplainBestPath` query with the given canned explanation.
+    fn make_explain_best_path_service(
+        explanation: Option<rustbgpd_rib::ExplainBestPath>,
+    ) -> RibService {
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                if let RibUpdate::ExplainBestPath { reply, .. } = update {
+                    let _ = reply.send(explanation.clone());
+                }
+            }
+        });
+        RibService::new(tx)
+    }
+
+    fn explain_best_path_request() -> proto::ExplainBestPathRequest {
+        proto::ExplainBestPathRequest {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            peer_address: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn explain_best_path_returns_tiebreaker_trace() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let best = test_route(prefix, vec![PathAttribute::LocalPref(200)]);
+        let mut loser = test_route(prefix, vec![PathAttribute::LocalPref(100)]);
+        loser.peer = "10.0.0.2".parse().unwrap();
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix,
+            best: Some(best),
+            candidates: vec![rustbgpd_rib::BestPathCandidate {
+                route: loser,
+                vs_best_reason: rustbgpd_rib::BestPathReason::HigherLocalPref,
+                vs_best_ordering: std::cmp::Ordering::Greater,
+                advertised_path_id: 0,
+                vs_best_detail: "local_pref 100 < 200".to_string(),
+                multipath: rustbgpd_rib::MultipathEligibility::None,
+            }],
+            peer: None,
+            add_path_send_max: 0,
+            best_reason: Some(rustbgpd_rib::BestPathReason::HigherLocalPref),
+            best_reason_detail: "local_pref 200 > 100".to_string(),
+        };
+
+        let resp = make_explain_best_path_service(Some(explanation))
+            .explain_best_path(Request::new(explain_best_path_request()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.best_reason, "higher_local_pref");
+        assert_eq!(resp.best_reason_detail, "local_pref 200 > 100");
+        assert_eq!(resp.candidates.len(), 1);
+        let cand = &resp.candidates[0];
+        assert_eq!(cand.vs_best_reason, "higher_local_pref");
+        assert_eq!(cand.vs_best_detail, "local_pref 100 < 200");
+        assert_eq!(cand.vs_best_ordering, "worse");
+        assert_eq!(cand.multipath, "none");
+    }
+
+    #[tokio::test]
+    async fn explain_best_path_single_path_reports_only_path() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix,
+            best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
+            candidates: vec![],
+            peer: None,
+            add_path_send_max: 0,
+            best_reason: None,
+            best_reason_detail: String::new(),
+        };
+
+        let resp = make_explain_best_path_service(Some(explanation))
+            .explain_best_path(Request::new(explain_best_path_request()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.best_reason, "only_path");
+        assert!(resp.best_reason_detail.is_empty());
+        assert!(resp.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explain_best_path_unknown_prefix_is_not_found() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        // No paths in any Adj-RIB-In: the manager reports an empty
+        // explanation; the RPC maps it to NOT_FOUND.
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix,
+            best: None,
+            candidates: vec![],
+            peer: None,
+            add_path_send_max: 0,
+            best_reason: None,
+            best_reason_detail: String::new(),
+        };
+
+        let status = make_explain_best_path_service(Some(explanation))
+            .explain_best_path(Request::new(explain_best_path_request()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(
+            status.message().contains("no paths for prefix 10.0.0.0/24"),
+            "unexpected message: {}",
+            status.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_best_path_unknown_peer_is_not_found() {
+        // Manager replies None for an unregistered peer scope.
+        let status = make_explain_best_path_service(None)
+            .explain_best_path(Request::new(proto::ExplainBestPathRequest {
+                peer_address: "192.0.2.99".to_string(),
+                ..explain_best_path_request()
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(
+            status.message().contains("192.0.2.99"),
+            "unexpected message: {}",
+            status.message()
+        );
     }
 
     fn list_routes_request() -> proto::ListRoutesRequest {
