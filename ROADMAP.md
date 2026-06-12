@@ -224,7 +224,7 @@ has it, no broad performance sprints without profile evidence.
   claiming the MAC and undrain replayed it stale — is RESOLVED: the
   classifier now surfaces VXLAN-port `RTM_NEWNEIGH` as an
   `ObservedOnVxlanPort` observation and the originator drops the stale local
-  claim, live or drained). Low-priority operational polish
+  claim, live or drained. Low-priority operational polish
   once core convergence is complete.
 - **Single-active non-DF full AC blocking.** The Gate 8b dataplane DF
   enforcement sets the bridge-port BUM-flood flags only

@@ -237,8 +237,8 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
 }
 
 /// Drop every local-claim cache entry for `(vni, mac)`: the kernel no
-/// longer holds the MAC on a local AC port. Shared by the drained
-/// `Aged` and drained `ObservedOnVxlanPort` arms.
+/// longer holds the MAC on a local AC port. Shared by [`handle_aged`]
+/// and the drained `Aged` / drained `ObservedOnVxlanPort` arms.
 fn drop_local_mac_caches(state: &mut OriginatorState, vni: EvpnInstanceId, mac: MacAddress) {
     if let Some(per_vni) = state.local_macs.get_mut(&vni) {
         per_vni.remove(&mac);
@@ -435,13 +435,7 @@ pub(super) async fn handle_aged(
     let Some(inst) = instances.get(vni) else {
         return;
     };
-    if let Some(per_vni) = state.local_macs.get_mut(&vni) {
-        per_vni.remove(&mac);
-    }
-    state.pending_ip_bindings.remove(&(vni, mac));
-    if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
-        per_vni.remove(&mac);
-    }
+    drop_local_mac_caches(state, vni, mac);
 
     // Withdraw both MAC-only and any MAC+IP routes for this MAC.
     // At most one set is non-empty under the replace model, but

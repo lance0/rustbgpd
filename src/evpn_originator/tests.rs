@@ -3613,7 +3613,9 @@ async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
 // longer holds. These tests pin the originator's handling.
 
 /// Like [`rib_capture_responder`] but also retains every injected
-/// route so tests can inspect path attributes (mobility extcomm).
+/// route in the returned `routes` handle so tests can inspect path
+/// attributes (mobility extcomm). `QueryEvpnRoutes` still replies
+/// empty — captured routes are visible only through the handle.
 fn rib_capture_responder_with_routes(
     mut rib_rx: mpsc::Receiver<RibUpdate>,
 ) -> (
