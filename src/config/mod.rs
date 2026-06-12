@@ -3460,6 +3460,8 @@ fn parse_ethernet_segment(
     cfg: &EthernetSegmentConfig,
     known_vnis: &BTreeSet<EvpnInstanceId>,
 ) -> Result<EthernetSegment, ConfigError> {
+    // IFNAMSIZ-1 — the longest interface name the kernel can hold.
+    const IFNAMSIZ_MAX: usize = 15;
     let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
         reason: format!("esi {:?}: {e}", cfg.esi),
     })?;
@@ -3594,11 +3596,11 @@ fn parse_ethernet_segment(
         // IFNAMSIZ-1: a longer name can never exist in the kernel, so
         // the binding would silently fail closed into a permanent
         // drain — reject the typo at config load instead.
-        if interface.len() > 15 {
+        if interface.len() > IFNAMSIZ_MAX {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
                     "esi {:?}: interface {interface:?} exceeds the Linux IFNAMSIZ limit \
-                     of 15 characters; no kernel link can ever match it",
+                     of {IFNAMSIZ_MAX} characters; no kernel link can ever match it",
                     cfg.esi
                 ),
             });
