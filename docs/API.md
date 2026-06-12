@@ -153,7 +153,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or static peer-group/session reshape impact; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -280,25 +280,27 @@ presence.
   (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete/modify,
   catalog-only `[policy]` / `[peer_groups]` changes with no effective impact on
   static neighbors or dynamic ranges, pure live policy-chain impact for
-  static neighbors or accepted dynamic peers, and static peer-group/session
-  reshape impact).
+  static neighbors or accepted dynamic peers, and peer-group/session
+  reshape impact — static members and live dynamic sessions).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
-  executor exists. Dynamic-range session reshapes and mixed policy/session
-  effective impact continue to report `effective neighbor inheritance impact`.
+  executor exists. Mixed policy/session effective impact and dynamic-range
+  peer-group reassignments continue to report
+  `effective neighbor inheritance impact`.
 - `restart_required_sections`: sections that still require daemon restart.
 
 `redacted_diff.reload_applied.effective_neighbor_impact[]` includes a
 machine-readable `kind`: `policy_chain` for a pure resolved import/export chain
 move that the live-policy executor can commit, or `session_reshape` when
-inherited peer-group/session state changes and a session-reconfigure executor is
-required.
+inherited peer-group/session state changes — committed by the session reshape
+executor (static members reconfigured in place; live dynamic sessions
+gracefully reset post-persist).
 
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
 `supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
-at a time. Cross-family candidates, dynamic-range session reshapes, mixed
-policy/session effective impacts, and other valid-but-unsupported sections
-return `REJECTED` without mutation until their section executor lands.
+at a time. Cross-family candidates, mixed policy/session effective impacts,
+and other valid-but-unsupported sections return `REJECTED` without mutation
+until their section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -464,14 +466,23 @@ import chain requires Route Refresh, so every impacted Established peer must
 have negotiated the Route Refresh capability; otherwise the apply is rejected
 and rolled back without committing the candidate.
 
-Static peer-group/session reshape transactions commit peer-group field edits or
-static-neighbor peer-group reassignments that rebuild existing static sessions.
-The executor stages the snapshot, reconfigures affected peers with the same
+Peer-group/session reshape transactions commit peer-group field edits or
+static-neighbor peer-group reassignments that rebuild existing sessions. The
+executor stages the snapshot, reconfigures affected static peers with the same
 delete/re-add semantics as SIGHUP, captures prior peer configs for rollback,
 persists with an acknowledgement, and restores both live peers and the snapshot
-on failure. Dynamic-range session reshapes remain rejected until a dynamic peer
-reshape executor can target accepted sessions with equivalent rollback
-semantics.
+on failure. Live dynamic sessions accepted by an affected
+`[[dynamic_neighbors]]` range cannot be delete/re-added (they exist only
+because the remote dialed in), so after a successful persist the executor
+gracefully resets them with a Cease NOTIFICATION carrying an RFC 8203 shutdown
+communication; each remote's reconnect is re-accepted under the committed
+config, and the `dynamic_neighbor_limit` slot accounting stays owned by the
+normal session-idle reaping. The dynamic reset is post-persist and best-effort
+by contract: a failed transaction never flaps a dynamic peer, and a session
+that could not be signaled keeps its running config until it reconnects
+(reported in the apply response, never silently swallowed). Reassigning a
+range to a different peer group remains a `[[dynamic_neighbors]]` record edit
+outside the reshape family (ADR-0086).
 
 CLI equivalent:
 

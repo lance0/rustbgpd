@@ -28,10 +28,9 @@ use crate::snapshot::KernelVxlanInfo;
 /// One bridge link the inventory cared about.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BridgeLink {
-    /// Kernel ifindex of the bridge. Reserved for future probe
-    /// extensions (e.g., reading bridge aging time) — current
-    /// reconcile path targets the VXLAN port, not the bridge.
-    #[allow(dead_code)]
+    /// Kernel ifindex of the bridge. Used by the `RTNLGRP_LINK`
+    /// reconcile-wake classifier (`notify::classify_link_event`) to
+    /// recognize changes on — or enslavements to — a managed bridge.
     pub ifindex: u32,
     /// Bridge link-layer (MAC) address, when the kernel reports one.
     /// Captured for SVI-MAC origination (RFC 9135 §6.1) — the daemon

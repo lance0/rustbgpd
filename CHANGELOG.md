@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Peer-group field edits now reach live dynamic sessions on the
+  config-transaction path (ADR-0086, closes the ADR-0081 decision-4
+  deferral).** A peer-group edit affecting a `[[dynamic_neighbors]]`
+  range (e.g. `hold_time`) previously classified as unsupported
+  "effective neighbor inheritance impact" and was rejected by
+  `ApplyConfigTransaction` / gNMI Set, while the live sessions kept
+  their old config until a natural reconnect. The session reshape
+  executor now commits it: static members are reconfigured in place
+  with captured priors exactly as before, and — only after the
+  transaction persists — the live dynamic sessions accepted by each
+  affected range are gracefully reset (Cease NOTIFICATION with an
+  RFC 8203 shutdown communication, `"peer-group configuration
+  change"`). The remote's reconnect is re-accepted under the committed
+  config (snapshot staging advances the accept matcher before
+  persist), and `dynamic_neighbor_limit` slot accounting stays owned
+  by the normal session-idle reaping — the reset never delete/re-adds
+  an ephemeral peer. A failed transaction never flaps a dynamic peer
+  (pinned by test); a session that cannot be signaled keeps its
+  running config until reconnect and is reported in the apply
+  response, never silently swallowed. Dynamic-range peer-group
+  *reassignments* remain outside the reshape family (a
+  `[[dynamic_neighbors]]` record edit; sessions accepted under the
+  old group cannot be live-reassigned), and SIGHUP / targeted
+  peer-group RPCs deliberately keep their no-preview skip semantics
+  (see ADR-0086).
 - **RIB distribution-health observability for the wedged
   post-Established advertisement path (ROADMAP, observed in an M66 CI
   run).** Root-cause analysis identified a silent failure mode:
@@ -413,6 +438,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   group-teardown path. The per-VNI `apply_aliasing_ecmp = false`
   off-switch governs the single-active indirection too (falls back to
   single-dst at the active PE, no backup pre-create).
+
+- **Kernel-side EVPN dataplane drift now repairs within the reconcile
+  actor's 50 ms coalesce window instead of the 60 s periodic dump
+  (poll-cadence tail sweep).** The notify task's existing netlink feeds
+  gain two drift classes on the same kernel-event wake channel the
+  IP-VRF route observation already uses: an `AF_BRIDGE` `RTM_DELNEIGH`
+  on a managed VXLAN port (a programmed remote-MAC row swept by
+  `bridge fdb del`/flush — unicast, BUM flood, and NHG-backed rows
+  alike) and, via a new `RTNLGRP_LINK` subscription on the notify
+  socket, link drift on the EVPN surface: bridge-port flag/state writes
+  (the BUM-filter and AC-gate enforcement targets, including the
+  single-active non-DF port block), VXLAN/managed-bridge topology
+  bring-up and teardown, and AC-port enslavement. Classifiers keep
+  container-runtime veth churn and VNI-less-bridge noise out of the
+  wake path; external in-place FDB *replaces* (no delete emitted) and
+  ports of not-yet-VNI-resolved bridges still ride the periodic dump,
+  which is retained unchanged as the backstop. The remaining
+  fixed-cadence loops were swept and stay deliberately: BMP statistics
+  (RFC 7854 interval reporting), BFD protocol timers, MRT dump
+  rotation, the originator/segment/dataplane/FIB/blackhole poll ticks
+  (all already event-driven; the ticks are their backstops), and the
+  FIB/blackhole 30 s kernel-drift bound (no kernel event feed behind
+  `UnicastFib` yet — noted on the roadmap).
 
 ### Fixed
 

@@ -132,10 +132,14 @@ Transaction and validation behavior:
 
 - Peer-group Set changes use the same candidate-TOML transaction path as native
   config changes. Unused peer-group catalog edits commit as catalog-only
-  transactions; edits that affect static live sessions use ADR-0076's existing
-  peer-group/session reshape executor.
+  transactions; edits that affect live sessions use ADR-0076's
+  peer-group/session reshape executor — static members are reconfigured in
+  place, and live dynamic sessions accepted by an affected range are
+  gracefully reset after persist to re-accept under the committed config
+  (ADR-0086).
 - If a candidate peer-group edit would affect a dynamic-neighbor range in a
-  way that the current transaction model cannot safely reshape, the transaction
+  way that the transaction model cannot safely reshape (for example a range
+  peer-group reassignment, or mixed policy/session impact), the transaction
   is rejected by the native planner rather than silently drifting.
 - OpenConfig peer-group leaves without a native inherited config model remain
   unsupported, including `config/peer-as`, `config/local-as`,

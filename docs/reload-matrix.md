@@ -44,13 +44,17 @@ has a rollback-capable transaction executor for that exact impact shape.
 Current transaction support includes pure `[[fib_tables]]`, pure
 `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only
 policy / neighbor-set / peer-group / global-chain changes, pure live
-policy-chain impact for static neighbors or accepted dynamic peers, and static
-peer-group/session reshape impact. Static reshapes include peer-group field
-edits or static-neighbor peer-group reassignments that require affected static
-sessions to be rebuilt; the transaction executor captures prior peer configs and
-restores them if apply or persistence fails. Dynamic-range session reshapes and
-mixed policy/session effective-impact candidates remain rejected even though
-SIGHUP can hot-reconcile some of those shapes best-effort.
+policy-chain impact for static neighbors or accepted dynamic peers, and
+peer-group/session reshape impact. Reshapes include peer-group field edits or
+static-neighbor peer-group reassignments that require affected sessions to be
+rebuilt; the transaction executor captures prior static peer configs and
+restores them if apply or persistence fails, and after a successful persist it
+gracefully resets the live dynamic sessions accepted by an affected range so
+they re-accept under the committed config (ADR-0086 — unlike SIGHUP and the
+targeted peer-group RPCs, which leave live dynamic sessions on their running
+config until they reconnect). Dynamic-range peer-group reassignments and mixed
+policy/session effective-impact candidates remain rejected even though SIGHUP
+can hot-reconcile some of those shapes best-effort.
 
 ## `[[neighbors]]`
 
