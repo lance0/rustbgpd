@@ -118,6 +118,16 @@ pub struct RibManager {
     /// ROUTE-REFRESH (RFC 5291 §6). While a `(peer, AFI, SAFI)` is here, the
     /// initial table dump skips it; the gate is lifted on the first refresh.
     peer_orf_pending: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Families whose initial-table `EoR` is withheld because the peer came
+    /// back as a graceful-restart RESTARTER (RFC 4724) while the family was
+    /// still behind the RFC 5291 §6 ORF initial-advertisement gate. An
+    /// immediate `EoR` would tell the restarter our initial update is
+    /// complete and trigger its stale-route sweep BEFORE the gated flood
+    /// arrives — a self-inflicted blackhole window. The `EoR` is emitted
+    /// after the gate lifts and the gated flood is sent. Non-GR ORF peers
+    /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
+    /// would otherwise never see `EoR` at all.
+    gr_deferred_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for path verification. `None` = no ASPA data.
@@ -464,6 +474,7 @@ impl RibManager {
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
             peer_orf_pending: HashMap::new(),
+            gr_deferred_eor: HashMap::new(),
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),

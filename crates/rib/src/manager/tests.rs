@@ -11828,6 +11828,376 @@ async fn graceful_restart_clears_orf_filter() {
     handle.await.unwrap();
 }
 
+/// Flap `target` into graceful restart (it becomes a GR RESTARTER we are
+/// helping) and re-establish it with the given ORF-receive families; returns
+/// the new session's outbound receiver.
+async fn gr_flap_and_reup(
+    tx: &mpsc::Sender<RibUpdate>,
+    target: IpAddr,
+    gr_families: Vec<(Afi, Safi)>,
+    sendable_families: Vec<(Afi, Safi)>,
+    negotiated_orf_recv: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: target,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families,
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv,
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+/// Drain outbound updates until one carries an `EoR` for `family`; return
+/// every update seen, including the `EoR`-bearing one. Panics if no such
+/// `EoR` arrives within 5 s.
+async fn drain_until_eor(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    family: (Afi, Safi),
+) -> Vec<OutboundRouteUpdate> {
+    let mut updates = Vec::new();
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("EoR-bearing update should arrive")
+            .expect("outbound channel open");
+        let done = update.end_of_rib.contains(&family);
+        updates.push(update);
+        if done {
+            return updates;
+        }
+    }
+}
+
+/// Prefixes announced across `updates`. Announces inside the `EoR`-bearing
+/// update itself count as before-`EoR`: transport encodes a single update's
+/// `EoR` markers after its route UPDATEs.
+fn prefixes_announced(updates: &[OutboundRouteUpdate]) -> Vec<Prefix> {
+    updates
+        .iter()
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix))
+        .collect()
+}
+
+/// A GR RESTARTER (RFC 4724) whose family is behind the RFC 5291 §6 ORF
+/// initial-advertisement gate must NOT receive the immediate initial-table
+/// `EoR`: the restarter takes `EoR` as "this peer's initial update is
+/// complete", proceeds with route selection, and sweeps the stale routes it
+/// retained from our previous session — before the gated flood has been
+/// sent, a self-inflicted blackhole window. The `EoR` must instead follow
+/// the gated flood once the gate lifts.
+#[tokio::test]
+async fn gr_restarter_defers_eor_for_orf_gated_family() {
+    let (tx, handle, target, _old_rx) = orf_setup().await;
+    let mut out_rx = gr_flap_and_reup(
+        &tx,
+        target,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        ipv4_sendable(),
+        vec![(Afi::Ipv4, Safi::Unicast)],
+    )
+    .await;
+
+    // Nothing — neither routes nor EoR — before the gate lifts.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "GR restarter must not receive EoR while the family is still ORF-gated"
+    );
+
+    // Gate lifts via an IMMEDIATE ORF push: the filtered flood arrives with
+    // the EoR ordered behind it.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    let announced = prefixes_announced(&updates);
+    assert!(
+        announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        "gated flood must precede the deferred EoR"
+    );
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Same deferral when the gate is lifted by a plain ROUTE-REFRESH carrying
+/// no ORF payload: the refresh response is the gated flood, and the deferred
+/// `EoR` follows it.
+#[tokio::test]
+async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
+    let (tx, handle, target, _old_rx) = orf_setup().await;
+    let mut out_rx = gr_flap_and_reup(
+        &tx,
+        target,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        ipv4_sendable(),
+        vec![(Afi::Ipv4, Safi::Unicast)],
+    )
+    .await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "GR restarter must not receive EoR while the family is still ORF-gated"
+    );
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    let announced = prefixes_announced(&updates);
+    assert!(
+        announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        "gated flood must precede the deferred EoR"
+    );
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Two independently gated families lift independently: each family's
+/// deferred `EoR` follows its OWN gate-lift flood, and a still-gated
+/// family's `EoR` does not ride along.
+#[tokio::test]
+async fn gr_restarter_deferred_eor_lifts_per_family() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        announced: vec![
+            make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            make_v6_route(v6_prefix, "2001:db8::1".parse().unwrap()),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let both = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: both.clone(),
+    })
+    .await
+    .unwrap();
+    // First (non-GR) session: both families gated, immediate honest-empty EoR.
+    let initial = out_rx.recv().await.unwrap();
+    assert!(initial.announce.is_empty());
+    assert!(!initial.end_of_rib.is_empty());
+
+    let mut out_rx = gr_flap_and_reup(&tx, target, both.clone(), dual_stack_sendable(), both).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "GR restarter must not receive EoR while both families are still gated"
+    );
+
+    // Lift IPv4 only: the v4 flood + v4 EoR arrive; the v6 EoR must wait.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    assert!(prefixes_announced(&updates).contains(&Prefix::V4(v4_prefix)));
+    assert!(
+        updates
+            .iter()
+            .all(|u| !u.end_of_rib.contains(&(Afi::Ipv6, Safi::Unicast))),
+        "the still-gated family's EoR must wait for its own gate lift"
+    );
+
+    // Lift IPv6: its flood + EoR follow.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let updates = drain_until_eor(&mut out_rx, (Afi::Ipv6, Safi::Unicast)).await;
+    assert!(prefixes_announced(&updates).contains(&Prefix::V6(v6_prefix)));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: a NON-GR ORF peer keeps today's immediate initial-table `EoR`
+/// (an honest "empty table so far"). `orf_setup` itself asserts the initial
+/// dump carries the `EoR` marker and no routes for the gated family — a
+/// client that never sends ROUTE-REFRESH must still see `EoR`.
+#[tokio::test]
+async fn non_gr_orf_peer_keeps_immediate_initial_eor() {
+    let (tx, handle, _target, _out_rx) = orf_setup().await;
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: a GR restarter WITHOUT ORF (no gate) keeps the immediate
+/// initial dump and `EoR` — no ROUTE-REFRESH is needed.
+#[tokio::test]
+async fn gr_restarter_without_orf_keeps_immediate_eor() {
+    let (tx, handle, target, _old_rx) = orf_setup().await;
+    let mut out_rx = gr_flap_and_reup(
+        &tx,
+        target,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        ipv4_sendable(),
+        vec![],
+    )
+    .await;
+
+    // The EoR arrives on its own — no refresh is ever sent here — with the
+    // full table ahead of it.
+    let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    let announced = prefixes_announced(&updates);
+    assert!(
+        announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        "ungated GR restarter must receive the immediate initial table"
+    );
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Peer down while an `EoR` deferral is outstanding must clear the deferral
+/// (it is per-session state, torn down with the rest of
+/// `clear_outbound_peer_state`).
+#[tokio::test]
+async fn peer_down_clears_gr_deferred_eor() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let family = (Afi::Ipv4, Safi::Unicast);
+
+    // Session 1 (no ORF), then a GR flap.
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+    });
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![family],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+
+    // Session 2: the restarter comes back with ORF — the deferral arms.
+    let (out_tx2, _out_rx2) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx2,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![family],
+    });
+    assert!(
+        manager
+            .gr_deferred_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family)),
+        "GR restarter with a gated family must have its EoR deferral armed"
+    );
+
+    // Peer down mid-deferral: the deferral must not leak into a later session.
+    manager.handle_update(RibUpdate::PeerDown { peer });
+    assert!(
+        !manager.gr_deferred_eor.contains_key(&peer),
+        "peer down must clear the outstanding EoR deferral"
+    );
+}
+
 #[test]
 fn test_ingest_stall_override_parse_rules() {
     // Unset → no stall.

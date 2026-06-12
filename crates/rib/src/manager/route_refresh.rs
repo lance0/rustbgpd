@@ -304,6 +304,17 @@ impl RibManager {
         if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
             pending.remove(&family);
         }
+        // A GR restarter's EoR for this family may have been withheld at
+        // `PeerUp` (`send_initial_table`) because the family was ORF-gated:
+        // this refresh response IS the gated flood, so the deferred EoR must
+        // follow it — as a genuine EoR UPDATE, not this response's own
+        // `end_of_rib` entry, which transport substitutes with an EoRR
+        // demarcation when enhanced route refresh is negotiated. A restarter
+        // ends its RFC 4724 deferral on EoR, not on the RFC 7313 markers.
+        let deferred_eor = self
+            .gr_deferred_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family));
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)
@@ -497,7 +508,7 @@ impl RibManager {
                 nh_override_flags,
                 announce,
                 withdraw,
-                vec![family],
+                if deferred_eor { vec![] } else { vec![family] },
                 vec![
                     (afi, safi, RouteRefreshSubtype::BoRR),
                     (afi, safi, RouteRefreshSubtype::EoRR),
@@ -522,6 +533,24 @@ impl RibManager {
                 .entry(peer)
                 .or_default()
                 .remove(&family);
+            if deferred_eor {
+                if let Some(families) = self.gr_deferred_eor.get_mut(&peer) {
+                    families.remove(&family);
+                    if families.is_empty() {
+                        self.gr_deferred_eor.remove(&peer);
+                    }
+                }
+                self.pending_eor.entry(peer).or_default().insert(family);
+                // The gated flood was just enqueued above; flushing now keeps
+                // the EoR behind it on the channel. A dirty peer defers to the
+                // resync paths instead — they flush pending EoR only AFTER a
+                // successful resync, and flushing here would emit any OTHER
+                // deferred families' EoR ahead of the resync that replays
+                // their table.
+                if !self.dirty_peers.contains(&peer) {
+                    self.flush_pending_eor(peer);
+                }
+            }
         }
     }
 

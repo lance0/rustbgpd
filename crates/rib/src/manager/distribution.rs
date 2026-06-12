@@ -410,6 +410,24 @@ impl RibManager {
             by_family.remove(&family);
         }
         if reset || when == rustbgpd_wire::WhenToRefresh::Immediate {
+            // If this peer's EoR for the family was withheld at `PeerUp`
+            // (GR restarter + §6 gate, see `send_initial_table`), the forced
+            // resync below is the gated flood: move the family into
+            // `pending_eor` and mark the peer dirty so the resync piggybacks
+            // the EoR behind the flooded routes (or flushes it standalone
+            // when the filter yields no routes). A DEFER update lifts the
+            // gate without flooding, so the deferral stays put and rides the
+            // later plain ROUTE-REFRESH or IMMEDIATE update that actually
+            // advertises the family.
+            if let Some(families) = self.gr_deferred_eor.get_mut(&peer)
+                && families.remove(&family)
+            {
+                if families.is_empty() {
+                    self.gr_deferred_eor.remove(&peer);
+                }
+                self.pending_eor.entry(peer).or_default().insert(family);
+                self.dirty_peers.insert(peer);
+            }
             self.force_outbound_peers.insert(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
