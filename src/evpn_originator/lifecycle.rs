@@ -10,6 +10,7 @@ use crate::evpn_originator::duplicate_mac::{
 use crate::evpn_originator::rib_polling::repoll_rib;
 use crate::evpn_originator::rib_write::drain_vni_to_withdraws;
 
+#[allow(clippy::too_many_lines)] // classification + drain + replay are one ordered sequence; splitting hurts the lifecycle story
 pub(super) async fn apply_runtime_model(
     model: Arc<OriginatorRuntimeModel>,
     state: &mut OriginatorState,
@@ -27,14 +28,28 @@ pub(super) async fn apply_runtime_model(
     //  - ESI-map changed only (instance identical, vni_to_esi differs):
     //    drain the stale routes but preserve and replay the cached local
     //    MAC/IP state so it re-originates under the new ESI.
+    //  - drain-status changed only (ADR-0084; instance and ESI mapping
+    //    identical, the mapped ESI entered/left the operator-drained set):
+    //    newly drained → withdraw the advertised routes but PRESERVE the
+    //    local observation caches and do NOT replay (this is the
+    //    drain-without-replay primitive); newly undrained → replay the
+    //    cached local MAC/IP state (nothing to drain — already withdrawn).
     let mut removed: Vec<EvpnInstanceId> = Vec::new();
     let mut redefined: Vec<EvpnInstanceId> = Vec::new();
     let mut esi_only_changed: Vec<EvpnInstanceId> = Vec::new();
+    let mut newly_drained: Vec<EvpnInstanceId> = Vec::new();
+    let mut newly_undrained: Vec<EvpnInstanceId> = Vec::new();
     for old in runtime.instances.iter() {
+        let was_drained = super::vni_is_drained(old.id, &runtime.vni_to_esi, &runtime.drained_esis);
+        let now_drained = super::vni_is_drained(old.id, &model.vni_to_esi, &model.drained_esis);
         match model.instances.get(old.id) {
             Some(next) if next == old => {
                 if runtime.vni_to_esi.get(&old.id) != model.vni_to_esi.get(&old.id) {
                     esi_only_changed.push(old.id);
+                } else if !was_drained && now_drained {
+                    newly_drained.push(old.id);
+                } else if was_drained && !now_drained {
+                    newly_undrained.push(old.id);
                 }
             }
             Some(_) => redefined.push(old.id),
@@ -49,8 +64,23 @@ pub(super) async fn apply_runtime_model(
     // duplicate-MAC detector/quarantine state (the instance is identical); a
     // redefine drops it below as part of the ADR-0063 delete-old + add-new
     // contract. Only a true delete uses the full VNI state purge below.
+    //
+    // ADR-0084: a VNI that is drained under the NEW model never replays —
+    // even when its instance was redefined or its ESI mapping changed in
+    // the same publish. Undrained VNIs replay their preserved caches.
     let mut replay_local_macs: LocalMacReplaySet = BTreeMap::new();
-    for &vni in redefined.iter().chain(esi_only_changed.iter()) {
+    for &vni in redefined
+        .iter()
+        .chain(esi_only_changed.iter())
+        .chain(newly_undrained.iter())
+    {
+        if super::vni_is_drained(vni, &model.vni_to_esi, &model.drained_esis) {
+            debug!(
+                ?vni,
+                "EVPN originator: VNI drained under new model — withdrawing without replay"
+            );
+            continue;
+        }
         let macs = state
             .local_macs
             .get(&vni)
@@ -66,6 +96,7 @@ pub(super) async fn apply_runtime_model(
         .iter()
         .chain(redefined.iter())
         .chain(esi_only_changed.iter())
+        .chain(newly_drained.iter())
         .copied()
     {
         drain_vni_to_withdraws(
@@ -108,6 +139,7 @@ pub(super) async fn apply_runtime_model(
 
     runtime.instances = model.instances.clone();
     runtime.vni_to_esi = model.vni_to_esi.clone();
+    runtime.drained_esis = model.drained_esis.clone();
 
     if let Err(e) = repoll_rib(
         runtime.instances.as_ref(),
@@ -146,6 +178,7 @@ pub(super) async fn apply_runtime_model(
                 &runtime.metrics,
                 &runtime.originated_local_mac_counts,
                 runtime.vni_to_esi.as_ref(),
+                runtime.drained_esis.as_ref(),
             )
             .await;
         }

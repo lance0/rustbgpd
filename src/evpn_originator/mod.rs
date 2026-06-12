@@ -132,11 +132,18 @@ impl EvpnOriginatorRuntimeControl {
     /// old-RD routes then re-originates the preserved local MAC/IP state
     /// under the new instance fields, before accepting the new table for
     /// future local observations and RIB-event replay.
+    ///
+    /// `drained_esis` is the ADR-0084 operator-drained ESI set: a VNI
+    /// whose mapped ESI is newly drained withdraws its advertised local
+    /// Type 2 routes WITHOUT clearing the local observation caches and
+    /// without replay; a newly-undrained VNI replays the cached local
+    /// MAC/IP state (quarantine-respecting).
     #[must_use]
     pub fn replace_runtime_model(
         &self,
         instances: Arc<EvpnInstanceTable>,
         vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+        drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
     ) -> bool {
         if self.model_tx.is_closed() {
             return false;
@@ -144,6 +151,7 @@ impl EvpnOriginatorRuntimeControl {
         self.model_tx.send_replace(Arc::new(OriginatorRuntimeModel {
             instances,
             vni_to_esi,
+            drained_esis,
         }));
         true
     }
@@ -191,9 +199,10 @@ impl EvpnOriginatorHandle {
         &self,
         instances: Arc<EvpnInstanceTable>,
         vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+        drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
     ) -> bool {
         self.runtime_control()
-            .replace_runtime_model(instances, vni_to_esi)
+            .replace_runtime_model(instances, vni_to_esi, drained_esis)
     }
 
     /// Cancel the actor and wait for it to drain.
@@ -341,12 +350,30 @@ struct OriginatorRuntime {
     /// not in this map default to `EthernetSegmentIdentifier::ZERO`
     /// (single-homed CE), preserving Gate 7b+1 behavior.
     vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    /// ADR-0084 operator-drained ESIs. A VNI whose mapped ESI is in
+    /// this set keeps its local observation caches up to date from
+    /// kernel events but originates nothing until undrained.
+    drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
 }
 
 #[derive(Debug)]
 struct OriginatorRuntimeModel {
     instances: Arc<EvpnInstanceTable>,
     vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    /// ADR-0084 operator-drained ESI set the model was published with.
+    drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+}
+
+/// Whether a VNI's mapped Ethernet Segment is operator-drained
+/// (ADR-0084). VNIs without an ESI mapping are never drained.
+pub(crate) fn vni_is_drained(
+    vni: EvpnInstanceId,
+    vni_to_esi: &BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
+) -> bool {
+    vni_to_esi
+        .get(&vni)
+        .is_some_and(|esi| drained_esis.contains(esi))
 }
 
 /// Spawn the originator. Returns `None` for RR-only deployments
@@ -408,9 +435,13 @@ pub fn spawn_with_quarantine(
     let state = OriginatorState::new(evpn_instances, duplicate_mac_quarantine_tx);
     let (command_tx, command_rx) = mpsc::channel(16);
     let control = EvpnOriginatorControl { command_tx };
+    // Drain state is runtime-only and in-memory (ADR-0084): every
+    // spawn starts with an empty drained set, so a daemon restart
+    // clears any drain and replays configured state.
     let (model_tx, model_rx) = watch::channel(Arc::new(OriginatorRuntimeModel {
         instances: evpn_instances.clone(),
         vni_to_esi: vni_to_esi.clone(),
+        drained_esis: Arc::new(BTreeSet::new()),
     }));
 
     let shutdown = daemon_shutdown;
@@ -422,6 +453,7 @@ pub fn spawn_with_quarantine(
         originated_local_mac_counts,
         shutdown: shutdown.clone(),
         vni_to_esi,
+        drained_esis: Arc::new(BTreeSet::new()),
     };
     let join = tokio::spawn(originator_loop(
         config,
@@ -603,6 +635,7 @@ async fn originator_loop(
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
                         &runtime.vni_to_esi,
+                        &runtime.drained_esis,
                     ).await;
                 }
                 None => {
@@ -634,6 +667,7 @@ async fn originator_loop(
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
                     &runtime.vni_to_esi,
+                    &runtime.drained_esis,
                 ).await;
             }
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
@@ -677,6 +711,7 @@ async fn originator_loop(
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
                     &runtime.vni_to_esi,
+                    &runtime.drained_esis,
                 ).await;
                 if let Err(e) = repoll_rib(
                     &runtime.instances,

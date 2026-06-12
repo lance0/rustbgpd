@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Runtime Ethernet Segment drain for access-circuit maintenance
+  (ADR-0084).** `rustbgpctl evpn es drain <esi>` (and `undrain`)
+  withdraws one configured ES's Type 4 + EAD-per-ES + EAD-per-EVI
+  routes (exiting DF election) and the member VNIs' locally-originated
+  Type 2 MAC/MAC+IP routes, and suppresses new local-MAC origination
+  while drained — remote PEs' ADR-0083 single-active backup swap then
+  repairs traffic around this PE before you touch the circuit.
+  Undraining re-originates the ES routes, re-runs DF election, and
+  replays the cached local MAC/IP state (the kernel keeps the cache
+  fresh during the drain). Backed by the new operator-only
+  `EvpnService.SetEthernetSegmentDrain` gRPC method; unknown ESIs
+  return `NOT_FOUND`, repeats are idempotent no-ops, and drain state
+  survives SIGHUP/runtime applies that keep the ES configured.
+  **Caveat:** drain state is in-memory — a daemon restart clears it
+  and replays configured state.
 - **M65 interop proof for the ADR-0083 single-active backup path:
   failover blackout measured on a live kernel (slice 4 — closes the
   ADR).** New `kernel-dataplane` CI job: rustbgpd is the remote VTEP

@@ -194,10 +194,13 @@ has it, no broad performance sprints without profile evidence.
   `ethernet_tag = 0` and the VNI in the label field per RFC 7432 §6.1
   / RFC 8365 §5.1.3 (FRR parity), so rustbgpd-originated EAD-per-EVI
   joins remote `(ESI, tag 0)` alias/eligible sets; (3)
-  origination-side withdrawal stimulus — an ES has no AC/interface
-  binding, so rustbgpd cannot emit the EAD-withdrawn-MACs-retained
-  mass-withdraw shape (ES↔interface binding or an ES-drain RPC closes
-  it); a cross-vendor preference-DF smoke
+  origination-side withdrawal stimulus — the manual half landed
+  (ADR-0084): `SetEthernetSegmentDrain` / `rustbgpctl evpn es drain`
+  withdraws the ES's Type 4/EAD routes + member VNIs' local Type 2
+  state without replay, in-memory v1; the remaining piece is the
+  ES↔interface binding so an AC failure emits the
+  EAD-withdrawn-MACs-retained mass-withdraw shape automatically
+  (reuses the same drain primitive, gets its own ADR); a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today); shape-aware EVPN `--diff` classification so the static diff

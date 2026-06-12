@@ -16,6 +16,7 @@ pub(super) async fn handle_originator_command(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) {
     match command {
         OriginatorCommand::ClearDuplicateMacQuarantine { key, reply } => {
@@ -27,6 +28,7 @@ pub(super) async fn handle_originator_command(
                 metrics,
                 originated_local_mac_counts,
                 vni_to_esi,
+                drained_esis,
             )
             .await;
             let _ = reply.send(result);
@@ -277,6 +279,7 @@ pub(super) async fn recover_duplicate_macs(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) {
     let recovered = state.duplicate_mac_detector.expire(Instant::now());
     for key in recovered {
@@ -301,6 +304,7 @@ pub(super) async fn recover_duplicate_macs(
             metrics,
             originated_local_mac_counts,
             vni_to_esi,
+            drained_esis,
         )
         .await;
     }
@@ -315,6 +319,7 @@ pub(super) async fn clear_duplicate_mac_quarantine(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) -> ClearDuplicateMacQuarantineResult {
     if instances.get(key.vni).is_none() {
         return ClearDuplicateMacQuarantineResult::UnknownVni;
@@ -352,6 +357,7 @@ pub(super) async fn clear_duplicate_mac_quarantine(
         metrics,
         originated_local_mac_counts,
         vni_to_esi,
+        drained_esis,
     )
     .await;
     ClearDuplicateMacQuarantineResult::Cleared
@@ -367,7 +373,21 @@ pub(super) async fn replay_local_mac_after_recovery(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) {
+    // ADR-0084: the replay primitive is the single chokepoint for
+    // re-origination from preserved caches — quarantine recovery,
+    // manual clear, and runtime-model replays all land here. While the
+    // VNI's mapped ESI is operator-drained, keep the caches but emit
+    // nothing; the undrain replay re-runs this with the drain lifted.
+    if super::vni_is_drained(vni, vni_to_esi, drained_esis) {
+        debug!(
+            ?vni,
+            ?mac,
+            "EVPN originator: suppressing local-MAC replay for drained Ethernet Segment"
+        );
+        return;
+    }
     let Some(inst) = instances.get(vni) else {
         return;
     };

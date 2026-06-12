@@ -118,6 +118,36 @@ pub type DuplicateMacClearFuture =
 pub type DuplicateMacClearFn =
     Arc<dyn Fn(EvpnInstanceId, MacAddress) -> DuplicateMacClearFuture + Send + Sync + 'static>;
 
+/// Outcome returned by the daemon ADR-0084 Ethernet Segment drain hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EthernetSegmentDrainOutcome {
+    /// Applied drain state.
+    pub drained: bool,
+    /// `false` for an idempotent no-op.
+    pub changed: bool,
+    /// Member VNIs of the targeted ES in the committed config.
+    pub member_vni_count: usize,
+}
+
+/// Error returned by the daemon ADR-0084 Ethernet Segment drain hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EthernetSegmentDrainError {
+    /// The ESI is not in the committed Ethernet Segment config.
+    NotFound(String),
+    /// An actor publish failed (actor exited / daemon tearing down).
+    Unavailable(String),
+}
+
+pub type EthernetSegmentDrainFuture = Pin<
+    Box<dyn Future<Output = Result<EthernetSegmentDrainOutcome, EthernetSegmentDrainError>> + Send>,
+>;
+pub type EthernetSegmentDrainFn = Arc<
+    dyn Fn(rustbgpd_evpn::EthernetSegmentIdentifier, bool) -> EthernetSegmentDrainFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
 /// EVPN service backed by shared resolved tables and optional actor controls.
 pub struct EvpnService {
     access_mode: AccessMode,
@@ -130,6 +160,7 @@ pub struct EvpnService {
     runtime_model: EvpnRuntimeModelFn,
     runtime_apply: Option<EvpnRuntimeApplyFn>,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
 }
 
 impl EvpnService {
@@ -151,6 +182,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
+            ethernet_segment_drain: None,
         }
     }
 
@@ -176,6 +208,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
+            ethernet_segment_drain: None,
         }
     }
 
@@ -267,6 +300,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply,
             duplicate_mac_clear,
+            ethernet_segment_drain: None,
         }
     }
 
@@ -279,6 +313,18 @@ impl EvpnService {
         remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
     ) -> Self {
         self.remote_ip_prefix_drop_counts_snapshot = remote_ip_prefix_drop_counts_snapshot;
+        self
+    }
+
+    /// Attach the optional ADR-0084 Ethernet Segment drain hook.
+    /// Absent on RR-only / no-`[[ethernet_segments]]` deployments —
+    /// the RPC then fails closed with `UNAVAILABLE`.
+    #[must_use]
+    pub fn with_ethernet_segment_drain(
+        mut self,
+        ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
+    ) -> Self {
+        self.ethernet_segment_drain = ethernet_segment_drain;
         self
     }
 }
@@ -433,6 +479,32 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         }))
     }
 
+    async fn set_ethernet_segment_drain(
+        &self,
+        request: Request<proto::SetEthernetSegmentDrainRequest>,
+    ) -> Result<Response<proto::SetEthernetSegmentDrainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let esi = parse_esi(&req.esi)
+            .map_err(|err| Status::invalid_argument(format!("invalid ESI {}: {err}", req.esi)))?;
+        let drain = self.ethernet_segment_drain.as_ref().ok_or_else(|| {
+            Status::unavailable("EVPN Ethernet Segment drain control is unavailable")
+        })?;
+        let outcome = drain(esi, req.drained).await.map_err(|err| match err {
+            EthernetSegmentDrainError::NotFound(message) => Status::not_found(message),
+            EthernetSegmentDrainError::Unavailable(message) => Status::unavailable(message),
+        })?;
+        let message = ethernet_segment_drain_message(&req.esi, &outcome);
+        Ok(Response::new(proto::SetEthernetSegmentDrainResponse {
+            drained: outcome.drained,
+            changed: outcome.changed,
+            member_vni_count: u32::try_from(outcome.member_vni_count).unwrap_or(u32::MAX),
+            message,
+        }))
+    }
+
     async fn apply_evpn_runtime(
         &self,
         request: Request<proto::ApplyEvpnRuntimeRequest>,
@@ -455,6 +527,44 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .await
             .map(Response::new)
             .map_err(EvpnRuntimeApplyError::into_status)
+    }
+}
+
+/// Parse a 10-byte ESI from the operator text form used across this
+/// proto (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`). Mirrors the daemon config
+/// parser — the wire crate intentionally doesn't implement `FromStr`
+/// for `EthernetSegmentIdentifier` (the on-the-wire form is raw
+/// bytes), so the API layer owns its own parse of the display form.
+fn parse_esi(raw: &str) -> Result<rustbgpd_evpn::EthernetSegmentIdentifier, &'static str> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    if parts.len() != 10 {
+        return Err("expected 10 colon-separated hex octets");
+    }
+    let mut bytes = [0u8; 10];
+    for (i, octet) in parts.iter().enumerate() {
+        if octet.len() != 2 {
+            return Err("each octet must be exactly 2 hex digits");
+        }
+        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
+    }
+    Ok(rustbgpd_evpn::EthernetSegmentIdentifier::new(bytes))
+}
+
+fn ethernet_segment_drain_message(esi: &str, outcome: &EthernetSegmentDrainOutcome) -> String {
+    let vnis = outcome.member_vni_count;
+    match (outcome.drained, outcome.changed) {
+        (true, true) => format!(
+            "Ethernet Segment {esi} drained: withdrew Type 4 (ES), EAD-per-ES, EAD-per-EVI, \
+             and local Type 2 MAC/MAC+IP routes for {vnis} member VNI(s); new local-MAC \
+             origination suppressed while drained"
+        ),
+        (true, false) => format!("Ethernet Segment {esi} is already drained"),
+        (false, true) => format!(
+            "Ethernet Segment {esi} undrained: re-originated Type 4 (ES), EAD-per-ES, \
+             EAD-per-EVI, re-ran DF election, and replayed cached local MAC/MAC+IP state \
+             for {vnis} member VNI(s)"
+        ),
+        (false, false) => format!("Ethernet Segment {esi} is not drained"),
     }
 }
 
@@ -1113,6 +1223,174 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    fn service_with_es_drain(
+        access_mode: crate::server::AccessMode,
+        ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
+    ) -> EvpnService {
+        service_with_duplicate_mac_clear(access_mode, None)
+            .with_ethernet_segment_drain(ethernet_segment_drain)
+    }
+
+    fn fixed_es_drain(
+        result: Result<EthernetSegmentDrainOutcome, EthernetSegmentDrainError>,
+    ) -> EthernetSegmentDrainFn {
+        Arc::new(move |_, _| {
+            let result = result.clone();
+            Box::pin(async move { result }) as EthernetSegmentDrainFuture
+        })
+    }
+
+    const TEST_ESI: &str = "00:11:22:33:44:55:66:77:88:99";
+
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_rejects_read_only_listener() {
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadOnly,
+            Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
+                drained: true,
+                changed: true,
+                member_vni_count: 1,
+            }))),
+        );
+        let err = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_requires_control_hook() {
+        let svc = service_with_es_drain(crate::server::AccessMode::ReadWrite, None);
+        let err = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_validates_esi() {
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
+                drained: true,
+                changed: true,
+                member_vni_count: 1,
+            }))),
+        );
+        for bad in [
+            "",
+            "00:11:22",
+            "zz:11:22:33:44:55:66:77:88:99",
+            "0:1:2:3:4:5:6:7:8:9",
+        ] {
+            let err = svc
+                .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                    esi: bad.to_string(),
+                    drained: true,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "esi {bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_maps_applied_and_idempotent_outcomes() {
+        let drain: EthernetSegmentDrainFn = Arc::new(|esi, drained| {
+            assert_eq!(esi.to_string(), TEST_ESI);
+            assert!(drained);
+            Box::pin(async move {
+                Ok(EthernetSegmentDrainOutcome {
+                    drained: true,
+                    changed: true,
+                    member_vni_count: 3,
+                })
+            }) as EthernetSegmentDrainFuture
+        });
+        let svc = service_with_es_drain(crate::server::AccessMode::ReadWrite, Some(drain));
+        let resp = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.drained);
+        assert!(resp.changed);
+        assert_eq!(resp.member_vni_count, 3);
+        assert!(resp.message.contains("drained"));
+        assert!(resp.message.contains("Type 4"));
+
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
+                drained: true,
+                changed: false,
+                member_vni_count: 3,
+            }))),
+        );
+        let resp = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.drained);
+        assert!(!resp.changed, "idempotent repeat must report changed=false");
+        assert!(resp.message.contains("already drained"));
+    }
+
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_maps_control_errors() {
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Err(EthernetSegmentDrainError::NotFound(
+                "not configured".to_string(),
+            )))),
+        );
+        let err = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Err(EthernetSegmentDrainError::Unavailable(
+                "control closed".to_string(),
+            )))),
+        );
+        let err = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: false,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn parse_esi_round_trips_display_form() {
+        let esi = super::parse_esi(TEST_ESI).unwrap();
+        assert_eq!(esi.to_string(), TEST_ESI);
+        assert!(super::parse_esi("not-an-esi").is_err());
     }
 
     #[tokio::test]

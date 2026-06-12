@@ -462,6 +462,9 @@ pub struct ServeConfig {
     /// Optional duplicate-MAC quarantine manual-clear hook. Present
     /// only when the EVPN originator actor is running.
     pub evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    /// Optional ADR-0084 Ethernet Segment drain hook. Present only
+    /// when the EVPN segment actor is running.
+    pub evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     /// Live snapshot reader for RFC 7999 BLACKHOLE kernel discard
     /// install state. Returns an empty list when the discard actor is
     /// disabled or has not observed any BLACKHOLE best routes.
@@ -812,6 +815,7 @@ async fn run_listener(
     let evpn_runtime_model = config.evpn_runtime_model;
     let evpn_runtime_apply = config.evpn_runtime_apply;
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
+    let evpn_es_drain = config.evpn_es_drain;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
     let fib_table_control = config.fib_table_control;
@@ -866,6 +870,7 @@ async fn run_listener(
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
+                evpn_es_drain.clone(),
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
@@ -915,6 +920,7 @@ async fn run_listener(
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
+                evpn_es_drain,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
@@ -971,6 +977,7 @@ async fn run_tcp_listener(
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
@@ -1117,7 +1124,8 @@ async fn run_tcp_listener(
             access_mode,
             evpn_duplicate_mac_clear,
         )
-        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
+        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_ethernet_segment_drain(evpn_es_drain),
         interceptor.clone(),
     ));
     routes.add_service(ControlServiceServer::with_interceptor(
@@ -1179,6 +1187,7 @@ async fn run_uds_listener(
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
@@ -1305,7 +1314,8 @@ async fn run_uds_listener(
             access_mode,
             evpn_duplicate_mac_clear,
         )
-        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
+        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_ethernet_segment_drain(evpn_es_drain),
         interceptor.clone(),
     ));
     routes.add_service(ControlServiceServer::with_interceptor(

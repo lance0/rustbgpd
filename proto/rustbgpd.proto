@@ -2109,6 +2109,18 @@ service EvpnService {
   // not clear all VNIs and does not mutate the resolved EVPN
   // instance table.
   rpc ClearDuplicateMacQuarantine(ClearDuplicateMacQuarantineRequest) returns (ClearDuplicateMacQuarantineResponse);
+  // ADR-0084 — manually drain (or undrain) one configured Ethernet
+  // Segment before access-circuit maintenance. Draining withdraws the
+  // ES's Type 4 + EAD-per-ES + EAD-per-EVI routes (exiting DF
+  // election) and the local Type 2 MAC/MAC+IP routes for its member
+  // VNIs, while suppressing new local-MAC originations; remote PEs'
+  // single-active backup swap then repairs around this PE. Undraining
+  // re-originates the ES routes, re-runs DF election, and replays the
+  // cached local MAC/IP state. Drain state is runtime-only and
+  // in-memory: a daemon restart clears it and replays configured
+  // state. Unknown/unconfigured ESIs return NOT_FOUND; repeating the
+  // current state is an idempotent no-op (`changed = false`).
+  rpc SetEthernetSegmentDrain(SetEthernetSegmentDrainRequest) returns (SetEthernetSegmentDrainResponse);
   // ADR-0063 — validate or apply a full candidate EVPN runtime model
   // through the coordinator. The request carries full candidate TOML
   // so the daemon can reuse the config layer's validation and table
@@ -2234,6 +2246,29 @@ message ClearDuplicateMacQuarantineResponse {
   bool cleared = 1;
   // Operator-facing summary of the result.
   string message = 2;
+}
+
+message SetEthernetSegmentDrainRequest {
+  // Ethernet Segment Identifier in the operator text form used across
+  // this proto: 10 colon-separated hex octets, e.g.
+  // `00:11:22:33:44:55:66:77:88:99`.
+  string esi = 1;
+  // Desired drain state: true drains the segment, false undrains it.
+  bool drained = 2;
+}
+
+message SetEthernetSegmentDrainResponse {
+  // Applied drain state (mirrors the request on success).
+  bool drained = 1;
+  // False when the request matched the current state (idempotent
+  // no-op — nothing was withdrawn or re-originated).
+  bool changed = 2;
+  // Number of member VNIs of the targeted Ethernet Segment whose
+  // local Type 2 origination was drained / replayed.
+  uint32 member_vni_count = 3;
+  // Operator-facing summary, including the withdrawn (or
+  // re-originated) route classes.
+  string message = 4;
 }
 
 message ApplyEvpnRuntimeRequest {

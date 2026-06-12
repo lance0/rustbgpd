@@ -20,6 +20,7 @@ use crate::evpn_originator::rib_write::apply_actions;
 ///
 /// See `docs/RFC_NOTES.md` for the RFC 9135 §7.2.3 framing and the
 /// FRR mailing-list bugs that motivated this model.
+#[allow(clippy::too_many_arguments)] // ADR-0084 drain gate nudged the count over the threshold; refactoring to a context struct is a separate slice.
 pub(super) async fn handle_observation(
     obs: &LocalMacObservation,
     state: &mut OriginatorState,
@@ -28,7 +29,26 @@ pub(super) async fn handle_observation(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    drained_esis: &std::collections::BTreeSet<EthernetSegmentIdentifier>,
 ) {
+    // ADR-0084: while a VNI's mapped Ethernet Segment is operator-
+    // drained, fresh kernel events must not (re-)originate routes —
+    // but the local observation caches must keep tracking them so an
+    // undrain replays the latest kernel state, not a stale snapshot.
+    let obs_vni = match *obs {
+        LocalMacObservation::Learned { vni, .. }
+        | LocalMacObservation::Aged { vni, .. }
+        | LocalMacObservation::IpAdded { vni, .. }
+        | LocalMacObservation::IpRemoved { vni, .. } => vni,
+    };
+    if super::vni_is_drained(obs_vni, vni_to_esi, drained_esis) {
+        debug!(
+            vni = ?obs_vni,
+            "EVPN originator: caching kernel observation for drained Ethernet Segment without origination"
+        );
+        handle_observation_while_drained(obs, state);
+        return;
+    }
     match *obs {
         LocalMacObservation::Learned { vni, mac, ifindex } => {
             handle_learned(
@@ -84,6 +104,80 @@ pub(super) async fn handle_observation(
                 vni_to_esi,
             )
             .await;
+        }
+    }
+}
+
+/// Cache-only observation handling for a drained VNI (ADR-0084):
+/// mirrors the cache bookkeeping of the live handlers without ever
+/// touching the origination state machines (they hold no outstanding
+/// routes while drained, and must stay that way).
+fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut OriginatorState) {
+    match *obs {
+        LocalMacObservation::Learned { vni, mac, ifindex } => {
+            state
+                .local_macs
+                .entry(vni)
+                .or_default()
+                .insert(mac, ifindex);
+            // Drain pending IP bindings straight into the live cache —
+            // the live handler would have advertised MAC+IP for them;
+            // the undrain replay will.
+            if let Some(pending) = state.pending_ip_bindings.remove(&(vni, mac)) {
+                state
+                    .live_mac_ip
+                    .entry(vni)
+                    .or_default()
+                    .entry(mac)
+                    .or_default()
+                    .extend(pending);
+            }
+        }
+        LocalMacObservation::Aged { vni, mac } => {
+            if let Some(per_vni) = state.local_macs.get_mut(&vni) {
+                per_vni.remove(&mac);
+            }
+            state.pending_ip_bindings.remove(&(vni, mac));
+            if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
+                per_vni.remove(&mac);
+            }
+        }
+        LocalMacObservation::IpAdded { vni, mac, ip } => {
+            let mac_is_local = state
+                .local_macs
+                .get(&vni)
+                .is_some_and(|m| m.contains_key(&mac));
+            if mac_is_local {
+                state
+                    .live_mac_ip
+                    .entry(vni)
+                    .or_default()
+                    .entry(mac)
+                    .or_default()
+                    .insert(ip);
+            } else {
+                state
+                    .pending_ip_bindings
+                    .entry((vni, mac))
+                    .or_default()
+                    .insert(ip);
+            }
+        }
+        LocalMacObservation::IpRemoved { vni, mac, ip } => {
+            if let Some(set) = state.pending_ip_bindings.get_mut(&(vni, mac)) {
+                set.remove(&ip);
+                if set.is_empty() {
+                    state.pending_ip_bindings.remove(&(vni, mac));
+                }
+            }
+            if let Some(per_vni) = state.live_mac_ip.get_mut(&vni)
+                && let Some(ips) = per_vni.get_mut(&mac)
+            {
+                ips.remove(&ip);
+                if ips.is_empty() {
+                    per_vni.remove(&mac);
+                }
+            }
         }
     }
 }

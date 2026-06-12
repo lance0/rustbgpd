@@ -179,7 +179,7 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (7 RPCs)
+### EvpnService (8 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -189,6 +189,7 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
+| `SetEthernetSegmentDrain` | `operator_only` | ADR-0084 manual Ethernet Segment drain/undrain. Draining withdraws the ES's Type 4/EAD routes and the member VNIs' local Type 2 routes and suppresses new local-MAC origination — traffic-impacting origination control that redirects live customer traffic onto remote PEs' backup paths (a step above the per-key, restorative duplicate-MAC clear). Runtime-only and in-memory; restart clears it. |
 | `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; the supported shapes converge live and commit a new generation (single L2VNI add/delete/redefine, single IP-VRF add/standalone-delete/redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, additive build-up, atomic tenant teardown of an ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass, and `ip_vrf` relink), while L3VNI/device/table IP-VRF identity redefine (restart-required by design) and generic mixed add/delete/redefine edits fail closed (issue #268). Request TOML can contain credentials and must be audit-redacted. |
 
 ### gnmi.gNMI (4 RPCs)

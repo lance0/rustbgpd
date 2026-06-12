@@ -629,6 +629,19 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine",
         AuthTier::Mutating,
     ),
+    // ADR-0084: SetEthernetSegmentDrain is `operator_only` on purpose —
+    // draining an ES withdraws its Type 4/EAD routes and the member
+    // VNIs' local Type 2 routes, redirecting live customer traffic to
+    // the remote PEs' backup path. That is traffic-impacting
+    // origination control (a step above ClearDuplicateMacQuarantine's
+    // per-key, restorative `Mutating` clear), in the same blast-radius
+    // class as SetGracefulShutdown.
+    method(
+        "rustbgpd.v1.EvpnService",
+        "SetEthernetSegmentDrain",
+        "/rustbgpd.v1.EvpnService/SetEthernetSegmentDrain",
+        AuthTier::OperatorOnly,
+    ),
     method(
         "rustbgpd.v1.EvpnService",
         "ApplyEvpnRuntime",
@@ -762,7 +775,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 86);
+        assert_eq!(METHODS.len(), 87);
     }
 
     #[test]
@@ -805,7 +818,7 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 45);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
 
     #[test]
@@ -856,6 +869,16 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine").map(|m| m.tier),
             Some(AuthTier::Mutating)
+        );
+        // DELIBERATE PIN (ADR-0084): SetEthernetSegmentDrain is
+        // `operator_only` — an ES drain withdraws live origination state
+        // and redirects customer traffic onto remote PEs' backup paths.
+        // Do not lower it to `Mutating` to make automation easier; if an
+        // automation role ever needs drains, decide that via an ADR-0084
+        // update, not by editing this assertion.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.EvpnService/SetEthernetSegmentDrain").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
         );
         // DELIBERATE PIN (ADR-0073 audit, WS2): ApplyEvpnRuntime was the
         // first `Mutating` method that programs the kernel dataplane. It stays

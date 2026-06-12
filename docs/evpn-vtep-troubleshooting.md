@@ -183,6 +183,38 @@ reflection, and `ListEvpnRoutes` visibility are preserved. Quarantine
 clears automatically after `recovery_seconds`, or immediately via
 `rustbgpctl evpn clear-duplicate-mac --vni <VNI> --mac <MAC>`.
 
+## Draining an Ethernet Segment for maintenance (ADR-0084)
+
+Before taking a multi-homed CE's access circuit down, drain its
+Ethernet Segment so remote PEs repair around this VTEP first
+(single-active segments swap to the backup PE per ADR-0083):
+
+```bash
+rustbgpctl evpn es drain 00:11:22:33:44:55:66:77:88:99
+# ... do the access-circuit maintenance ...
+rustbgpctl evpn es undrain 00:11:22:33:44:55:66:77:88:99
+```
+
+Draining withdraws the ES's Type 4 (exiting DF election), EAD-per-ES,
+and EAD-per-EVI routes plus the member VNIs' locally-originated Type 2
+MAC/MAC+IP routes, and suppresses new local-MAC origination while
+drained. The local observation caches keep tracking kernel FDB/neigh
+events, so undraining replays the *latest* local state (and re-runs DF
+election). Repeating the current state is an idempotent no-op; an ESI
+that is not in `[[ethernet_segments]]` returns `NOT_FOUND`.
+
+Caveats:
+
+- **Drain state is in-memory.** A daemon restart clears it and replays
+  configured state — re-apply the drain after any restart inside the
+  maintenance window.
+- Drain state survives SIGHUP / runtime applies that keep the ES
+  configured; removing the ES from config drops its drain entry.
+- The RPC is `operator_only` (it redirects live traffic); observer and
+  automation principals are denied.
+- Duplicate-MAC quarantines still apply: undrain does not replay a
+  quarantined MAC until its quarantine clears.
+
 ## MAC+IP routes not appearing
 
 Gate 7b+2 origination requires the operator to enable per-VXLAN-port

@@ -320,9 +320,14 @@ pub(crate) struct EvpnRuntimeActorConverger {
     svi: Option<evpn_svi::EvpnSviRuntimeControl>,
     l3_originator: Option<evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
     segment: Option<evpn_segment::EvpnSegmentRuntimeControl>,
+    /// ADR-0084 operator drained-ESI set. Every originator runtime-model
+    /// publish carries the current snapshot; segment-set publishes GC
+    /// drain entries for ESIs that left the config.
+    es_drain: crate::evpn_es_drain::EvpnEsDrainState,
 }
 
 impl EvpnRuntimeActorConverger {
+    #[allow(clippy::too_many_arguments)] // one optional control per EVPN actor plus the shared drain state
     pub(crate) fn new(
         rib_tx: mpsc::Sender<RibUpdate>,
         imet_controller: Arc<tokio::sync::Mutex<evpn_imet::EvpnImetController>>,
@@ -331,6 +336,7 @@ impl EvpnRuntimeActorConverger {
         svi: Option<evpn_svi::EvpnSviRuntimeControl>,
         l3_originator: Option<evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
         segment: Option<evpn_segment::EvpnSegmentRuntimeControl>,
+        es_drain: crate::evpn_es_drain::EvpnEsDrainState,
     ) -> Self {
         Self {
             rib_tx,
@@ -340,7 +346,22 @@ impl EvpnRuntimeActorConverger {
             svi,
             l3_originator,
             segment,
+            es_drain,
         }
+    }
+
+    /// GC the ADR-0084 drained-ESI set against a segment snapshot about
+    /// to be published (drop entries for ESIs leaving the config) and
+    /// return the new set when it changed so the caller can republish it
+    /// to the segment actor. Deliberately not restored on a failed
+    /// converge's rollback: losing a drain entry is conservative (routes
+    /// re-advertise; the operator re-drains), whereas restoring one
+    /// could silently re-suppress an ES the operator believes undrained.
+    fn gc_drained_esis(
+        &self,
+        segments: &[rustbgpd_evpn::EthernetSegment],
+    ) -> Option<Arc<std::collections::BTreeSet<rustbgpd_wire::EthernetSegmentIdentifier>>> {
+        self.es_drain.retain_configured(segments)
     }
 
     async fn converge_l2vni_add(
@@ -409,7 +430,11 @@ impl EvpnRuntimeActorConverger {
                 "EVPN dataplane runtime model publish failed",
             ));
         }
-        if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {
+        if !originator.replace_runtime_model(
+            candidate_instances.clone(),
+            candidate_vni_to_esi,
+            self.es_drain.snapshot(),
+        ) {
             Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
             self.rollback_imet(added_vni).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -424,6 +449,7 @@ impl EvpnRuntimeActorConverger {
             let _ = originator.replace_runtime_model(
                 current_instances,
                 evpn_vni_to_esi_map(current.ethernet_segments()),
+                self.es_drain.snapshot(),
             );
             self.rollback_imet(added_vni).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -431,7 +457,7 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            Self::rollback_l2vni_runtime_models(
+            self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -495,6 +521,7 @@ impl EvpnRuntimeActorConverger {
     }
 
     fn rollback_l2vni_runtime_models(
+        &self,
         dataplane: &evpn_dataplane::EvpnDataplaneRuntimeControl,
         originator: Option<&evpn_originator::EvpnOriginatorRuntimeControl>,
         svi: Option<&evpn_svi::EvpnSviRuntimeControl>,
@@ -508,6 +535,7 @@ impl EvpnRuntimeActorConverger {
             let _ = originator.replace_runtime_model(
                 current_instances.clone(),
                 evpn_vni_to_esi_map(current.ethernet_segments()),
+                self.es_drain.snapshot(),
             );
         }
         if let Some(svi) = svi {
@@ -698,7 +726,11 @@ impl EvpnRuntimeActorConverger {
             }
         }
         if let Some(originator) = originator
-            && !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi)
+            && !originator.replace_runtime_model(
+                candidate_instances.clone(),
+                candidate_vni_to_esi,
+                self.es_drain.snapshot(),
+            )
         {
             let restored = self
                 .rollback_additive_build_up(current, &originated_instances)
@@ -773,8 +805,11 @@ impl EvpnRuntimeActorConverger {
             restored &= dataplane.replace_evpn_instances(current_instances.clone());
         }
         if let Some(originator) = self.originator.as_ref() {
-            restored &=
-                originator.replace_runtime_model(current_instances.clone(), current_vni_to_esi);
+            restored &= originator.replace_runtime_model(
+                current_instances.clone(),
+                current_vni_to_esi,
+                self.es_drain.snapshot(),
+            );
         }
         if let Some(svi) = self.svi.as_ref() {
             restored &= svi.replace_evpn_instances(current_instances.clone());
@@ -875,6 +910,7 @@ impl EvpnRuntimeActorConverger {
         if !originator.replace_runtime_model(
             candidate_instances.clone(),
             evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            self.es_drain.snapshot(),
         ) {
             Self::rollback_l2vni_dataplane(dataplane, current, ip_vrf_metadata_changed);
             if let Some(svi) = svi {
@@ -886,7 +922,7 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            Self::rollback_l2vni_runtime_models(
+            self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -928,6 +964,10 @@ impl EvpnRuntimeActorConverger {
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
         let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
+        // ADR-0084 GC: a teardown can delete a drained ES; drop its drain
+        // entry before the publishes below so the originator model and the
+        // segment actor both see the GC'd set.
+        let gc_drained = self.gc_drained_esis(candidate.ethernet_segments());
         let ip_vrf_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
         let dataplane = self.require_l2vni_dataplane("tenant teardown")?;
@@ -1022,7 +1062,11 @@ impl EvpnRuntimeActorConverger {
             }
         }
 
-        if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {
+        if !originator.replace_runtime_model(
+            candidate_instances.clone(),
+            candidate_vni_to_esi,
+            self.es_drain.snapshot(),
+        ) {
             let restored = self
                 .rollback_tenant_teardown(current, &deleted_instances)
                 .await;
@@ -1049,6 +1093,12 @@ impl EvpnRuntimeActorConverger {
                     restored,
                     "EVPN segment runtime model publish failed",
                 ));
+            }
+            // Push the GC'd ADR-0084 drain set so a re-added ESI cannot
+            // pick up a stale drain entry inside the segment actor.
+            // Best-effort: a closed control here means daemon teardown.
+            if let Some(gc_drained) = gc_drained.clone() {
+                let _ = segment.replace_drained_esis(gc_drained);
             }
         }
         if let Some(l3) = l3_originator
@@ -1114,7 +1164,11 @@ impl EvpnRuntimeActorConverger {
             let _ = svi.replace_evpn_instances(current_instances.clone());
         }
         if let Some(originator) = self.originator.as_ref() {
-            let _ = originator.replace_runtime_model(current_instances.clone(), current_vni_to_esi);
+            let _ = originator.replace_runtime_model(
+                current_instances.clone(),
+                current_vni_to_esi,
+                self.es_drain.snapshot(),
+            );
         }
         if let Some(segment) = self.segment.as_ref() {
             let _ = segment.replace_instances(current_instances);
@@ -1237,7 +1291,11 @@ impl EvpnRuntimeActorConverger {
                 "EVPN dataplane runtime model publish failed",
             ));
         }
-        if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {
+        if !originator.replace_runtime_model(
+            candidate_instances.clone(),
+            candidate_vni_to_esi,
+            self.es_drain.snapshot(),
+        ) {
             Self::rollback_l2vni_dataplane(dataplane, current, false);
             let restored = self
                 .rollback_imet_redefine(redefined_vni, old_instance)
@@ -1256,6 +1314,7 @@ impl EvpnRuntimeActorConverger {
             let _ = originator.replace_runtime_model(
                 current_instances,
                 evpn_vni_to_esi_map(current.ethernet_segments()),
+                self.es_drain.snapshot(),
             );
             let restored = self
                 .rollback_imet_redefine(redefined_vni, old_instance)
@@ -1267,7 +1326,7 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
-            Self::rollback_l2vni_runtime_models(
+            self.rollback_l2vni_runtime_models(
                 dataplane,
                 Some(originator),
                 svi,
@@ -1485,6 +1544,10 @@ impl EvpnRuntimeActorConverger {
         operation: &str,
     ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
         let segment = self.require_segment_runtime_control(operation)?;
+        // ADR-0084 GC: an ES delete drops its drain entry (a redefine
+        // keeps the ESI, so its drain survives). Run before the
+        // originator publish below so the model carries the GC'd set.
+        let gc_drained = self.gc_drained_esis(candidate.ethernet_segments());
         // ES add/delete/redefine leaves the instance table unchanged
         // (`plan.evpn_instances.has_changes() == false`), so clone it once
         // and share the Arc across the segment + originator publishes.
@@ -1507,6 +1570,7 @@ impl EvpnRuntimeActorConverger {
             if !originator.replace_runtime_model(
                 candidate_instances.clone(),
                 evpn_vni_to_esi_map(candidate.ethernet_segments()),
+                self.es_drain.snapshot(),
             ) {
                 return Err(DaemonEvpnRuntimeConvergeError::failed(
                     "EVPN Type 2 originator runtime model publish failed",
@@ -1527,11 +1591,18 @@ impl EvpnRuntimeActorConverger {
                 let _ = originator.replace_runtime_model(
                     Arc::new(current.instances().clone()),
                     evpn_vni_to_esi_map(current.ethernet_segments()),
+                    self.es_drain.snapshot(),
                 );
             }
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN segment runtime model publish failed",
             ));
+        }
+        // Push the GC'd ADR-0084 drain set so a re-added ESI cannot pick
+        // up a stale drain entry inside the segment actor. Best-effort:
+        // a closed control here means daemon teardown.
+        if let Some(gc_drained) = gc_drained {
+            let _ = segment.replace_drained_esis(gc_drained);
         }
         Ok(())
     }
@@ -4740,6 +4811,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let response = apply_evpn_runtime_request(
@@ -4803,6 +4875,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let response = apply_evpn_runtime_request(
@@ -4866,6 +4939,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let response = apply_evpn_runtime_request(
@@ -5213,6 +5287,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -5307,6 +5382,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -5389,6 +5465,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let error = converger
@@ -5454,6 +5531,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let error = converger
@@ -5592,7 +5670,8 @@ table_id = 6000
         assert!(dataplane.replace_evpn_instances(candidate_instances.clone()));
         assert!(originator.replace_runtime_model(
             candidate_instances.clone(),
-            evpn_vni_to_esi_map(candidate.ethernet_segments())
+            evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            Arc::new(std::collections::BTreeSet::new()),
         ));
         assert!(segment.replace_instances(candidate_instances));
         assert!(segment.replace_segments(candidate_segments));
@@ -5625,6 +5704,7 @@ table_id = 6000
             svi: None,
             l3_originator: Some(l3_handle.runtime_control()),
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let restored = converger
@@ -5773,6 +5853,7 @@ table_id = 6000
             svi: Some(svi_handle.runtime_control()),
             l3_originator: Some(l3_handle.runtime_control()),
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -5981,6 +6062,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6078,6 +6160,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6585,6 +6668,7 @@ table_id = 6000
             svi: None,
             l3_originator: Some(l3_handle.runtime_control()),
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6644,6 +6728,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6733,6 +6818,7 @@ table_id = 6000
             svi: None,
             l3_originator: Some(l3_handle.runtime_control()),
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6819,6 +6905,7 @@ table_id = 6000
             svi: None,
             l3_originator: Some(l3_handle.runtime_control()),
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -6887,6 +6974,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7001,6 +7089,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7101,6 +7190,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7215,6 +7305,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7315,6 +7406,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7394,6 +7486,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let restored = converger.rollback_imet_redefine(vni100, old_instance).await;
@@ -7435,6 +7528,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         assert!(
@@ -7539,6 +7633,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7669,6 +7764,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -7895,6 +7991,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         let restored = converger
@@ -8026,6 +8123,7 @@ table_id = 6000
             svi: Some(svi_handle.runtime_control()),
             l3_originator: None,
             segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger
@@ -8119,6 +8217,7 @@ table_id = 6000
             svi: None,
             l3_originator: None,
             segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
         };
 
         converger

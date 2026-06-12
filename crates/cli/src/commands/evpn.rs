@@ -10,6 +10,7 @@ use crate::proto::{
     EvpnRuntimeLifecycle, EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest,
     GetIpVrfRequest, IpVrfReadinessState, IpVrfState, ListEvpnInstancesRequest,
     ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
+    SetEthernetSegmentDrainRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -380,6 +381,41 @@ pub async fn clear_duplicate_mac(
         println!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}");
     } else {
         println!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}");
+    }
+    Ok(())
+}
+
+/// Drain or undrain one configured Ethernet Segment (ADR-0084).
+///
+/// Draining withdraws the ES's Type 4 + EAD routes and the member
+/// VNIs' local Type 2 routes ahead of access-circuit maintenance;
+/// undraining re-originates and replays. Drain state is in-memory:
+/// a daemon restart clears it.
+pub async fn set_es_drain(
+    connection: Connection,
+    esi: String,
+    drained: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .set_ethernet_segment_drain(SetEthernetSegmentDrainRequest {
+            esi: esi.clone(),
+            drained,
+        })
+        .await?
+        .into_inner();
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+                "esi": esi,
+                "drained": resp.drained,
+                "changed": resp.changed,
+                "member_vni_count": resp.member_vni_count,
+                "message": resp.message,
+        }))?;
+    } else {
+        println!("{}", resp.message);
     }
     Ok(())
 }
@@ -1130,6 +1166,34 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         super::clear_duplicate_mac(connection, 100, "aa:bb:cc:dd:ee:ff".to_string(), true)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn es_drain_commands_run_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::set_es_drain(
+            connection,
+            "00:11:22:33:44:55:66:77:88:99".to_string(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::set_es_drain(
+            connection,
+            "00:11:22:33:44:55:66:77:88:99".to_string(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
