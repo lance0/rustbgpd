@@ -1473,7 +1473,7 @@ async fn peer_group_reshape_mid_fanout_failure_restores_prior_members() {
     let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its reconfigure fails
     let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
-    mgr.inject_reconfigure_failure = Some(key(a2));
+    mgr.inject_reconfigure_failures.insert(key(a2), 0);
 
     let result = mgr
         .apply_peer_group_change(
@@ -1513,6 +1513,96 @@ async fn peer_group_reshape_mid_fanout_failure_restores_prior_members() {
             .hold_time,
         Some(90),
         "member after the failure must never be touched"
+    );
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90),
+        "failed reshape must not advance current_config"
+    );
+}
+
+/// ADR-0081: rollback of the captured priors is best-effort — a failed
+/// restore must not short-circuit the reverse sweep, so every earlier
+/// member is still attempted, and the compound error names exactly which
+/// members were left in the reshaped state (members it does not name were
+/// restored).
+#[tokio::test]
+async fn peer_group_reshape_rollback_failure_still_restores_other_priors() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its rollback fails
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)); // its apply fails
+    // a3 fails on its first reconfigure (the apply), triggering rollback of
+    // the captured priors [a1, a2] in reverse order; a2's first reconfigure
+    // (the apply) succeeds and its second (the rollback) fails.
+    mgr.inject_reconfigure_failures.insert(key(a3), 0);
+    mgr.inject_reconfigure_failures.insert(key(a2), 1);
+
+    let result = mgr
+        .apply_peer_group_change(
+            set_edge_hold_time_event(45),
+            // Explicit order so members 1 and 2 are reshaped before member 3
+            // fails.
+            vec![a1, a2, a3],
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("apply failure with a partial rollback failure must surface as Err");
+    };
+    assert!(
+        matches!(error, CatalogMutationError::Internal(_)),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("10.0.0.4"),
+        "compound error must carry the original apply failure: {message}"
+    );
+    assert!(
+        message.contains("10.0.0.3"),
+        "compound error must name the member left reshaped: {message}"
+    );
+    assert!(
+        !message.contains("10.0.0.2"),
+        "compound error must not claim the restored member failed: {message}"
+    );
+
+    assert_eq!(
+        mgr.peers
+            .get(&key(a1))
+            .expect("restored member 1")
+            .hold_time,
+        Some(90),
+        "member 1's rollback must still be attempted after member 2's fails"
+    );
+    assert_eq!(
+        mgr.peers
+            .get(&key(a2))
+            .expect("rollback-failed member 2")
+            .hold_time,
+        Some(45),
+        "member 2 stays in the reshaped state its failed rollback left it in"
+    );
+    assert_eq!(
+        mgr.peers
+            .get(&key(a3))
+            .expect("apply-failed member 3")
+            .hold_time,
+        Some(90),
+        "member 3's apply failed up front, leaving its prior config in place"
     );
     assert_eq!(
         mgr.current_config
@@ -1613,7 +1703,7 @@ async fn peer_group_reshape_rollback_preserves_admin_disabled_state() {
     mgr.disable_peer(key(a1), None).await.unwrap();
     // Member 2 fails after member 1 was reshaped, forcing member 1's
     // rollback while it is admin-disabled.
-    mgr.inject_reconfigure_failure = Some(key(a2));
+    mgr.inject_reconfigure_failures.insert(key(a2), 0);
 
     let result = mgr
         .apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2])
