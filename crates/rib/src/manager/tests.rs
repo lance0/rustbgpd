@@ -6226,6 +6226,284 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
     handle.await.unwrap();
 }
 
+// --- GR/LLGR expiry session-hygiene tests ---
+//
+// Direct-manager style: these assert internal per-peer map state across
+// the retention-expiry sweeps, which the channel-driven tests above
+// cannot observe.
+
+/// Apply all queued `RoutesReceived` chunks (the channel-driven manager
+/// drains these from its run loop).
+fn drain_route_chunks(manager: &mut RibManager) {
+    while manager.process_next_route_chunk() {}
+}
+
+/// `PeerUp` with the boilerplate defaulted; returns the outbound receiver
+/// so the channel stays open for the initial dump + `EoR`.
+fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(1, 1, 1, 1),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    });
+    out_rx
+}
+
+#[tokio::test]
+async fn llgr_reestablish_uses_captured_stale_routes_time() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    // GR with LLGR and a non-default stale_routes_time.
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 2,
+        stale_routes_time: 77,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    });
+
+    // GR deadline expires → promotion to the LLGR stale phase.
+    manager.sweep_gr_stale(peer);
+    assert!(manager.llgr_peers.contains_key(&peer));
+
+    // Peer re-establishes during LLGR: the re-armed GR deadline must use
+    // the stale_routes_time captured at GR entry, not the 360 s default.
+    let _out_rx = establish_peer(&mut manager, peer);
+    assert_eq!(
+        manager.gr_stale_routes_time.get(&peer),
+        Some(&77),
+        "re-establishment during LLGR must honor the captured stale_routes_time"
+    );
+}
+
+#[tokio::test]
+async fn llgr_expiry_sweep_drops_llgr_peer_config() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 10,
+        }],
+        llgr_stale_time: 10,
+    });
+
+    manager.sweep_gr_stale(peer);
+    assert!(
+        manager.llgr_peer_config.contains_key(&peer),
+        "LLGR config must survive GR→LLGR promotion (handle_peer_up reads it)"
+    );
+
+    // LLGR expires with the peer still gone — the config must not leak.
+    manager.sweep_llgr_stale(peer);
+    assert!(
+        !manager.llgr_peer_config.contains_key(&peer),
+        "LLGR expiry must drop the per-peer LLGR config"
+    );
+}
+
+#[tokio::test]
+async fn gr_expiry_without_reestablish_releases_peer_state() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    let _out_rx = establish_peer(&mut manager, peer);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        peer_group: Some("edge".to_string()),
+    });
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    assert!(manager.ribs.contains_key(&peer));
+
+    // GR flap without LLGR; the peer never re-establishes, so when the
+    // retention expires nothing references its per-peer state anymore.
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    manager.sweep_gr_stale(peer);
+
+    assert!(
+        !manager.ribs.contains_key(&peer),
+        "GR expiry without re-establishment must release the Adj-RIB-In shell"
+    );
+    assert!(
+        !manager.peer_asn.contains_key(&peer),
+        "GR expiry without re-establishment must release peer_asn"
+    );
+    assert!(
+        !manager.peer_bgp_id.contains_key(&peer),
+        "GR expiry without re-establishment must release peer_bgp_id"
+    );
+    assert!(
+        !manager.peer_group.contains_key(&peer),
+        "GR expiry without re-establishment must release peer_group"
+    );
+}
+
+#[tokio::test]
+async fn llgr_expiry_without_reestablish_releases_peer_state() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    let _out_rx = establish_peer(&mut manager, peer);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        peer_group: Some("edge".to_string()),
+    });
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 10,
+        }],
+        llgr_stale_time: 10,
+    });
+    manager.sweep_gr_stale(peer);
+    assert!(manager.ribs.contains_key(&peer), "LLGR retains the rib");
+
+    // LLGR expires with the peer still gone.
+    manager.sweep_llgr_stale(peer);
+
+    assert!(
+        !manager.ribs.contains_key(&peer),
+        "LLGR expiry without re-establishment must release the Adj-RIB-In shell"
+    );
+    assert!(
+        !manager.peer_asn.contains_key(&peer),
+        "LLGR expiry without re-establishment must release peer_asn"
+    );
+    assert!(
+        !manager.peer_bgp_id.contains_key(&peer),
+        "LLGR expiry without re-establishment must release peer_bgp_id"
+    );
+    assert!(
+        !manager.peer_group.contains_key(&peer),
+        "LLGR expiry without re-establishment must release peer_group"
+    );
+}
+
+#[tokio::test]
+async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    let _out_rx = establish_peer(&mut manager, peer);
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        peer_group: Some("edge".to_string()),
+    });
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+
+    // Peer re-establishes during GR, but its End-of-RIB is late: the
+    // stale-time sweep fires while the session is up. Stale routes go,
+    // the live session's state must not.
+    let _out_rx2 = establish_peer(&mut manager, peer);
+    manager.sweep_gr_stale(peer);
+
+    assert_eq!(
+        manager
+            .ribs
+            .get(&peer)
+            .map(crate::adj_rib_in::AdjRibIn::len),
+        Some(0),
+        "stale routes are swept but the Adj-RIB-In entry survives"
+    );
+    assert!(
+        manager.peer_asn.contains_key(&peer),
+        "identity must survive a sweep that fires before a late EoR"
+    );
+    assert!(manager.peer_bgp_id.contains_key(&peer));
+    assert!(manager.peer_group.contains_key(&peer));
+    assert!(
+        manager.outbound_peers.contains_key(&peer),
+        "outbound registration must survive a sweep that fires before a late EoR"
+    );
+}
+
 // --- Route Reflector tests ---
 
 #[tokio::test]

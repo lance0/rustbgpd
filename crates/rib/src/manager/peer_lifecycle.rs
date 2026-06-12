@@ -26,6 +26,11 @@ impl RibManager {
 
         if self.llgr_peers.remove(&peer).is_some() {
             self.llgr_stale_deadlines.remove(&peer);
+            // The LLGR config survives GR→LLGR promotion (handle_peer_up
+            // reads it on re-establishment), so an LLGR abort must drop it
+            // here — the GR arm above won't fire for a peer already
+            // promoted out of gr_peers.
+            self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during LLGR — aborting LLGR");
             let peer_label = peer.to_string();
             self.metrics.set_gr_active(&peer_label, false);

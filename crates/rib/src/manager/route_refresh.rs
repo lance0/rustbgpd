@@ -230,6 +230,9 @@ impl RibManager {
                 info!(%peer, "LLGR complete — all End-of-RIB received");
                 self.llgr_peers.remove(&peer);
                 self.llgr_stale_deadlines.remove(&peer);
+                // The LLGR config outlives GR→LLGR promotion; LLGR
+                // completion is a terminal point, mirror the GR arm above.
+                self.llgr_peer_config.remove(&peer);
                 self.metrics.set_gr_active(&peer_label, false);
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }

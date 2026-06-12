@@ -167,6 +167,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Re-establishment during LLGR now honors the negotiated stale-routes
+  time.** The per-peer LLGR config (which carries the stale-routes time
+  captured at GR entry) was consumed at GR→LLGR promotion, so a peer
+  coming back during the LLGR stale phase always had its End-of-RIB
+  deadline re-armed with the 360 s default instead of the configured
+  value. The config now survives the LLGR phase and is dropped at each
+  terminal point instead (End-of-RIB completion, LLGR expiry, the
+  no-LLGR purge, peer down) — which also lets a second GR-deadline
+  expiry after an LLGR re-establishment promote back to LLGR rather
+  than silently purging.
+
+- **Expired GR/LLGR retention now releases the departed peer's RIB and
+  identity state.** A GR flap deliberately keeps the peer's Adj-RIB-In
+  and identity maps (ASN, BGP identifier, peer-group — the MRT
+  `TABLE_DUMP_V2` peer index reads them) for the returning session, but
+  if the peer never re-established, the retention-expiry sweeps removed
+  only the routes: the empty Adj-RIB-In shell and the identity entries
+  leaked forever. Both sweeps now run the full peer-down teardown for a
+  peer that has not re-registered; a peer that re-established but whose
+  End-of-RIB is merely late keeps its session state untouched.
+
 - **Peer-group reshape rollback is now best-effort across every prior
   member (ADR-0081).** When a mid-fanout reconfigure failure triggers
   rollback of the already-reshaped members, a failed restore no longer

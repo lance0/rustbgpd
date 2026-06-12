@@ -218,11 +218,19 @@ impl RibManager {
         let peer_label = peer.to_string();
         self.metrics.record_gr_timer_expired(&peer_label);
 
-        // Check if LLGR applies
-        if let Some(llgr_config) = self.llgr_peer_config.remove(&peer)
-            && llgr_config.peer_llgr_capable
-            && llgr_config.local_llgr_stale_time > 0
-        {
+        // Check if LLGR applies. Read — don't consume — the config: the
+        // entry must survive the LLGR stale phase so that a peer
+        // re-establishing during LLGR gets its captured stale_routes_time
+        // (`handle_peer_up`) instead of the 360 s default, and so a second
+        // GR-deadline expiry can re-promote. Terminal points remove it:
+        // End-of-RIB completion, `sweep_llgr_stale`, the no-LLGR purge
+        // below, and `handle_peer_down`.
+        let llgr_config = self
+            .llgr_peer_config
+            .get(&peer)
+            .filter(|c| c.peer_llgr_capable && c.local_llgr_stale_time > 0)
+            .cloned();
+        if let Some(llgr_config) = llgr_config {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
             // Only promote families that are in BOTH the GR and LLGR capability sets.
@@ -327,7 +335,10 @@ impl RibManager {
             return;
         }
 
-        // No LLGR — purge stale routes
+        // No LLGR — purge stale routes. Drop any LLGR config entry that
+        // failed the promotion gate above (insertion is gated identically,
+        // so this is defensive — but the map must not outlive GR).
+        self.llgr_peer_config.remove(&peer);
         info!(%peer, "graceful restart timer expired — sweeping stale routes");
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
@@ -360,6 +371,8 @@ impl RibManager {
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
+
+        self.release_peer_state_if_departed(peer);
     }
 
     /// Sweep LLGR-stale routes for a peer whose LLGR timer has expired.
@@ -367,6 +380,9 @@ impl RibManager {
         info!(%peer, "LLGR timer expired — sweeping LLGR-stale routes");
         self.llgr_peers.remove(&peer);
         self.llgr_stale_deadlines.remove(&peer);
+        // LLGR is the last retention phase — the per-peer LLGR config has
+        // no further reader once the stale routes are swept.
+        self.llgr_peer_config.remove(&peer);
         let peer_label = peer.to_string();
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
@@ -398,6 +414,32 @@ impl RibManager {
             self.metrics
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+
+        self.release_peer_state_if_departed(peer);
+    }
+
+    /// Release a departed peer's remaining per-peer state once GR/LLGR
+    /// retention has expired.
+    ///
+    /// A GR flap routes session-down through `handle_peer_graceful_restart`,
+    /// which deliberately keeps the Adj-RIB-In shell and the identity maps
+    /// (`peer_asn` / `peer_bgp_id` / `peer_group` — the MRT `TABLE_DUMP_V2`
+    /// peer index reads them) for the returning peer. If the peer never
+    /// returns, the expiry sweeps remove only routes, so without this the
+    /// empty shell and identity entries would leak forever.
+    ///
+    /// Re-using the full `handle_peer_down` teardown is safe here: the
+    /// caller has already removed the GR/LLGR maps (its abort arms no-op),
+    /// the ribs entry holds only swept-empty state, and the outbound state
+    /// was cleared at GR entry (`clear_outbound_peer_state` no-ops). If the
+    /// peer DID re-establish (`outbound_peers` is re-inserted by
+    /// `handle_peer_up`) and only its End-of-RIB is late, identity and RIB
+    /// state must survive the sweep — hence the guard.
+    fn release_peer_state_if_departed(&mut self, peer: IpAddr) {
+        if !self.outbound_peers.contains_key(&peer) {
+            info!(%peer, "GR retention expired without re-establishment — releasing per-peer state");
+            self.handle_peer_down(peer);
         }
     }
 

@@ -268,16 +268,14 @@ has it, no broad performance sprints without profile evidence.
   default against the bench convergence shapes now that overflow is a pacing
   knob rather than a correctness cliff.
 - **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
-  cleanup, so per-session state leaks across the restart: installed ORF
-  filters and the ORF initial-advertisement gate survive into the new session
-  (a stale gate suppresses a family's flood indefinitely when the new session
-  didn't negotiate ORF; a ghost filter keeps filtering churn the new session
-  never asked for); EoR is sent immediately for ORF-gated families, telling an
-  RFC 4724 restarter to sweep retained routes before the gated flood arrives;
-  a GR peer that never re-establishes leaves an empty Adj-RIB-In plus identity
-  maps (and MRT peer-index entries) behind forever; and the configured LLGR
-  stale time is consumed at GR→LLGR promotion, so a peer re-establishing
-  during LLGR always gets the 360 s default.
+  cleanup; three of the four resulting state leaks are fixed: ORF filters and
+  the ORF initial-advertisement gate surviving into the new session (#415),
+  the configured LLGR stale time being consumed at GR→LLGR promotion (a
+  peer re-establishing during LLGR always got the 360 s default), and a
+  GR/LLGR peer that never re-establishes leaving an empty Adj-RIB-In plus
+  identity maps (and MRT peer-index entries) behind forever. What remains:
+  EoR is sent immediately for ORF-gated families, telling an RFC 4724
+  restarter to sweep retained routes before the gated flood arrives.
 - **Peer lifecycle hardening.** Runtime-added neighbors are built by
   `resolve_neighbor`, which never sets `cluster_id` — an RR client added via
   gRPC runs without CLUSTER_LIST prepend or cluster-loop detection until
