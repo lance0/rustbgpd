@@ -399,8 +399,14 @@ async fn notify_loop(
             // wake path; our own port writes echo here and cost one
             // coalesced no-op pass.
             RouteNetlinkMessage::NewLink(link) | RouteNetlinkMessage::DelLink(link) => {
-                let cache = link_cache.lock().await.clone();
-                if notify::classify_link_event(&link, &cache) {
+                // Classify under the guard (read-only) — cloning the
+                // cache per event would be a per-event allocation on a
+                // group that is chatty under host container churn.
+                let relevant = {
+                    let cache = link_cache.lock().await;
+                    notify::classify_link_event(&link, &cache)
+                };
+                if relevant {
                     let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
                 }
             }
