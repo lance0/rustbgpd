@@ -527,6 +527,19 @@ mod tests {
         assert!(!proj.apply_walk(&kernel(&[("es0", true)])));
     }
 
+    /// Enum-vs-bitmask pin, mirroring the `RTNLGRP_NEIGH = 3 vs 4`
+    /// and route-group pins in `notify.rs`: `Socket::add_membership`
+    /// takes the ENUM group id (`RTNLGRP_LINK = 1` per
+    /// `<linux/rtnetlink.h>`), not the legacy `RTMGRP_LINK` bitmask
+    /// (also 1 here by coincidence — which is exactly why the pin
+    /// matters: a future "fix" toward bitmask thinking on a group
+    /// where they differ would silently subscribe to the wrong
+    /// events).
+    #[test]
+    fn link_rtnlgrp_constant_matches_kernel_enum_value() {
+        assert_eq!(RTNLGRP_LINK, 1);
+    }
+
     #[test]
     fn empty_watched_set_projects_an_empty_map() {
         let mut proj = CarrierProjection::new(BTreeSet::new());
