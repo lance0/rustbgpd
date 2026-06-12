@@ -40,6 +40,10 @@ VXLAN="vxlan${VNI}"
 # kernel-learn junk rows the local Type 2 originator would advertise
 # — breaking the "CE MAC from the DF only" steady state M66 pins.
 ip link add name "${BRIDGE}" type bridge mcast_snooping 0 2>/dev/null || true
+# Re-exec path: creation may have been skipped above, so force the
+# snooping setting unconditionally — a pre-existing bridge would
+# otherwise keep the kernel default (1) and reintroduce the chatter.
+ip link set dev "${BRIDGE}" type bridge mcast_snooping 0
 ip link set dev "${BRIDGE}" multicast off
 ip link set dev "${BRIDGE}" up
 
@@ -77,6 +81,7 @@ fi
 # `sleep infinity` (the container's PID 1) keeps the netns alive.
 nohup /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml \
     >/var/log/rustbgpd.log 2>&1 &
+mkdir -p /var/run
 echo $! >/var/run/rustbgpd.pid
 
 # Tiny pause so the first containerlab `docker exec` finds rustbgpd

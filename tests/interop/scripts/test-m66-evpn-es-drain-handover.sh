@@ -245,8 +245,8 @@ prom_df_role() {
     local container=${1:?}
     local role=${2:?}
     prom_scrape "$container" \
-        | awk -v r="role=\"${role}\"" -v v="vni=\"${VNI}\"" \
-            '$0 ~ /^evpn_df_role\{/ && index($0, r) && index($0, v) { print $2; exit }'
+        | awk -v r="role=\"${role}\"" -v v="vni=\"${VNI}\"" -v e="esi=\"${ESI}\"" \
+            '$0 ~ /^evpn_df_role\{/ && index($0, r) && index($0, v) && index($0, e) { print $2; exit }'
 }
 
 wait_for_role() {
@@ -607,14 +607,16 @@ got=$(wait_vtep_routes_at_least 2 "$PE2_IP" ".mac == \"${CE_MAC}\"" 1 90) \
 
 handover_done=0
 for _ in $(seq 1 60); do
-    if ce_mac_egress_ips | grep -qE "^${PE2_IP}$"; then
+    # Strict: the egress set must be EXACTLY {pe2}. A row resolving to
+    # both PEs would mask a single-active receive-side regression.
+    if [ "$(ce_mac_egress_ips | sort -u | tr '\n' ' ' | sed 's/ $//')" = "$PE2_IP" ]; then
         handover_done=1
         break
     fi
     sleep 1
 done
 if [ "$handover_done" -eq 1 ]; then
-    ok "vtep FDB row for $CE_MAC resolves toward $PE2_IP (handover complete)"
+    ok "vtep FDB row for $CE_MAC resolves toward exactly $PE2_IP (handover complete)"
     log "  row: $(ce_mac_row)"
 else
     fail "vtep FDB row for $CE_MAC never resolved toward $PE2_IP"
