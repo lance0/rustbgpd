@@ -412,7 +412,10 @@ impl PeerSession {
                     prefix = %route.prefix,
                     "not advertising unicast route with OTC to Provider/Peer/RouteServer"
                 );
-                self.record_otc_routes_blocked("egress_to_upstream_via_otc", 1);
+                self.record_otc_routes_blocked(
+                    rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
+                    1,
+                );
 
                 // ADR-0072 follow-up: structured event surface. Emit
                 // after the legacy counter so the
@@ -447,7 +450,8 @@ impl PeerSession {
                 let otc_event = crate::event_sink::OtcRouteBlockedEvent {
                     peer: self.peer_ip,
                     direction: crate::event_sink::OtcDirection::Egress,
-                    reason: "egress_to_upstream_via_otc",
+                    reason:
+                        rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
                     prefixes: vec![route.prefix.to_string()],
                     local_role: self.config.peer.local_role,
                     remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),

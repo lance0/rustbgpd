@@ -369,12 +369,14 @@ counters operators watch:
 - **Session liveness** — `bgp_session_established_total`,
   `bgp_session_flaps_total`, `bgp_messages_received_total`,
   `bgp_messages_sent_total` (all by peer).
-- **Loop / leak detection** — `bgp_as_path_loop_detected`,
-  `bgp_rr_loop_detected`, `bgp_otc_routes_blocked_total{peer, reason}`
+- **Loop / leak detection** — `bgp_as_path_loop_detected_total`,
+  `bgp_rr_loop_detected_total`,
+  `bgp_otc_routes_blocked_total{peer, reason}`
   (RFC 9234 / ADR-0071), `bgp_role_mismatch_total{peer, local_role,
-  remote_role}`.
-- **Route processing** — `bgp_routes_received_total`,
-  `bgp_routes_installed_total`, `bgp_max_prefix_exceeded`.
+  remote_role}`. Canonical `reason` values are documented in
+  `docs/OPERATIONS.md` ("Ingress rejection / route-leak detection").
+- **Route processing** — `bgp_rib_prefixes{peer, afi_safi}`,
+  `bgp_rib_loc_prefixes{afi_safi}`, `bgp_max_prefix_exceeded_total`.
 - **GR / FIB** — `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
   `bgp_fib_routes_installed_total`, `bgp_fib_kernel_failures_total`.
 - **Durable event outbox** (ADR-0072) —

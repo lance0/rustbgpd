@@ -633,7 +633,11 @@ impl PeerSession {
         }
     }
 
-    pub(super) fn record_otc_routes_blocked(&mut self, reason: &'static str, count: u64) {
+    pub(super) fn record_otc_routes_blocked(
+        &mut self,
+        reason: rustbgpd_telemetry::reason_labels::OtcBlockReason,
+        count: u64,
+    ) {
         self.otc_routes_blocked = self.otc_routes_blocked.saturating_add(count);
         self.metrics
             .record_otc_routes_blocked(&self.peer_label, reason, count);

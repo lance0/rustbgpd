@@ -1796,15 +1796,26 @@ impl BgpMetrics {
             .inc_by(count);
     }
 
-    /// Record a route reflector loop detection event (`ORIGINATOR_ID` or `CLUSTER_LIST` loop).
+    /// Record a route reflector loop detection event. The metric has
+    /// no `reason` label; the caller's log line distinguishes the
+    /// two loop signals via
+    /// [`crate::reason_labels::RrLoopReason`].
     pub fn record_rr_loop_detected(&self, peer: &str) {
         self.rr_loop_detected.with_label_values(&[peer]).inc();
     }
 
-    /// Record RFC 9234 OTC route-leak blocking by bounded reason label.
-    pub fn record_otc_routes_blocked(&self, peer: &str, reason: &str, count: u64) {
+    /// Record RFC 9234 OTC route-leak blocking. The `reason` label
+    /// value is the canonical
+    /// [`crate::reason_labels::OtcBlockReason`] string — typed here
+    /// so the vocabulary cannot drift between surfaces.
+    pub fn record_otc_routes_blocked(
+        &self,
+        peer: &str,
+        reason: crate::reason_labels::OtcBlockReason,
+        count: u64,
+    ) {
         self.otc_routes_blocked
-            .with_label_values(&[peer, reason])
+            .with_label_values(&[peer, reason.as_str()])
             .inc_by(count);
     }
 
@@ -2533,9 +2544,11 @@ mod tests {
 
     #[test]
     fn otc_routes_blocked_counter_uses_bounded_reason_label() {
+        use crate::reason_labels::OtcBlockReason;
+
         let m = BgpMetrics::new();
-        m.record_otc_routes_blocked("10.0.0.2", "ingress_peer_mismatch", 2);
-        m.record_otc_routes_blocked("10.0.0.2", "ingress_peer_mismatch", 3);
+        m.record_otc_routes_blocked("10.0.0.2", OtcBlockReason::IngressPeerMismatch, 2);
+        m.record_otc_routes_blocked("10.0.0.2", OtcBlockReason::IngressPeerMismatch, 3);
 
         assert_eq!(
             m.otc_routes_blocked
@@ -2543,6 +2556,27 @@ mod tests {
                 .get(),
             5
         );
+    }
+
+    /// Walks the full canonical OTC reason vocabulary through the
+    /// recorder: every contract value must be accepted and must land
+    /// on a series labeled with exactly its canonical string.
+    #[test]
+    fn otc_routes_blocked_accepts_every_canonical_reason() {
+        use crate::reason_labels::OtcBlockReason;
+
+        let m = BgpMetrics::new();
+        for reason in OtcBlockReason::ALL {
+            m.record_otc_routes_blocked("10.0.0.2", reason, 1);
+            assert_eq!(
+                m.otc_routes_blocked
+                    .with_label_values(&["10.0.0.2", reason.as_str()])
+                    .get(),
+                1,
+                "canonical reason {} must be recorded on its own series",
+                reason.as_str()
+            );
+        }
     }
 
     #[test]
@@ -3086,6 +3120,29 @@ mod tests {
     }
 
     #[test]
+    fn as_path_loop_detected_counter_increments_by_rejected_prefixes() {
+        let m = BgpMetrics::new();
+        m.record_as_path_loop_detected("10.0.0.1", 3);
+        m.record_as_path_loop_detected("10.0.0.1", 2);
+
+        let val = m
+            .as_path_loop_detected
+            .with_label_values(&["10.0.0.1"])
+            .get();
+        assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn rr_loop_detected_counter_increments_per_update() {
+        let m = BgpMetrics::new();
+        m.record_rr_loop_detected("10.0.0.1");
+        m.record_rr_loop_detected("10.0.0.1");
+
+        let val = m.rr_loop_detected.with_label_values(&["10.0.0.1"]).get();
+        assert_eq!(val, 2);
+    }
+
+    #[test]
     fn with_registry_uses_provided_registry() {
         let reg = Registry::new();
         let m = BgpMetrics::with_registry(reg);
@@ -3208,7 +3265,11 @@ mod tests {
         m.record_rib_outbound_registration_replaced(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
-        m.record_otc_routes_blocked(peer, "ingress_peer_mismatch", 2);
+        m.record_otc_routes_blocked(
+            peer,
+            crate::reason_labels::OtcBlockReason::IngressPeerMismatch,
+            2,
+        );
         m.record_role_mismatch(peer, "provider", "provider");
         m.record_policy_routes(peer, "ingress-filter", "import", "permit");
         m.set_gr_active(peer, true);
