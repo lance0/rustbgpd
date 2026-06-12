@@ -202,6 +202,15 @@ pub enum RibUpdate {
     PeerDown {
         /// The peer whose session went down.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation) of
+        /// the session that went down. The RIB manager discards a
+        /// `PeerDown` whose id doesn't match the currently registered
+        /// session, so a stale collision-loser teardown (RFC 4271 §6.8)
+        /// processed after the winner's `PeerUp` cannot destroy the
+        /// surviving session's state. `0` = legacy emitters without
+        /// identity tracking (every session of such an emitter shares
+        /// id 0, which degrades to the pre-stamping behavior).
+        session_id: u64,
     },
     /// Peer was *deleted* from the configuration (not a session flap):
     /// after clearing any remaining per-peer state, remove the peer's
@@ -217,6 +226,11 @@ pub enum RibUpdate {
     PeerUp {
         /// The peer whose session came up.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation).
+        /// Recorded by the RIB manager at registration so that later
+        /// `PeerDown`/`PeerGracefulRestart` events can be matched to the
+        /// session that emitted them (see `PeerDown::session_id`).
+        session_id: u64,
         /// Peer's remote ASN (for MRT `PEER_INDEX_TABLE`).
         peer_asn: u32,
         /// Peer's BGP router ID.
@@ -420,6 +434,13 @@ pub enum RibUpdate {
     PeerGracefulRestart {
         /// The restarting peer.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation) of
+        /// the session that went down with GR. Subject to the same
+        /// stale-teardown discard rule as `PeerDown::session_id` — a GR
+        /// flap from a superseded session must not mark the surviving
+        /// session's routes stale. When the id matches, GR stale-path
+        /// retention behaves exactly as before stamping.
+        session_id: u64,
         /// Peer's advertised restart time (seconds).
         restart_time: u16,
         /// Our configured stale routes time (seconds).

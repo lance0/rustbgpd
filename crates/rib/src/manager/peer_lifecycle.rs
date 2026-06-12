@@ -12,7 +12,60 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
-    pub(super) fn handle_peer_down(&mut self, peer: IpAddr) {
+    /// Session-down teardown, gated on session identity: a `PeerDown`
+    /// stamped with an id that doesn't match the registered session is a
+    /// stale teardown from a superseded session (RFC 4271 §6.8 collision
+    /// loser whose `PeerDown` was processed after the winner's `PeerUp`)
+    /// and is discarded WHOLE — not just outbound deregistration but also
+    /// the Adj-RIB-In clear, GR/LLGR aborts, and every other per-peer
+    /// teardown below, all of which would otherwise destroy the surviving
+    /// session's state. A `PeerDown` for a peer with no registered
+    /// session (never registered, or already torn down / in a GR window)
+    /// keeps the pre-stamping accept-all behavior.
+    pub(super) fn handle_peer_down(&mut self, peer: IpAddr, session_id: u64) {
+        if self.discard_stale_session_teardown(peer, session_id, "PeerDown") {
+            return;
+        }
+        self.peer_down_teardown(peer);
+    }
+
+    /// The session-identity gate shared by `handle_peer_down` and
+    /// `handle_peer_graceful_restart`. Returns `true` when the teardown
+    /// event is stale — stamped with a session id that doesn't match the
+    /// registered session — and was discarded (INFO log +
+    /// `bgp_rib_stale_peer_down_ignored_total`). A teardown for a peer
+    /// with no registered session keeps the pre-stamping accept-all
+    /// behavior and is never discarded.
+    pub(super) fn discard_stale_session_teardown(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        event: &str,
+    ) -> bool {
+        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
+            return false;
+        };
+        if registered == session_id {
+            return false;
+        }
+        info!(
+            %peer,
+            event,
+            stale_session_id = session_id,
+            registered_session_id = registered,
+            "discarding stale session teardown from a superseded session — \
+             the registered session's state is untouched"
+        );
+        self.metrics
+            .record_rib_stale_peer_down_ignored(&peer.to_string());
+        true
+    }
+
+    /// The unconditional `PeerDown` teardown body. Callers that bypass
+    /// the session-identity gate are authoritative non-session events:
+    /// peer deletion (config removed the neighbor) and GR/LLGR retention
+    /// expiry (the peer never came back).
+    pub(super) fn peer_down_teardown(&mut self, peer: IpAddr) {
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
@@ -37,27 +90,7 @@ impl RibManager {
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
 
-        if let Some(rib) = self.ribs.remove(&peer) {
-            let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
-            let count = rib.len();
-            let fs_affected: HashSet<FlowSpecRule> =
-                rib.iter_flowspec().map(|r| r.rule.clone()).collect();
-            let evpn_affected: HashSet<EvpnRouteKey> = rib
-                .iter_evpn()
-                .map(crate::route::EvpnRibRoute::key)
-                .collect();
-            debug!(%peer, cleared = count, "peer down — rib cleared");
-            self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
-            self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
-            let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
-            if !fs_affected.is_empty() {
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
-            if !evpn_affected.is_empty() {
-                self.recompute_and_distribute_evpn(&evpn_affected);
-            }
-        }
+        self.clear_peer_adj_rib_in(peer);
 
         self.metrics
             .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
@@ -71,6 +104,36 @@ impl RibManager {
         self.clear_peer_refresh_metrics(peer);
     }
 
+    /// Remove every Adj-RIB-In route learned from `peer` and redistribute
+    /// the result. Shared by the `PeerDown` teardown and the
+    /// replacement-`PeerUp` session reset (a new session for an address
+    /// whose previous session was never torn down must not inherit its
+    /// predecessor's received routes).
+    fn clear_peer_adj_rib_in(&mut self, peer: IpAddr) {
+        let Some(rib) = self.ribs.remove(&peer) else {
+            return;
+        };
+        let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
+        let count = rib.len();
+        let fs_affected: HashSet<FlowSpecRule> =
+            rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+        let evpn_affected: HashSet<EvpnRouteKey> = rib
+            .iter_evpn()
+            .map(crate::route::EvpnRibRoute::key)
+            .collect();
+        debug!(%peer, cleared = count, "peer session reset — rib cleared");
+        self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
+        self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
+        let changed = self.recompute_best(&affected);
+        self.distribute_changes(&changed, &affected);
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_affected.is_empty() {
+            self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+    }
+
     /// Handle a peer *deletion* (the neighbor was removed from the
     /// configuration — not a session flap, which keeps its series).
     ///
@@ -81,8 +144,12 @@ impl RibManager {
     /// established. Afterwards, remove the deleted peer's metric label
     /// sets entirely — gauges frozen at their last value would
     /// otherwise keep advertising a peer that no longer exists.
+    ///
+    /// Deletion is a config decision, not a session event, so it runs the
+    /// teardown unconditionally — the session-identity gate in
+    /// `handle_peer_down` does not apply.
     pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
-        self.handle_peer_down(peer);
+        self.peer_down_teardown(peer);
         self.metrics.reap_peer_series(&peer.to_string());
     }
 
@@ -94,11 +161,13 @@ impl RibManager {
     /// the returning peer; `PeerDown` removes them at its call site.
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
         let was_registered = self.outbound_peers.remove(&peer).is_some();
-        // INFO, not debug: a `PeerDown` that clears an outbound
-        // registration is the only event that can silently wedge a
-        // still-Established session's advertisement path (stale
-        // collision-loser `PeerDown` after the winner's `PeerUp`), so
-        // the deregistration must be visible at default log level.
+        self.outbound_session_ids.remove(&peer);
+        // INFO, not debug: an outbound deregistration is the event that
+        // historically wedged a still-Established session's advertisement
+        // path (stale collision-loser `PeerDown` after the winner's
+        // `PeerUp` — now discarded upstream by the session-identity gate
+        // in `handle_peer_down`), so it stays visible at default log
+        // level for attribution.
         info!(%peer, was_registered, "peer outbound registration cleared");
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
@@ -142,6 +211,7 @@ impl RibManager {
     pub(super) fn handle_peer_up(
         &mut self,
         peer: IpAddr,
+        session_id: u64,
         peer_asn: u32,
         peer_router_id: Ipv4Addr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -153,6 +223,35 @@ impl RibManager {
         add_path_send_max: u32,
         negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
     ) {
+        // Two live sessions for one peer address can overlap during the
+        // RFC 4271 §6.8 collision window. A `PeerUp` that finds a
+        // still-registered sender is the surviving session taking over
+        // from a session that was never torn down here: treat it as a
+        // session reset — clear the predecessor's Adj-RIB-In/Out and
+        // outbound state before re-registering so nothing from the dumped
+        // session lingers, and record the new session id so the dumped
+        // session's stale `PeerDown` (arriving after this point) is
+        // discarded instead of deregistering the live session. GR/LLGR
+        // retention is the exception: routes deliberately held stale for
+        // a restarting peer stay put — they are deadline-bounded and
+        // swept on End-of-RIB, exactly as on a plain GR reconnect.
+        if self.outbound_peers.contains_key(&peer) {
+            warn!(
+                %peer,
+                session_id,
+                "peer up replaced a still-registered outbound sender — concurrent \
+                 sessions for this peer (collision window); resetting the prior \
+                 session's state, its stale PeerDown will be discarded by session id"
+            );
+            self.metrics
+                .record_rib_outbound_registration_replaced(&peer.to_string());
+            if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
+                self.clear_policy_filtered_routes_for_peer(peer);
+                self.clear_peer_adj_rib_in(peer);
+            }
+            self.clear_outbound_peer_state(peer);
+        }
+
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
 
@@ -190,25 +289,8 @@ impl RibManager {
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
         self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
-        // Two live sessions for one peer address can overlap during the
-        // RFC 4271 §6.8 collision window, and `PeerUp`/`PeerDown` carry no
-        // session identity. If this `PeerUp` replaces a still-registered
-        // sender, a stale `PeerDown` from the dumped session arriving
-        // AFTER this point deregisters the surviving session: every later
-        // advertisement is then silently skipped while the session stays
-        // Established (keepalives are writer-owned). Surface the
-        // replacement loudly so the wedge signature is attributable.
-        if self.outbound_peers.contains_key(&peer) {
-            warn!(
-                %peer,
-                "peer up replaced a still-registered outbound sender — concurrent \
-                 sessions for this peer (collision window); a stale PeerDown after \
-                 this replacement would silently deregister the live session"
-            );
-            self.metrics
-                .record_rib_outbound_registration_replaced(&peer_label);
-        }
         self.outbound_peers.insert(peer, outbound_tx);
+        self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );

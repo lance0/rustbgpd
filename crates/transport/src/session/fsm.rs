@@ -429,6 +429,7 @@ impl PeerSession {
                         .rib_tx
                         .send(RibUpdate::PeerUp {
                             peer: self.peer_ip,
+                            session_id: self.session_identity.id,
                             peer_asn,
                             peer_router_id: self
                                 .negotiated
@@ -532,6 +533,7 @@ impl PeerSession {
                                 .collect();
                             Some(RibUpdate::PeerGracefulRestart {
                                 peer: self.peer_ip,
+                                session_id: self.session_identity.id,
                                 restart_time: neg.peer_restart_time,
                                 stale_routes_time: self.config.gr_stale_routes_time,
                                 gr_families,
@@ -586,7 +588,10 @@ impl PeerSession {
                     self.outbound_tx = new_tx;
                     self.outbound_rx = new_rx;
 
-                    let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
+                    let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                    });
                     let _ = self.rib_tx.send(rib_msg).await;
                 }
             }

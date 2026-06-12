@@ -14,6 +14,7 @@ impl RibManager {
     pub(super) fn handle_peer_graceful_restart(
         &mut self,
         peer: IpAddr,
+        session_id: u64,
         restart_time: u16,
         stale_routes_time: u64,
         gr_families: Vec<(Afi, Safi)>,
@@ -21,6 +22,16 @@ impl RibManager {
         peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
         llgr_stale_time: u32,
     ) {
+        // Same session-identity gate as `handle_peer_down`: a GR-down from
+        // a superseded session (RFC 4271 §6.8 collision loser processed
+        // after the winner's `PeerUp`) must not mark the surviving
+        // session's routes stale or deregister its outbound sender. When
+        // the id matches the registered session, GR stale-path retention
+        // proceeds exactly as before stamping.
+        if self.discard_stale_session_teardown(peer, session_id, "PeerGracefulRestart") {
+            return;
+        }
+
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
 
         let mut affected = HashSet::new();
@@ -429,17 +440,21 @@ impl RibManager {
     /// returns, the expiry sweeps remove only routes, so without this the
     /// empty shell and identity entries would leak forever.
     ///
-    /// Re-using the full `handle_peer_down` teardown is safe here: the
-    /// caller has already removed the GR/LLGR maps (its abort arms no-op),
-    /// the ribs entry holds only swept-empty state, and the outbound state
-    /// was cleared at GR entry (`clear_outbound_peer_state` no-ops). If the
+    /// Re-using the full `PeerDown` teardown is safe here: the caller has
+    /// already removed the GR/LLGR maps (its abort arms no-op), the ribs
+    /// entry holds only swept-empty state, and the outbound state was
+    /// cleared at GR entry (`clear_outbound_peer_state` no-ops). If the
     /// peer DID re-establish (`outbound_peers` is re-inserted by
     /// `handle_peer_up`) and only its End-of-RIB is late, identity and RIB
-    /// state must survive the sweep — hence the guard.
+    /// state must survive the sweep — hence the guard. Retention expiry is
+    /// a timer decision, not a session event, so it calls the
+    /// unconditional teardown rather than the session-identity-gated
+    /// `handle_peer_down` (there is no registered session to match here
+    /// anyway — the guard just established that).
     fn release_peer_state_if_departed(&mut self, peer: IpAddr) {
         if !self.outbound_peers.contains_key(&peer) {
             info!(%peer, "GR retention expired without re-establishment — releasing per-peer state");
-            self.handle_peer_down(peer);
+            self.peer_down_teardown(peer);
         }
     }
 

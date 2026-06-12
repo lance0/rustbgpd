@@ -44,6 +44,13 @@ pub struct RibManager {
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
+    /// Transport session identity recorded at `PeerUp` registration,
+    /// keyed like `outbound_peers`. `handle_peer_down` /
+    /// `handle_peer_graceful_restart` discard a teardown whose stamped id
+    /// doesn't match, so a stale collision-loser `PeerDown` (RFC 4271
+    /// §6.8 overlap, processed after the winner's `PeerUp`) cannot
+    /// destroy the surviving session's state.
+    outbound_session_ids: HashMap<IpAddr, u64>,
     export_policy: Option<PolicyChain>,
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
@@ -448,6 +455,7 @@ impl RibManager {
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
+            outbound_session_ids: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
@@ -623,10 +631,11 @@ impl RibManager {
                 evpn_announced,
                 evpn_withdrawn,
             ),
-            RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
+            RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
                 peer,
+                session_id,
                 peer_asn,
                 peer_router_id,
                 outbound_tx,
@@ -639,6 +648,7 @@ impl RibManager {
                 negotiated_orf_recv,
             } => self.handle_peer_up(
                 peer,
+                session_id,
                 peer_asn,
                 peer_router_id,
                 outbound_tx,
@@ -754,6 +764,7 @@ impl RibManager {
             }
             RibUpdate::PeerGracefulRestart {
                 peer,
+                session_id,
                 restart_time,
                 stale_routes_time,
                 gr_families,
@@ -762,6 +773,7 @@ impl RibManager {
                 llgr_stale_time,
             } => self.handle_peer_graceful_restart(
                 peer,
+                session_id,
                 restart_time,
                 stale_routes_time,
                 gr_families,

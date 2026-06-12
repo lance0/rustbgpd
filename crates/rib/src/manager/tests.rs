@@ -405,6 +405,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -536,7 +537,12 @@ async fn peer_down_clears_routes() {
     .await
     .unwrap();
 
-    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryReceivedRoutes {
@@ -746,7 +752,12 @@ async fn peer_down_promotes_second_best() {
     .unwrap();
 
     // Peer2 goes down — peer1 should be promoted
-    tx.send(RibUpdate::PeerDown { peer: peer2 }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: peer2,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
@@ -914,6 +925,7 @@ async fn peer_up_triggers_initial_table_dump() {
     // Register target for outbound
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -948,6 +960,7 @@ async fn route_change_distributes_to_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -995,6 +1008,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1045,6 +1059,7 @@ async fn split_horizon_prevents_echo() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1160,6 +1175,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1208,6 +1224,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1260,6 +1277,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1301,6 +1319,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     // Register iBGP target peer
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: ibgp_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1333,9 +1352,12 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     assert_eq!(update.announce.len(), 1);
 
     // Now the eBGP source goes down, replaced by iBGP source
-    tx.send(RibUpdate::PeerDown { peer: ebgp_source })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: ebgp_source,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Withdraw should be sent to iBGP target
     let update = out_rx.recv().await.unwrap();
@@ -1379,6 +1401,7 @@ async fn local_route_sent_to_ibgp_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1470,6 +1493,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1506,6 +1530,7 @@ async fn peer_down_cleans_up_outbound() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1521,7 +1546,12 @@ async fn peer_down_cleans_up_outbound() {
     .await
     .unwrap();
 
-    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Query advertised routes — should be empty after PeerDown
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -1548,6 +1578,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1621,6 +1652,7 @@ async fn withdraw_injected_removes_and_distributes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1713,6 +1745,7 @@ async fn export_policy_counter_records_single_best_permit() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1743,7 +1776,12 @@ async fn export_policy_counter_records_single_best_permit() {
     // peer add/delete churn — see handle_peer_down in peer_lifecycle.rs.
     // The counter resets here matches the import-side per-session
     // contract: both directions zero on the next session.
-    tx.send(RibUpdate::PeerDown { peer: target }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
     let stats_after = query_neighbor_policy_stats(&tx, target).await;
     assert_eq!(
         stats_after.export_policy_routes_permitted, 0,
@@ -1788,6 +1826,7 @@ async fn graceful_restart_clears_export_policy_stats() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1808,6 +1847,7 @@ async fn graceful_restart_clears_export_policy_stats() {
     assert_eq!(stats.export_policy_routes_permitted, 1);
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: target,
         restart_time: 120,
         stale_routes_time: 360,
@@ -1855,6 +1895,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1925,6 +1966,7 @@ async fn export_policy_blocks_denied() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1985,6 +2027,7 @@ async fn query_advertised_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2073,6 +2116,7 @@ async fn per_peer_export_policy() {
 
     let (send_filtered, mut recv_filtered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: peer1,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2091,6 +2135,7 @@ async fn per_peer_export_policy() {
 
     let (send_unfiltered, mut recv_unfiltered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: peer2,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2175,6 +2220,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2305,6 +2351,7 @@ async fn export_policy_match_next_hop_filters_route() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2353,6 +2400,7 @@ async fn explain_advertised_route_reports_no_best_route() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65002,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -2395,6 +2443,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65002,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -2505,6 +2554,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65002,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -2596,6 +2646,7 @@ async fn explain_advertised_route_reports_modifications() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65002,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -2683,6 +2734,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65002,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -2759,6 +2811,7 @@ async fn peer_down_cleans_up_export_policy() {
     }]));
 
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2774,7 +2827,12 @@ async fn peer_down_cleans_up_export_policy() {
     .await
     .unwrap();
 
-    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Query to confirm loop processed PeerDown
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -2808,6 +2866,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     // Channel capacity 1: fills after one send
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2958,6 +3017,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3096,6 +3156,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
     drop(out_rx);
 
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3174,6 +3235,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         .unwrap();
 
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4170,7 +4232,12 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
     assert_eq!(sample as i64, 1);
 
     // PeerDown should zero the gauge
-    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
         .await
@@ -4243,6 +4310,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
 
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4337,6 +4405,7 @@ async fn query_advertised_count() {
 
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4411,6 +4480,7 @@ async fn distribute_changes_filters_unsendable_families() {
 
     // Register peer with IPv4-only sendable families
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4534,6 +4604,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4619,6 +4690,7 @@ async fn dual_stack_peer_receives_both_families() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4667,6 +4739,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4721,6 +4794,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5138,6 +5212,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5201,6 +5276,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5234,6 +5310,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
     // Source enters graceful restart
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5267,6 +5344,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5325,6 +5403,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     assert_eq!(best_before[0].peer, source_a);
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source_a,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5389,6 +5468,7 @@ async fn gr_eor_clears_stale() {
 
     // Source enters graceful restart
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5459,6 +5539,7 @@ async fn gr_timer_sweeps_stale_routes() {
 
     // Source enters graceful restart with short timer
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 5,
         stale_routes_time: 10,
@@ -5520,6 +5601,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
 
     // Source enters graceful restart
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5542,6 +5624,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     // Source re-establishes — route should STILL be stale
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5616,6 +5699,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
 
     // Source enters GR with short restart_time
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 5,
         stale_routes_time: 10,
@@ -5634,6 +5718,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     // Source re-establishes — timer resets to stale_routes_time (10s)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5698,6 +5783,7 @@ async fn gr_peer_down_aborts_gr() {
 
     // Source enters graceful restart
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5710,7 +5796,12 @@ async fn gr_peer_down_aborts_gr() {
     .unwrap();
 
     // Source goes fully down during GR — aborts GR, clears all routes
-    tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Routes should be gone
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -5776,6 +5867,7 @@ async fn gr_withdraws_non_gr_family_routes() {
 
     // GR with only IPv4 in GR capability — IPv6 should be withdrawn
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -5832,6 +5924,7 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
 
     // Source enters GR with LLGR enabled
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 5,
         stale_routes_time: 10,
@@ -5892,6 +5985,7 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
 
     // GR with LLGR, short timers for testing
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -5956,6 +6050,7 @@ async fn llgr_eor_clears_llgr_stale() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -5986,6 +6081,7 @@ async fn llgr_eor_clears_llgr_stale() {
     // Peer re-establishes during LLGR
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6047,6 +6143,7 @@ async fn llgr_peer_down_aborts_llgr() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6075,7 +6172,12 @@ async fn llgr_peer_down_aborts_llgr() {
     assert!(best[0].is_llgr_stale);
 
     // PeerDown during LLGR — should clear everything
-    tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     let best = query_best_routes(&tx).await;
     assert!(
@@ -6112,6 +6214,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
 
     // GR without LLGR capability — timer expiry should purge
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6158,6 +6261,7 @@ fn drain_route_chunks(manager: &mut RibManager) {
 fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65001,
         peer_router_id: Ipv4Addr::new(1, 1, 1, 1),
@@ -6181,6 +6285,7 @@ async fn llgr_reestablish_uses_captured_stale_routes_time() {
 
     // GR with LLGR and a non-default stale_routes_time.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 2,
         stale_routes_time: 77,
@@ -6216,6 +6321,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6271,6 +6377,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
     // GR flap without LLGR; the peer never re-establishes, so when the
     // retention expires nothing references its per-peer state anymore.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6323,6 +6430,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
     drain_route_chunks(&mut manager);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6384,6 +6492,7 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
     drain_route_chunks(&mut manager);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 2,
         stale_routes_time: 5,
@@ -6437,6 +6546,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register source as iBGP client
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6455,6 +6565,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register client target
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: client_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6474,6 +6585,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Register non-client target
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: nonclient_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6536,6 +6648,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register source as non-client
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6554,6 +6667,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register client target
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: client_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6573,6 +6687,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Register non-client target
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: nonclient_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6634,6 +6749,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6689,6 +6805,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6743,6 +6860,7 @@ async fn rr_local_route_to_all_ibgp() {
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7300,6 +7418,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
 
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7478,6 +7597,7 @@ async fn multipath_send_advertises_multiple_routes() {
     // Register multi-path target (send_max=5)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7546,6 +7666,7 @@ async fn multipath_send_respects_send_max() {
     // Register target with send_max=2
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7623,6 +7744,7 @@ async fn multipath_send_split_horizon() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7667,6 +7789,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     // Register multi-path target first
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7794,6 +7917,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     // Register single-best target (send_max=0)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7840,6 +7964,7 @@ async fn multipath_peer_down_cleans_up_state() {
     // Register multi-path target
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7856,7 +7981,12 @@ async fn multipath_peer_down_cleans_up_state() {
     .unwrap();
 
     // Peer goes down
-    tx.send(RibUpdate::PeerDown { peer: target }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Re-register as single-best (send_max=0) — should work fine,
     // state was properly cleaned up
@@ -7881,6 +8011,7 @@ async fn multipath_peer_down_cleans_up_state() {
 
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7918,6 +8049,7 @@ async fn multipath_send_incremental_route_addition() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8037,6 +8169,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     // Register multi-path target
     let (multi_tx, mut multi_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: multi_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8055,6 +8188,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     // Register single-best target
     let (single_tx, mut single_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: single_target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8143,6 +8277,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8227,6 +8362,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8320,6 +8456,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8417,6 +8554,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8521,6 +8659,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8603,6 +8742,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     // Register multi-path target
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -8729,6 +8869,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65001,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -8759,6 +8900,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 120,
         stale_routes_time: 360,
@@ -9048,6 +9190,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -9139,6 +9282,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: peer_winner, // <-- target IS the winner
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -9206,6 +9350,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -9277,6 +9422,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
     // prefix → effective send_max should be 0.
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -9396,6 +9542,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // Register target as RR client for L2VPN/EVPN (iBGP, same AS).
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -9418,6 +9565,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // suppresses them at the stage step.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -9462,7 +9610,12 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     );
 
     // Source goes down.
-    tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
 
     // Target should receive a withdrawal for that EVPN key.
     let withdraw = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
@@ -9502,6 +9655,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // Source is an RR client.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -9521,6 +9675,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // A second RR client so reflection has somewhere to go.
     let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: other,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -9600,6 +9755,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // We'll fill it, then the EVPN announce will fail and mark target dirty.
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -9619,6 +9775,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // Source as RR client so reflection isn't suppressed.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -9704,23 +9861,22 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     handle.await.unwrap();
 }
 
-/// Characterization of the wedged post-Established advertisement path
-/// (ROADMAP, observed in an M66 CI run): `PeerUp`/`PeerDown` carry no
-/// session identity, so when two sessions for the same peer address
-/// overlap (RFC 4271 §6.8 collision window) and the loser's `PeerDown`
-/// arrives AFTER the winner's `PeerUp`, the stale `PeerDown` deregisters
-/// the surviving session's outbound sender. From then on every
-/// advertisement to that peer is silently skipped — `distribute_changes`
-/// iterates `outbound_peers` only, so the peer is never visited, never
-/// marked dirty, and no resync ever fires — while the session itself
-/// stays Established (keepalives are writer-owned in transport).
+/// Regression test for the silent advertisement wedge (ROADMAP, observed
+/// in an M66 CI run, root-caused in the stale-PeerDown deregistration
+/// entry): two sessions for one peer address overlap during the RFC 4271
+/// §6.8 collision window, the loser's `PeerDown` is processed AFTER the
+/// winner's `PeerUp`, and — before session-identity stamping — it
+/// deregistered the surviving session's outbound sender, silently
+/// wedging every later advertisement while the session stayed
+/// Established (keepalives are writer-owned in transport).
 ///
-/// This test asserts the CURRENT (buggy) end state to pin the mechanism
-/// and the observability that detects it. When `PeerUp`/`PeerDown` gain
-/// session-identity stamping (the fix), flip the trailing asserts:
-/// the imet must then be delivered on `winner_rx`.
+/// With the fix, `PeerUp`/`PeerDown` carry the transport session id and
+/// the whole `handle_peer_down` teardown is gated on it: the stale
+/// collision-loser `PeerDown` is discarded, the winner's Adj-RIB-In
+/// survives, and a post-convergence advertisement MUST be delivered on
+/// the winner's outbound channel.
 #[tokio::test]
-async fn stale_peer_down_after_replacement_peer_up_silently_wedges_distribution() {
+async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let (tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
@@ -9729,42 +9885,79 @@ async fn stale_peer_down_after_replacement_peer_up_silently_wedges_distribution(
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
-    let peer_up = |outbound_tx: mpsc::Sender<OutboundRouteUpdate>| RibUpdate::PeerUp {
-        peer,
-        peer_asn: 65000,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        outbound_tx,
-        export_policy: None,
-        sendable_families: evpn_sendable(),
-        is_ebgp: false,
-        route_reflector_client: true,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
-        negotiated_orf_recv: Vec::new(),
-    };
+    let peer_up =
+        |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        };
 
     // Session A (collision loser) reaches Established first and registers.
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
-    tx.send(peer_up(loser_tx)).await.unwrap();
+    tx.send(peer_up(loser_tx, 1)).await.unwrap();
     drain_eor(&mut loser_rx).await;
 
     // Session B (collision winner) reaches Established while A is still
-    // registered — same peer address, fresh outbound channel. The session
-    // task keeps its own sender clone alive (it does in production), so a
-    // deregistration in the manager closes nothing.
+    // registered — same peer address, fresh outbound channel, new session
+    // id. The session task keeps its own sender clone alive (it does in
+    // production), so a deregistration in the manager closes nothing.
     let (winner_tx, mut winner_rx) = mpsc::channel(8);
     let winner_session_tx = winner_tx.clone();
-    tx.send(peer_up(winner_tx)).await.unwrap();
+    tx.send(peer_up(winner_tx, 2)).await.unwrap();
     drain_eor(&mut winner_rx).await;
 
-    // The dumped loser's teardown lands last: a bare-IP PeerDown.
-    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+    // The winner session receives a route from the peer — state a stale
+    // PeerDown must NOT destroy (the id check gates the whole teardown,
+    // Adj-RIB-In included, not just outbound deregistration).
+    let imet_winner = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
+    let imet_winner_key = imet_winner.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet_winner],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // The dumped loser's teardown lands last, stamped with ITS session id.
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 1,
+    })
+    .await
+    .unwrap();
+
+    // The stale PeerDown must not have cleared the winner session's
+    // Adj-RIB-In: the route it received is still in the Loc-RIB.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    let evpn_routes = reply_rx.await.unwrap();
+    assert!(
+        evpn_routes.iter().any(|r| r.key() == imet_winner_key),
+        "stale PeerDown must not clear the surviving session's Adj-RIB-In"
+    );
 
     // A post-convergence advertisement arrives from another RR client —
     // the analogue of pe1's fresh Type 2 origination / drain withdrawals.
-    let (source_tx, mut source_rx) = mpsc::channel(8);
+    let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        session_id: 3,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
         outbound_tx: source_tx,
@@ -9778,9 +9971,9 @@ async fn stale_peer_down_after_replacement_peer_up_silently_wedges_distribution(
     })
     .await
     .unwrap();
-    drain_eor(&mut source_rx).await;
 
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
         announced: vec![],
@@ -9793,16 +9986,128 @@ async fn stale_peer_down_after_replacement_peer_up_silently_wedges_distribution(
     .await
     .unwrap();
 
-    // The winner session is notionally still Established (its channel is
-    // open and drained), yet nothing arrives — not immediately and not
-    // via the 1s dirty-resync timer, because the stale PeerDown removed
-    // the peer from `outbound_peers` entirely. 3s > 2 resync intervals.
-    let delivered = tokio::time::timeout(Duration::from_secs(3), winner_rx.recv()).await;
+    // Delivery assert: the winner session is still registered, so the new
+    // advertisement MUST reach its outbound channel. (Before the fix this
+    // never arrived — the stale PeerDown had removed the peer from
+    // `outbound_peers`, so distribution skipped it forever.)
+    let delivered = tokio::time::timeout(Duration::from_secs(5), winner_rx.recv())
+        .await
+        .expect(
+            "stale collision-loser PeerDown wedged distribution — no advertisement \
+             reached the surviving session's outbound channel",
+        )
+        .expect("winner outbound channel closed unexpectedly");
     assert!(
-        delivered.is_err(),
-        "BUG BEHAVIOR CHANGED: the stale PeerDown no longer wedges distribution — \
-         the session-identity fix has landed; flip this test to assert delivery \
-         instead"
+        delivered.evpn_announce.iter().any(|r| r.key() == imet_key),
+        "delivered update must carry the post-convergence EVPN announce"
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// GR flavor of the stale collision-loser teardown: a
+/// `PeerGracefulRestart` from a superseded session must be discarded by
+/// the same session-identity rule. Before stamping, a stale GR-down
+/// would mark the surviving session's routes stale AND deregister its
+/// outbound sender (`clear_outbound_peer_state` runs on the GR path
+/// too) — the same silent wedge. A GR-down whose id matches the
+/// registered session keeps its stale-path-retention semantics
+/// unchanged.
+#[tokio::test]
+async fn stale_graceful_restart_from_superseded_session_is_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let peer_up =
+        |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        };
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(peer_up(loser_tx, 1)).await.unwrap();
+    drain_eor(&mut loser_rx).await;
+
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(peer_up(winner_tx, 2)).await.unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // The dumped loser goes down with GR retention — stamped with ITS id.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 1,
+        restart_time: 30,
+        stale_routes_time: 30,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // The winner session must still be registered: a new advertisement
+    // reaches its outbound channel.
+    let (source_tx, _source_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        session_id: 3,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let delivered = tokio::time::timeout(Duration::from_secs(5), winner_rx.recv())
+        .await
+        .expect(
+            "stale collision-loser PeerGracefulRestart wedged distribution — no \
+             advertisement reached the surviving session's outbound channel",
+        )
+        .expect("winner outbound channel closed unexpectedly");
+    assert!(
+        delivered.evpn_announce.iter().any(|r| r.key() == imet_key),
+        "delivered update must carry the post-convergence EVPN announce"
     );
 
     drop(winner_session_tx);
@@ -9841,6 +10146,7 @@ async fn evpn_gr_marks_stale_and_demotes_routes() {
 
     // Source enters graceful restart
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -9883,6 +10189,7 @@ async fn evpn_gr_eor_clears_stale() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 120,
         stale_routes_time: 360,
@@ -9938,6 +10245,7 @@ async fn evpn_gr_timer_sweeps_stale_routes() {
 
     // GR without LLGR — stale routes should be purged on timer expiry.
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -9990,6 +10298,7 @@ async fn evpn_llgr_gr_timer_promotes_to_llgr_stale() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 5,
         stale_routes_time: 10,
@@ -10054,6 +10363,7 @@ async fn evpn_llgr_timer_sweeps_llgr_stale_routes() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -10115,6 +10425,7 @@ async fn evpn_llgr_eor_clears_llgr_stale() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -10216,6 +10527,7 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
     .unwrap();
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: source,
         restart_time: 2,
         stale_routes_time: 5,
@@ -10263,6 +10575,7 @@ async fn inject_evpn_reflects_to_peer() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -10372,6 +10685,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let early = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: early,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -10412,6 +10726,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let late = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: late,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -10576,6 +10891,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -10594,6 +10910,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: source,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -11672,6 +11989,7 @@ async fn orf_setup() -> (
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -11940,6 +12258,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
     let (tx, handle, target, _out_rx) = orf_setup().await;
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: target,
         restart_time: 120,
         stale_routes_time: 360,
@@ -11954,6 +12273,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
     // Re-establish WITHOUT ORF: the initial dump must carry the full table.
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12012,6 +12332,7 @@ async fn graceful_restart_clears_orf_filter() {
     );
 
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: target,
         restart_time: 120,
         stale_routes_time: 360,
@@ -12027,6 +12348,7 @@ async fn graceful_restart_clears_orf_filter() {
     // 10/8-only filter must not survive into the new session.
     let (out_tx, mut out_rx2) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12094,6 +12416,7 @@ async fn gr_flap_and_reup(
     negotiated_orf_recv: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer: target,
         restart_time: 120,
         stale_routes_time: 360,
@@ -12107,6 +12430,7 @@ async fn gr_flap_and_reup(
 
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12286,6 +12610,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        session_id: 0,
         peer: target,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12400,6 +12725,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 1 (no ORF), then a GR flap.
     let (out_tx, _out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12413,6 +12739,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         negotiated_orf_recv: vec![],
     });
     manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
         peer,
         restart_time: 120,
         stale_routes_time: 360,
@@ -12425,6 +12752,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 2: the restarter comes back with ORF — the deferral arms.
     let (out_tx2, _out_rx2) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        session_id: 0,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -12446,7 +12774,10 @@ async fn peer_down_clears_gr_deferred_eor() {
     );
 
     // Peer down mid-deferral: the deferral must not leak into a later session.
-    manager.handle_update(RibUpdate::PeerDown { peer });
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
     assert!(
         !manager.gr_deferred_eor.contains_key(&peer),
         "peer down must clear the outstanding EoR deferral"
@@ -12502,7 +12833,10 @@ async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
 
     // A session flap: PeerDown zeroes / rewrites gauges but must keep
     // the label sets — the peer still exists.
-    manager.handle_update(RibUpdate::PeerDown { peer });
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
     assert!(
         peer_series_count(&metrics, "10.0.0.2") > 0,
         "PeerDown must not remove the peer's label sets"

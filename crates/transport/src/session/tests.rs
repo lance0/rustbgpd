@@ -4080,7 +4080,7 @@ async fn notification_teardown_without_n_bit_uses_peer_down() {
     session.execute_actions(vec![Action::SessionDown]).await;
 
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerDown { peer } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
         _ => panic!("expected PeerDown"),
     }
 }
@@ -4129,7 +4129,7 @@ async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     session.execute_actions(vec![Action::SessionDown]).await;
 
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerDown { peer } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
         _ => panic!("expected PeerDown"),
     }
 }

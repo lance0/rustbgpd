@@ -31,8 +31,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_rib_ingest_channel_depth` (sampled RIB manager ingest queue
   depth). The RIB manager also WARNs when a `PeerUp` replaces a live
   registration and INFO-logs every outbound deregistration. The
-  session-identity fix itself is specified in the ROADMAP entry and
-  deliberately not shipped speculatively.
+  session-identity fix itself shipped separately — see "Silent
+  advertisement wedge after a BGP session collision" under Fixed.
 - **Statement-level attribution in `rustbgpctl policy explain` — the
   decision trace now names WHICH statement inside the matched import
   chain decided, not just which policy.** Each `permit` / `deny`
@@ -62,7 +62,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   statements` per match (no new RPC, authz unchanged), the CLI text
   renderer prints a `statements:` section, and `--json` gains a
   run-stable `statements` array per match.
-
 - **M67 interop proof for the ADR-0085 link-driven Ethernet Segment
   drain: a real AC failure drives the failover end-to-end, no RPC in
   the path.** New `kernel-dataplane` CI job — the M66 sibling with
@@ -381,6 +380,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Silent advertisement wedge after a BGP session collision: a stale
+  collision-loser `PeerDown` is now discarded by session identity.**
+  When two sessions for one peer address overlapped during the
+  RFC 4271 §6.8 collision window and the loser's `PeerDown` was
+  processed after the winner's `PeerUp`, the RIB manager deregistered
+  the surviving session's outbound sender — every later advertisement
+  to that peer was silently lost while the session stayed Established
+  on writer-owned keepalives (observed once in an M66 CI run; the
+  observability for it shipped earlier under Added).
+  `PeerUp`/`PeerDown`/`PeerGracefulRestart` now carry the transport
+  session id; the RIB manager records the registered session's id at
+  `PeerUp` and discards a teardown whose id doesn't match — the whole
+  teardown, so a stale `PeerDown` can no longer clear the surviving
+  session's Adj-RIB-In, abort its GR/LLGR retention, or deregister its
+  outbound sender (INFO log + new
+  `bgp_rib_stale_peer_down_ignored_total{peer}` counter). A
+  replacement `PeerUp` (same address, new session) is treated as a
+  session reset: the prior session's Adj-RIB-In/Out is cleared before
+  re-registering so dumped-session state can't linger — except routes
+  under GR/LLGR stale retention, which remain deadline-bounded as on
+  any GR reconnect. GR flap semantics are unchanged when the id
+  matches.
 - **The EVPN local-MAC observation layer now detects in-place FDB
   port moves, so the originator's cache tracks the kernel instead of
   claiming MACs the kernel no longer holds locally.** When a remote
