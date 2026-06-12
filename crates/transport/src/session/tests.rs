@@ -3046,6 +3046,187 @@ async fn explain_import_policy_command_does_not_touch_counters() {
     assert_eq!(session.import_policy_routes_denied, denied_before);
 }
 
+/// Statement-level explain (the ADR-0073 deferred enrichment): a
+/// current-generation Hit re-derives WHICH statement inside the matched
+/// chain decided, through the real command dispatch path. A
+/// generation bump (import-chain hot-apply) makes the entry `Stale`,
+/// and a stale entry must carry NO statement trace — the chain that
+/// produced the decision is gone, so re-walking the current chain
+/// could contradict the recorded outcome.
+#[expect(clippy::too_many_lines)]
+#[tokio::test]
+async fn explain_statement_trace_attributes_hit_and_skips_stale() {
+    use super::import_decision_cache::LookupResult;
+    use rustbgpd_policy::NamedPolicy;
+
+    async fn explain_for(
+        session: &mut PeerSession,
+        prefix: Ipv4Prefix,
+    ) -> super::import_decision_cache::ImportExplainReply {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = session
+            .handle_command(PeerCommand::ExplainImportPolicy {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                prefix: Prefix::V4(prefix),
+                path_id: None,
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.expect("session replied")
+    }
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
+        prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    let deny_stmt = PolicyStatement {
+        prefix: Some(Prefix::V4(denied_prefix)),
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let mut permit_stmt = deny_stmt.clone();
+    permit_stmt.prefix = Some(Prefix::V4(permitted_prefix));
+    permit_stmt.action = PolicyAction::Permit;
+    permit_stmt.modifications = RouteModifications {
+        set_local_pref: Some(200),
+        ..RouteModifications::default()
+    };
+    let chain = PolicyChain::from_named(vec![NamedPolicy {
+        name: Some("edge-import".to_string()),
+        policy: Policy {
+            entries: vec![deny_stmt, permit_stmt],
+            default_action: PolicyAction::Permit,
+        },
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain.clone()),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: denied_prefix,
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: permitted_prefix,
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    // Permit: attributed to statement 1 of "edge-import", with the
+    // prefix condition and the local_pref transition rendered.
+    let reply = explain_for(&mut session, permitted_prefix).await;
+    assert_eq!(reply.matches.len(), 1);
+    let steps = &reply.matches[0].statements;
+    assert_eq!(steps.len(), 1, "one policy evaluated");
+    assert_eq!(steps[0].policy_index, 0);
+    assert_eq!(steps[0].policy_name.as_deref(), Some("edge-import"));
+    assert_eq!(steps[0].statement_index, Some(1));
+    assert_eq!(steps[0].action, PolicyAction::Permit);
+    assert_eq!(steps[0].matched_conditions, vec!["prefix 192.0.2.0/24"]);
+    assert_eq!(steps[0].modifications, vec!["local_pref 100 -> 200"]);
+
+    // Deny: attributed to statement 0 — the reject fast-path is
+    // explainable even though the route never reached RIB.
+    let reply = explain_for(&mut session, denied_prefix).await;
+    let steps = &reply.matches[0].statements;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].statement_index, Some(0));
+    assert_eq!(steps[0].action, PolicyAction::Deny);
+    assert!(steps[0].modifications.is_empty());
+
+    // Hot-apply the (same) chain: the generation bump makes the cached
+    // entries Stale, and a stale match must carry no statement trace.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::UpdateImportPolicy {
+            policy: Some(chain),
+            reply: reply_tx,
+        })
+        .await;
+    reply_rx.await.expect("policy update acked").unwrap();
+
+    let reply = explain_for(&mut session, permitted_prefix).await;
+    assert!(
+        matches!(reply.matches[0].result, LookupResult::Stale(_)),
+        "generation bump must mark the entry stale"
+    );
+    assert!(
+        reply.matches[0].statements.is_empty(),
+        "stale entries must not carry a statement trace"
+    );
+}
+
 /// ADR-0073 pin 4 (reset semantics): a freshly constructed session — the
 /// state every peer reconnect / daemon restart starts from — has an
 /// empty import-decision cache, so an explain query returns `NOT_SEEN`.

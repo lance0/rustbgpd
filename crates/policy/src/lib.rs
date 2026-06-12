@@ -10,6 +10,7 @@
 /// Policy engine core — match, modify, and filter routes.
 pub mod engine;
 
+pub use engine::explain::{ChainStatementTrace, StatementAttribution, explain_chain_statements};
 pub use engine::{
     AsPathRegex, CommunityMatch, NamedPolicy, NeighborSetMatch, NextHopAction, Policy,
     PolicyAction, PolicyChain, PolicyEvaluation, PolicyResult, PolicyStatement, RouteContext,

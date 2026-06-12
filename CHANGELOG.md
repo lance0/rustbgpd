@@ -33,6 +33,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registration and INFO-logs every outbound deregistration. The
   session-identity fix itself is specified in the ROADMAP entry and
   deliberately not shipped speculatively.
+- **Statement-level attribution in `rustbgpctl policy explain` — the
+  decision trace now names WHICH statement inside the matched import
+  chain decided, not just which policy.** Each `permit` / `deny`
+  match gains a `statements` trace: one step per policy the chain
+  evaluated, carrying the policy index + name, the index of the
+  matching statement (or a default-action fallthrough marker when
+  nothing matched), the action it contributed, the conditions the
+  statement matched (stable leading labels: `prefix`, `community`,
+  `as_path`, `neighbor_set`, `rpki`, `local_pref`, … or `any` for an
+  unconditional statement), and the attribute edits it contributes
+  rendered as `before -> after` against the route's pre-policy
+  values (`local_pref 100 -> 200`). A deny ends the trace at the
+  denying policy — later policies were never consulted and get no
+  step. The trace is re-derived at query time from the cached
+  pre-policy attributes (ADR-0073 decision cache) against the
+  session's import chain, so the inbound UPDATE hot path records
+  nothing new; the explain-only chain walk is pinned to the live
+  evaluator by an agreement matrix in the policy crate, and the
+  evaluation-time next-hop is now stored alongside the cached
+  attributes so the reconstruction is exact (MP-unicast next-hops
+  live in MP_REACH framing, which the stored attributes drop).
+  Statement traces attach only to current-generation `permit` /
+  `deny` outcomes: `stale` entries were decided by a chain that no
+  longer exists, `withdrawn` tombstones have shed their attributes,
+  and `evicted` / `not_seen` carry no decision. Surfaces:
+  `ExplainImportPolicy` gains `repeated ImportExplainStatementStep
+  statements` per match (no new RPC, authz unchanged), the CLI text
+  renderer prints a `statements:` section, and `--json` gains a
+  run-stable `statements` array per match.
+
 - **M67 interop proof for the ADR-0085 link-driven Ethernet Segment
   drain: a real AC failure drives the failover end-to-end, no RPC in
   the path.** New `kernel-dataplane` CI job — the M66 sibling with
