@@ -167,6 +167,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **GR restarters no longer receive End-of-RIB for ORF-gated families
+  before the gated flood.** The RFC 5291 §6 initial-advertisement gate
+  withholds a family's table until the peer's first ROUTE-REFRESH, but
+  the initial End-of-RIB was still sent immediately — an RFC 4724
+  restarter took it as "initial update complete", ran route selection,
+  and swept the stale routes it had retained, blackholing exactly the
+  prefixes the gated flood was about to re-announce. For a peer that
+  re-establishes as a graceful-restart restarter (including via the
+  LLGR stale phase), the gated family's End-of-RIB is now withheld and
+  follows the first ROUTE-REFRESH that lifts the gate, ordered behind
+  the gated flood it triggers (it is sent as a genuine End-of-RIB even
+  when enhanced route refresh would normally substitute its EoRR
+  demarcation). Non-GR ORF peers keep the immediate honest-empty-table
+  End-of-RIB — a client that never sends ROUTE-REFRESH must still see
+  End-of-RIB — and GR restarters without ORF are unchanged.
+
 - **Re-establishment during LLGR now honors the negotiated stale-routes
   time.** The per-peer LLGR config (which carries the stale-routes time
   captured at GR entry) was consumed at GR→LLGR promotion, so a peer

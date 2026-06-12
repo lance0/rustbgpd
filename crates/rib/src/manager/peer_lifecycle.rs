@@ -109,6 +109,9 @@ impl RibManager {
         // `negotiated_orf_recv`.
         self.peer_orf_filters.remove(&peer);
         self.peer_orf_pending.remove(&peer);
+        // The GR-deferred EoR is per-session too: the deferral pairs with
+        // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
+        self.gr_deferred_eor.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
@@ -220,8 +223,10 @@ impl RibManager {
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
-        // for families still awaiting the peer's first ROUTE-REFRESH. The EoR is
-        // still emitted (an honest "empty table so far"); the filtered flood
+        // for families still awaiting the peer's first ROUTE-REFRESH. For a
+        // non-GR peer the EoR is still emitted (an honest "empty table so
+        // far"); for a GR restarter the EoR is deferred until the gated flood
+        // is sent (see the `eor_families` carve-out below). The filtered flood
         // follows once the gate is lifted.
         let orf_gated = self
             .peer_orf_pending
@@ -384,11 +389,35 @@ impl RibManager {
         }
 
         // Determine EoR families from this peer's sendable families
-        let eor_families = self
+        let mut eor_families = self
             .peer_sendable_families
             .get(&peer)
             .cloned()
             .unwrap_or_default();
+        // RFC 4724: a GR RESTARTER takes our EoR as "this peer's initial
+        // update is complete", proceeds with route selection, and sweeps the
+        // stale routes it retained from our previous session. For an
+        // ORF-gated family that EoR would arrive BEFORE the gated flood
+        // (which waits on the peer's first ROUTE-REFRESH, RFC 5291 §6) —
+        // sweeping everything we are about to re-announce, a self-inflicted
+        // blackhole window. Withhold those families' EoR; it is emitted once
+        // the gate lifts and the gated flood is sent
+        // (`send_route_refresh_response` / `handle_peer_orf_update`). Non-GR
+        // ORF peers keep the immediate EoR — a client that never sends
+        // ROUTE-REFRESH must still see EoR. This runs after `handle_peer_up`'s
+        // LLGR arm has moved a peer re-establishing during LLGR back into
+        // `gr_peers`, so that restarter is covered too.
+        if !orf_gated.is_empty() && self.gr_peers.contains_key(&peer) {
+            let deferred: HashSet<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)> = eor_families
+                .iter()
+                .copied()
+                .filter(|family| orf_gated.contains(family))
+                .collect();
+            if !deferred.is_empty() {
+                eor_families.retain(|family| !deferred.contains(family));
+                self.gr_deferred_eor.insert(peer, deferred);
+            }
+        }
 
         let has_outbound_diff = !announce.is_empty()
             || !withdraw.is_empty()
