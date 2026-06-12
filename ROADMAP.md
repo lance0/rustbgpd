@@ -208,6 +208,28 @@ has it, no broad performance sprints without profile evidence.
   poll-only link inventory; learned-port-to-ESI disambiguation so one local VNI
   can participate in multiple Ethernet Segments. Low-priority operational polish
   once core convergence is complete.
+- **Single-active non-DF full AC blocking.** The Gate 8b dataplane DF
+  enforcement sets the bridge-port BUM-flood flags only
+  (`IFLA_BRPORT_{UNICAST,MCAST,BCAST}_FLOOD`), which is the correct
+  all-active scope — but RFC 7432 single-active semantics require the
+  non-DF PE to block **all** traffic on the segment AC, known unicast
+  included. Today a single-active non-DF suppresses MAC *origination*
+  (control plane) yet its bridge still forwards unicast on the AC, so a
+  dual-homed CE can transiently see duplicate delivery or have its
+  return path pulled to the non-forwarding PE. Needs a per-role
+  all-traffic port gate (e.g. bridge port `state disabled` or an
+  equivalent single-netlink toggle) driven by the same DF-role map that
+  feeds the BUM filter, with the drain path reusing it. Distinct from
+  the deferred all-active local-bias item.
+- **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
+  primitive fans out to two actors (segment orchestrator withdraws
+  Type 1/4; local originator withdraws Type 2) over independent
+  channels, so the EAD-per-ES-before-MAC ordering that maximizes the
+  remote receivers' single-active backup-swap window is convergent but
+  not guaranteed. A small cross-actor sequencing step (withdraw EADs,
+  then MACs) would pin the §8.2-style fast-signal ordering and shrink
+  the unknown-unicast gap during a drain handover. Polish on the drain
+  primitive, not correctness — either order converges.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
@@ -289,10 +311,10 @@ has it, no broad performance sprints without profile evidence.
   session but not a pending collision candidate, which `BackToIdle` promotion
   then establishes over the BFD-down path; the inbound handler treats a
   state-query timeout as Idle and replaces a possibly-Established session
-  instead of rejecting the new connection (RFC 4271 §6.8); per-peer Prometheus
-  label series are never reaped, so churning dynamic ranges grow scrape
-  cardinality without bound; and peer-group field edits still don't reach live
-  dynamic sessions (pairs with the deferred dynamic reconfigure executor).
+  instead of rejecting the new connection (RFC 4271 §6.8); and peer-group
+  field edits still don't reach live dynamic sessions (pairs with the deferred
+  dynamic reconfigure executor). (The per-peer Prometheus series leak listed
+  here previously was fixed — deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
   unit-test coverage; per-statement attribution within a matched import chain
@@ -466,7 +488,11 @@ has it, no broad performance sprints without profile evidence.
   route-server control-plane gap for clients pushing filters to rustbgpd.
   Send-side ORF (rustbgpd pushing filters to upstreams) and advertising legacy
   Cisco type 128 stay deferred pending operator demand; type 128 is accepted on
-  decode only today.
+  decode only today. End-of-RIB for ORF-gated families is deferred only for
+  GR-restarter peers (the premature-sweep fix); the conformance-purist
+  alternative — defer EoR for every ORF peer, with a timeout backstop so a
+  client that never sends its ROUTE-REFRESH still converges — stays deferred
+  until interop evidence shows a non-GR receiver misreading the early EoR.
 - **Confederation (RFC 5065).** Required for service-provider deployments, but
   SPs are not the initial target market. (Unblocks several deferred RFC 9234
   confederation-scope items and the RFC 8326 confederation gating.)
