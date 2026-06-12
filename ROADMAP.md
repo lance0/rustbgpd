@@ -197,7 +197,10 @@ has it, no broad performance sprints without profile evidence.
   origination-side withdrawal stimulus — the manual half landed
   (ADR-0084): `SetEthernetSegmentDrain` / `rustbgpctl evpn es drain`
   withdraws the ES's Type 4/EAD routes + member VNIs' local Type 2
-  state without replay, in-memory v1; the remaining piece is the
+  state without replay, in-memory v1, and the M66 interop job proves
+  the drain end-to-end as a service handover with rustbgpd on both
+  sides (the rustbgpd-originated proof M65 had to fake with GoBGP);
+  the remaining piece is the
   ES↔interface binding so an AC failure emits the
   EAD-withdrawn-MACs-retained mass-withdraw shape automatically
   (reuses the same drain primitive, gets its own ADR); a cross-vendor preference-DF smoke
@@ -211,7 +214,12 @@ has it, no broad performance sprints without profile evidence.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support; rustbgpd-managed
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
   poll-only link inventory; learned-port-to-ESI disambiguation so one local VNI
-  can participate in multiple Ethernet Segments. Low-priority operational polish
+  can participate in multiple Ethernet Segments; same-ESI local bias in the
+  remote-MAC projection (M66 surfaced: an ES peer's Type 2 for a MAC on a
+  locally-configured segment is programmed as a remote row, usurping the
+  kernel-learned local AC row — and the in-place FDB port move emits no
+  local-delete observation, so the originator's cache keeps claiming the MAC;
+  both documented in the M66 topology header). Low-priority operational polish
   once core convergence is complete.
 - **Single-active non-DF full AC blocking.** The Gate 8b dataplane DF
   enforcement sets the bridge-port BUM-flood flags only

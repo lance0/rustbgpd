@@ -1,0 +1,53 @@
+# M66 PE2 (rustbgpd) — backup member of the single-active Ethernet
+# Segment. df_preference 100 (< pe1's 200) under RFC 9785
+# highest-preference election keeps this PE NonDF until pe1 drains
+# (ADR-0084), at which point it must win DF, learn the CE MAC through
+# the now-open flood path, and take over Type 2 origination.
+#
+# Same two-principal tier-enforcement gRPC shape as pe1 (see
+# rustbgpd-m66-pe1.toml) and the same read-only-template bind
+# convention.
+[global]
+asn = 65000
+router_id = "10.0.2.2"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/etc/rustbgpd/grpc-operator.token"
+principal = "rustbgpd://operator/ci"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc-observer.sock"
+principal = "rustbgpd://observer/ci"
+
+[security.grpc.roles]
+"rustbgpd://operator/ci" = "operator"
+"rustbgpd://observer/ci" = "observer"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.2.2:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.2.2"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 100
+df_algorithm = "highest-preference"
+redundancy_mode = "single-active"
+originator_ip = "10.0.2.2"
+
+[[neighbors]]
+address = "10.0.1.1"
+remote_asn = 65000
+description = "vtep-rr"
+hold_time = 30
+families = ["l2vpn_evpn"]

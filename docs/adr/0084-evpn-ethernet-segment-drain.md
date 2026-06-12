@@ -149,8 +149,11 @@ daemon coordinator and pushed to both origination actors, exposed via
   quarantine-respecting, and quarantine recovery while drained keeps
   the MAC withdrawn until undrain.
 - An interop M-job proving the drain against a remote PE's backup swap
-  is a planned follow-up (the M65 topology already exercises the
-  receive side of the same wire shape).
+  landed as M66 (`tests/interop/m66-evpn-es-drain-handover.clab.yml`):
+  the drain/undrain cycle, the operator_only ceiling, decision 3's
+  reload survival, and the service handover to the surviving PE are
+  asserted end-to-end with rustbgpd on both sides (the M65 topology
+  already exercised the receive side of the same wire shape).
 
 ## References
 
