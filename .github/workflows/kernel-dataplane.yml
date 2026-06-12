@@ -403,6 +403,25 @@ jobs:
           topology: tests/interop/m66-evpn-es-drain-handover.clab.yml
           script: tests/interop/scripts/test-m66-evpn-es-drain-handover.sh
 
+  m67:
+    name: M67 — ADR-0085 link-driven ES drain failover (rustbgpd ×3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # The M66 sibling with the production trigger: an attachment-
+      # circuit carrier loss (ip link set down inside pe1) — not an
+      # RPC — drives the drain, the RFC 7432 §8.2 withdrawal shape,
+      # the DF handover, and the held-off recovery (see the topology
+      # header). All three BGP speakers are rustbgpd.
+      - name: Run M67 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M67
+          topology: tests/interop/m67-evpn-link-drain-failover.clab.yml
+          script: tests/interop/scripts/test-m67-evpn-link-drain-failover.sh
+
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: ubuntu-latest

@@ -194,7 +194,8 @@ has it, no broad performance sprints without profile evidence.
   `ethernet_tag = 0` and the VNI in the label field per RFC 7432 §6.1
   / RFC 8365 §5.1.3 (FRR parity), so rustbgpd-originated EAD-per-EVI
   joins remote `(ESI, tag 0)` alias/eligible sets; (3)
-  origination-side withdrawal stimulus — the manual half landed
+  origination-side withdrawal stimulus — **complete end-to-end**:
+  the manual half landed
   (ADR-0084): `SetEthernetSegmentDrain` / `rustbgpctl evpn es drain`
   withdraws the ES's Type 4/EAD routes + member VNIs' local Type 2
   state without replay, in-memory v1, and the M66 interop job proves
@@ -212,8 +213,13 @@ has it, no broad performance sprints without profile evidence.
   not drained, and entitled to forward (all-active always;
   single-active only as DF — a healthy backup keeps the remote row)
   programs no remote FDB row, fixing the M66 usurpation at its root;
-  remaining ADR-0085 slice: the link-driven M66 sibling
-  proof; a cross-vendor preference-DF smoke
+  and the link-driven M66 sibling proof **landed** (M67, the final
+  ADR-0085 slice): a real AC failure inside the active PE — no RPC —
+  drives the drain, the §8.2 wire shape, the DF handover, the
+  sub-second-sampled recovery hold-off, flap damping, and the
+  operator/link composition against a real kernel, with a measured
+  100–300 ms failover blackout. ADR-0085 arc done.
+  Still open from the arc: a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today); shape-aware EVPN `--diff` classification so the static diff

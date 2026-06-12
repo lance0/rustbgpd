@@ -1,6 +1,13 @@
 # ADR-0085: Ethernet Segment interface binding — link-driven drain and same-ESI local bias
 
-**Status:** Accepted
+**Status:** Accepted — all four slices landed 2026-06-12 (slice 1
+`link_carrier` monitor; slice 2 decisions 1–4, the binding +
+reason-keyed drain + recovery hold-off; slice 3 decision 5, the
+same-ESI local bias; slice 4 the M67 interop proof,
+`tests/interop/m67-evpn-link-drain-failover.clab.yml` — the
+link-down stimulus job foreseen in Consequences, proving the
+drain/hold-off/composition end-to-end against a real kernel with a
+measured 100–300 ms failover blackout).
 **Date:** 2026-06-12
 
 ## Context

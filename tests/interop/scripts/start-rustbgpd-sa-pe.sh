@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustbgpd single-active segment PE setup — M66.
+# rustbgpd single-active segment PE setup — shared by M66 and M67.
 #
 # Pre-creates the kernel L2 topology a full rustbgpd VTEP-with-AC
 # needs: br${VNI} bridging the EVPN VXLAN port (nolearning + bridge
