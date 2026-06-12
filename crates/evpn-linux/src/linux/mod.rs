@@ -19,8 +19,11 @@
 //! dump cadence, so kernel drift is repaired structurally rather than
 //! through edge-triggered notifications. `RTNLGRP_NEIGH` is active for
 //! local-MAC observations through the dedicated
-//! [`crate::Dataplane::take_local_mac_rx`] channel. `RTNLGRP_LINK` and
-//! reconcile-trigger subscriptions remain follow-up work.
+//! [`crate::Dataplane::take_local_mac_rx`] channel. `RTNLGRP_LINK`
+//! carrier eventing lives in the standalone [`link_carrier`] monitor
+//! (ADR-0085 Decision 4) on its own dedicated connection; wiring the
+//! wider inventory or reconcile triggers to link events remains
+//! follow-up work.
 //!
 //! ## Failure semantics
 //!
@@ -59,6 +62,7 @@ mod fdb_nhg;
 mod ip_vrf;
 mod l3;
 mod l3_adoption;
+pub mod link_carrier;
 mod links;
 pub mod nexthop_raw;
 mod notify;

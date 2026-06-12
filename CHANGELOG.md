@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN link carrier monitor (ADR-0085 slice 1).** New standalone
+  monitor in `rustbgpd-evpn-linux`
+  (`linux::link_carrier::spawn_link_carrier_monitor`): subscribes to
+  `RTNLGRP_LINK` on a dedicated rtnetlink connection and projects
+  per-link **carrier** state — the `IFF_LOWER_UP` bit in the link
+  flags, deliberately not `IFLA_OPERSTATE` (ADR-0085 decision 1) —
+  for a watched set of link names into a `tokio::sync::watch`
+  channel. Resolution is by name on every event (ifindex reuse is
+  real; names are the operator contract); a watched name with no
+  kernel link is published as down, fail-closed. Startup applies the
+  first-probe walk directly before any event processing, a 10 s
+  re-walk backstop heals missed netlink messages, the watch only
+  publishes on actual change, and the watched-name set is replaceable
+  at runtime with immediate re-evaluation (the SIGHUP path slice 2
+  needs). Proven against a real kernel by a netns veth carrier-flap
+  test (`link_carrier` selector in the netns Docker harness). First
+  of four ADR-0085 slices: pure infrastructure — nothing consumes the
+  monitor yet, no daemon wiring, no config keys, no behavior change.
 - **M66 interop proof for the ADR-0084 Ethernet Segment drain: a
   service handover with rustbgpd on BOTH sides.** New
   `kernel-dataplane` CI job — the proof M65 couldn't be (M65 needed

@@ -45,6 +45,8 @@
 #       (ADR-0067 single-hop BFD actor netns validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bgp_unnumbered
 #       (ADR-0069 BGP unnumbered Linux/socket primitive spike)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier
+#       (ADR-0085 RTNLGRP_LINK carrier monitor veth transitions)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -59,7 +61,8 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # the ADR-0059 slice 3b FDB nexthop group integration test;
 # `fib_runtime` / `bfd_runtime` run same-module `-p rustbgpd` daemon
 # runtime tests (ADR-0061 FIB / ADR-0067 BFD). `bgp_unnumbered` runs the
-# ADR-0069 evpn-linux integration proof.
+# ADR-0069 evpn-linux integration proof; `link_carrier` runs the
+# ADR-0085 RTNLGRP_LINK carrier monitor proof.
 TEST_BIN="netns_bum_filter"
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
@@ -74,8 +77,9 @@ case "${1:-all}" in
     fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
+    link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier" >&2
         exit 2
         ;;
 esac
