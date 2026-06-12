@@ -877,6 +877,114 @@ mod tests {
         finish(rig).await;
     }
 
+    /// Startup seam against the REAL segment actor (ADR-0085
+    /// decisions 3 + 5): the segment actor publishes its first
+    /// bias/AC-gate snapshots without waiting for the carrier
+    /// monitor's first probe, so a bound single-active ES whose AC is
+    /// down at boot is transiently bias-eligible and ungated. Pin the
+    /// convergence contract: once the link coordinator's first probe
+    /// lands, the system settles on drained(Link), bias-ineligible,
+    /// and an AC gate row of `Blocked` — with no further stimulus.
+    #[tokio::test]
+    async fn down_at_boot_converges_segment_bias_and_gate_to_drained() {
+        use rustbgpd_rib::RibUpdate;
+        use rustbgpd_telemetry::BgpMetrics;
+
+        use crate::test_support::{evpn_instance, vni};
+
+        let id = esi(1);
+        let mut table = rustbgpd_evpn::EvpnInstanceTable::new();
+        table
+            .insert(evpn_instance(65000, 100, 100, None, false))
+            .unwrap();
+        let instances = Arc::new(table);
+        let mut bound_segment = segment(id);
+        bound_segment.member_vnis = std::collections::BTreeSet::from([vni(100)]);
+        bound_segment.redundancy_mode = rustbgpd_evpn::RedundancyMode::SingleActive;
+        let segments = vec![bound_segment];
+
+        // Fake RIB: ack injects/withdraws, empty query, broadcast sub.
+        let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel::<RibUpdate>(64);
+        let _rib = tokio::spawn(async move {
+            let (events_tx, _keepalive) = tokio::sync::broadcast::channel(16);
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::InjectEvpn { reply, .. } | RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (bindings_tx, _bindings_keepalive) = watch::channel(bindings(&[(1, "es0", 30)]));
+        let (carrier_tx, carrier_rx) = watch::channel::<CarrierMap>(Arc::new(carrier(&[(
+            "es0", false, // AC dead at boot
+        )])));
+        let (bum_tx, bum_rx) = watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (bias_tx, bias_rx) = watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+
+        let segment_handle = crate::evpn_segment::spawn_with_local_bias(
+            &instances,
+            segments.clone(),
+            rib_tx,
+            Some(bum_tx),
+            Some(bias_tx),
+            Some(bindings_tx.subscribe()),
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("segment actor spawns for non-empty ES config");
+
+        let drain_state = EvpnEsDrainState::default();
+        let shutdown = CancellationToken::new();
+        let task = spawn(
+            bindings_tx.subscribe(),
+            CarrierFeed::Injected(carrier_rx),
+            EsLinkDrainDeps {
+                apply_lock: Arc::new(tokio::sync::Mutex::new(())),
+                coordinator: Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                    instances.clone(),
+                    Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
+                    segments,
+                ))),
+                drain_state: drain_state.clone(),
+                segment: Some(segment_handle.runtime_control()),
+                originator: None,
+            },
+            shutdown.clone(),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let drained_link =
+                drain_state.reasons_for(id) == [EsDrainReason::Link].into_iter().collect();
+            let bias_lifted = !bias_rx.borrow().is_eligible(id, vni(100));
+            let gate_blocked = bum_rx.borrow().ac_gate(id).map(|entry| entry.state)
+                == Some(rustbgpd_evpn::AcGateState::Blocked);
+            if drained_link && bias_lifted && gate_blocked {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "down-at-boot did not converge: drained_link={drained_link} \
+                 bias_lifted={bias_lifted} gate_blocked={gate_blocked}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        drop(carrier_tx);
+        shutdown.cancel();
+        let _ = task.await;
+        segment_handle.shutdown().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn operator_drain_survives_link_recovery_through_the_coordinator() {
         let rig = rig(

@@ -3252,4 +3252,276 @@ mod tests {
         handle.shutdown().await;
         assert!(!control.is_open());
     }
+
+    /// ADR-0084 decision 3, the re-add half at the actor seam: after a
+    /// drained ES leaves the config (the converger publishes the
+    /// segment snapshot first, then the GC'd drained set), re-adding
+    /// the same ESI in a later apply must start undrained — no phantom
+    /// drain may survive inside the actor.
+    #[tokio::test]
+    async fn re_added_esi_after_drain_gc_starts_undrained() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x37), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[esi(0x37)])));
+        let _ = wait_for_keys(&withdraws, 3, "drain withdraws").await;
+
+        // Runtime apply removes the drained ES: segment snapshot
+        // first, then the coordinator-GC'd drained set (the
+        // `publish_ethernet_segment_runtime_snapshot` order).
+        assert!(control.replace_segments(Arc::new(Vec::new())));
+        assert!(control.replace_drained_esis(drained_set(&[])));
+
+        // A later apply re-adds the same ESI: it must originate all
+        // three route classes — the prior drain is gone.
+        assert!(control.replace_segments(Arc::new(vec![segment(esi(0x37), &[100])])));
+        let injected = wait_for_keys(&injects, 6, "re-added ES re-originations").await;
+        let re_added = &injected[3..];
+        assert!(
+            re_added
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. })),
+            "re-added ES must re-originate its Type 4; got {re_added:?}"
+        );
+        assert!(
+            re_added
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. })),
+            "re-added ES must re-originate its EAD-per-ES; got {re_added:?}"
+        );
+        assert!(
+            re_added
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. })),
+            "re-added ES must re-originate its EAD-per-EVI; got {re_added:?}"
+        );
+
+        handle.shutdown().await;
+    }
+
+    /// Cross-snapshot coherence between the two dataplane snapshots
+    /// the segment actor publishes from one state
+    /// (`publish_dataplane_snapshots`): a `(ESI, VNI)` pair the bias
+    /// table marks eligible can never belong to a drained ES, and
+    /// never to an ES whose AC gate row says `Blocked` — for EVERY
+    /// combination of redundancy mode, drain state, binding, and
+    /// per-VNI DF role assignment. A consumer that honors the bias
+    /// (suppresses the remote FDB row) is therefore never pointed at
+    /// an attachment circuit the gate is blocking.
+    #[test]
+    fn bias_eligibility_never_coexists_with_a_blocked_ac_gate() {
+        let id = esi(0x51);
+        let members: BTreeSet<EvpnInstanceId> = [vni(100), vni(200)].into_iter().collect();
+        let role_options = [None, Some(DfRole::Df), Some(DfRole::NonDf)];
+        for mode in [RedundancyMode::AllActive, RedundancyMode::SingleActive] {
+            for drained in [false, true] {
+                for bound in [false, true] {
+                    for r1 in role_options {
+                        for r2 in role_options {
+                            let mut roles = BTreeMap::new();
+                            if let Some(role) = r1 {
+                                roles.insert(vni(100), role);
+                            }
+                            if let Some(role) = r2 {
+                                roles.insert(vni(200), role);
+                            }
+                            let bound_esis: BTreeSet<EthernetSegmentIdentifier> =
+                                if bound { [id].into() } else { BTreeSet::new() };
+                            let drained_esis: BTreeSet<EthernetSegmentIdentifier> = if drained {
+                                [id].into()
+                            } else {
+                                BTreeSet::new()
+                            };
+                            let bias = build_same_esi_bias_table_from_roles(
+                                &bound_esis,
+                                &drained_esis,
+                                roles.iter().map(|(&v, &r)| (id, mode, v, r)),
+                            );
+                            let gate = ac_gate_state_for_es(mode, drained, &members, &roles);
+                            for &(_, eligible_vni) in bias.iter() {
+                                assert!(
+                                    !drained,
+                                    "a drained ES must never be bias-eligible \
+                                     (mode={mode:?} roles={roles:?})"
+                                );
+                                assert_ne!(
+                                    gate,
+                                    Some(AcGateState::Blocked),
+                                    "bias-eligible (.., {eligible_vni:?}) must not coexist \
+                                     with a Blocked AC gate (mode={mode:?} drained={drained} \
+                                     bound={bound} roles={roles:?})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Like [`rib_recorder`] but serving a test-controlled Type 4
+    /// route set on `QueryEvpnRoutes` and broadcasting from a
+    /// test-held event sender, so a remote PE's Type 4 can drive a
+    /// real DF re-election through the actor.
+    fn rib_recorder_with_routes(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        routes: Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+        events_tx: broadcast::Sender<EvpnRouteEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(routes.lock().await.clone());
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        injects.lock().await.push(route.key());
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        withdraws.lock().await.push(key);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    async fn wait_for_dataplane_state<F>(
+        bias_rx: &watch::Receiver<Arc<SameEsiBiasTable>>,
+        bum_rx: &watch::Receiver<Arc<BumEnforcementTable>>,
+        label: &str,
+        mut pred: F,
+    ) where
+        F: FnMut(&SameEsiBiasTable, &BumEnforcementTable) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let bias = bias_rx.borrow().clone();
+            let bum = bum_rx.borrow().clone();
+            if pred(&bias, &bum) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {label}; bias={bias:?} bum={bum:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// DF-election seam toward the dataplane consumers: a remote Type
+    /// 4 that flips this PE to non-DF on a bound single-active ES
+    /// updates BOTH published snapshots from the same election pass —
+    /// the `(ESI, VNI)` bias eligibility drops AND the AC gate row
+    /// flips to `Blocked`, with no further stimulus.
+    #[tokio::test]
+    async fn df_flip_republishes_bias_and_ac_gate_together() {
+        // With candidates sorted [10.0.0.1, 10.0.0.2], DefaultModulo
+        // gives VNI 101 → slot 101 % 2 = 1 → the remote wins DF.
+        let id = esi(0x52);
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(101)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let routes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (events_tx, _events_keepalive) = broadcast::channel(16);
+        let _rib = rib_recorder_with_routes(
+            rib_rx,
+            injects.clone(),
+            withdraws.clone(),
+            routes.clone(),
+            events_tx.clone(),
+        );
+
+        let (bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
+        let bindings: EsLinkBindings = Arc::new(
+            [(
+                id,
+                crate::config::EsLinkBinding {
+                    interface: "es0".to_string(),
+                    recovery_delay: Duration::ZERO,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_bindings_tx, bindings_rx) = watch::channel(bindings);
+
+        let mut single_active = segment(id, &[101]);
+        single_active.redundancy_mode = RedundancyMode::SingleActive;
+        let handle = spawn_with_local_bias(
+            &instances,
+            vec![single_active],
+            rib_tx,
+            Some(bum_tx),
+            Some(bias_tx),
+            Some(bindings_rx),
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+
+        // Startup: sole candidate → DF everywhere → bias-eligible and
+        // the AC gate forwarding.
+        wait_for_dataplane_state(&bias_rx, &bum_rx, "startup DF snapshots", |bias, bum| {
+            bias.is_eligible(id, vni(101))
+                && bum.ac_gate(id).map(|entry| entry.state) == Some(AcGateState::Forwarding)
+        })
+        .await;
+
+        // The remote PE's Type 4 lands: it wins the modulo election
+        // for VNI 101, demoting this PE to non-DF.
+        let remote_type4 = type_4_es_route(id, "10.0.0.2", attrs_with_es_import_rt(id));
+        routes.lock().await.push(remote_type4.clone());
+        events_tx
+            .send(EvpnRouteEvent {
+                event_type: rustbgpd_rib::RouteEventType::Added,
+                key: EvpnRouteKey::Es {
+                    rd: rd(65000, 100),
+                    esi: id,
+                    originator_ip: ipa("10.0.0.2"),
+                },
+                best: Some(remote_type4),
+                previous_best: None,
+                peer: Some(ipa("10.0.0.2")),
+                previous_peer: None,
+                timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+            })
+            .expect("segment actor subscribed");
+
+        wait_for_dataplane_state(&bias_rx, &bum_rx, "post-flip snapshots", |bias, bum| {
+            !bias.is_eligible(id, vni(101))
+                && bum.ac_gate(id).map(|entry| entry.state) == Some(AcGateState::Blocked)
+        })
+        .await;
+
+        handle.shutdown().await;
+    }
 }

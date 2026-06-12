@@ -157,6 +157,22 @@ impl EvpnOriginatorRuntimeControl {
     }
 }
 
+#[cfg(test)]
+impl EvpnOriginatorRuntimeControl {
+    /// Control whose actor has already exited (the watch receiver is
+    /// dropped immediately), so every publish fails. Used by the
+    /// cross-actor seam tests to pin the drain primitive's rollback
+    /// behavior on an originator publish failure.
+    pub(crate) fn closed_for_test() -> Self {
+        let (model_tx, _) = watch::channel(Arc::new(OriginatorRuntimeModel {
+            instances: Arc::new(EvpnInstanceTable::new()),
+            vni_to_esi: Arc::new(std::collections::BTreeMap::new()),
+            drained_esis: Arc::new(BTreeSet::new()),
+        }));
+        Self { model_tx }
+    }
+}
+
 #[derive(Debug)]
 pub struct EvpnOriginatorHandle {
     pub(crate) shutdown: CancellationToken,
