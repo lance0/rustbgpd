@@ -482,11 +482,13 @@ impl PeerManager {
             // behind it) on one wedged peer. The sweep is best-effort by
             // contract — a peer that can't be signaled keeps its running
             // config until it reconnects, same as a send error.
-            let signaled =
-                tokio::time::timeout(PEER_POLICY_UPDATE_TIMEOUT, managed.handle.stop(Some(reason)))
-                    .await
-                    .map_err(|_| "timed out signaling session reset".to_string())
-                    .and_then(|sent| sent.map_err(|e| e.to_string()));
+            let signaled = tokio::time::timeout(
+                PEER_POLICY_UPDATE_TIMEOUT,
+                managed.handle.stop(Some(reason)),
+            )
+            .await
+            .map_err(|_| "timed out signaling session reset".to_string())
+            .and_then(|sent| sent.map_err(|e| e.to_string()));
             match signaled {
                 Ok(()) => {
                     info!(

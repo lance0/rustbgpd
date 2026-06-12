@@ -51,6 +51,25 @@ pub struct KernelLinkInfo {
     pub ce_port_ifindexes: Vec<u32>,
 }
 
+/// One non-VXLAN bridge port observed in the kernel link inventory,
+/// keyed by link name in [`KernelSnapshot::bridge_ports`]. The AC-gate
+/// resolver uses this to turn an ADR-0085 `interface` binding into a
+/// concrete ifindex + the *observed* port state — the gate diffs
+/// desired against observed (not against a remembered plan) because
+/// the kernel rewrites the state underneath us: `br_port_carrier_check`
+/// re-enables a `BR_STATE_DISABLED` port the moment carrier returns,
+/// so a remembered-plan diff would silently leave a non-DF AC
+/// forwarding after a carrier flap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelBridgePortInfo {
+    /// Kernel ifindex of the port.
+    pub ifindex: u32,
+    /// Observed `IFLA_BRPORT_STATE` scalar (`BR_STATE_*`: 0 disabled,
+    /// 1 listening, 2 learning, 3 forwarding, 4 blocking). `None`
+    /// when the kernel dump did not report port state.
+    pub state: Option<u8>,
+}
+
 /// Properties of a VXLAN port that the probe verifies before treating
 /// the instance as Ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +266,11 @@ pub struct KernelSnapshot {
     /// Per-bridge link info, indexed by bridge name. Used by the probe
     /// pass; the diff function itself does not read this.
     pub links: BTreeMap<String, KernelLinkInfo>,
+    /// Non-VXLAN bridge ports by link name, with observed
+    /// `IFLA_BRPORT_STATE`. Consumed by the single-active AC-gate
+    /// resolver (`crate::ac_gate`) to map an ADR-0085 `interface`
+    /// binding onto a concrete port.
+    pub bridge_ports: BTreeMap<String, KernelBridgePortInfo>,
 }
 
 impl KernelSnapshot {
@@ -296,6 +320,13 @@ impl KernelSnapshot {
     /// Add a single bridge to the link inventory (test convenience).
     pub fn insert_link(&mut self, info: KernelLinkInfo) {
         self.links.insert(info.bridge_name.clone(), info);
+    }
+
+    /// Add (or overwrite) one named bridge port. Used by the Linux
+    /// dump and by tests staging AC-gate state.
+    pub fn insert_bridge_port(&mut self, name: &str, ifindex: u32, state: Option<u8>) {
+        self.bridge_ports
+            .insert(name.to_string(), KernelBridgePortInfo { ifindex, state });
     }
 }
 
