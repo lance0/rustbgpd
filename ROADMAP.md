@@ -177,9 +177,24 @@ has it, no broad performance sprints without profile evidence.
   NIST-BRIO ASPA vectors when they are easy to automate.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
-  backup-path pre-install (proactive receive-side backup VTEP next-hop so
-  failover is sub-second instead of waiting for BGP reconvergence — single-active
-  is correct today, just reconvergence-speed); a cross-vendor preference-DF smoke
+  backup-path pre-install — **done (ADR-0083, all four slices):** remote
+  single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
+  groups with a pre-created standby NH, and an EAD-per-ES withdrawal
+  with surviving eligible PEs swaps the group membership to the backup
+  in one atomic netlink replace (MAC rows untouched); proven by M65
+  with a measured ~4.5 s blackout. Follow-ups from the arc: (1)
+  event-driven intent recompute — the 5 s RIB-poll cadence dominates
+  the measured window; the swap itself is one netlink op, so this is
+  the gap between 4.5 s and genuinely sub-second; (2) Ethernet-Tag
+  alignment — rustbgpd's EAD-per-EVI originates with `ethernet_tag =
+  VNI` while its Type 2s use tag 0, so a rustbgpd-originated
+  EAD-per-EVI never joins a remote rustbgpd's eligible set (receive
+  side proven against standards-shaped senders; rustbgpd↔rustbgpd
+  single-active backup needs an alignment decision); (3)
+  origination-side withdrawal stimulus — an ES has no AC/interface
+  binding, so rustbgpd cannot emit the EAD-withdrawn-MACs-retained
+  mass-withdraw shape (ES↔interface binding or an ES-drain RPC closes
+  it); a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today); shape-aware EVPN `--diff` classification so the static diff
