@@ -127,7 +127,9 @@ has it, no broad performance sprints without profile evidence.
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
   churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
   `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
-  regressions. **Done:** bounded
+  regressions. The next soak shape should exercise the EVPN single-active
+  failover + ES drain/undrain path under sustained churn — the newest
+  differentiator is the surface with the shortest continuous-runtime receipt. **Done:** bounded
   `bgp_config_transaction_lifecycle_total{operation,outcome}` exposes confirmed
   transaction confirm / abort / auto-revert failures without unbounded labels
   (`confirm_id`, candidate content, and error text stay out of Prometheus).
@@ -643,6 +645,24 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
 Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
+
+- [ ] **EVPN origination cross-actor seam audit.** One protocol concept (the
+  Ethernet Segment lifecycle) now spans the segment orchestrator (Type 1/4),
+  the local originator (Type 2), the IMET controller, and the coordinator
+  that fans state out to all of them; cross-actor invariants (drain
+  vs. replay, withdrawal ordering, drained-set GC) are enforced only at the
+  coordinator and documented only in ADR-0084. Audit the seam: enumerate the
+  invariants each actor assumes about the others, pin them with
+  coordinator-level tests, and evaluate whether ES-scoped state wants a single
+  owner. The ES drain implementation is the motivating case — it worked, but
+  every new cross-actor feature currently re-derives the seam contract.
+- [ ] **Poll-cadence tail sweep.** The dataplane intent recompute went
+  event-driven with the 5 s poll demoted to a backstop, and segment
+  re-election subscribes to the EVPN event broadcast with a 10 s backstop
+  tick. Sweep the remaining fixed-cadence loops (originator RIB repoll,
+  reconciler passes) and convert the ones with an available event source to
+  the same event-driven + poll-backstop shape; each conversion so far has
+  turned seconds of repair latency into milliseconds.
 
 - [x] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
   `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Multi-PR batches keep
