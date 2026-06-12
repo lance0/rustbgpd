@@ -5378,6 +5378,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -5388,6 +5390,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -5444,6 +5447,10 @@ table_id = 6000
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "full dataplane-handle + segment-actor wiring per the sibling converger proofs"
+    )]
     async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
         let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
         let l2_candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
@@ -5463,6 +5470,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -5473,6 +5482,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -5568,6 +5578,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -5578,6 +5590,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -5622,6 +5635,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -5632,6 +5647,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -5725,6 +5741,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
@@ -5735,6 +5753,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -5898,6 +5917,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
@@ -5908,6 +5929,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6122,6 +6144,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6132,6 +6156,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6247,6 +6272,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6257,6 +6284,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6755,6 +6783,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6765,6 +6795,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6831,6 +6862,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6841,6 +6874,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6894,6 +6928,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6904,6 +6940,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -6980,6 +7017,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -6990,6 +7029,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -7498,6 +7538,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -7508,6 +7550,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -7820,6 +7863,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -7830,6 +7875,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -8007,6 +8053,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -8017,6 +8065,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -8178,6 +8227,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -8188,6 +8239,7 @@ table_id = 6000
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,

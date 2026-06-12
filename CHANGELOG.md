@@ -11,6 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Same-ESI local bias in the remote-MAC projection (ADR-0085
+  slice 3 — decision 5).** A multi-homed PE no longer lets a peer
+  PE's Type 2 usurp its own healthy attachment circuit: a remote
+  MAC/MAC-IP route whose ESI is locally attached (via the
+  `[[ethernet_segments]].interface` binding), healthy, not drained,
+  and **entitled to forward** is suppressed from remote-FDB intent —
+  the local AC is the correct egress, and per RFC 7432 §15.1 same-ES
+  reachability is not mobility (the usurpation M66 surfaced is fixed
+  at its root). Entitlement is DF-aware: all-active members always
+  qualify; in single-active mode only the DF does — a healthy
+  single-active **backup keeps the remote row toward the active PE**
+  (its AC is non-forwarding; biasing there would blackhole). MAC-IP
+  neighbor rows follow the MAC's bias: the host's L3 adjacency also
+  resolves on the local AC. The bias lifts the moment the segment
+  drains (operator or link reason, including the recovery hold-off)
+  or loses entitlement — remote rows then program and the peer PE
+  takes over, which is the M66 takeover behavior by design instead of
+  by usurpation. Unbound segments (no `interface`) keep today's
+  behavior — AC health is unknowable without the binding. Published
+  by the segment actor as a per-`(ESI, VNI)` eligibility snapshot
+  next to the BUM-enforcement flow; the dataplane supervisor
+  re-projects on every snapshot change, so the desired state stays a
+  pure function of the EVPN RIB and the published snapshots.
 - **Best-path explain now names the tiebreaker that won — with the
   compared values.** `rustbgpctl rib --prefix X --explain` (RibService
   `ExplainBestPath`) already annotated each losing path with the

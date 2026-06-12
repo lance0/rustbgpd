@@ -207,8 +207,12 @@ has it, no broad performance sprints without profile evidence.
   EAD-withdrawn-MACs-retained mass-withdraw shape automatically,
   recovery holds `recovery_delay_secs` (re-armed per up edge), and
   operator/link reasons compose so neither trigger overrides the
-  other; remaining ADR-0085 slices: the same-ESI local bias in the
-  remote-MAC projection (decision 5) and the link-driven M66 sibling
+  other; the same-ESI local bias **landed** (ADR-0085 decision 5,
+  slice 3): a remote Type 2 whose ESI is locally attached, healthy,
+  not drained, and entitled to forward (all-active always;
+  single-active only as DF — a healthy backup keeps the remote row)
+  programs no remote FDB row, fixing the M66 usurpation at its root;
+  remaining ADR-0085 slice: the link-driven M66 sibling
   proof; a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
@@ -225,11 +229,13 @@ has it, no broad performance sprints without profile evidence.
   stays poll-based until something else needs eventing); learned-port-to-ESI
   disambiguation so one local VNI
   can participate in multiple Ethernet Segments; same-ESI local bias in the
-  remote-MAC projection (M66 surfaced: an ES peer's Type 2 for a MAC on a
-  locally-configured segment is programmed as a remote row, usurping the
-  kernel-learned local AC row — a real EVPN implementation never points an
-  own-segment MAC at the ES peer; deliberately deferred to the ES↔interface
-  binding design. The second half M66 surfaced — the in-place FDB port move
+  remote-MAC projection — **RESOLVED** (ADR-0085 decision 5, slice 3): M66
+  surfaced an ES peer's Type 2 for a MAC on a locally-configured segment
+  being programmed as a remote row, usurping the kernel-learned local AC
+  row; with the ES↔interface binding the projection now suppresses remote
+  rows for locally-attached, healthy, entitled-to-forward (ESI, VNI) pairs
+  (DF-aware in single-active mode — a healthy backup keeps the remote row
+  toward the active PE). The second half M66 surfaced — the in-place FDB port move
   emitting no local-delete observation, so the originator's cache kept
   claiming the MAC and undrain replayed it stale — is RESOLVED: the
   classifier now surfaces VXLAN-port `RTM_NEWNEIGH` as an

@@ -211,6 +211,66 @@ impl BumEnforcementTable {
     }
 }
 
+/// ADR-0085 decision 5: per-`(ESI, VNI)` same-ESI local-bias
+/// eligibility snapshot.
+///
+/// Published by the daemon's segment actor — the one owner of both
+/// the redundancy mode and the per-`(ESI, VNI)` DF role — composed
+/// with attachment-circuit health (interface binding + drain state).
+/// A pair is present exactly when a remote MAC/MAC-IP route for that
+/// `(ESI, VNI)` must NOT program a remote FDB row on this PE: the
+/// local attachment circuit is healthy and this PE is entitled to
+/// forward on it, so the local AC is the correct egress (RFC 7432
+/// §15.1 — same-ES reachability is not mobility).
+///
+/// Consumed by the dataplane supervisor's remote-MAC projection as a
+/// pure input: a bias-eligible route simply does not exist in the
+/// desired remote-FDB state, so the table feeds the projection
+/// rather than riding [`DataplaneIntent`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SameEsiBiasTable {
+    eligible: std::collections::BTreeSet<(EthernetSegmentIdentifier, EvpnInstanceId)>,
+}
+
+impl SameEsiBiasTable {
+    /// Empty table: no segment is bias-eligible, today's projection
+    /// behavior applies everywhere.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark one `(ESI, VNI)` pair bias-eligible.
+    pub fn insert(&mut self, esi: EthernetSegmentIdentifier, vni: EvpnInstanceId) {
+        self.eligible.insert((esi, vni));
+    }
+
+    /// Whether remote MAC/MAC-IP routes for `(esi, vni)` are biased
+    /// to the local attachment circuit (suppressed from remote-FDB
+    /// intent).
+    #[must_use]
+    pub fn is_eligible(&self, esi: EthernetSegmentIdentifier, vni: EvpnInstanceId) -> bool {
+        self.eligible.contains(&(esi, vni))
+    }
+
+    /// Number of bias-eligible `(ESI, VNI)` pairs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.eligible.len()
+    }
+
+    /// `true` when no pair is bias-eligible.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.eligible.is_empty()
+    }
+
+    /// Iterate eligible pairs in deterministic `(ESI, VNI)` order.
+    pub fn iter(&self) -> impl Iterator<Item = &(EthernetSegmentIdentifier, EvpnInstanceId)> {
+        self.eligible.iter()
+    }
+}
+
 /// Readiness of one BUM-enforcement row after the Linux dataplane
 /// resolves it against current link inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]

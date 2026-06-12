@@ -50,6 +50,7 @@ use rustbgpd_evpn::{
     BumEnforcementTable, DfAlgorithm, DfCandidate, DfElection, DfRole, EthernetSegment,
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalEadPerEsOriginator,
     LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction, RedundancyMode,
+    SameEsiBiasTable,
 };
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
@@ -61,6 +62,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::evpn_es_link_drain::EsLinkBindings;
 use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 
 /// Cloneable ADR-0063 runtime control surface for the Ethernet
@@ -188,11 +190,49 @@ impl EvpnSegmentHandle {
 /// single-homed deployments and route reflectors take this path and
 /// pay zero runtime cost.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "daemon wiring spawns via spawn_with_local_bias since ADR-0085 decision 5; this bias-less shape is kept for the actor lifecycle tests"
+    )
+)]
 pub fn spawn(
     instances: &Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
     rib_tx: mpsc::Sender<RibUpdate>,
     bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
+    metrics: BgpMetrics,
+    daemon_shutdown: CancellationToken,
+) -> Option<EvpnSegmentHandle> {
+    spawn_with_local_bias(
+        instances,
+        segments,
+        rib_tx,
+        bum_enforcement_tx,
+        None,
+        None,
+        metrics,
+        daemon_shutdown,
+    )
+}
+
+/// [`spawn`] plus the ADR-0085 decision 5 inputs: the same-ESI
+/// bias-eligibility publisher (toward the dataplane supervisor,
+/// alongside the BUM-enforcement flow) and the resolved
+/// `[[ethernet_segments]]` interface-binding watch (the "locally
+/// attached" half of the eligibility condition). Either may be absent
+/// — no dataplane / no binding feed — in which case no bias snapshot
+/// is published / no segment counts as bound.
+#[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
+#[allow(clippy::too_many_arguments)] // actor dependency spine, mirrored from the dataplane supervisor spawn
+pub(crate) fn spawn_with_local_bias(
+    instances: &Arc<EvpnInstanceTable>,
+    segments: Vec<EthernetSegment>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
+    same_esi_bias_tx: Option<watch::Sender<Arc<SameEsiBiasTable>>>,
+    es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnSegmentHandle> {
@@ -210,15 +250,18 @@ pub fn spawn(
         instances: instances.clone(),
         rib_tx,
         bum_enforcement_tx,
+        same_esi_bias_tx,
         metrics,
         shutdown: daemon_shutdown.clone(),
         drained_esis: Arc::new(BTreeSet::new()),
+        bound_esis: BTreeSet::new(),
     };
     let join = tokio::spawn(segment_loop(
         runtime,
         instances_rx,
         segments_rx,
         drained_esis_rx,
+        es_link_bindings_rx,
     ));
     Some(EvpnSegmentHandle {
         shutdown: daemon_shutdown,
@@ -233,6 +276,9 @@ struct SegmentRuntime {
     instances: Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
+    /// ADR-0085 decision 5: same-ESI bias-eligibility publisher toward
+    /// the dataplane supervisor. `None` when no dataplane runs.
+    same_esi_bias_tx: Option<watch::Sender<Arc<SameEsiBiasTable>>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
     /// ADR-0084 operator-drained ESIs. While an ESI is in this set the
@@ -240,6 +286,11 @@ struct SegmentRuntime {
     /// startup, election, and snapshot reapplication all skip it, so a
     /// SIGHUP/runtime snapshot republish cannot resurrect the routes.
     drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+    /// ESIs with an `[[ethernet_segments]].interface` binding in the
+    /// committed config (ADR-0085 decision 1) — derived from the
+    /// binding watch. Only bound segments can be bias-eligible:
+    /// unbound segments have unknowable AC health (decision 5).
+    bound_esis: BTreeSet<EthernetSegmentIdentifier>,
 }
 
 /// Per-ESI runtime state.
@@ -271,6 +322,7 @@ async fn segment_loop(
     mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
     mut segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
     mut drained_esis_rx: watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    mut es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
 ) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
     // One allocator per spawn so two operators on different daemons
@@ -278,6 +330,11 @@ async fn segment_loop(
     // for the lifetime of the actor task and assignments stay
     // stable across reconfiguration within that lifetime.
     let mut esi_label_allocator = rustbgpd_evpn::EsiLabelAllocator::new();
+    // Bound-ESI projection before the first snapshot publish so the
+    // initial bias-eligibility table sees startup bindings.
+    if let Some(rx) = es_link_bindings_rx.as_mut() {
+        runtime.bound_esis = rx.borrow_and_update().keys().copied().collect();
+    }
     let startup_segments = segments_rx.borrow().as_ref().clone();
     rebuild_segment_states(
         &runtime,
@@ -297,7 +354,7 @@ async fn segment_loop(
 
     // Initial origination + election.
     initial_startup(&runtime, &mut by_esi).await;
-    publish_bum_enforcement_snapshot(&runtime, &by_esi);
+    publish_dataplane_snapshots(&runtime, &by_esi);
 
     // Periodic re-election timer — backstop in case we're in poll-only mode
     // (broadcast subscription failed) or events get dropped under load.
@@ -309,7 +366,7 @@ async fn segment_loop(
             biased;
             () = runtime.shutdown.cancelled() => {
                 drain(&runtime, &mut by_esi).await;
-                publish_empty_bum_enforcement_snapshot(&runtime);
+                publish_empty_dataplane_snapshots(&runtime);
                 return;
             }
             changed = segments_rx.changed() => {
@@ -331,7 +388,7 @@ async fn segment_loop(
                 } else {
                     debug!("EVPN segment: runtime segment watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
-                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    publish_empty_dataplane_snapshots(&runtime);
                     return;
                 }
             },
@@ -353,14 +410,14 @@ async fn segment_loop(
                             segments,
                         );
                         initial_startup(&runtime, &mut by_esi).await;
-                        publish_bum_enforcement_snapshot(&runtime, &by_esi);
+                        publish_dataplane_snapshots(&runtime, &by_esi);
                     } else {
                         apply_runtime_instance_snapshot(&mut runtime, instances);
                     }
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
-                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    publish_empty_dataplane_snapshots(&runtime);
                     return;
                 }
             },
@@ -374,8 +431,28 @@ async fn segment_loop(
                     // daemon teardown — same exit path as the other watches.
                     debug!("EVPN segment: runtime drained-ESI watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
-                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    publish_empty_dataplane_snapshots(&runtime);
                     return;
+                }
+            },
+            changed = bindings_changed(&mut es_link_bindings_rx) => {
+                if changed.is_ok() {
+                    if let Some(rx) = es_link_bindings_rx.as_mut() {
+                        runtime.bound_esis =
+                            rx.borrow_and_update().keys().copied().collect();
+                    }
+                    // Bound-ness only affects bias eligibility — the
+                    // BUM-enforcement table is binding-agnostic, so
+                    // republish just the bias snapshot.
+                    publish_same_esi_bias_snapshot(&runtime, &by_esi);
+                } else {
+                    // Bindings publisher gone (daemon teardown / test
+                    // rig). Keep the last-known bound set — the drain
+                    // watch still lifts the bias fail-safe (a dead AC
+                    // drains, drained ESIs are never eligible) — and
+                    // stop selecting on the closed channel.
+                    debug!("EVPN segment: ES link-binding watch closed; keeping last bound set");
+                    es_link_bindings_rx = None;
                 }
             },
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
@@ -549,7 +626,7 @@ async fn apply_runtime_segment_snapshot(
     drain(runtime, by_esi).await;
     rebuild_segment_states(runtime, by_esi, esi_label_allocator, segments);
     initial_startup(runtime, by_esi).await;
-    publish_bum_enforcement_snapshot(runtime, by_esi);
+    publish_dataplane_snapshots(runtime, by_esi);
 }
 
 async fn subscribe_evpn_events(
@@ -568,6 +645,19 @@ async fn recv_evpn_event(
 ) -> Result<EvpnRouteEvent, broadcast::error::RecvError> {
     match rx {
         Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the next ES link-binding publish. `Ok` means a new snapshot
+/// is readable, `Err` means the sender closed; a `None` receiver (no
+/// binding feed wired, or closed earlier) parks forever so the
+/// surrounding `select!` services the other arms.
+async fn bindings_changed(
+    rx: &mut Option<watch::Receiver<EsLinkBindings>>,
+) -> Result<(), watch::error::RecvError> {
+    match rx {
+        Some(r) => r.changed().await,
         None => std::future::pending().await,
     }
 }
@@ -667,7 +757,7 @@ async fn apply_drained_esi_snapshot(
         changed = true;
     }
     if changed {
-        publish_bum_enforcement_snapshot(runtime, by_esi);
+        publish_dataplane_snapshots(runtime, by_esi);
     }
 }
 
@@ -693,7 +783,7 @@ async fn handle_evpn_event(
         return;
     };
     run_election_for(runtime, state).await;
-    publish_bum_enforcement_snapshot(runtime, by_esi);
+    publish_dataplane_snapshots(runtime, by_esi);
 }
 
 async fn reelection_sweep(
@@ -710,7 +800,7 @@ async fn reelection_sweep(
     for state in by_esi.values_mut() {
         run_election_for_routes(runtime, state, &routes).await;
     }
-    publish_bum_enforcement_snapshot(runtime, by_esi);
+    publish_dataplane_snapshots(runtime, by_esi);
 }
 
 /// Re-gather candidates from the RIB and re-run election for one
@@ -811,6 +901,25 @@ async fn run_election_with_candidates(
     }
 }
 
+/// Publish both dataplane-supervisor snapshots the segment actor
+/// owns: the Gate 8b BUM-enforcement table and the ADR-0085 same-ESI
+/// bias-eligibility table. Both derive from the same per-ES role
+/// state, so every event that republishes one republishes the other.
+fn publish_dataplane_snapshots(
+    runtime: &SegmentRuntime,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) {
+    publish_bum_enforcement_snapshot(runtime, by_esi);
+    publish_same_esi_bias_snapshot(runtime, by_esi);
+}
+
+fn publish_empty_dataplane_snapshots(runtime: &SegmentRuntime) {
+    publish_empty_bum_enforcement_snapshot(runtime);
+    if let Some(tx) = &runtime.same_esi_bias_tx {
+        send_same_esi_bias_if_modified(tx, SameEsiBiasTable::new());
+    }
+}
+
 fn publish_bum_enforcement_snapshot(
     runtime: &SegmentRuntime,
     by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
@@ -830,6 +939,105 @@ fn publish_empty_bum_enforcement_snapshot(runtime: &SegmentRuntime) {
     if let Some(tx) = &runtime.bum_enforcement_tx {
         tx.send_replace(Arc::new(BumEnforcementTable::new()));
     }
+}
+
+/// ADR-0085 decision 5: publish the per-`(ESI, VNI)` same-ESI
+/// bias-eligibility snapshot toward the dataplane supervisor.
+///
+/// Published change-only (`send_if_modified`): a bias change forces a
+/// full remote-MAC re-projection on the supervisor side, and the
+/// re-election sweep republishes every 10 s with usually-identical
+/// content.
+fn publish_same_esi_bias_snapshot(
+    runtime: &SegmentRuntime,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) {
+    let Some(tx) = &runtime.same_esi_bias_tx else {
+        return;
+    };
+    let table = build_same_esi_bias_table_from_roles(
+        &runtime.bound_esis,
+        &runtime.drained_esis,
+        by_esi.iter().flat_map(|(&esi, state)| {
+            state
+                .last_roles
+                .iter()
+                .map(move |(&vni, &role)| (esi, state.config.redundancy_mode, vni, role))
+        }),
+    );
+    if send_same_esi_bias_if_modified(tx, table) {
+        debug!("EVPN segment: published same-ESI bias eligibility");
+    }
+}
+
+fn send_same_esi_bias_if_modified(
+    tx: &watch::Sender<Arc<SameEsiBiasTable>>,
+    table: SameEsiBiasTable,
+) -> bool {
+    tx.send_if_modified(|current| {
+        if **current == table {
+            return false;
+        }
+        *current = Arc::new(table);
+        true
+    })
+}
+
+/// Pure ADR-0085 decision 5 eligibility rule. A `(ESI, VNI)` pair is
+/// bias-eligible — remote MAC/MAC-IP routes for it must not program a
+/// remote FDB row — iff the segment is:
+///
+/// - **locally attached**: in `bound_esis` (has an `interface`
+///   binding). Unbound segments are never eligible — AC health is
+///   unknowable, today's projection behavior is preserved.
+/// - **healthy and not drained**: not in `drained_esis`. The flat
+///   drained set already encodes link health: per decision 2 a
+///   carrier loss (or a missing link, a dead monitor, a non-Linux
+///   build — all fail-closed) holds the `Link` drain reason, so
+///   "attached and not drained" implies "healthy". The decision 3
+///   recovery hold-off keeps the ES drained after carrier returns,
+///   which correctly suppresses the bias until the segment has
+///   re-converged. No separate health channel is needed.
+/// - **entitled to forward**, redundancy-mode-aware: all-active —
+///   always (every member PE forwards); single-active — only when
+///   this PE is the DF for the `(ESI, VNI)`. A healthy single-active
+///   *backup* keeps the remote row toward the active PE: its own AC
+///   is non-forwarding by definition, and biasing there would become
+///   a blackhole the moment the non-DF all-traffic AC blocking gap
+///   is closed.
+///
+/// `roles` carries one entry per actively-originated `(ESI, VNI)`
+/// (the actor's `last_roles`, cleared while an ES is drained), so a
+/// drained ES contributes nothing through either condition.
+pub(crate) fn build_same_esi_bias_table_from_roles<I>(
+    bound_esis: &BTreeSet<EthernetSegmentIdentifier>,
+    drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
+    roles: I,
+) -> SameEsiBiasTable
+where
+    I: IntoIterator<
+        Item = (
+            EthernetSegmentIdentifier,
+            RedundancyMode,
+            EvpnInstanceId,
+            DfRole,
+        ),
+    >,
+{
+    let mut table = SameEsiBiasTable::new();
+    for (esi, redundancy_mode, vni, role) in roles {
+        if !bound_esis.contains(&esi) || drained_esis.contains(&esi) {
+            continue;
+        }
+        let entitled_to_forward = match redundancy_mode {
+            RedundancyMode::AllActive => true,
+            RedundancyMode::SingleActive => role.is_df(),
+        };
+        if entitled_to_forward {
+            table.insert(esi, vni);
+        }
+    }
+    table
 }
 
 fn build_bum_enforcement_table(
@@ -2320,9 +2528,11 @@ mod tests {
             instances,
             rib_tx,
             bum_enforcement_tx: None,
+            same_esi_bias_tx: None,
             metrics: BgpMetrics::new(),
             shutdown: CancellationToken::new(),
             drained_esis: Arc::new(BTreeSet::new()),
+            bound_esis: BTreeSet::new(),
         };
         let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
@@ -2388,6 +2598,84 @@ mod tests {
         let table =
             build_bum_enforcement_table_from_roles(&instances, [(esi(7), vni(100), DfRole::NonDf)]);
         assert!(table.is_empty());
+    }
+
+    // -- ADR-0085 decision 5: same-ESI bias eligibility ---------------
+
+    /// The full decision 5 matrix: (DF / non-DF) x (all-active /
+    /// single-active) x (drained / not drained) x (bound / unbound).
+    /// Eligible iff bound AND not drained AND entitled to forward
+    /// (all-active always; single-active only as DF).
+    #[test]
+    fn same_esi_bias_table_covers_the_role_mode_drain_matrix() {
+        use RedundancyMode::{AllActive, SingleActive};
+        let bound: BTreeSet<EthernetSegmentIdentifier> = [esi(1)].into_iter().collect();
+        let no_drain: BTreeSet<EthernetSegmentIdentifier> = BTreeSet::new();
+        let drained: BTreeSet<EthernetSegmentIdentifier> = [esi(1)].into_iter().collect();
+
+        let cases = [
+            // (mode, role, drained set, expected eligible)
+            (AllActive, DfRole::Df, &no_drain, true),
+            // All-active entitles every member PE — non-DF included.
+            (AllActive, DfRole::NonDf, &no_drain, true),
+            (SingleActive, DfRole::Df, &no_drain, true),
+            // A healthy single-active backup is NOT eligible: its AC
+            // is non-forwarding; the remote row toward the active PE
+            // must stay (operator review amendment).
+            (SingleActive, DfRole::NonDf, &no_drain, false),
+            // Drain (operator or link reason, incl. the recovery
+            // hold-off) lifts the bias regardless of role/mode.
+            (AllActive, DfRole::Df, &drained, false),
+            (AllActive, DfRole::NonDf, &drained, false),
+            (SingleActive, DfRole::Df, &drained, false),
+            (SingleActive, DfRole::NonDf, &drained, false),
+        ];
+        for (mode, role, drain_set, expected) in cases {
+            let table = build_same_esi_bias_table_from_roles(
+                &bound,
+                drain_set,
+                [(esi(1), mode, vni(100), role)],
+            );
+            assert_eq!(
+                table.is_eligible(esi(1), vni(100)),
+                expected,
+                "mode={mode:?} role={role:?} drained={}",
+                !drain_set.is_empty()
+            );
+        }
+
+        // Unbound (no interface binding): never eligible — AC health
+        // is unknowable, today's projection behavior is preserved.
+        let unbound: BTreeSet<EthernetSegmentIdentifier> = BTreeSet::new();
+        let table = build_same_esi_bias_table_from_roles(
+            &unbound,
+            &no_drain,
+            [(esi(1), AllActive, vni(100), DfRole::Df)],
+        );
+        assert!(table.is_empty(), "unbound segments get no bias");
+    }
+
+    /// Eligibility is per-(ESI, VNI): one ES spanning two VNIs with
+    /// split DF roles biases only the DF VNI in single-active mode.
+    #[test]
+    fn same_esi_bias_table_is_keyed_per_esi_vni() {
+        let bound: BTreeSet<EthernetSegmentIdentifier> = [esi(1)].into_iter().collect();
+        let table = build_same_esi_bias_table_from_roles(
+            &bound,
+            &BTreeSet::new(),
+            [
+                (esi(1), RedundancyMode::SingleActive, vni(100), DfRole::Df),
+                (
+                    esi(1),
+                    RedundancyMode::SingleActive,
+                    vni(200),
+                    DfRole::NonDf,
+                ),
+            ],
+        );
+        assert!(table.is_eligible(esi(1), vni(100)));
+        assert!(!table.is_eligible(esi(1), vni(200)));
+        assert_eq!(table.len(), 1);
     }
 
     // -- ADR-0084 Ethernet Segment drain/undrain ---------------------

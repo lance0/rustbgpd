@@ -62,7 +62,7 @@ use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
     FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ProjectedEvpnEadPerEvi,
-    ProjectedEvpnRoute, RemoteMacTable,
+    ProjectedEvpnRoute, RemoteMacTable, SameEsiBiasTable,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -218,6 +218,13 @@ pub struct EvpnDataplaneHandle {
     /// supervisor folds it into the same [`DataplaneIntent`] watch
     /// stream as remote-MAC programming.
     pub(crate) bum_enforcement_tx: watch::Sender<Arc<BumEnforcementTable>>,
+    /// ADR-0085 decision 5 same-ESI bias-eligibility input. The
+    /// segment orchestrator publishes the latest `(ESI, VNI)`
+    /// eligibility snapshot here; unlike [`Self::bum_enforcement_tx`]
+    /// it feeds the remote-MAC PROJECTION (a bias-eligible route does
+    /// not exist in desired remote-FDB state), so a change triggers a
+    /// full intent recompute rather than a cached republish.
+    pub(crate) same_esi_bias_tx: watch::Sender<Arc<SameEsiBiasTable>>,
     /// ADR-0063 effective L2VNI table input. Future runtime commits
     /// publish complete table snapshots here; the supervisor folds
     /// the latest table into [`DataplaneIntent`] without mutating a
@@ -249,6 +256,14 @@ impl EvpnDataplaneHandle {
     #[must_use]
     pub fn bum_enforcement_sender(&self) -> watch::Sender<Arc<BumEnforcementTable>> {
         self.bum_enforcement_tx.clone()
+    }
+
+    /// Clone the ADR-0085 same-ESI bias-eligibility publisher.
+    /// Consumers publish a complete snapshot; intermediates may be
+    /// coalesced by the watch channel.
+    #[must_use]
+    pub fn same_esi_bias_sender(&self) -> watch::Sender<Arc<SameEsiBiasTable>> {
+        self.same_esi_bias_tx.clone()
     }
 
     /// Cloneable ADR-0063 runtime control surface for daemon apply
@@ -301,6 +316,7 @@ impl EvpnDataplaneHandle {
             local_mac_rx: _,
             report_tx: _,
             bum_enforcement_tx: _,
+            same_esi_bias_tx: _,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx: _,
@@ -488,6 +504,7 @@ where
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
     let (bum_enforcement_tx, bum_enforcement_rx) =
         watch::channel(Arc::new(BumEnforcementTable::new()));
+    let (same_esi_bias_tx, same_esi_bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
     let (evpn_instances_tx, evpn_instances_rx) = watch::channel(evpn_instances.clone());
     let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(ip_vrfs.clone());
     let (remote_prefix_drop_counts_tx, remote_prefix_drop_counts_rx) =
@@ -545,6 +562,7 @@ where
         rib_tx,
         intent_tx,
         bum_enforcement_rx,
+        same_esi_bias_rx,
         duplicate_mac_quarantine_rx,
         remote_prefix_drop_counts_tx,
         metrics.clone(),
@@ -567,6 +585,7 @@ where
         local_mac_rx: None,
         report_tx: report_broadcast_tx,
         bum_enforcement_tx,
+        same_esi_bias_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
         remote_prefix_drop_counts_rx,
@@ -685,15 +704,21 @@ async fn publish_dataplane_intent(
     ip_vrfs: Arc<IpVrfTable>,
     bum_enforcement: BumEnforcementTable,
     quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    same_esi_bias: &SameEsiBiasTable,
     metrics: &BgpMetrics,
     state: &mut SupervisorIntentState,
     remote_prefix_drop_counts_tx: &watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
 ) -> Result<bool, RibQueryError> {
+    // The bias snapshot is a projection input: it shapes the remote-MAC
+    // table itself, so the unchanged-intent early return below covers
+    // bias changes through the projected-table comparison — no separate
+    // last-bias field is needed.
     let tables = build_intent_tables(
         rib_tx,
         instances.as_ref(),
         ip_vrfs.as_ref(),
         quarantined_macs,
+        same_esi_bias,
     )
     .await?;
     // ADR-0083 slice 3: refresh the backup-window gauge on every
@@ -814,6 +839,7 @@ async fn supervisor_loop(
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
+    mut same_esi_bias_rx: watch::Receiver<Arc<SameEsiBiasTable>>,
     mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
     remote_prefix_drop_counts_tx: watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
     metrics: BgpMetrics,
@@ -842,6 +868,7 @@ async fn supervisor_loop(
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow().clone();
                 match publish_dataplane_intent(
                     &rib_tx,
                     &intent_tx,
@@ -849,6 +876,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
                     &metrics,
                     &mut state,
                     &remote_prefix_drop_counts_tx,
@@ -866,6 +894,7 @@ async fn supervisor_loop(
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow().clone();
                 match publish_dataplane_intent(
                     &rib_tx,
                     &intent_tx,
@@ -873,6 +902,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
                     &metrics,
                     &mut state,
                     &remote_prefix_drop_counts_tx,
@@ -902,6 +932,7 @@ async fn supervisor_loop(
                     }
                 } else {
                     let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                    let same_esi_bias = same_esi_bias_rx.borrow().clone();
                     match publish_dataplane_intent(
                         &rib_tx,
                         &intent_tx,
@@ -909,6 +940,7 @@ async fn supervisor_loop(
                         ip_vrfs,
                         bum_enforcement,
                         quarantined.as_ref(),
+                        same_esi_bias.as_ref(),
                         &metrics,
                         &mut state,
                         &remote_prefix_drop_counts_tx,
@@ -921,6 +953,41 @@ async fn supervisor_loop(
                     }
                 }
             }
+            changed = same_esi_bias_rx.changed() => {
+                if changed.is_err() {
+                    // The bias sender lives on the dataplane handle
+                    // (like the BUM publisher) — closed means daemon
+                    // teardown.
+                    debug!("same-ESI bias publisher gone; supervisor exiting");
+                    return;
+                }
+                // The bias snapshot is a projection input, so a change
+                // always requires a full re-projection — there is no
+                // cached-republish shortcut like the BUM arm's.
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow_and_update().clone();
+                match publish_dataplane_intent(
+                    &rib_tx,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
+                    quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
+                    &metrics,
+                    &mut state,
+                    &remote_prefix_drop_counts_tx,
+                ).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                    },
+                }
+            }
             changed = duplicate_mac_quarantine_rx.changed(), if duplicate_mac_quarantine_updates_open => {
                 if changed.is_err() {
                     debug!("duplicate-MAC quarantine publisher gone; continuing with periodic polls");
@@ -931,6 +998,7 @@ async fn supervisor_loop(
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow_and_update().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow().clone();
                 match publish_dataplane_intent(
                     &rib_tx,
                     &intent_tx,
@@ -938,6 +1006,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
                     &metrics,
                     &mut state,
                     &remote_prefix_drop_counts_tx,
@@ -958,6 +1027,7 @@ async fn supervisor_loop(
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow().clone();
                 match publish_dataplane_intent(
                     &rib_tx,
                     &intent_tx,
@@ -965,6 +1035,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
                     &metrics,
                     &mut state,
                     &remote_prefix_drop_counts_tx,
@@ -985,6 +1056,7 @@ async fn supervisor_loop(
                 let ip_vrfs = ip_vrfs_rx.borrow_and_update().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let same_esi_bias = same_esi_bias_rx.borrow().clone();
                 match publish_dataplane_intent(
                     &rib_tx,
                     &intent_tx,
@@ -992,6 +1064,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    same_esi_bias.as_ref(),
                     &metrics,
                     &mut state,
                     &remote_prefix_drop_counts_tx,
@@ -1107,6 +1180,7 @@ async fn build_intent_tables(
     instances: &EvpnInstanceTable,
     ip_vrfs: &rustbgpd_evpn::ip_vrf::IpVrfTable,
     quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    same_esi_bias: &SameEsiBiasTable,
 ) -> Result<IntentTables, RibQueryError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     rib_tx
@@ -1166,7 +1240,7 @@ async fn build_intent_tables(
 
     let projected: Vec<ProjectedEvpnRoute> = routes
         .iter()
-        .filter_map(|r| project_one(r, &active_ead_per_es, &single_active_index))
+        .filter_map(|r| project_one(r, &active_ead_per_es, &single_active_index, same_esi_bias))
         .filter(|route| !projected_route_is_quarantined(route, quarantined_macs))
         .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
@@ -1189,10 +1263,13 @@ async fn build_intent_tables(
             };
             let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
             instances.get(vni)?;
-            // Mirror the projection's quarantine gate — a quarantined
-            // MAC contributes no desired state, so it must not light
-            // the gauge either.
+            // Mirror the projection's quarantine + same-ESI bias gates
+            // — a route that contributes no desired state must not
+            // light the gauge either.
             if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
+                return None;
+            }
+            if same_esi_bias.is_eligible(macip.esi, vni) {
                 return None;
             }
             Some(key)
@@ -1446,6 +1523,22 @@ fn project_ead_per_evi_unfiltered(
 /// and the reconcile actor realizes the retarget as one atomic
 /// `NLM_F_REPLACE` per `(ESI, EthernetTag)` group with the MAC rows
 /// untouched. With no eligible survivor, today's flush applies.
+///
+/// ADR-0085 decision 5 layers the same-ESI local bias on top: a Type
+/// 2 whose `(ESI, VNI)` is bias-eligible — locally attached via an
+/// `interface` binding, healthy, not drained, and entitled to forward
+/// (all-active always; single-active only as DF) — is dropped from
+/// the projection entirely. The local attachment circuit is the
+/// correct egress and RFC 7432 §15.1 says same-ES reachability is not
+/// mobility, so the route must not usurp the kernel-learned local AC
+/// row (the M66 finding). Dropping the projected route removes the
+/// remote FDB row, its nexthop-group membership, its MAC-IP neighbor
+/// rows (the host's L3 adjacency also resolves on the local AC), and
+/// its Type 5 overlay-index resolution — a biased MAC simply does not
+/// exist in desired remote state. The bias lifts (route projects
+/// again) the moment the segment is drained or unhealthy: the
+/// eligibility snapshot then drops the pair and the M66 takeover
+/// behavior is the failure path, by design.
 fn project_one(
     route: &EvpnRibRoute,
     active_ead_per_es: &std::collections::BTreeSet<(
@@ -1453,10 +1546,23 @@ fn project_one(
         rustbgpd_wire::EthernetSegmentIdentifier,
     )>,
     single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
+    same_esi_bias: &SameEsiBiasTable,
 ) -> Option<ProjectedEvpnRoute> {
     let EvpnRoute::MacIp(macip) = &route.route else {
         return None;
     };
+
+    // ADR-0085 decision 5 same-ESI local bias: suppress before any
+    // other gate — an eligible (ESI, VNI) has no remote row regardless
+    // of the mass-withdraw / swap-window outcome. ESI=0 (single-homed)
+    // can never be eligible; the eligibility table only carries
+    // configured, bound segments.
+    if macip.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
+        && let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni())
+        && same_esi_bias.is_eligible(macip.esi, vni)
+    {
+        return None;
+    }
 
     // Mass-withdraw filter: a Type 2 with non-zero ESI is only
     // valid if the originating VTEP also advertises an EAD-per-ES
@@ -1527,7 +1633,7 @@ mod tests {
     use rustbgpd_evpn::ip_vrf::{IpVrf, IpVrfId};
     use rustbgpd_evpn::{
         BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceTable,
-        FdbNhgDriftCounters, MacAddress, RouteDistinguisher, RouteTarget,
+        FdbNhgDriftCounters, MacAddress, RedundancyMode, RouteDistinguisher, RouteTarget,
     };
     use rustbgpd_evpn_linux::{
         InMemoryDataplane, InstanceProbe, KernelLinkInfo, snapshot::KernelVxlanInfo,
@@ -1549,6 +1655,12 @@ mod tests {
     /// did pre-slice-3 (flush) in the tests that pin that baseline.
     fn empty_sa_index() -> rustbgpd_evpn::SingleActiveEligibleIndex {
         rustbgpd_evpn::SingleActiveEligibleIndex::new()
+    }
+
+    /// Empty same-ESI bias table: ADR-0085 decision 5 bias never
+    /// fires, pinning the pre-bias projection behavior.
+    fn no_bias() -> SameEsiBiasTable {
+        SameEsiBiasTable::new()
     }
 
     fn local_instance(v: u32, bridge: Option<&str>) -> EvpnInstance {
@@ -1797,6 +1909,7 @@ mod tests {
                 ip_vrfs.clone(),
                 BumEnforcementTable::new(),
                 &BTreeSet::new(),
+                &no_bias(),
                 &metrics,
                 &mut state,
                 &drop_counts_tx,
@@ -1832,6 +1945,7 @@ mod tests {
                 ip_vrfs,
                 BumEnforcementTable::new(),
                 &BTreeSet::new(),
+                &no_bias(),
                 &metrics,
                 &mut state,
                 &drop_counts_tx,
@@ -1861,6 +1975,7 @@ mod tests {
         let (evpn_instances_tx, evpn_instances_rx) = watch::channel(initial);
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<DataplaneReport>(1);
@@ -1872,6 +1987,7 @@ mod tests {
             local_mac_rx: None,
             report_tx,
             bum_enforcement_tx,
+            same_esi_bias_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
             remote_prefix_drop_counts_rx,
@@ -1888,7 +2004,7 @@ mod tests {
         // ESI=0 → bypasses the mass-withdraw filter regardless of
         // the active set's contents.
         let active = std::collections::BTreeSet::new();
-        let projected = project_one(&route, &active, &empty_sa_index()).unwrap();
+        let projected = project_one(&route, &active, &empty_sa_index(), &no_bias()).unwrap();
         assert_eq!(projected.mac.octets(), [1; 6]);
         assert_eq!(projected.next_hop, ipa("10.0.0.2"));
         assert_eq!(projected.mobility_sequence, Some(7));
@@ -1913,7 +2029,7 @@ mod tests {
             is_llgr_stale: false,
         };
         let active = std::collections::BTreeSet::new();
-        assert!(project_one(&imet, &active, &empty_sa_index()).is_none());
+        assert!(project_one(&imet, &active, &empty_sa_index(), &no_bias()).is_none());
     }
 
     #[test]
@@ -1947,15 +2063,15 @@ mod tests {
         };
         // No EAD-per-ES from VTEP 10.0.0.2 for this ESI → filter.
         let empty = std::collections::BTreeSet::new();
-        assert!(project_one(&route, &empty, &empty_sa_index()).is_none());
+        assert!(project_one(&route, &empty, &empty_sa_index(), &no_bias()).is_none());
         // Same route with the active set populated → route survives.
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
-        assert!(project_one(&route, &active, &empty_sa_index()).is_some());
+        assert!(project_one(&route, &active, &empty_sa_index(), &no_bias()).is_some());
         // Different VTEP in the active set doesn't satisfy the gate.
         let mut wrong_vtep = std::collections::BTreeSet::new();
         wrong_vtep.insert((ipa("10.0.0.55"), esi));
-        assert!(project_one(&route, &wrong_vtep, &empty_sa_index()).is_none());
+        assert!(project_one(&route, &wrong_vtep, &empty_sa_index(), &no_bias()).is_none());
     }
 
     #[test]
@@ -1983,10 +2099,151 @@ mod tests {
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
 
-        assert!(project_one(&from_vtep_a, &active, &empty_sa_index()).is_some());
+        assert!(project_one(&from_vtep_a, &active, &empty_sa_index(), &no_bias()).is_some());
         assert!(
-            project_one(&from_vtep_b, &active, &empty_sa_index()).is_none(),
+            project_one(&from_vtep_b, &active, &empty_sa_index(), &no_bias()).is_none(),
             "EAD-per-ES from VTEP A must not satisfy VTEP B"
+        );
+    }
+
+    // ─── ADR-0085 decision 5: the same-ESI local bias ───
+    //
+    // Each scenario composes the segment actor's pure eligibility
+    // builder (`build_same_esi_bias_table_from_roles`) with
+    // `project_one` — the two halves of the decision 5 contract. The
+    // M66 finding these pin: a peer PE's Type 2 for a MAC on a
+    // locally-attached, healthy segment must not usurp the
+    // kernel-learned local AC row.
+
+    fn bias_table(
+        bound: &[EthernetSegmentIdentifier],
+        drained: &[EthernetSegmentIdentifier],
+        roles: &[(EthernetSegmentIdentifier, RedundancyMode, u32, DfRole)],
+    ) -> SameEsiBiasTable {
+        crate::evpn_segment::build_same_esi_bias_table_from_roles(
+            &bound.iter().copied().collect(),
+            &drained.iter().copied().collect(),
+            roles
+                .iter()
+                .map(|&(esi, mode, v, role)| (esi, mode, vni(v), role)),
+        )
+    }
+
+    #[test]
+    fn all_active_attached_segment_suppresses_the_remote_row() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let route = evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi);
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+        // Control: the route passes the mass-withdraw gate and
+        // projects without the bias.
+        assert!(project_one(&route, &active, &empty_sa_index(), &no_bias()).is_some());
+
+        // Locally attached (bound), healthy (not drained), all-active
+        // — entitled to forward even as non-DF: suppressed.
+        let bias = bias_table(
+            &[esi],
+            &[],
+            &[(esi, RedundancyMode::AllActive, 100, DfRole::NonDf)],
+        );
+        assert!(
+            project_one(&route, &active, &empty_sa_index(), &bias).is_none(),
+            "an all-active member with a healthy local AC must not program a remote row"
+        );
+
+        // MAC-IP routes follow the same bias: the host's L3 adjacency
+        // also resolves on the local AC (RFC 7432 — the MAC is
+        // reachable locally; the neighbor entry must not point at the
+        // fabric either).
+        let mut macip = evpn_macip_route_with_host_ip(100, 1, Some("192.0.2.10"), "10.0.0.2", None);
+        if let EvpnRoute::MacIp(inner) = &mut macip.route {
+            inner.esi = esi;
+        }
+        assert!(
+            project_one(&macip, &active, &empty_sa_index(), &bias).is_none(),
+            "MAC-IP (neighbor) rows follow the MAC's bias"
+        );
+    }
+
+    #[test]
+    fn single_active_df_suppresses_the_remote_row() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let route = evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi);
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+
+        let bias = bias_table(
+            &[esi],
+            &[],
+            &[(esi, RedundancyMode::SingleActive, 100, DfRole::Df)],
+        );
+        assert!(
+            project_one(&route, &active, &empty_sa_index(), &bias).is_none(),
+            "the single-active DF forwards on its own AC; the peer's Type 2 must not usurp it"
+        );
+    }
+
+    /// The operator review amendment, pinned by name: a healthy
+    /// single-active BACKUP (non-DF) keeps the remote row toward the
+    /// active PE. Its own AC is non-forwarding by definition — biasing
+    /// there would become a blackhole the moment non-DF all-traffic AC
+    /// blocking lands.
+    #[test]
+    fn single_active_non_df_keeps_the_remote_row() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let route = evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi);
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+
+        let bias = bias_table(
+            &[esi],
+            &[],
+            &[(esi, RedundancyMode::SingleActive, 100, DfRole::NonDf)],
+        );
+        assert!(
+            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            "a healthy single-active backup must keep the remote row toward the active PE"
+        );
+    }
+
+    #[test]
+    fn same_esi_bias_lifts_on_drain() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let route = evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi);
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+
+        // Drained (operator or link reason — including the recovery
+        // hold-off window): the bias lifts and the remote row programs,
+        // the M66 takeover behavior as the designed failure path.
+        let bias = bias_table(
+            &[esi],
+            &[esi],
+            &[(esi, RedundancyMode::AllActive, 100, DfRole::Df)],
+        );
+        assert!(
+            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            "a drained segment must program remote rows so the peer PE takes over"
+        );
+    }
+
+    #[test]
+    fn unbound_segment_gets_no_bias() {
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let route = evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi);
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+
+        // No `interface` binding: AC health is unknowable, today's
+        // behavior is preserved — the route projects.
+        let bias = bias_table(
+            &[],
+            &[],
+            &[(esi, RedundancyMode::AllActive, 100, DfRole::Df)],
+        );
+        assert!(
+            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            "unbound segments must keep today's remote-row behavior"
         );
     }
 
@@ -2073,7 +2330,7 @@ mod tests {
         let mut quarantined = BTreeSet::new();
         quarantined.insert(DuplicateMacKey::new(vni(100), mac(1)));
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &quarantined)
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &quarantined, &no_bias())
             .await
             .unwrap();
         assert!(
@@ -2128,9 +2385,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
         assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
         assert!(
@@ -2161,9 +2419,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
         assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
         assert!(entry.alias_group_key.is_none());
@@ -2204,9 +2463,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         let entry = tables
             .remote_macs
             .get(vni(100), mac(1))
@@ -2245,9 +2505,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         assert!(
             tables.remote_macs.get(vni(100), mac(1)).is_none(),
             "no eligible survivor → today's mass-withdraw flush"
@@ -2284,9 +2545,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         let tag0 = tables.remote_macs.get(vni(100), mac(1)).unwrap();
         assert_eq!(tag0.remote_vtep_ip, ipa("10.0.0.3"));
         assert_eq!(tag0.alias_group_key, Some((esi, EthernetTagId(0))));
@@ -2343,12 +2605,14 @@ mod tests {
             }
         });
 
-        let window = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
-        let reconverged = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let window =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        let reconverged =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         assert_eq!(
             window.remote_macs, reconverged.remote_macs,
             "swap-window and post-readvertisement intents must be identical"
@@ -2399,6 +2663,7 @@ mod tests {
                 ip_vrfs.clone(),
                 BumEnforcementTable::new(),
                 &BTreeSet::new(),
+                &no_bias(),
                 &metrics,
                 &mut state,
                 &drop_counts_tx,
@@ -2420,6 +2685,7 @@ mod tests {
                 ip_vrfs,
                 BumEnforcementTable::new(),
                 &BTreeSet::new(),
+                &no_bias(),
                 &metrics,
                 &mut state,
                 &drop_counts_tx,
@@ -2471,9 +2737,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
         assert_eq!(entry.alias_vtep_ips, vec![ipa("10.0.0.3")]);
         assert_eq!(entry.alias_group_key, Some((esi, EthernetTagId(0))));
@@ -2505,9 +2772,10 @@ mod tests {
             }
         });
 
-        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
-            .await
-            .unwrap();
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
         assert!(tables.remote_ip_prefixes.drops().is_empty());
         let entries: Vec<_> = tables
             .remote_ip_prefixes
@@ -2735,6 +3003,7 @@ mod tests {
         // supervisor's deduplication logic.
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -2748,6 +3017,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -2808,6 +3078,7 @@ mod tests {
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -2821,6 +3092,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -2871,6 +3143,7 @@ mod tests {
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -2884,6 +3157,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -2935,6 +3209,7 @@ mod tests {
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -2948,6 +3223,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -3038,6 +3314,7 @@ mod tests {
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -3051,6 +3328,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -3079,6 +3357,94 @@ mod tests {
         assert!(
             updated.remote_macs.get(vni(100), mac(1)).is_none(),
             "quarantine update should re-project before the next long poll interval"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_reprojects_on_same_esi_bias_change() {
+        // Mirrors the quarantine-change recompute test: the segment
+        // actor publishing a new bias-eligibility snapshot must drive
+        // a full re-projection before the next long poll (the desired
+        // state stays a pure function of RIB x snapshots).
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let routes = vec![
+                        evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                        evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    ];
+                    let _ = reply.send(routes);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            bias_rx,
+            quarantine_rx,
+            drop_counts_tx,
+            BgpMetrics::new(),
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(
+            initial.remote_macs.get(vni(100), mac(1)).is_some(),
+            "initial projection should include the remote MAC (no bias yet)"
+        );
+
+        // The segment actor reports the segment locally attached,
+        // healthy, and entitled to forward.
+        let mut bias = SameEsiBiasTable::new();
+        bias.insert(esi, vni(100));
+        bias_tx.send_replace(Arc::new(bias));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(
+            updated.remote_macs.get(vni(100), mac(1)).is_none(),
+            "a bias-eligibility change must re-project before the next long poll interval"
+        );
+
+        // Bias lifts (e.g. the AC drains): the row must come back.
+        bias_tx.send_replace(Arc::new(SameEsiBiasTable::new()));
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let lifted = intent_rx.borrow_and_update().clone();
+        assert!(
+            lifted.remote_macs.get(vni(100), mac(1)).is_some(),
+            "lifting the bias must re-program the remote row (the M66 takeover path)"
         );
 
         shutdown.cancel();
@@ -3167,6 +3533,7 @@ mod tests {
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -3182,6 +3549,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
@@ -3224,6 +3592,7 @@ mod tests {
 
         let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let (drop_counts_tx, _drop_counts_rx) =
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
@@ -3237,6 +3606,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            bias_rx,
             quarantine_rx,
             drop_counts_tx,
             BgpMetrics::new(),
