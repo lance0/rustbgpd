@@ -1,6 +1,6 @@
 # ADR-0085: Ethernet Segment interface binding — link-driven drain and same-ESI local bias
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-12
 
 ## Context
