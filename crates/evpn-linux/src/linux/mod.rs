@@ -95,12 +95,21 @@ pub struct LinuxDataplane {
     local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
     /// Upward `KernelEvent` channel for the reconcile actor's
     /// [`Dataplane::next_event`]. The notify task pushes
-    /// [`KernelEvent::KernelStateChanged`] here when an
-    /// `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` message survives
-    /// [`notify::classify_route`], so withdraws on operator
-    /// `ip addr del` (or any custom-table route change) reach the
-    /// actor within milliseconds instead of waiting for the periodic
-    /// dump cycle.
+    /// [`KernelEvent::KernelStateChanged`] here when:
+    ///
+    /// - an `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` message
+    ///   survives [`notify::classify_route`] (operator `ip addr del`
+    ///   or any custom-table route change),
+    /// - an `RTNLGRP_NEIGH` `AF_BRIDGE` delete survives
+    ///   [`notify::classify_fdb_drift`] (a programmed remote-MAC row
+    ///   flushed off a managed VXLAN port), or
+    /// - an `RTNLGRP_LINK` message survives
+    ///   [`notify::classify_link_event`] (bridge-port flag/state
+    ///   drift on the BUM-filter / AC-gate surface, VXLAN or managed
+    ///   bridge topology change, AC-port enslavement),
+    ///
+    /// so all three drift classes reach the actor within
+    /// milliseconds instead of waiting for the periodic dump cycle.
     kernel_event_rx: mpsc::Receiver<KernelEvent>,
     /// Dedicated `NETLINK_ROUTE` socket for ADR-0059 FDB nexthop
     /// group programming. Distinct from `handle` so nexthop traffic
@@ -152,8 +161,8 @@ impl LinuxDataplane {
             rtnetlink::new_connection().map_err(DataplaneError::Io)?;
 
         // Subscribe to RTNLGRP_NEIGH + RTNLGRP_IPV4_ROUTE +
-        // RTNLGRP_IPV6_ROUTE on the same socket that carries our
-        // solicited dump/program traffic. `add_membership` is a
+        // RTNLGRP_IPV6_ROUTE + RTNLGRP_LINK on the same socket that
+        // carries our solicited dump/program traffic. `add_membership` is a
         // synchronous setsockopt call, so it must happen before we
         // hand the connection to the runtime via `tokio::spawn`.
         // Failure on any subscription is logged but non-fatal — the
@@ -174,10 +183,19 @@ impl LinuxDataplane {
         //   the off-by-one is exactly what `notify::tests::
         //   route_rtnlgrp_constants_match_kernel_enum_values`
         //   guards against.)
+        // - `RTNLGRP_LINK` (1) feeds the same kernel-event channel
+        //   for link drift on the EVPN surface: bridge-port flag /
+        //   state writes (the BUM-filter and AC-gate enforcement
+        //   targets), VXLAN/bridge topology bring-up and teardown,
+        //   and AC-port enslavement — repaired within the coalesce
+        //   window instead of the 60 s periodic dump.
+        //   `notify::classify_link_event` keeps container-runtime
+        //   veth churn out of the wake path.
         for (group, name) in [
             (notify::RTNLGRP_NEIGH, "RTNLGRP_NEIGH"),
             (notify::RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE"),
             (notify::RTNLGRP_IPV6_ROUTE, "RTNLGRP_IPV6_ROUTE"),
+            (link_carrier::RTNLGRP_LINK, "RTNLGRP_LINK"),
         ] {
             if let Err(e) = connection.socket_mut().socket_mut().add_membership(group) {
                 warn!(
@@ -347,6 +365,16 @@ async fn notify_loop(
                     }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
                 }
+                // Independent of the observation pipeline: a delete
+                // on a managed VXLAN port is kernel-side drift of a
+                // programmed remote-MAC row (`bridge fdb del` /
+                // flush). Wake the reconcile actor so the re-diff
+                // repairs it within the coalesce window instead of
+                // the periodic dump. Same `try_send` rationale as
+                // the route arms below.
+                if notify::classify_fdb_drift(&neigh, &cache) {
+                    let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
+                }
             }
             RouteNetlinkMessage::NewRoute(route)
                 if notify::classify_route(&route, notify::RouteEventKind::New) =>
@@ -362,6 +390,19 @@ async fn notify_loop(
                 if notify::classify_route(&route, notify::RouteEventKind::Del) =>
             {
                 let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
+            }
+            // `RTNLGRP_LINK` drift feed: bridge-port flag / state
+            // writes (BUM-filter + AC-gate enforcement surface),
+            // VXLAN/bridge topology bring-up and teardown, AC-port
+            // enslavement. The classifier keeps unrelated host link
+            // churn (container veths, VNI-less bridges) out of the
+            // wake path; our own port writes echo here and cost one
+            // coalesced no-op pass.
+            RouteNetlinkMessage::NewLink(link) | RouteNetlinkMessage::DelLink(link) => {
+                let cache = link_cache.lock().await.clone();
+                if notify::classify_link_event(&link, &cache) {
+                    let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
+                }
             }
             _ => {}
         }
@@ -692,20 +733,23 @@ impl Dataplane for LinuxDataplane {
     }
 
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send {
-        // Drain the kernel-event channel populated by the
-        // `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` notify task.
+        // Drain the kernel-event channel populated by the notify
+        // task: route changes (`RTNLGRP_IPV4_ROUTE` /
+        // `RTNLGRP_IPV6_ROUTE` via `classify_route`), programmed-FDB
+        // drift (`RTNLGRP_NEIGH` `AF_BRIDGE` deletes on a managed
+        // VXLAN port via `classify_fdb_drift`), and link drift on the
+        // EVPN surface (`RTNLGRP_LINK` via `classify_link_event`).
         // The reconcile actor awaits this in its `tokio::select!`
-        // and re-runs `coalesce_and_reconcile` on every wake — slice
-        // 6a's IP-VRF observation refreshes within milliseconds of
-        // an operator `ip addr del` / `ip route add` in a custom
-        // table, instead of waiting for the 60 s periodic dump.
+        // and re-runs `coalesce_and_reconcile` on every wake — an
+        // operator `ip route add` in a custom table, a `bridge fdb
+        // del` against a programmed row, or a `bridge link set`
+        // flipping a port flag all repair within milliseconds
+        // instead of waiting for the 60 s periodic dump.
         //
-        // `RTNLGRP_NEIGH` events stay on the dedicated
-        // `LocalMacObservation` channel surfaced by
-        // `take_local_mac_rx` (ADR-0054 §1's "narrow upward
-        // interface" rationale). `RTNLGRP_LINK` subscription is
-        // still a follow-up — the periodic dump catches link/FDB
-        // drift.
+        // `RTNLGRP_NEIGH` *observation* events (local learns/ages,
+        // IP bindings) stay on the dedicated `LocalMacObservation`
+        // channel surfaced by `take_local_mac_rx` (ADR-0054 §1's
+        // "narrow upward interface" rationale).
         self.kernel_event_rx.recv()
     }
 

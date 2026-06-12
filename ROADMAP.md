@@ -231,8 +231,10 @@ has it, no broad performance sprints without profile evidence.
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
-  drain needs — name + `IFF_LOWER_UP`; the wider bridge/VXLAN inventory
-  stays poll-based until something else needs eventing); learned-port-to-ESI
+  drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep
+  added `RTNLGRP_LINK` eventing on the notify socket so EVPN-surface link
+  drift wakes the reconcile actor (the inventory itself is still rebuilt
+  by dump — now event-triggered rather than periodic-only); learned-port-to-ESI
   disambiguation so one local VNI
   can participate in multiple Ethernet Segments; same-ESI local bias in the
   remote-MAC projection — **RESOLVED** (ADR-0085 decision 5, slice 3): M66
@@ -761,13 +763,29 @@ branch is between features.
   coordinator-level tests, and evaluate whether ES-scoped state wants a single
   owner. The ES drain implementation is the motivating case — it worked, but
   every new cross-actor feature currently re-derives the seam contract.
-- [ ] **Poll-cadence tail sweep.** The dataplane intent recompute went
+- [x] **Poll-cadence tail sweep.** The dataplane intent recompute went
   event-driven with the 5 s poll demoted to a backstop, and segment
   re-election subscribes to the EVPN event broadcast with a 10 s backstop
-  tick. Sweep the remaining fixed-cadence loops (originator RIB repoll,
-  reconciler passes) and convert the ones with an available event source to
-  the same event-driven + poll-backstop shape; each conversion so far has
-  turned seconds of repair latency into milliseconds.
+  tick. The sweep found the originator RIB repoll already converted (RIB
+  broadcast + local-MAC netlink observations; its 5 s tick is the backstop
+  plus the duplicate-MAC quarantine recovery sweep, whose ≤5 s tail on a
+  minutes-long quarantine window isn't worth a deadline timer) and the
+  reconcile actor already event-driven for intent and custom-table route
+  changes — what was missing was kernel-side drift eventing: programmed
+  remote-MAC rows flushed off a managed VXLAN port and bridge-port
+  flag/state drift (BUM-filter / AC-gate surface) repaired only on the
+  60 s periodic dump. **Converted:** the notify task now wakes the
+  reconcile actor on `AF_BRIDGE` FDB deletes on managed VXLAN ports and on
+  classified `RTNLGRP_LINK` events (port flags/state, VXLAN/managed-bridge
+  topology, enslavement), repairing within the 50 ms coalesce window; the
+  periodic dump stays as the backstop. **Stays on cadence, deliberately:**
+  BMP statistics (RFC 7854 interval reporting), BFD protocol timers, MRT
+  dump rotation, and the retained backstop ticks themselves. **Follow-up
+  inventory (demand-shaped):** the FIB runtime and blackhole reconcilers
+  bound *kernel*-side drift at 30 s — RIB-side changes are already
+  event-driven — and converting them needs an `RTNLGRP_IPV4/6_ROUTE`
+  subscription surfaced through the `UnicastFib` seam (the evpn-linux
+  notify task is the template).
 
 - [x] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
   `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Multi-PR batches keep
