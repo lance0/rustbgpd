@@ -470,21 +470,41 @@ pub enum ImportValidationDependency {
     Aspa,
 }
 
-/// Canonical `[[dynamic_neighbors]]` range whose accepted live peers need their
-/// resolved policy chains re-applied.
+/// Canonical `[[dynamic_neighbors]]` range selector identifying the live
+/// dynamic sessions a command targets.
 ///
-/// Carried by [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]. The peer
-/// manager expands these selectors against its live `ManagedPeer` map so
-/// dynamic-range transaction apply/rollback targets the exact dynamic sessions
-/// that were accepted by the impacted range.
+/// Carried by [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] (re-apply
+/// resolved policy chains) and [`PeerManagerCommand::BounceDynamicRangePeers`]
+/// (graceful session reset after a peer-group reshape). The peer manager
+/// expands these selectors against its live `ManagedPeer` map so a
+/// dynamic-range transaction targets exactly the dynamic sessions that were
+/// accepted by the impacted range.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DynamicRangePolicyTarget {
+pub struct DynamicRangeTarget {
     /// Canonical network address of the accepted dynamic range.
     pub addr: IpAddr,
     /// Prefix length of the accepted dynamic range.
     pub prefix_len: u8,
     /// Peer group inherited by sessions accepted by this range.
     pub peer_group: String,
+}
+
+/// Outcome of [`PeerManagerCommand::BounceDynamicRangePeers`].
+///
+/// The bounce is deliberately best-effort: it runs only after the owning
+/// config transaction has persisted, so a per-peer signaling failure must not
+/// fail (or roll back) the already-committed transaction. A peer that could
+/// not be signaled keeps its running session config until it reconnects —
+/// the same documented semantics SIGHUP and the targeted peer-group RPCs
+/// apply to live dynamic sessions — and is reported here instead of being
+/// silently swallowed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DynamicPeerBounceOutcome {
+    /// Live dynamic sessions that were signaled to gracefully reset.
+    pub signaled: usize,
+    /// Per-peer signaling failures (`"<peer>: <error>"`). These peers keep
+    /// their running config until they reconnect.
+    pub failures: Vec<String>,
 }
 
 /// Resolved import/export policy chains for one live peer session.
@@ -637,9 +657,31 @@ pub enum PeerManagerCommand {
         /// Concrete static-neighbor targets.
         static_targets: Vec<ResolvedPeerPolicy>,
         /// Dynamic-range selectors to expand against live dynamic peers.
-        dynamic_ranges: Vec<DynamicRangePolicyTarget>,
+        dynamic_ranges: Vec<DynamicRangeTarget>,
         /// Reply returns the captured prior chains (the rollback token).
         reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+    },
+    /// Gracefully reset the live dynamic sessions accepted by the given
+    /// `[[dynamic_neighbors]]` ranges so they re-accept under the committed
+    /// runtime config.
+    ///
+    /// The dynamic counterpart of [`PeerManagerCommand::ApplyPeerReshapeSnapshot`]:
+    /// an accepted dynamic peer cannot be delete/re-added (it exists only
+    /// because the remote dialed in), so a peer-group session reshape reaches
+    /// it by sending a graceful stop (Cease NOTIFICATION with an RFC 8203
+    /// shutdown communication). The normal `BackToIdle` auto-removal then
+    /// reaps the `ManagedPeer` and frees its `dynamic_neighbor_limit` slot,
+    /// and the remote's reconnect is re-accepted through `handle_inbound`,
+    /// which resolves the session config from the already-staged candidate
+    /// snapshot. Issued only after the owning transaction has persisted;
+    /// per-peer failures are reported in the outcome, never as a command
+    /// error. Admin-disabled dynamic peers are skipped (they have no running
+    /// session to reset and `BackToIdle` deliberately does not reap them).
+    BounceDynamicRangePeers {
+        /// Dynamic-range selectors to expand against live dynamic peers.
+        ranges: Vec<DynamicRangeTarget>,
+        /// Reply returns the per-peer signaling outcome.
+        reply: oneshot::Sender<DynamicPeerBounceOutcome>,
     },
     /// Atomically reconfigure a set of live static peers and return each peer's
     /// PRIOR neighbor config for rollback.

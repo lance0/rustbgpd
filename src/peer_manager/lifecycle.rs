@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig, SessionLifecycleEventType,
-    SetGshutError,
+    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey, PeerLifecycleError,
+    PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig, TransportConfig};
@@ -416,6 +416,87 @@ impl PeerManager {
             failures.len(),
             failures.join("; ")
         )))
+    }
+
+    /// Gracefully reset the live dynamic sessions accepted by `ranges` so
+    /// they re-accept under the current (already staged) runtime config.
+    ///
+    /// The dynamic counterpart of [`Self::apply_peer_reshape_snapshot`]: an
+    /// accepted dynamic peer cannot be delete/re-added — it exists only
+    /// because the remote dialed in, and `delete_peer_checked` rejects
+    /// dynamic targets so the `dynamic_neighbor_limit` slot accounting stays
+    /// owned by the `BackToIdle` reap path. Instead, each matched peer is
+    /// sent a graceful stop (Cease NOTIFICATION carrying an RFC 8203
+    /// shutdown communication) with its admin state untouched; the session's
+    /// `BackToIdle` notification then drives the normal dynamic auto-removal
+    /// (slot decrement, dead-letter carry-over, metric reaping), and the
+    /// remote's reconnect is re-accepted by `handle_inbound`, which resolves
+    /// the session config from `current_config` — the staged candidate.
+    ///
+    /// Best-effort by contract: this runs only after the owning transaction
+    /// persisted, so per-peer signaling failures are reported in the outcome
+    /// rather than failing the committed transaction. A peer that could not
+    /// be signaled keeps its running session config until it reconnects (the
+    /// same documented semantics SIGHUP and the targeted peer-group RPCs
+    /// apply to live dynamic sessions). Admin-disabled dynamic peers are
+    /// skipped: they have no running session to reset, and `BackToIdle`
+    /// deliberately keeps them un-reaped.
+    pub(super) async fn bounce_dynamic_peers_for_ranges(
+        &mut self,
+        ranges: &[DynamicRangeTarget],
+    ) -> DynamicPeerBounceOutcome {
+        let mut outcome = DynamicPeerBounceOutcome::default();
+        if ranges.is_empty() {
+            return outcome;
+        }
+
+        let mut matched: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter(|(_, managed)| {
+                managed.is_dynamic
+                    && managed.enabled
+                    && managed
+                        .accepted_dynamic_range
+                        .as_ref()
+                        .is_some_and(|accepted| {
+                            ranges.iter().any(|range| {
+                                range.addr == accepted.addr
+                                    && range.prefix_len == accepted.prefix_len
+                                    && range.peer_group == accepted.peer_group
+                            })
+                        })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        matched.sort();
+
+        for peer_key in matched {
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            let reason = bytes::Bytes::from_static(b"peer-group configuration change");
+            match managed.handle.stop(Some(reason)).await {
+                Ok(()) => {
+                    info!(
+                        peer = %peer_key,
+                        "peer-group reshape: signaled dynamic session to reset; it \
+                         re-accepts under the committed config on reconnect"
+                    );
+                    outcome.signaled += 1;
+                }
+                Err(error) => {
+                    warn!(
+                        peer = %peer_key,
+                        %error,
+                        "peer-group reshape: failed to signal dynamic session reset; \
+                         the session keeps its running config until it reconnects"
+                    );
+                    outcome.failures.push(format!("{peer_key}: {error}"));
+                }
+            }
+        }
+        outcome
     }
 
     async fn restore_reconfigured_peer(

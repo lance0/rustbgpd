@@ -409,11 +409,15 @@ has it, no broad performance sprints without profile evidence.
   state query now distinguishes a deadline expiry from an exited session
   task, and a timeout drops the inbound connection instead of treating the
   existing — possibly Established — session as Idle and replacing it
-  (RFC 4271 §6.8); a dead session task still accepts the inbound. What
-  remains: peer-group field edits still don't reach live dynamic sessions
-  (pairs with the deferred dynamic reconfigure executor). (The per-peer
-  Prometheus series leak listed here previously was fixed — deleted peers
-  now reap their label series.)
+  (RFC 4271 §6.8); a dead session task still accepts the inbound.
+  Peer-group field edits now reach live dynamic sessions on the transaction
+  path (`[Unreleased]`, ADR-0086): the session reshape executor gracefully
+  resets affected dynamic sessions after persist so they re-accept under the
+  committed config. What remains: SIGHUP and the targeted peer-group RPCs
+  still leave live dynamic sessions on their running config until reconnect
+  (deliberate — no plan preview on those paths; see ADR-0086's deferral).
+  (The per-peer Prometheus series leak listed here previously was fixed —
+  deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
   unit-test coverage. Per-statement attribution within a matched import chain —
@@ -849,13 +853,19 @@ branch is between features.
   the candidate snapshot, re-apply resolved chains to affected live sessions
   with captured priors, persist with ack, and restore live chains plus the
   snapshot on failure.
-- [x] **Config transaction static peer-group/session reshape executor.**
+- [x] **Config transaction peer-group/session reshape executor.**
   Peer-group field edits and static-neighbor peer-group reassignments that
   reshape existing static sessions now commit as transactions: stage the
   candidate snapshot, reconfigure affected peers with captured prior configs,
   persist with ack, and restore live peers plus the snapshot on failure.
-  Dynamic-range session reshapes remain deferred until accepted dynamic sessions
-  can be targeted with equivalent rollback semantics.
+  Dynamic-range session reshapes shipped in `[Unreleased]` (ADR-0086): after a
+  successful persist, the executor gracefully resets the live dynamic sessions
+  accepted by an affected range (Cease + RFC 8203 shutdown communication);
+  each remote's reconnect is re-accepted under the committed config and the
+  accept-slot accounting stays owned by the normal `BackToIdle` reaping.
+  Dynamic-range peer-group *reassignments* stay outside the reshape family (a
+  `[[dynamic_neighbors]]` record edit; sessions accepted under the old group
+  cannot be live-reassigned).
 - [x] **Config transaction commit-confirmed core.**
   `ApplyConfigTransaction` can now enter a singleton pending-confirm state with
   `confirm_id` and a bounded confirm timer. Confirm makes the change permanent;

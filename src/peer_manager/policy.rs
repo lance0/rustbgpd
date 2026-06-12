@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, ConfigEvent, DynamicRangePolicyTarget, ImportValidationDependency,
-    PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency, PeerKey,
+    PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -207,7 +207,7 @@ impl PeerManager {
     pub(super) async fn apply_policy_impact_snapshot(
         &mut self,
         mut static_targets: Vec<ResolvedPeerPolicy>,
-        dynamic_ranges: Vec<DynamicRangePolicyTarget>,
+        dynamic_ranges: Vec<DynamicRangeTarget>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
         let mut dynamic_targets = self.resolve_dynamic_policy_targets(&dynamic_ranges)?;
         static_targets.append(&mut dynamic_targets);
@@ -216,7 +216,7 @@ impl PeerManager {
 
     fn resolve_dynamic_policy_targets(
         &self,
-        dynamic_ranges: &[DynamicRangePolicyTarget],
+        dynamic_ranges: &[DynamicRangeTarget],
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
         if dynamic_ranges.is_empty() {
             return Ok(Vec::new());
