@@ -1116,8 +1116,8 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 mod tests {
     use super::*;
     use prometheus::Registry;
+    use rustbgpd_rib::RouteEvent;
     use rustbgpd_rib::route::RouteOrigin;
-    use rustbgpd_rib::{RouteEvent, RouteEventType};
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin};
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::{
@@ -1339,17 +1339,7 @@ mod tests {
     }
 
     fn route_event(prefix: Prefix) -> RouteEvent {
-        RouteEvent {
-            event_id: 0,
-            event_type: RouteEventType::BestChanged,
-            prefix,
-            peer: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-            previous_peer: None,
-            target_peer: None,
-            timestamp: "0".to_string(),
-            path_id: 0,
-            reason: String::new(),
-        }
+        crate::test_support::route_event(prefix, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)))
     }
 
     fn v4(len: u8) -> Prefix {

@@ -508,20 +508,7 @@ mod tests {
     use super::*;
     use rustbgpd_api::peer_types::PeerManagerCommand;
 
-    fn table(name: &str, table_id: u32) -> FibTableConfig {
-        FibTableConfig {
-            name: name.to_string(),
-            table_id,
-            metric: 200,
-            families: vec!["ipv4_unicast".to_string()],
-            allowed_peer_groups: vec![],
-            allowed_neighbors: vec![],
-            max_routes: None,
-            maximum_paths: None,
-            maximum_paths_ebgp: None,
-            maximum_paths_ibgp: None,
-        }
-    }
+    use crate::test_support::basic_fib_table as table;
 
     #[tokio::test]
     async fn persistence_rejection_rolls_back_runtime_and_snapshot() {

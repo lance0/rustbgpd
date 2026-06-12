@@ -2173,20 +2173,7 @@ remote_asn = 65002
         );
     }
 
-    fn table(name: &str, table_id: u32) -> FibTableConfig {
-        FibTableConfig {
-            name: name.to_string(),
-            table_id,
-            metric: 200,
-            families: vec!["ipv4_unicast".to_string()],
-            allowed_peer_groups: Vec::new(),
-            allowed_neighbors: Vec::new(),
-            max_routes: None,
-            maximum_paths: None,
-            maximum_paths_ebgp: None,
-            maximum_paths_ibgp: None,
-        }
-    }
+    use crate::test_support::basic_fib_table as table;
 
     fn snapshot(table: &FibTableConfig) -> FibTableSnapshot {
         FibTableSnapshot {

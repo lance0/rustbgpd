@@ -227,31 +227,10 @@ impl AdjRibOut {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
 
     use rustbgpd_wire::{Ipv4Prefix, Prefix};
 
-    use crate::route::{Route, RouteOrigin};
-
-    fn make_route(prefix: Prefix, path_id: u32) -> Route {
-        Route {
-            prefix,
-            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            attributes: Arc::new(vec![]),
-            received_at: std::time::Instant::now(),
-            origin_type: RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::new(1, 1, 1, 1),
-            is_stale: false,
-            is_llgr_stale: false,
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-            path_id,
-        }
-    }
+    use crate::test_support::make_route_with_path_id as make_route;
 
     fn prefix_a() -> Prefix {
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))

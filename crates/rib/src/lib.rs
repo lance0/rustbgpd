@@ -29,6 +29,9 @@ mod orf;
 mod prefix_map;
 /// Route and `FlowSpec` route data types.
 pub mod route;
+/// Shared unit-test fixtures (canonical test route builders).
+#[cfg(test)]
+mod test_support;
 /// RIB update messages and outbound route structures.
 pub mod update;
 

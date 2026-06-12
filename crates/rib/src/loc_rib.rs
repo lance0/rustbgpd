@@ -450,37 +450,18 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
-        NumericMatch, Origin, PathAttribute,
+        NumericMatch, PathAttribute,
     };
 
     use super::*;
     use crate::route::RouteOrigin;
 
     fn make_route(peer_oct: u8, prefix: Ipv4Prefix, local_pref: u32) -> Route {
-        let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
-        Route {
-            prefix: Prefix::V4(prefix),
-            next_hop: IpAddr::V4(peer),
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: IpAddr::V4(peer),
-            attributes: Arc::new(vec![
-                PathAttribute::Origin(Origin::Igp),
-                PathAttribute::AsPath(AsPath {
-                    segments: vec![AsPathSegment::AsSequence(vec![65001])],
-                }),
-                PathAttribute::LocalPref(local_pref),
-            ]),
-            received_at: Instant::now(),
-            origin_type: crate::route::RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }
+        crate::test_support::make_route_with_lp(
+            prefix,
+            Ipv4Addr::new(10, 0, 0, peer_oct),
+            local_pref,
+        )
     }
 
     #[test]

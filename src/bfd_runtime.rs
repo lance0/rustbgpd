@@ -1022,7 +1022,6 @@ mod linux {
 mod tests {
     use super::BfdRuntimeConfig;
     use crate::config::Config;
-    use std::net::IpAddr;
 
     fn config_with(extra: &str) -> Config {
         let toml = format!(
@@ -1041,9 +1040,7 @@ log_format = "json"
         toml::from_str(&toml).expect("parse config")
     }
 
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
+    use crate::test_support::ip;
 
     #[test]
     fn from_config_collects_bfd_enabled_neighbor() {

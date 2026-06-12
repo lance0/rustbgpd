@@ -938,16 +938,11 @@ fn cmp_prefix(left: Prefix, right: Prefix) -> Ordering {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
-    use std::time::Instant;
 
-    use rustbgpd_rib::{FibInstallNextHop, NextHopScope, Route, RouteOrigin};
-    use rustbgpd_wire::{
-        AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
-    };
+    use rustbgpd_rib::{FibInstallNextHop, Route, RouteOrigin};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 
     use super::*;
-    use crate::config::FibTableConfig;
 
     /// Wrap a single best route as a one-next-hop install candidate (the
     /// shape the RIB returns when `maximum_paths` is unset / 1).
@@ -1024,23 +1019,9 @@ mod tests {
         FibInstallCandidate { next_hops, best }
     }
 
-    fn table(name: &str, table_id: u32, metric: u32, families: &[&str]) -> FibTableConfig {
-        FibTableConfig {
-            name: name.to_string(),
-            table_id,
-            metric,
-            families: families
-                .iter()
-                .map(|family| (*family).to_string())
-                .collect(),
-            allowed_peer_groups: Vec::new(),
-            allowed_neighbors: Vec::new(),
-            max_routes: None,
-            maximum_paths: None,
-            maximum_paths_ebgp: None,
-            maximum_paths_ibgp: None,
-        }
-    }
+    use crate::test_support::{
+        fib_route_key as key, fib_table as table, ip, route_from_peer, scoped_route,
+    };
 
     fn v4_prefix(octet: u8, len: u8) -> Prefix {
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, octet, 0), len))
@@ -1051,10 +1032,6 @@ mod tests {
             Ipv6Addr::new(0x2001, 0x0db8, segment, 0, 0, 0, 0, 0),
             len,
         ))
-    }
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
     }
 
     /// Equal-cost (weight-1) next-hop from a string address — the common test shape.
@@ -1094,44 +1071,6 @@ mod tests {
         route_from_peer(prefix, next_hop, origin_type, path_id, ip("198.51.100.1"))
     }
 
-    fn route_from_peer(
-        prefix: Prefix,
-        next_hop: IpAddr,
-        origin_type: RouteOrigin,
-        path_id: u32,
-        peer: IpAddr,
-    ) -> Route {
-        Route {
-            prefix,
-            next_hop,
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer,
-            attributes: Arc::new(vec![
-                PathAttribute::Origin(Origin::Igp),
-                PathAttribute::AsPath(AsPath { segments: vec![] }),
-            ]),
-            received_at: Instant::now(),
-            origin_type,
-            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id,
-            validation_state: RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }
-    }
-
-    fn scoped_route(prefix: Prefix, next_hop: IpAddr, ifindex: u32) -> Route {
-        let mut route = route(prefix, next_hop, RouteOrigin::Ebgp, 0);
-        route.next_hop_scope = Some(Box::new(NextHopScope {
-            interface: Arc::from("fib0"),
-            ifindex,
-        }));
-        route
-    }
-
     fn one_route(key: FibRouteKey, next_hop: &str) -> FibRoute {
         FibRoute {
             table_name: "edge".to_string(),
@@ -1140,14 +1079,6 @@ mod tests {
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
-        }
-    }
-
-    fn key(prefix: Prefix) -> FibRouteKey {
-        FibRouteKey {
-            table_id: 1000,
-            metric: 200,
-            prefix,
         }
     }
 

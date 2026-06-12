@@ -484,34 +484,20 @@ async fn drain_to_withdraws(originated: &mut OriginatedSet, runtime: &SviRuntime
 mod tests {
     use super::*;
     use rustbgpd_evpn::{
-        DataplaneReport, EvpnInstance, EvpnInstanceTable, InstanceDataplaneStatus, RouteTarget,
+        DataplaneReport, EvpnInstance, EvpnInstanceTable, InstanceDataplaneStatus,
     };
     use rustbgpd_rib::route::EvpnRibRoute;
 
-    fn vni(n: u32) -> EvpnInstanceId {
-        EvpnInstanceId::new(n).unwrap()
-    }
-
-    fn rd_for(asn: u16, val: u32) -> RouteDistinguisher {
-        let mut bytes = [0u8; 8];
-        bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-        bytes[4..8].copy_from_slice(&val.to_be_bytes());
-        RouteDistinguisher::new(bytes)
-    }
+    use crate::test_support::{evpn_instance, vni};
 
     fn instance(vni_val: u32, advertise_svi: bool) -> EvpnInstance {
-        EvpnInstance::new(
-            vni(vni_val),
-            rd_for(65000, vni_val),
-            vec![RouteTarget::TwoOctetAs {
-                asn: 65000,
-                value: vni_val,
-            }],
-            "10.0.0.1".parse().unwrap(),
+        evpn_instance(
+            65000,
+            vni_val,
+            vni_val,
             Some(format!("br{vni_val}")),
             advertise_svi,
         )
-        .unwrap()
     }
 
     fn instance_table(advertise_svi: bool) -> Arc<EvpnInstanceTable> {
