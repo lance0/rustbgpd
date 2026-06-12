@@ -61,6 +61,12 @@ pub struct BgpMetrics {
     outbound_route_drops: IntCounterVec,
     inbound_rib_backpressure: IntCounterVec,
     hold_timer_rearmed_pending_input: IntCounterVec,
+
+    // ── RIB distribution health ─────────────────────────────────
+    rib_outbound_registered_peers: IntGauge,
+    rib_outbound_registration_replaced: IntCounterVec,
+    rib_dirty_resync: IntCounterVec,
+    rib_ingest_channel_depth: IntGauge,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -372,6 +378,46 @@ impl BgpMetrics {
                  pending — the local daemon was the bottleneck, not the peer (ADR-0078).",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_outbound_registered_peers = IntGauge::new(
+            "bgp_rib_outbound_registered_peers",
+            "Peers currently registered with the RIB manager for outbound route \
+             distribution. An Established session whose peer is missing here has a \
+             wedged advertisement path: keepalives still flow (writer-owned) but no \
+             UPDATE can ever reach the peer until a new session re-registers.",
+        )
+        .expect("valid metric definition");
+
+        let rib_outbound_registration_replaced = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_outbound_registration_replaced_total",
+                "PeerUp re-registrations that replaced a still-registered outbound \
+                 sender for the same peer address — two sessions for one peer \
+                 overlapped (collision window). A stale PeerDown arriving after \
+                 such a replacement deregisters the surviving session.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_dirty_resync = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_dirty_resync_total",
+                "Dirty-peer resync timer fires, by outcome: 'cleared' (all dirty \
+                 peers resynced) or 'still_dirty' (at least one peer remains dirty \
+                 and the 1s timer re-arms).",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+
+        let rib_ingest_channel_depth = IntGauge::new(
+            "bgp_rib_ingest_channel_depth",
+            "Queued RibUpdate messages in the RIB manager ingest channel, sampled \
+             once per manager loop iteration. Pegged at the channel capacity means \
+             producers (sessions, local originators) are parked on backpressure.",
         )
         .expect("valid metric definition");
 
@@ -1007,6 +1053,18 @@ impl BgpMetrics {
             .register(Box::new(hold_timer_rearmed_pending_input.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_registered_peers.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_registration_replaced.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_dirty_resync.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_ingest_channel_depth.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -1233,6 +1291,10 @@ impl BgpMetrics {
             outbound_route_drops,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
+            rib_outbound_registered_peers,
+            rib_outbound_registration_replaced,
+            rib_dirty_resync,
+            rib_ingest_channel_depth,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -1344,6 +1406,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
@@ -1615,6 +1678,37 @@ impl BgpMetrics {
         self.hold_timer_rearmed_pending_input
             .with_label_values(&[peer])
             .inc();
+    }
+
+    /// Set the number of peers currently registered with the RIB manager
+    /// for outbound route distribution.
+    pub fn set_rib_outbound_registered_peers(&self, count: i64) {
+        self.rib_outbound_registered_peers.set(count);
+    }
+
+    /// Record a `PeerUp` that replaced a still-registered outbound sender
+    /// for the same peer address (two sessions overlapped — collision
+    /// window).
+    pub fn record_rib_outbound_registration_replaced(&self, peer: &str) {
+        self.rib_outbound_registration_replaced
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Record a dirty-peer resync timer fire.
+    ///
+    /// `outcome` is bounded: `"cleared"` or `"still_dirty"`.
+    pub fn record_rib_dirty_resync(&self, outcome: &str) {
+        debug_assert!(
+            matches!(outcome, "cleared" | "still_dirty"),
+            "unbounded dirty-resync outcome label: {outcome:?}"
+        );
+        self.rib_dirty_resync.with_label_values(&[outcome]).inc();
+    }
+
+    /// Set the sampled depth of the RIB manager ingest channel.
+    pub fn set_rib_ingest_channel_depth(&self, depth: i64) {
+        self.rib_ingest_channel_depth.set(depth);
     }
 
     /// Record a successful RFC 7999 kernel discard install.
@@ -3022,6 +3116,32 @@ mod tests {
         assert_eq!(closed, 1);
     }
 
+    #[test]
+    fn rib_distribution_health_metrics() {
+        let m = BgpMetrics::new();
+
+        m.set_rib_outbound_registered_peers(3);
+        m.record_rib_outbound_registration_replaced("10.0.0.1");
+        m.record_rib_outbound_registration_replaced("10.0.0.1");
+        m.record_rib_dirty_resync("still_dirty");
+        m.record_rib_dirty_resync("cleared");
+        m.set_rib_ingest_channel_depth(17);
+
+        assert_eq!(m.rib_outbound_registered_peers.get(), 3);
+        assert_eq!(
+            m.rib_outbound_registration_replaced
+                .with_label_values(&["10.0.0.1"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.rib_dirty_resync.with_label_values(&["still_dirty"]).get(),
+            1
+        );
+        assert_eq!(m.rib_dirty_resync.with_label_values(&["cleared"]).get(), 1);
+        assert_eq!(m.rib_ingest_channel_depth.get(), 17);
+    }
+
     /// Populate every peer-labeled family for `peer` through the public
     /// recording surface. Doubles as the sync guard for the reap list:
     /// if a future peer-labeled family is added here but not to
@@ -3044,6 +3164,7 @@ mod tests {
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
         m.record_hold_timer_rearmed_pending_input(peer);
+        m.record_rib_outbound_registration_replaced(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
         m.record_otc_routes_blocked(peer, "ingress_peer_mismatch", 2);
@@ -3085,8 +3206,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 27 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 28);
+        // 28 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 29);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -3096,7 +3217,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 28);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 29);
     }
 
     #[test]
