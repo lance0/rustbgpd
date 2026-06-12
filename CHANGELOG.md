@@ -439,6 +439,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off-switch governs the single-active indirection too (falls back to
   single-dst at the active PE, no backup pre-create).
 
+- **Kernel-side EVPN dataplane drift now repairs within the reconcile
+  actor's 50 ms coalesce window instead of the 60 s periodic dump
+  (poll-cadence tail sweep).** The notify task's existing netlink feeds
+  gain two drift classes on the same kernel-event wake channel the
+  IP-VRF route observation already uses: an `AF_BRIDGE` `RTM_DELNEIGH`
+  on a managed VXLAN port (a programmed remote-MAC row swept by
+  `bridge fdb del`/flush — unicast, BUM flood, and NHG-backed rows
+  alike) and, via a new `RTNLGRP_LINK` subscription on the notify
+  socket, link drift on the EVPN surface: bridge-port flag/state writes
+  (the BUM-filter and AC-gate enforcement targets, including the
+  single-active non-DF port block), VXLAN/managed-bridge topology
+  bring-up and teardown, and AC-port enslavement. Classifiers keep
+  container-runtime veth churn and VNI-less-bridge noise out of the
+  wake path; external in-place FDB *replaces* (no delete emitted) and
+  ports of not-yet-VNI-resolved bridges still ride the periodic dump,
+  which is retained unchanged as the backstop. The remaining
+  fixed-cadence loops were swept and stay deliberately: BMP statistics
+  (RFC 7854 interval reporting), BFD protocol timers, MRT dump
+  rotation, the originator/segment/dataplane/FIB/blackhole poll ticks
+  (all already event-driven; the ticks are their backstops), and the
+  FIB/blackhole 30 s kernel-drift bound (no kernel event feed behind
+  `UnicastFib` yet — noted on the roadmap).
+
 ### Fixed
 
 - **The EVPN local-MAC observation layer now detects in-place FDB
