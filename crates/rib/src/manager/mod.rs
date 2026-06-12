@@ -1154,12 +1154,15 @@ impl RibManager {
             .filter_map(|(idx, key)| u32::try_from(idx + 1).ok().map(|rank| (*key, rank)))
             .collect();
 
-        let candidates = if let Some(ref best_route) = best {
+        let candidates: Vec<BestPathCandidate> = if let Some(ref best_route) = best {
             all_candidates
                 .drain(..)
                 .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
                 .map(|candidate| {
                     let (ordering, reason) = best_path_cmp_with_reason(&candidate, best_route);
+                    let vs_best_detail =
+                        crate::best_path::best_path_reason_detail(reason, &candidate, best_route);
+                    let multipath = crate::best_path::multipath_eligibility(best_route, &candidate);
                     let advertised_path_id = advertised_rank
                         .get(&(candidate.peer, candidate.path_id))
                         .copied()
@@ -1169,11 +1172,34 @@ impl RibManager {
                         vs_best_reason: reason,
                         vs_best_ordering: ordering,
                         advertised_path_id,
+                        vs_best_detail,
+                        multipath,
                     }
                 })
                 .collect()
         } else {
             vec![]
+        };
+
+        // The step that *won*: the comparison against the runner-up —
+        // the closest competitor by best-path order — is the last
+        // decision the winner had to survive. Re-derived on demand from
+        // the same explain-only ladder (`best_path_cmp_with_reason`);
+        // the hot-path comparator never records anything.
+        let (best_reason, best_reason_detail) = match (&best, candidates.is_empty()) {
+            (Some(best_route), false) => {
+                let runner_up = candidates
+                    .iter()
+                    .map(|c| &c.route)
+                    .min_by(|a, b| best_path_cmp(a, b))
+                    .expect("non-empty candidate list has a minimum");
+                let (_, reason) = best_path_cmp_with_reason(best_route, runner_up);
+                let detail =
+                    crate::best_path::best_path_reason_detail(reason, best_route, runner_up);
+                (Some(reason), detail)
+            }
+            // Single-path trivial winner or no best route at all.
+            _ => (None, String::new()),
         };
 
         let explanation = ExplainBestPath {
@@ -1182,6 +1208,8 @@ impl RibManager {
             candidates,
             peer,
             add_path_send_max,
+            best_reason,
+            best_reason_detail,
         };
 
         if reply.send(Some(explanation)).is_err() {

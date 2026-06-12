@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Best-path explain now names the tiebreaker that won — with the
+  compared values.** `rustbgpctl rib --prefix X --explain` (RibService
+  `ExplainBestPath`) already annotated each losing path with the
+  decisive RFC 4271 §9.1.2 step; the trace now also carries, per loser,
+  the compared values behind that step (`vs_best_detail`, e.g.
+  `local_pref 100 < 200` or `as_path_len 3 > 1`), a winner-level
+  `best_reason` + `best_reason_detail` naming the step that eliminated
+  the runner-up — the deepest-surviving competitor — (`only_path` for a
+  single-path prefix), and a per-candidate `multipath` classification
+  (`eligible` / `relax_only` / `none`) showing which losers would still
+  survive the ADR-0066 equal-cost multipath cut. Asking about a prefix
+  with no paths in any Adj-RIB-In now returns a clean `NOT_FOUND`
+  instead of an empty trace. The attribution is re-derived on demand
+  from the current Adj-RIB-In paths through the explain-only comparison
+  ladder; the hot-path comparator is untouched (agreement pinned by a
+  per-step matrix and a property test). Text and `--json` CLI renders
+  both carry the new fields.
 - **Link-driven Ethernet Segment drain (ADR-0085 slice 2 — decisions
   1–3).** `[[ethernet_segments]]` gains an optional
   `interface = "<linkname>"` binding: the ES's drain state now follows

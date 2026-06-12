@@ -139,6 +139,15 @@ pub struct ExplainBestPath {
     /// `add_path_send_max` candidates by best-path preference get a
     /// non-zero `BestPathCandidate::advertised_path_id`.
     pub add_path_send_max: u32,
+    /// The decision step that selected the winner over the runner-up —
+    /// the last surviving competitor by best-path order. `None` when
+    /// the prefix has no competing path (single-path trivial winner) or
+    /// no best route at all.
+    pub best_reason: Option<BestPathReason>,
+    /// Compared values behind `best_reason`, winner's value first
+    /// (e.g. `"local_pref 200 > 100"`). Empty when `best_reason` is
+    /// `None`.
+    pub best_reason_detail: String,
 }
 
 /// A candidate route with its comparison result against the best route.
@@ -161,6 +170,12 @@ pub struct BestPathCandidate {
     /// see `ExplainBestPath::add_path_send_max` for why single-best
     /// can't be expressed through this field.
     pub advertised_path_id: u32,
+    /// Compared values behind `vs_best_reason`, candidate's value
+    /// first (e.g. `"local_pref 100 < 200"`).
+    pub vs_best_detail: String,
+    /// Whether this candidate survives the equal-cost multipath cut
+    /// vs the best route (strict / relax-only / not at all).
+    pub multipath: crate::best_path::MultipathEligibility,
 }
 
 /// Messages sent from peer sessions to the RIB manager.

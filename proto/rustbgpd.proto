@@ -1043,6 +1043,8 @@ message ExplainAdvertisedRouteResponse {
 }
 
 message ExplainBestPathRequest {
+  // Prefix to explain. A prefix with no paths in any Adj-RIB-In
+  // returns NOT_FOUND (there is nothing to explain).
   string prefix = 1;
   uint32 prefix_length = 2;
   // Optional IP address (IPv4 or IPv6 literal) of the peer to
@@ -1072,6 +1074,21 @@ message BestPathCandidate {
   Route route = 1;
   string vs_best_reason = 2;
   string vs_best_ordering = 3;
+  // Compared values behind vs_best_reason, candidate's value first,
+  // e.g. "local_pref 100 < 200" or "as_path_len 3 > 1". Categorical
+  // steps render as "x vs y" (e.g. "ibgp vs ebgp", "rpki invalid vs
+  // valid"). Human-oriented diagnostic text — not a stable
+  // machine-parsable grammar; consume vs_best_reason for the step
+  // identity.
+  string vs_best_detail = 5;
+  // Whether this candidate survives the equal-cost multipath cut vs
+  // the best route (ADR-0066): "eligible" (groups under the strict
+  // default, exact AS_PATH match), "relax_only" (groups only with
+  // as-path multipath-relax), or "none". Reported for both grouping
+  // modes because the explain query does not know which relax knob a
+  // given FIB table uses; the live cut still applies the configured
+  // knob and maximum_paths bound.
+  string multipath = 6;
   // Set on responses scoped to a peer with Add-Path send mode
   // (`add_path_send_max > 0`). Non-zero = this candidate would be
   // advertised at this rank. Zero = filtered (export policy
@@ -1107,6 +1124,21 @@ message ExplainBestPathResponse {
   // gets `add_path_send_max = 0` here — the response reflects
   // what would actually happen, not the bare config knob.
   uint32 add_path_send_max = 6;
+  // The decision step that selected the winner: the step at which the
+  // runner-up — the last surviving competitor by best-path order — was
+  // eliminated. Same snake_case step vocabulary as vs_best_reason
+  // (stale_preference, rpki_preference, aspa_preference,
+  // higher_local_pref, shorter_as_path, lower_origin, lower_med,
+  // ebgp_over_ibgp, shorter_cluster_list, lower_originator_id,
+  // lower_peer_address). "only_path" when the prefix has exactly one
+  // path (trivial winner, no competing candidates). A prefix with no
+  // paths at all is NOT_FOUND at the RPC layer, so this field is never
+  // empty on a successful response.
+  string best_reason = 7;
+  // Compared values behind best_reason, winner's value first
+  // (e.g. "local_pref 200 > 100"). Empty when best_reason is
+  // "only_path". Human-oriented diagnostic text, like vs_best_detail.
+  string best_reason_detail = 8;
 }
 
 message ListBlackholeDiscardsRequest {}

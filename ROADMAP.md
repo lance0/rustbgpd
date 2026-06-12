@@ -355,7 +355,10 @@ has it, no broad performance sprints without profile evidence.
   unit-test coverage; per-statement attribution within a matched import chain
   (the `rustbgpctl policy explain --neighbor X --prefix Y` decision trace itself
   shipped in v0.31.0, ADR-0073); best-path explain surfacing the tiebreaker step
-  that won (RIB-side sibling to the export-side policy-clause attribution).
+  that won (the RIB-side sibling to the export-side policy-clause attribution —
+  shipped in `[Unreleased]`: per-loser decisive step with compared values, the
+  winner's step vs the runner-up, multipath-cut classification, `NOT_FOUND` for
+  unknown prefixes).
   Also: named-policy / statement identity in explain output; verbose policy
   trace including non-match steps; route history / why-changed timeline;
   looking-glass integration for explain; `rustbgpd --diff` output formatted by

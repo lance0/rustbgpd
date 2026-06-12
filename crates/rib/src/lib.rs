@@ -35,7 +35,10 @@ mod test_support;
 /// RIB update messages and outbound route structures.
 pub mod update;
 
-pub use best_path::{BestPathReason, best_path_cmp, multipath_equal};
+pub use best_path::{
+    BestPathReason, MultipathEligibility, best_path_cmp, best_path_reason_detail,
+    multipath_eligibility, multipath_equal,
+};
 pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use loc_rib::LocRib;

@@ -147,6 +147,134 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
     (a.peer.cmp(&b.peer), BestPathReason::LowerPeerAddress)
 }
 
+/// Relational symbol for a compared pair, read left-to-right:
+/// `a < b`, `a = b`, or `a > b`.
+fn cmp_symbol<T: Ord>(a: &T, b: &T) -> &'static str {
+    match a.cmp(b) {
+        Ordering::Less => "<",
+        Ordering::Equal => "=",
+        Ordering::Greater => ">",
+    }
+}
+
+/// Operator-facing name for a route's stale tier (see [`stale_rank`]).
+fn stale_tier_name(route: &Route) -> &'static str {
+    match stale_rank(route) {
+        0 => "fresh",
+        1 => "gr_stale",
+        _ => "llgr_stale",
+    }
+}
+
+/// Render the compared values behind a decisive [`BestPathReason`] for
+/// the pair `(a, b)`, e.g. `"local_pref 100 < 200"` — `a`'s value on
+/// the left, `b`'s on the right.
+///
+/// Explain-only: this allocates per call and exists solely for the
+/// on-demand `ExplainBestPath` query. It must never be called from the
+/// live comparator path ([`best_path_cmp`] stays allocation-free).
+#[must_use]
+pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> String {
+    match reason {
+        BestPathReason::StalePreference => {
+            format!(
+                "stale_tier {} vs {}",
+                stale_tier_name(a),
+                stale_tier_name(b)
+            )
+        }
+        BestPathReason::RpkiPreference => {
+            format!("rpki {} vs {}", a.validation_state, b.validation_state)
+        }
+        BestPathReason::AspaPreference => {
+            format!("aspa {} vs {}", a.aspa_state, b.aspa_state)
+        }
+        BestPathReason::HigherLocalPref => {
+            let (x, y) = (a.local_pref(), b.local_pref());
+            format!("local_pref {x} {} {y}", cmp_symbol(&x, &y))
+        }
+        BestPathReason::ShorterAsPath => {
+            let x = a.as_path().map_or(0, AsPath::len);
+            let y = b.as_path().map_or(0, AsPath::len);
+            format!("as_path_len {x} {} {y}", cmp_symbol(&x, &y))
+        }
+        BestPathReason::LowerOrigin => {
+            format!("origin {} vs {}", a.origin(), b.origin()).to_ascii_lowercase()
+        }
+        BestPathReason::LowerMed => {
+            let (x, y) = (a.med(), b.med());
+            format!("med {x} {} {y}", cmp_symbol(&x, &y))
+        }
+        BestPathReason::EbgpOverIbgp => {
+            let kind = |ebgp: bool| if ebgp { "ebgp" } else { "ibgp" };
+            format!("{} vs {}", kind(a.is_ebgp()), kind(b.is_ebgp()))
+        }
+        BestPathReason::ShorterClusterList => {
+            let (x, y) = (a.cluster_list().len(), b.cluster_list().len());
+            format!("cluster_list_len {x} {} {y}", cmp_symbol(&x, &y))
+        }
+        BestPathReason::LowerOriginatorId => match (a.originator_id(), b.originator_id()) {
+            (Some(x), Some(y)) => format!("originator_id {x} {} {y}", cmp_symbol(&x, &y)),
+            // Defensive: the comparator only returns this reason when
+            // both routes carry ORIGINATOR_ID.
+            _ => "originator_id absent".to_string(),
+        },
+        BestPathReason::LowerPeerAddress => {
+            format!(
+                "peer {} {} {}",
+                a.peer,
+                cmp_symbol(&a.peer, &b.peer),
+                b.peer
+            )
+        }
+        // Not produced by the unicast ladder; EVPN MAC mobility carries
+        // its sequence in EVPN-specific route state, not on `Route`.
+        BestPathReason::EvpnMacMobility => "mac_mobility_sequence".to_string(),
+    }
+}
+
+/// How a candidate relates to the best route under the ADR-0066
+/// equal-cost (ECMP) grouping rules — the "multipath cut".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipathEligibility {
+    /// Not co-installable with the best route under any setting.
+    None,
+    /// Co-installable under the strict default (exact `AS_PATH` match).
+    Eligible,
+    /// Co-installable only with multipath-relax (`AS_PATH` length match,
+    /// ADR-0066 / FRR `as-path multipath-relax`).
+    RelaxOnly,
+}
+
+impl std::fmt::Display for MultipathEligibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Eligible => write!(f, "eligible"),
+            Self::RelaxOnly => write!(f, "relax_only"),
+        }
+    }
+}
+
+/// Classify `other`'s ECMP grouping vs `best` under both the strict
+/// default and multipath-relax.
+///
+/// Explain-only enrichment for the `ExplainBestPath` point query. The
+/// live multipath cut keeps using [`multipath_equal`] with the
+/// operator's actual per-table `relax` knob; this reports both answers
+/// because the explain query does not know which knob a given FIB table
+/// uses.
+#[must_use]
+pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibility {
+    if multipath_equal(best, other, false) {
+        MultipathEligibility::Eligible
+    } else if multipath_equal(best, other, true) {
+        MultipathEligibility::RelaxOnly
+    } else {
+        MultipathEligibility::None
+    }
+}
+
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
@@ -854,6 +982,171 @@ mod tests {
         }
     }
 
+    // --- best_path_reason_detail (explain-only compared-values render) ---
+
+    #[test]
+    fn reason_detail_renders_compared_values_per_step() {
+        let p1 = Ipv4Addr::new(1, 0, 0, 1);
+        let p2 = Ipv4Addr::new(1, 0, 0, 2);
+
+        let mut stale = base_route(p1);
+        stale.is_stale = true;
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::StalePreference, &stale, &base_route(p2)),
+            "stale_tier gr_stale vs fresh"
+        );
+
+        let mut rpki = base_route(p1);
+        rpki.validation_state = RpkiValidation::Invalid;
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::RpkiPreference, &rpki, &base_route(p2)),
+            "rpki invalid vs not_found"
+        );
+
+        let mut aspa = base_route(p1);
+        aspa.aspa_state = AspaValidation::Invalid;
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::AspaPreference, &aspa, &base_route(p2)),
+            "aspa invalid vs unknown"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::HigherLocalPref,
+                &with_local_pref(base_route(p1), 100),
+                &with_local_pref(base_route(p2), 200),
+            ),
+            "local_pref 100 < 200"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::ShorterAsPath,
+                &with_as_path(base_route(p1), vec![65001, 65002, 65003]),
+                &with_as_path(base_route(p2), vec![65001]),
+            ),
+            "as_path_len 3 > 1"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerOrigin,
+                &with_origin(base_route(p1), Origin::Incomplete),
+                &with_origin(base_route(p2), Origin::Igp),
+            ),
+            "origin incomplete vs igp"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerMed,
+                &with_med(base_route(p1), 100),
+                &with_med(base_route(p2), 50),
+            ),
+            "med 100 > 50"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::EbgpOverIbgp,
+                &with_ibgp(base_route(p1)),
+                &base_route(p2),
+            ),
+            "ibgp vs ebgp"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::ShorterClusterList,
+                &with_cluster_list(
+                    base_route(p1),
+                    vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+                ),
+                &with_cluster_list(base_route(p2), vec![Ipv4Addr::new(10, 0, 0, 1)]),
+            ),
+            "cluster_list_len 2 > 1"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerOriginatorId,
+                &with_originator_id(base_route(p1), Ipv4Addr::new(10, 0, 0, 9)),
+                &with_originator_id(base_route(p2), Ipv4Addr::new(10, 0, 0, 1)),
+            ),
+            "originator_id 10.0.0.9 > 10.0.0.1"
+        );
+
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerPeerAddress,
+                &base_route(p2),
+                &base_route(p1)
+            ),
+            "peer 1.0.0.2 > 1.0.0.1"
+        );
+    }
+
+    #[test]
+    fn reason_detail_missing_med_renders_as_zero() {
+        // Deterministic / always-compare MED treats an absent MED as 0
+        // (matching `Route::med()`); the detail must show that, so an
+        // operator sees why a MED-less path beat a MED-carrying one.
+        let no_med = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let med50 = with_med(base_route(Ipv4Addr::new(1, 0, 0, 2)), 50);
+        // The MED-less route wins (0 < 50) under always-compare.
+        assert_eq!(best_path_cmp(&no_med, &med50), Ordering::Less);
+        let (_, reason) = best_path_cmp_with_reason(&no_med, &med50);
+        assert_eq!(reason, BestPathReason::LowerMed);
+        assert_eq!(
+            best_path_reason_detail(reason, &no_med, &med50),
+            "med 0 < 50"
+        );
+    }
+
+    // --- multipath_eligibility (explain-only ECMP-cut classification) ---
+
+    #[test]
+    fn multipath_eligibility_strict_relax_and_none() {
+        // Co-equal paths differing only on peer/next-hop: strict-eligible.
+        let best = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let sibling = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        assert_eq!(
+            multipath_eligibility(&best, &sibling),
+            MultipathEligibility::Eligible
+        );
+
+        // Equal AS_PATH length, different ASNs: groups only with relax.
+        let best = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 1)), vec![65001, 65010]);
+        let relax_only = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 2)), vec![65001, 65020]);
+        assert_eq!(
+            multipath_eligibility(&best, &relax_only),
+            MultipathEligibility::RelaxOnly
+        );
+
+        // LOCAL_PREF difference disqualifies under both modes.
+        let best = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        let worse = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        assert_eq!(
+            multipath_eligibility(&best, &worse),
+            MultipathEligibility::None
+        );
+
+        // eBGP/iBGP class mixing never groups.
+        let ebgp = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 2)));
+        assert_eq!(
+            multipath_eligibility(&ebgp, &ibgp),
+            MultipathEligibility::None
+        );
+    }
+
+    #[test]
+    fn multipath_eligibility_display_labels() {
+        assert_eq!(MultipathEligibility::None.to_string(), "none");
+        assert_eq!(MultipathEligibility::Eligible.to_string(), "eligible");
+        assert_eq!(MultipathEligibility::RelaxOnly.to_string(), "relax_only");
+    }
+
     // --- ADR-0068 link_bandwidth_weights ---
 
     #[test]
@@ -1004,6 +1297,16 @@ mod proptests {
     }
 
     proptest! {
+        /// The explain-only ladder (`best_path_cmp_with_reason`) must
+        /// agree with the hot-path comparator on arbitrary inputs —
+        /// the randomized counterpart of the per-step agreement matrix
+        /// in `with_reason_ordering_matches_plain_cmp_at_every_step`.
+        #[test]
+        fn with_reason_agrees_with_plain_cmp(a in arb_route(), b in arb_route()) {
+            let (ord, _) = best_path_cmp_with_reason(&a, &b);
+            prop_assert_eq!(ord, best_path_cmp(&a, &b));
+        }
+
         #[test]
         fn antisymmetry(a in arb_route(), b in arb_route()) {
             let ab = best_path_cmp(&a, &b);

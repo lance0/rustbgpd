@@ -1121,7 +1121,11 @@ one `[[fib_tables]]` entry at startup, on Linux); otherwise they fail
 
 ```bash
 # Global Loc-RIB view: best route + every losing candidate annotated with
-# the decisive comparison reason.
+# the decisive comparison reason and the compared values behind it
+# (e.g. "local_pref 100 < 200"). The winner carries the step that beat
+# the runner-up ("only_path" for a single-path prefix), and each loser
+# is classified against the equal-cost multipath cut
+# (eligible / relax_only / none). A prefix with no paths is NOT_FOUND.
 rbgp rib --prefix 203.0.113.0/24 --explain
 
 # Peer-scoped view: same shape, but every candidate the named peer would
@@ -1265,7 +1269,10 @@ rbgp rib --prefix 10.0.0.0/24 --explain
 ```
 
 Shows all candidates for a prefix with the decisive comparison reason
-for each non-winner (e.g., `higher_local_pref`, `shorter_as_path`).
+for each non-winner (e.g., `higher_local_pref`, `shorter_as_path`)
+plus the compared values behind it (e.g., `local_pref 100 < 200`),
+the step that selected the winner over the runner-up, and whether each
+loser would survive the equal-cost multipath cut.
 
 ### Looking glass (birdwatcher-compatible REST API)
 
