@@ -386,6 +386,23 @@ jobs:
           topology: tests/interop/m65-evpn-single-active-failover.clab.yml
           script: tests/interop/scripts/test-m65-evpn-single-active-failover.sh
 
+  m66:
+    name: M66 — ADR-0084 ES drain service handover (rustbgpd ×3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # All three BGP speakers are rustbgpd — the origination-side
+      # withdrawal stimulus M65 lacked is the ADR-0084 runtime ES
+      # drain, so no GoBGP image is needed (see the topology header).
+      - name: Run M66 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M66
+          topology: tests/interop/m66-evpn-es-drain-handover.clab.yml
+          script: tests/interop/scripts/test-m66-evpn-es-drain-handover.sh
+
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: ubuntu-latest

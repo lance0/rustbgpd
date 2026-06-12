@@ -1,0 +1,225 @@
+# Containerlab topology: ADR-0084 Ethernet Segment drain service
+# handover (M66) — rustbgpd on BOTH sides.
+#
+# This is the proof M65 could not be. M65 needed GoBGP PEs because
+# rustbgpd had no deliberate origination-side withdrawal stimulus: the
+# only way to withdraw an EAD-per-ES was a config reload, whose
+# ES-removal path re-keys the VNI's Type 2 routes in the same apply.
+# The ADR-0084 runtime drain (`rustbgpctl evpn es drain <esi>`) is
+# that stimulus now: it withdraws exactly the segment's origination
+# state (Type 4 + EAD-per-ES + EAD-per-EVI + the member VNIs' local
+# Type 2 routes) while the BGP session stays up — the RFC 7432 §8.2
+# fast-convergence shape, produced by rustbgpd itself. So all three
+# BGP speakers here are rustbgpd: the two segment PEs (origination
+# side, where the drain runs) and the remote VTEP (receive side, the
+# proven ADR-0083 swap consumer).
+#
+# Topology (vtep is the underlay hub and an iBGP route reflector so
+# the PEs see each other's Type 4 routes for DF election; VTEP IPs
+# are the link addresses):
+#
+#   hr ── eth3[br100] vtep (rustbgpd RR, 10.0.1.1) eth1 ── pe1 (rustbgpd, 10.0.1.2) eth2 ──┐
+#   192.168.66.20             DUT, receive side    eth2 ── pe2 (rustbgpd, 10.0.2.2) eth2 ──┤
+#                                                                                          ce (bridge)
+#                                                                                   192.168.66.10
+#
+#   pe1 + pe2 share single-active ES 00:00:00:00:00:00:00:00:00:01
+#   for VNI 100 (`redundancy_mode = "single-active"`). DF election is
+#   RFC 9785 highest-preference: pe1 df_preference 200, pe2 100, so
+#   pe1 deterministically wins DF and — being the only PE that floods
+#   toward the CE — is the only PE whose kernel bridge ever learns the
+#   CE MAC, hence the only Type 2 originator for it. The CE host
+#   bridges both PE attachment circuits; bridge MAC learning re-pins
+#   the return path when traffic starts arriving on the other leg. hr
+#   is the remote host behind the DUT. Static neighbor entries on
+#   hr/ce remove ARP from the picture, and IPv6 is disabled on every
+#   node so the CE emits no spontaneous chatter: a frame from the CE
+#   arriving at the non-DF PE's bridge would kernel-learn the CE MAC
+#   there and break the "Type 2 from the DF only" steady state.
+#
+# Difference from M65 — flood path present: M65 deliberately had no
+# flood entries anywhere so the NHG swap was the ONLY restoration
+# path. M66 is a service-continuity proof and wants the realistic
+# BUM flood path so the surviving PE's MAC-learning gap is bridged
+# after the drain: all three nodes originate Type 3 IMET (the
+# default), and the IMET routes are asserted present in the VTEP's
+# RIB. rustbgpd does not yet program kernel flood entries from
+# received IMET (the L2VNI dataplane boundary programs Type 2 MACs
+# only), so the topology pre-installs the equivalent static all-zero
+# VXLAN FDB entries on each node toward the other two VTEPs — the
+# exact rows an IMET-driven flood programmer would install. They are
+# foreign to the daemon's FDB diff (never claimed, never deleted;
+# ADR-0054 §5/§7).
+#
+# Known enforcement limit (designed around, not asserted away):
+# rustbgpd's dataplane DF enforcement today is BUM-flood-only — a
+# single-active non-DF suppresses flood toward the attachment circuit
+# (`IFLA_BRPORT_*_FLOOD` off) but does NOT block known unicast on the
+# AC (ROADMAP: "Single-active non-DF full AC blocking"). Likewise a
+# drained PE's kernel bridge state is untouched (the drain is control
+# plane only — the AC stays up during a pre-maintenance drain), so
+# stale known-unicast rows on the drained PE may keep forwarding
+# until traffic re-pins. The script therefore asserts route state and
+# the receive-side handover strictly, but never that the drained /
+# non-DF AC drops unicast.
+#
+# Known daemon gaps this proof surfaces (worked around with one CE
+# maintenance-exit ARP broadcast in phase 7, not asserted away —
+# both pre-date the drain feature):
+# (1) No same-ESI local bias in the PE remote-MAC projection: while
+#     pe1 is drained, pe2's Type 2 for the CE MAC is programmed on
+#     pe1's bridge as a REMOTE row toward pe2, usurping pe1's
+#     kernel-learned local AC row (real EVPN implementations never
+#     point an own-segment MAC at the ES peer).
+# (2) That usurpation is an in-place FDB port move (no RTM_DELNEIGH),
+#     so no local-delete observation reaches the originator: pe1's
+#     observation cache still claims the MAC and the undrain replays
+#     it even though the kernel no longer holds it locally — in
+#     tension with ADR-0084 decision 1's "kernel events keep updating
+#     the caches so undrain replays the latest state".
+# Until the CE speaks again, the combination blackholes hr->CE at the
+# undrained PE (the VTEP unicasts to pe1, whose kernel row hairpins
+# toward pe2). The script documents and routes around this; fixing
+# either gap makes the workaround redundant without breaking the
+# asserts.
+#
+# gRPC authorization: the PEs run `enforcement = "tier"` with two
+# principals — an operator (bearer-token TCP listener) and an
+# observer (UDS listener) — so the driver can assert the drain RPC's
+# ADR-0064 operator_only ceiling (observer → PermissionDenied) with
+# rustbgpctl, the M54 denial pattern. The VTEP keeps the M65 legacy
+# fixture shape.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m66-evpn-es-drain-handover.clab.yml
+#   bash tests/interop/scripts/test-m66-evpn-es-drain-handover.sh
+#   containerlab destroy -t tests/interop/m66-evpn-es-drain-handover.clab.yml
+
+name: m66-evpn-es-drain-handover
+
+topology:
+  nodes:
+    vtep:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m66-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        # The vtep routes between the two PE subnets (pe1 <-> pe2
+        # flood frames transit it).
+        - sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth2 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.1.1 100
+        # Kernel learning on the VXLAN bridge port off: EVPN owns the
+        # remote-MAC rows (ADR-0054 §5/§7).
+        - bridge link set dev vxlan100 learning off
+        # Silence kernel IGMP bring-up frames on the test fabric (see
+        # the CE node comment).
+        - ip link set br100 type bridge mcast_snooping 0
+        - ip link set dev br100 multicast off
+        - ip link set dev eth3 multicast off
+        - ip link set eth3 master br100
+        - ip link set eth3 up
+        # Static stand-in for IMET-driven flood programming (see
+        # header): BUM toward both segment PEs.
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m66-pe1.toml:/etc/rustbgpd/config.template.toml:ro
+        - ./configs/m66-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
+        - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.1.2 100 10.0.2.0/24 10.0.1.1
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m66-pe2.toml:/etc/rustbgpd/config.template.toml:ro
+        - ./configs/m66-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
+        - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.2.2 100 10.0.1.0/24 10.0.2.1
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    # Dual-homed CE: a plain bridge over both PE attachment circuits
+    # with a pinned MAC (M65 shape). Single-active means at most one
+    # PE floods toward it; bridge learning re-pins the return path on
+    # handover. IPv6 off so the CE never transmits except to reply —
+    # the non-DF PE must never kernel-learn the CE MAC.
+    ce:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        # mcast_snooping 0 + multicast off: the kernel's IGMP machinery
+        # otherwise emits bring-up frames that the CE bridge floods out
+        # BOTH legs, kernel-learning the CE/port MACs on the non-DF PE
+        # and breaking the "Type 2 from the DF only" steady state.
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set br0 address 02:ce:ce:ce:ce:01
+        - ip link set dev br0 multicast off
+        - ip link set dev eth1 multicast off
+        - ip link set dev eth2 multicast off
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+        - ip addr add 192.168.66.10/24 dev br0
+        - ip neigh replace 192.168.66.20 lladdr 02:aa:aa:aa:aa:01 dev br0 nud permanent
+
+    # Remote host behind the DUT — the traffic source whose ping
+    # stream measures the handover blackout window (M65 shape).
+    hr:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip link set eth1 address 02:aa:aa:aa:aa:01
+        - ip link set dev eth1 multicast off
+        - ip addr add 192.168.66.20/24 dev eth1
+        - ip link set eth1 up
+        - ip neigh replace 192.168.66.10 lladdr 02:ce:ce:ce:ce:01 dev eth1 nud permanent
+
+  links:
+    - endpoints: ["vtep:eth1", "pe1:eth1"]
+    - endpoints: ["vtep:eth2", "pe2:eth1"]
+    - endpoints: ["vtep:eth3", "hr:eth1"]
+    - endpoints: ["pe1:eth2", "ce:eth1"]
+    - endpoints: ["pe2:eth2", "ce:eth2"]

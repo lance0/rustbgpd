@@ -1,0 +1,60 @@
+# M66 PE1 (rustbgpd) — preferred-DF member of the single-active
+# Ethernet Segment under ADR-0084 drain test. RFC 9785
+# highest-preference election with df_preference 200 (> pe2's 100)
+# makes this PE the deterministic DF; the driver drains this ES here
+# and asserts the service hands over to pe2.
+#
+# gRPC runs ADR-0064 `enforcement = "tier"` with two principals so
+# the driver can prove the drain RPC's operator_only ceiling with
+# rustbgpctl: the TCP listener authenticates the operator via bearer
+# token; the UDS listener is the observer (filesystem-authenticated)
+# and must get PermissionDenied for the drain.
+#
+# This file is bind-mounted as a read-only TEMPLATE; the start script
+# copies it to /etc/rustbgpd/config.toml so the driver can stage a
+# config edit for the SIGHUP-while-drained sub-phase (M58 pattern —
+# a single-file ro bind cannot be rewritten in place).
+[global]
+asn = 65000
+router_id = "10.0.1.2"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/etc/rustbgpd/grpc-operator.token"
+principal = "rustbgpd://operator/ci"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc-observer.sock"
+principal = "rustbgpd://observer/ci"
+
+[security.grpc.roles]
+"rustbgpd://operator/ci" = "operator"
+"rustbgpd://observer/ci" = "observer"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.1.2:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.1.2"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 200
+df_algorithm = "highest-preference"
+redundancy_mode = "single-active"
+originator_ip = "10.0.1.2"
+
+[[neighbors]]
+address = "10.0.1.1"
+remote_asn = 65000
+description = "vtep-rr"
+hold_time = 30
+families = ["l2vpn_evpn"]

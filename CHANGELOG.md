@@ -11,6 +11,37 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M66 interop proof for the ADR-0084 Ethernet Segment drain: a
+  service handover with rustbgpd on BOTH sides.** New
+  `kernel-dataplane` CI job — the proof M65 couldn't be (M65 needed
+  GoBGP PEs because rustbgpd had no origination-side withdrawal
+  stimulus; the runtime drain is that stimulus). Two full-dataplane
+  rustbgpd PEs share a single-active ES (RFC 9785 highest-preference
+  DF) behind a rustbgpd VTEP/route-reflector, with a host pinging the
+  dual-homed CE at a 100 ms grain. Hard asserts on the mechanism:
+  steady state (Type 4 + EAD-per-ES + EAD-per-EVI from both PEs,
+  CE-MAC Type 2 from the DF only, the ADR-0083 one-member NHG with
+  the backup NH pre-created), the ADR-0064 operator_only ceiling via
+  rustbgpctl (observer principal → PermissionDenied, unknown ESI →
+  NotFound), the drain (all four route classes withdrawn while the
+  peer PE's survive, idempotent repeat reports `changed=false`, df
+  gauge → 0, the peer promotes to DF), the service handover (the
+  surviving PE learns the CE MAC through the flood path, originates
+  its own Type 2, and the VTEP's CE-MAC FDB row re-resolves toward
+  it), SIGHUP-while-drained non-resurrection (a live L2VNI-add reload
+  demonstrably applies while the drained ES stays withdrawn —
+  ADR-0084 decision 3), and the undrain (Type 4 + both EAD classes
+  return immediately, the drained PE re-wins DF revertively, and
+  after one CE maintenance-exit ARP broadcast the CE-MAC Type 2 and
+  end-to-end service are asserted back — the broadcast routes around
+  two pre-existing daemon gaps the proof surfaces and documents in
+  the topology header: no same-ESI local bias in the PE remote-MAC
+  projection, and no local-delete observation for the in-place FDB
+  port move that usurpation performs). The blackout window is
+  informational with
+  a generous < 30 s bound: the BUM-flood-only enforcement limit (a
+  drained/non-DF AC does not block known unicast) keeps the observed
+  gap near zero while the control-plane handover completes behind it.
 - **Runtime Ethernet Segment drain for access-circuit maintenance
   (ADR-0084).** `rustbgpctl evpn es drain <esi>` (and `undrain`)
   withdraws one configured ES's Type 4 + EAD-per-ES + EAD-per-EVI
