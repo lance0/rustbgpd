@@ -1,0 +1,18 @@
+# M65 PE2 (GoBGP) — the BACKUP PE of the single-active Ethernet
+# Segment. Advertises EAD-per-ES (Single-Active flag) + EAD-per-EVI
+# only — no MAC routes (the non-DF holds its AC blocked; its bridge
+# learns nothing the driver advertises). Withdrawing its EAD-per-ES
+# in the teardown phase empties the eligible set.
+[global.config]
+as = 65000
+router-id = "10.0.2.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.2.1"
+peer-as = 65000
+description = "rustbgpd-m65-vtep"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"
