@@ -11,6 +11,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Link-driven Ethernet Segment drain (ADR-0085 slice 2 — decisions
+  1–3).** `[[ethernet_segments]]` gains an optional
+  `interface = "<linkname>"` binding: the ES's drain state now follows
+  the bound attachment circuit's carrier. Carrier loss (cable pull or
+  admin down — the `IFF_LOWER_UP` bit) drains the segment immediately,
+  producing the RFC 7432 §8.2 mass-withdraw shape with no operator
+  action; a bound link absent from the kernel counts as down
+  (fail-closed). Recovery is held off by the new per-ES
+  `recovery_delay_secs` (default 30, range 0–3600; rejected without
+  `interface`): the hold re-arms on every up edge, so a flapping
+  circuit stays drained until it holds carrier for the full window.
+  Down is always immediate; startup applies the first probe directly
+  (an ES whose AC is down at boot starts drained, up at boot
+  originates immediately). Drain state is now **reason-keyed** and
+  reasons compose: the ADR-0084 RPC owns the `operator` reason, the
+  binding owns `link`, and the ES stays drained while either holds —
+  an operator undrain never overrides a dead link, and link recovery
+  never overrides a maintenance drain. The `SetEthernetSegmentDrain`
+  response and `rustbgpctl evpn es drain`/`undrain` now report the
+  composed state plus the reason set, and the new
+  `evpn_es_drained{esi, reason}` gauge answers "why is this ES
+  drained" in Prometheus. SIGHUP / `ApplyEvpnRuntime` may add, change,
+  or remove bindings at runtime: a binding change re-evaluates against
+  the new link immediately, and removing the binding clears any `link`
+  drain. Consumes the slice-1 carrier monitor (spawned lazily when the
+  first binding appears, dropped when the last one goes).
 - **EVPN link carrier monitor (ADR-0085 slice 1).** New standalone
   monitor in `rustbgpd-evpn-linux`
   (`linux::link_carrier::spawn_link_carrier_monitor`): subscribes to

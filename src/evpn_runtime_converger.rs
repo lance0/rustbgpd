@@ -110,6 +110,13 @@ pub(crate) struct EvpnRuntimeReloadApply {
     apply_lock: Arc<tokio::sync::Mutex<()>>,
     converger: Arc<dyn DaemonEvpnRuntimeConverger>,
     committed_config: Arc<Mutex<Config>>,
+    /// ADR-0085: where the resolved `[[ethernet_segments]]` interface
+    /// bindings are republished whenever the committed config
+    /// advances (SIGHUP and `ApplyEvpnRuntime` both commit through
+    /// `set_committed_config`, so this is the single chokepoint). The
+    /// link-drain coordinator consumes the receiver.
+    es_link_bindings_tx:
+        Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
 }
 
 impl EvpnRuntimeReloadApply {
@@ -127,7 +134,19 @@ impl EvpnRuntimeReloadApply {
             apply_lock,
             converger,
             committed_config: Arc::new(Mutex::new(committed_config)),
+            es_link_bindings_tx: None,
         }
+    }
+
+    /// Attach the ADR-0085 binding publisher. Every committed config
+    /// advance re-resolves and republishes the binding map (publish
+    /// is `send_if_modified`, so unchanged bindings stay silent).
+    pub(crate) fn with_es_link_bindings_publisher(
+        mut self,
+        tx: Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>,
+    ) -> Self {
+        self.es_link_bindings_tx = Some(tx);
+        self
     }
 
     fn committed_config_locked(&self) -> Config {
@@ -141,6 +160,36 @@ impl EvpnRuntimeReloadApply {
         match self.committed_config.lock() {
             Ok(mut guard) => *guard = config.clone(),
             Err(poisoned) => *poisoned.into_inner() = config.clone(),
+        }
+        self.publish_es_link_bindings(config);
+    }
+
+    /// Re-resolve and republish the ADR-0085 interface bindings for a
+    /// newly committed config. A binding-only edit plans as an EVPN
+    /// runtime no-op (the bindings deliberately live outside the
+    /// domain type the planner diffs), but still commits the config —
+    /// and lands here, where the link-drain coordinator picks it up
+    /// and re-evaluates immediately.
+    fn publish_es_link_bindings(&self, config: &Config) {
+        let Some(tx) = self.es_link_bindings_tx.as_ref() else {
+            return;
+        };
+        match config.resolve_es_link_bindings() {
+            Ok(bindings) => {
+                tx.send_if_modified(|current| {
+                    if **current == bindings {
+                        return false;
+                    }
+                    *current = Arc::new(bindings);
+                    true
+                });
+            }
+            // Unreachable for a config that passed validation; warn
+            // rather than poison the commit.
+            Err(error) => tracing::warn!(
+                %error,
+                "failed to resolve Ethernet Segment interface bindings from committed config"
+            ),
         }
     }
 
@@ -4556,6 +4605,84 @@ table_id = 6000
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// ADR-0085: a binding-only `[[ethernet_segments]]` edit plans as
+    /// an EVPN runtime no-op (the binding lives outside the domain
+    /// type the planner diffs) but must still advance the committed
+    /// config AND republish the resolved bindings to the link-drain
+    /// coordinator's watch — both directions: bind and unbind.
+    #[tokio::test]
+    async fn committed_config_advance_republishes_es_link_bindings() {
+        let baseline = Config::load_toml_with_diagnostics(
+            l2vni_one_es_runtime_candidate_toml(),
+            "test baseline",
+        )
+        .unwrap();
+        let bound_toml = format!(
+            "{}interface = \"bond0\"\nrecovery_delay_secs = 5\n",
+            l2vni_one_es_runtime_candidate_toml()
+        );
+        let bound = Config::load_toml_with_diagnostics(&bound_toml, "test candidate").unwrap();
+
+        // Coordinator already holds the baseline model, so the
+        // binding-only candidate is a planner no-op.
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            baseline.resolve_evpn_instances().unwrap(),
+            baseline.resolve_evpn_ip_vrfs().unwrap(),
+            baseline.resolve_ethernet_segments().unwrap(),
+        )));
+        let (bindings_tx, mut bindings_rx) =
+            tokio::sync::watch::channel(Arc::new(baseline.resolve_es_link_bindings().unwrap())
+                as crate::evpn_es_link_drain::EsLinkBindings);
+        let reload_apply = EvpnRuntimeReloadApply::new(
+            coordinator,
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(TestRuntimeConverger::ok()),
+            baseline,
+        )
+        .with_es_link_bindings_publisher(Arc::new(bindings_tx));
+
+        assert!(bindings_rx.borrow_and_update().is_empty());
+
+        // Bind: SIGHUP-shaped apply commits (Noop) and republishes.
+        let attempt = reload_apply
+            .apply_config_if_changed(&bound, evpn_runtime_changed_for_test)
+            .await;
+        assert!(matches!(
+            attempt.result,
+            Ok(Some(EvpnRuntimeReloadApplyResult {
+                outcome: EvpnRuntimeReloadOutcome::Noop,
+                ..
+            }))
+        ));
+        assert!(bindings_rx.has_changed().unwrap(), "binding add published");
+        let published = bindings_rx.borrow_and_update().clone();
+        let binding = published.values().next().expect("one binding");
+        assert_eq!(binding.interface, "bond0");
+        assert_eq!(binding.recovery_delay, Duration::from_secs(5));
+
+        // Unbind: removing the keys republishes the empty map.
+        let unbound = Config::load_toml_with_diagnostics(
+            l2vni_one_es_runtime_candidate_toml(),
+            "test candidate",
+        )
+        .unwrap();
+        let attempt = reload_apply
+            .apply_config_if_changed(&unbound, evpn_runtime_changed_for_test)
+            .await;
+        assert!(matches!(attempt.result, Ok(Some(_))));
+        assert!(
+            bindings_rx.has_changed().unwrap(),
+            "binding removal published"
+        );
+        assert!(bindings_rx.borrow_and_update().is_empty());
+    }
+
+    fn evpn_runtime_changed_for_test(new_config: &Config, current: &Config) -> bool {
+        new_config.evpn_instances != current.evpn_instances
+            || new_config.evpn_ip_vrfs != current.evpn_ip_vrfs
+            || new_config.ethernet_segments != current.ethernet_segments
     }
 
     #[test]

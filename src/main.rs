@@ -24,6 +24,7 @@ mod config_persister;
 mod config_transaction_control;
 mod evpn_dataplane;
 mod evpn_es_drain;
+mod evpn_es_link_drain;
 mod evpn_imet;
 mod evpn_l3_originator;
 mod evpn_originator;
@@ -1884,11 +1885,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .as_ref()
         .map(evpn_l3_originator::EvpnL3OriginatorHandle::runtime_control);
     let evpn_runtime_apply_lock = Arc::new(tokio::sync::Mutex::new(()));
-    // ADR-0084 runtime ES drain: shared in-memory drained-ESI set. The
-    // converger consults it on every originator-model publish and GCs it
-    // on segment-set replace; the gRPC SetEthernetSegmentDrain hook below
-    // mutates it under the same apply lock.
-    let evpn_es_drain_state = evpn_es_drain::EvpnEsDrainState::default();
+    // ADR-0084 runtime ES drain: shared in-memory drained set, reason-
+    // keyed since ADR-0085 (operator | link). The converger consults it
+    // on every originator-model publish and GCs it on segment-set
+    // replace; the gRPC SetEthernetSegmentDrain hook below and the
+    // ADR-0085 link coordinator both mutate it under the same apply
+    // lock. Built with the metrics handle so every committed mutation
+    // syncs the evpn_es_drained{esi, reason} gauge.
+    let evpn_es_drain_state = evpn_es_drain::EvpnEsDrainState::with_metrics(metrics.clone());
     let evpn_runtime_converger = Arc::new(evpn_runtime_converger::EvpnRuntimeActorConverger::new(
         rib_tx.clone(),
         evpn_imet_controller.clone(),
@@ -1899,12 +1903,25 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_segment_runtime_control.clone(),
         evpn_es_drain_state.clone(),
     ));
+    // ADR-0085: resolved [[ethernet_segments]] interface bindings.
+    // Initial value from the startup config; the reload apply
+    // republishes on every committed config advance; the link-drain
+    // coordinator (spawned below) consumes the receiver.
+    let initial_es_link_bindings = config.resolve_es_link_bindings().unwrap_or_else(|error| {
+        // Unreachable: the config passed full validation at load.
+        warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
+        std::collections::BTreeMap::new()
+    });
+    let (es_link_bindings_tx, es_link_bindings_rx) =
+        watch::channel::<evpn_es_link_drain::EsLinkBindings>(Arc::new(initial_es_link_bindings));
+    let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
         evpn_runtime_apply_lock.clone(),
         evpn_runtime_converger.clone(),
         config.clone(),
-    );
+    )
+    .with_es_link_bindings_publisher(es_link_bindings_tx.clone());
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -2057,6 +2074,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 Box::pin(async move {
                     match evpn_es_drain::apply_ethernet_segment_drain(
                         esi,
+                        // The RPC owns exactly the Operator reason
+                        // (ADR-0085 decision 2); the Link reason
+                        // belongs to the interface-binding
+                        // coordinator.
+                        evpn_es_drain::EsDrainReason::Operator,
                         drained,
                         &apply_lock,
                         &coordinator,
@@ -2071,6 +2093,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                                 drained: outcome.drained,
                                 changed: outcome.changed,
                                 member_vni_count: outcome.member_vni_count,
+                                reasons: outcome
+                                    .reasons
+                                    .iter()
+                                    .map(|reason| reason.as_str().to_string())
+                                    .collect(),
                             })
                         }
                         Err(evpn_es_drain::EsDrainError::UnknownEsi(message)) => Err(
@@ -2088,6 +2115,30 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             },
         ) as rustbgpd_api::evpn_service::EthernetSegmentDrainFn
     });
+    // ADR-0085 link-driven drain coordinator. Spawned whenever the
+    // segment actor runs (the drain target): bindings may be empty at
+    // startup and arrive later via SIGHUP / ApplyEvpnRuntime — the
+    // coordinator lazily spawns the kernel carrier monitor when the
+    // first binding appears and drops it when the last one goes. All
+    // its drain mutations go through the shared ADR-0084 primitive
+    // under the same EVPN runtime apply lock.
+    let evpn_es_link_drain_shutdown = tokio_util::sync::CancellationToken::new();
+    let _evpn_es_link_drain_task = evpn_segment_runtime_control
+        .as_ref()
+        .map(|segment_control| {
+            evpn_es_link_drain::spawn(
+                es_link_bindings_rx,
+                evpn_es_link_drain::CarrierFeed::Kernel,
+                evpn_es_link_drain::EsLinkDrainDeps {
+                    apply_lock: evpn_runtime_apply_lock.clone(),
+                    coordinator: evpn_runtime_coordinator.clone(),
+                    drain_state: evpn_es_drain_state.clone(),
+                    segment: Some(segment_control.clone()),
+                    originator: evpn_originator_runtime_control.clone(),
+                },
+                evpn_es_link_drain_shutdown.clone(),
+            )
+        });
     // Coordinator lock serializing persisted runtime config mutations with
     // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
     // catalog CRUD, and the SIGHUP reload path hold it across their
@@ -2589,6 +2640,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         warn!("EVPN runtime apply still in flight after 10s; proceeding with shutdown teardown");
     })
     .ok();
+
+    // 1.9a-pre Stop the ADR-0085 link-drain coordinator before the
+    // EVPN actors drain: a carrier edge arriving mid-teardown must
+    // not race the orchestrated withdraws (any in-flight apply still
+    // serializes on the EVPN runtime apply lock).
+    evpn_es_link_drain_shutdown.cancel();
 
     // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
     // peer manager shutdown — so its Type 2 Withdraws ride the still-

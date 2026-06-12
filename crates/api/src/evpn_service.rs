@@ -121,12 +121,17 @@ pub type DuplicateMacClearFn =
 /// Outcome returned by the daemon ADR-0084 Ethernet Segment drain hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthernetSegmentDrainOutcome {
-    /// Applied drain state.
+    /// Composed drain state after the request: `true` while ANY drain
+    /// reason is held (ADR-0085 decision 2) — an operator undrain
+    /// against a link-drained segment reports `true`.
     pub drained: bool,
-    /// `false` for an idempotent no-op.
+    /// `false` for an idempotent no-op on the RPC's (operator) reason.
     pub changed: bool,
     /// Member VNIs of the targeted ES in the committed config.
     pub member_vni_count: usize,
+    /// Drain reasons held after the request, as the lowercase wire
+    /// strings (`operator`, `link`). Empty when undrained.
+    pub reasons: Vec<String>,
 }
 
 /// Error returned by the daemon ADR-0084 Ethernet Segment drain hook.
@@ -496,12 +501,13 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             EthernetSegmentDrainError::NotFound(message) => Status::not_found(message),
             EthernetSegmentDrainError::Unavailable(message) => Status::unavailable(message),
         })?;
-        let message = ethernet_segment_drain_message(&req.esi, &outcome);
+        let message = ethernet_segment_drain_message(&req.esi, req.drained, &outcome);
         Ok(Response::new(proto::SetEthernetSegmentDrainResponse {
             drained: outcome.drained,
             changed: outcome.changed,
             member_vni_count: u32::try_from(outcome.member_vni_count).unwrap_or(u32::MAX),
             message,
+            reasons: outcome.reasons,
         }))
     }
 
@@ -550,19 +556,50 @@ fn parse_esi(raw: &str) -> Result<rustbgpd_evpn::EthernetSegmentIdentifier, &'st
     Ok(rustbgpd_evpn::EthernetSegmentIdentifier::new(bytes))
 }
 
-fn ethernet_segment_drain_message(esi: &str, outcome: &EthernetSegmentDrainOutcome) -> String {
+/// Operator-facing summary for a drain request. `requested` is the
+/// RPC's desired operator-reason state; `outcome.drained` is the
+/// COMPOSED state after the request (ADR-0085 decision 2: reasons
+/// compose, so removing the operator reason does not undrain a
+/// segment whose bound link is down, and adding it to a link-drained
+/// segment withdraws nothing new).
+fn ethernet_segment_drain_message(
+    esi: &str,
+    requested: bool,
+    outcome: &EthernetSegmentDrainOutcome,
+) -> String {
     let vnis = outcome.member_vni_count;
-    match (outcome.drained, outcome.changed) {
+    let reasons = if outcome.reasons.is_empty() {
+        "none".to_string()
+    } else {
+        outcome.reasons.join(",")
+    };
+    let link_held = outcome.reasons.iter().any(|reason| reason == "link");
+    match (requested, outcome.changed) {
+        (true, true) if link_held => format!(
+            "Ethernet Segment {esi} operator drain recorded; routes were already \
+             withdrawn by the link drain (drain reasons: {reasons})"
+        ),
         (true, true) => format!(
             "Ethernet Segment {esi} drained: withdrew Type 4 (ES), EAD-per-ES, EAD-per-EVI, \
              and local Type 2 MAC/MAC+IP routes for {vnis} member VNI(s); new local-MAC \
              origination suppressed while drained"
         ),
-        (true, false) => format!("Ethernet Segment {esi} is already drained"),
+        (true, false) => {
+            format!("Ethernet Segment {esi} is already drained (drain reasons: {reasons})")
+        }
+        (false, true) if outcome.drained => format!(
+            "Ethernet Segment {esi} operator drain removed; segment remains drained \
+             (drain reasons: {reasons}) — origination resumes when the attachment \
+             circuit recovers"
+        ),
         (false, true) => format!(
             "Ethernet Segment {esi} undrained: re-originated Type 4 (ES), EAD-per-ES, \
              EAD-per-EVI, re-ran DF election, and replayed cached local MAC/MAC+IP state \
              for {vnis} member VNI(s)"
+        ),
+        (false, false) if outcome.drained => format!(
+            "Ethernet Segment {esi} has no operator drain; segment remains drained \
+             (drain reasons: {reasons})"
         ),
         (false, false) => format!("Ethernet Segment {esi} is not drained"),
     }
@@ -1252,6 +1289,7 @@ mod tests {
                 drained: true,
                 changed: true,
                 member_vni_count: 1,
+                reasons: vec!["operator".to_string()],
             }))),
         );
         let err = svc
@@ -1285,6 +1323,7 @@ mod tests {
                 drained: true,
                 changed: true,
                 member_vni_count: 1,
+                reasons: vec!["operator".to_string()],
             }))),
         );
         for bad in [
@@ -1314,6 +1353,7 @@ mod tests {
                     drained: true,
                     changed: true,
                     member_vni_count: 3,
+                    reasons: vec!["operator".to_string()],
                 })
             }) as EthernetSegmentDrainFuture
         });
@@ -1331,6 +1371,7 @@ mod tests {
         assert_eq!(resp.member_vni_count, 3);
         assert!(resp.message.contains("drained"));
         assert!(resp.message.contains("Type 4"));
+        assert_eq!(resp.reasons, vec!["operator".to_string()]);
 
         let svc = service_with_es_drain(
             crate::server::AccessMode::ReadWrite,
@@ -1338,6 +1379,7 @@ mod tests {
                 drained: true,
                 changed: false,
                 member_vni_count: 3,
+                reasons: vec!["operator".to_string()],
             }))),
         );
         let resp = svc
@@ -1351,6 +1393,65 @@ mod tests {
         assert!(resp.drained);
         assert!(!resp.changed, "idempotent repeat must report changed=false");
         assert!(resp.message.contains("already drained"));
+    }
+
+    /// ADR-0085 decision 2: the response reports the COMPOSED state
+    /// and the reason set. An operator undrain that removes its
+    /// reason while the link drain holds must say "remains drained";
+    /// an operator drain on an already link-drained segment must not
+    /// claim a fresh withdrawal.
+    #[tokio::test]
+    async fn set_ethernet_segment_drain_reports_composed_state_and_reasons() {
+        // Operator undrain accepted, but the bound link is down.
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
+                drained: true,
+                changed: true,
+                member_vni_count: 2,
+                reasons: vec!["link".to_string()],
+            }))),
+        );
+        let resp = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.drained, "composed state stays drained");
+        assert!(resp.changed, "operator reason was removed");
+        assert_eq!(resp.reasons, vec!["link".to_string()]);
+        assert!(resp.message.contains("remains drained"));
+        assert!(resp.message.contains("link"));
+
+        // Operator drain stacked on an existing link drain: no fresh
+        // withdrawal happened.
+        let svc = service_with_es_drain(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_es_drain(Ok(EthernetSegmentDrainOutcome {
+                drained: true,
+                changed: true,
+                member_vni_count: 2,
+                reasons: vec!["operator".to_string(), "link".to_string()],
+            }))),
+        );
+        let resp = svc
+            .set_ethernet_segment_drain(Request::new(proto::SetEthernetSegmentDrainRequest {
+                esi: TEST_ESI.to_string(),
+                drained: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.drained);
+        assert!(resp.changed);
+        assert_eq!(
+            resp.reasons,
+            vec!["operator".to_string(), "link".to_string()]
+        );
+        assert!(resp.message.contains("already withdrawn"));
     }
 
     #[tokio::test]

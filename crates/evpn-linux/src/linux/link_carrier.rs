@@ -37,16 +37,18 @@
 //!   the kernel's unrelated link chatter.
 //!
 //! The watched-name set is replaceable at runtime via
-//! [`LinkCarrierHandle::replace_watched_links`] (SIGHUP adds/removes
-//! `[[ethernet_segments]]` bindings in the next slice); a replace
-//! re-evaluates immediately against current kernel state.
+//! [`LinkCarrierHandle::replace_watched_links`] (SIGHUP / runtime
+//! applies add and remove `[[ethernet_segments]]` bindings); a
+//! replace re-evaluates immediately against current kernel state.
 //!
 //! Parsing keeps the crate's established `LinkMessage` discipline:
 //! scalars out of the message (name `String`, carrier `bool`), no
 //! enum round-tripping.
 //!
-//! Nothing consumes this monitor yet — ADR-0085 slice 2 wires it
-//! into the drain coordinator.
+//! The daemon's ADR-0085 link-drain coordinator
+//! (`src/evpn_es_link_drain.rs`) owns the monitor: it spawns it when
+//! the first `interface` binding appears, replaces the watched set on
+//! config change, and drops it when the last binding goes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

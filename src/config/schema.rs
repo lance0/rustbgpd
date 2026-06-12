@@ -1284,6 +1284,18 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   single-active ES reachability.
 /// - `originator_ip` — IP this PE uses as the Type 4 ES route's
 ///   originator address. Typically equals `evpn_instances[].local_vtep_ip`.
+/// - `interface` — optional attachment-circuit link binding
+///   (ADR-0085 decision 1). When set, the ES's drain state follows
+///   that link's carrier (`IFF_LOWER_UP`): carrier loss drains the
+///   ES immediately; a link absent from the kernel counts as down
+///   (fail-closed). Unbound segments behave as before — drain only
+///   via the ADR-0084 RPC.
+/// - `recovery_delay_secs` — hold-off after carrier returns before
+///   the link drain is released (ADR-0085 decision 3). Default 30,
+///   range `0..=3600`; the timer re-arms on every up edge, so a
+///   flapping circuit stays drained until it holds carrier for the
+///   full window. Only meaningful — and only accepted — together
+///   with `interface`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EthernetSegmentConfig {
@@ -1307,6 +1319,16 @@ pub struct EthernetSegmentConfig {
     pub redundancy_mode: String,
     /// Originator IP carried on the Type 4 ES route.
     pub originator_ip: String,
+    /// ADR-0085 decision 1: name of the local attachment-circuit
+    /// link whose carrier drives this ES's link drain. Optional —
+    /// unbound segments are drained only via the ADR-0084 RPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    /// ADR-0085 decision 3: seconds to hold the link drain after
+    /// carrier returns (default 30, range `0..=3600`). Rejected
+    /// without `interface` — it has no meaning unbound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_delay_secs: Option<u64>,
 }
 
 fn default_df_preference() -> u32 {

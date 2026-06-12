@@ -754,6 +754,11 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 } else {
                     format!("Ethernet Segment {} undrained", req.esi)
                 },
+                reasons: if req.drained {
+                    vec!["operator".to_string()]
+                } else {
+                    Vec::new()
+                },
             },
         ))
     }

@@ -7954,6 +7954,171 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn ethernet_segment_interface_binding_parses_and_resolves() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "bond0"
+recovery_delay_secs = 5
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [200]
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(
+        segments.len(),
+        2,
+        "bindings must not leak into the domain type"
+    );
+
+    let bindings = config.resolve_es_link_bindings().unwrap();
+    assert_eq!(
+        bindings.len(),
+        1,
+        "only the bound segment resolves a binding"
+    );
+    let binding = bindings.get(&segments[0].esi).expect("bound ESI present");
+    assert_eq!(binding.interface, "bond0");
+    assert_eq!(binding.recovery_delay, std::time::Duration::from_secs(5));
+    assert!(
+        !bindings.contains_key(&segments[1].esi),
+        "unbound segment has no binding entry"
+    );
+}
+
+#[test]
+fn ethernet_segment_recovery_delay_defaults_to_thirty_seconds() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "eth1"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let bindings = config.resolve_es_link_bindings().unwrap();
+    assert_eq!(
+        bindings.values().next().unwrap().recovery_delay,
+        std::time::Duration::from_secs(30),
+        "ADR-0085 decision 3 default"
+    );
+}
+
+#[test]
+fn ethernet_segment_rejects_recovery_delay_without_interface() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+recovery_delay_secs = 5
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("recovery_delay_secs") && msg.contains("interface"),
+        "msg must explain the dependency: {msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_rejects_recovery_delay_out_of_range() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "eth1"
+recovery_delay_secs = 3601
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(msg.contains("3601") && msg.contains("3600"), "{msg}");
+}
+
+#[test]
+fn ethernet_segment_rejects_empty_or_overlong_interface() {
+    for (interface, needle) in [
+        ("\"\"", "must not be empty"),
+        ("\"a-name-longer-than-ifnamsiz\"", "IFNAMSIZ"),
+    ] {
+        let toml = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = {interface}
+"#
+        ));
+        let err = parse(&toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+            "expected InvalidEthernetSegment for {interface}, got {msg}"
+        );
+        assert!(msg.contains(needle), "{msg}");
+    }
+}
+
+#[test]
 fn ethernet_segment_rejects_empty_member_vnis() {
     let toml = evpn_toml_with(
         r#"

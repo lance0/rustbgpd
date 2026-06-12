@@ -156,7 +156,12 @@ rustbgpd's `[[ethernet_segments]]` is **control-plane only**: when the
 EVPN reconcile actor is running it originates Type 4 (ES route), Type 1
 EAD-per-ES, and Type 1 EAD-per-EVI for the configured ESI over its
 `member_vnis`, and runs DF election. It does **not** probe or require a
-kernel bond/ES netdev — there is no ES readiness gate.
+kernel bond/ES netdev — there is no ES readiness gate. Optionally, an
+`interface = "<linkname>"` binding (ADR-0085) makes the ES's drain
+state follow that link's carrier — an AC failure then withdraws the
+ES routes automatically (see the drain section in
+`docs/evpn-vtep-troubleshooting.md`); this watches the named link's
+carrier but still gates nothing at startup beyond the drain itself.
 
 What you still provide:
 

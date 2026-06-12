@@ -44,6 +44,8 @@ in practice:
 
 ## Decision 1 — `interface` binding on `[[ethernet_segments]]`
 
+**Landed:** 2026-06-12 (slice 2).
+
 Add two optional keys to `[[ethernet_segments]]`:
 `interface = "<linkname>"` (the binding) and `recovery_delay_secs`
 (the Decision 3 hold-off; meaningful only with `interface` set).
@@ -68,6 +70,8 @@ Binding semantics:
 
 ## Decision 2 — drain reasons: operator and link drains compose
 
+**Landed:** 2026-06-12 (slice 2).
+
 The ADR-0084 drained set becomes **reason-keyed**:
 `drained: Map<ESI, Set<DrainReason>>` with `DrainReason::Operator`
 and `DrainReason::Link`. An ES is drained while the set is non-empty.
@@ -90,6 +94,8 @@ and `DrainReason::Link`. An ES is drained while the set is non-empty.
 
 ## Decision 3 — recovery hold-off on link up
 
+**Landed:** 2026-06-12 (slice 2).
+
 A down→up transition does not undrain immediately. Per-ES
 `recovery_delay_secs` (default **30**, range 0–3600) holds the `Link`
 reason for that long after carrier returns:
@@ -110,6 +116,9 @@ reason for that long after carrier returns:
   only.
 
 ## Decision 4 — `RTNLGRP_LINK` subscription with poll backstop
+
+**Landed:** 2026-06-12 (slice 1, the `link_carrier` monitor); wired
+into the drain coordinator with slice 2.
 
 A daemon-side link monitor subscribes to `RTNLGRP_LINK` and projects
 carrier state for the bound link names into a watch channel the drain

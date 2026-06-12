@@ -203,13 +203,53 @@ events, so undraining replays the *latest* local state (and re-runs DF
 election). Repeating the current state is an idempotent no-op; an ESI
 that is not in `[[ethernet_segments]]` returns `NOT_FOUND`.
 
+### Link-driven drain and composable reasons (ADR-0085)
+
+Bind the ES to its attachment-circuit link and the drain follows
+carrier automatically:
+
+```toml
+[[ethernet_segments]]
+esi = "00:11:22:33:44:55:66:77:88:99"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+interface = "bond0"          # AC link; carrier = IFF_LOWER_UP
+recovery_delay_secs = 30     # hold-off after carrier returns (0-3600)
+```
+
+- **Carrier loss drains immediately** (cable pull and `ip link set
+  ... down` both clear `IFF_LOWER_UP`). A bound link that does not
+  exist in the kernel counts as down — fail-closed toward drain.
+- **Recovery is held off** for `recovery_delay_secs` after carrier
+  returns, and the hold re-arms on every up edge, so a flapping
+  circuit stays drained until it holds carrier for the full window.
+  Down is always immediate; only recovery waits.
+- **Reasons compose.** The RPC/CLI owns the `operator` reason; the
+  binding owns `link`; the ES is drained while either is held. The
+  maintenance flow above still works with a binding: drain manually,
+  do the cable work (the link flapping changes nothing), undrain
+  manually — origination returns only once the link is also healthy
+  past its hold-off.
+- **"Why is this ES drained?"** — the drain/undrain response and
+  `--json` output list the reason set, and the
+  `evpn_es_drained{esi, reason}` gauge exposes each reason in
+  Prometheus.
+- Bindings hot-apply: SIGHUP / `ApplyEvpnRuntime` may add, change, or
+  remove `interface`/`recovery_delay_secs`; a changed binding
+  re-evaluates against the new link immediately, and removing the
+  binding clears any `link` drain.
+
 Caveats:
 
-- **Drain state is in-memory.** A daemon restart clears it and replays
-  configured state — re-apply the drain after any restart inside the
-  maintenance window.
+- **Operator drain state is in-memory.** A daemon restart clears the
+  `operator` reason and replays configured state — re-apply the drain
+  after any restart inside the maintenance window. For **bound**
+  segments this caveat softens: link state is re-read at startup, so
+  an ES whose AC is down when the daemon boots starts drained(`link`)
+  with no operator action and no hold-off.
 - Drain state survives SIGHUP / runtime applies that keep the ES
-  configured; removing the ES from config drops its drain entry.
+  configured; removing the ES from config drops its drain entry (all
+  reasons).
 - The RPC is `operator_only` (it redirects live traffic); observer and
   automation principals are denied.
 - Duplicate-MAC quarantines still apply: undrain does not replay a
