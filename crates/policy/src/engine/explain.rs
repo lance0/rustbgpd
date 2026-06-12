@@ -107,11 +107,20 @@ pub fn explain_chain_statements(
         let (statement_index, action, matched_conditions, modifications) = match matched {
             Some(index) => {
                 let entry = &named.policy.entries[index];
+                // Live-path parity: a Deny terminator returns
+                // `PolicyResult::deny()` and never applies its set
+                // clauses, so a denying statement must not claim
+                // modifications in the trace either.
+                let modifications = if entry.action == PolicyAction::Permit {
+                    render_modifications(&entry.modifications, ctx)
+                } else {
+                    Vec::new()
+                };
                 (
                     Some(index),
                     entry.action,
                     render_matched_conditions(entry, ctx),
-                    render_modifications(&entry.modifications, ctx),
+                    modifications,
                 )
             }
             None => (None, named.policy.default_action, Vec::new(), Vec::new()),

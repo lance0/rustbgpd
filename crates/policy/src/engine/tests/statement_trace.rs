@@ -268,6 +268,30 @@ fn deny_stops_the_walk_and_later_policies_get_no_step() {
 }
 
 #[test]
+fn deny_statement_never_claims_modifications() {
+    // Live-path parity: a Deny terminator drops its set clauses
+    // (`PolicyResult::deny()`), so the trace must not render them.
+    let mut denying = stmt(None, PolicyAction::Deny, vec![]);
+    denying.modifications = RouteModifications {
+        set_local_pref: Some(200),
+        ..Default::default()
+    };
+    let chain = PolicyChain::from_named(vec![named(
+        "blocker",
+        policy(vec![denying], PolicyAction::Permit),
+    )]);
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Deny);
+    assert_eq!(trace.steps.len(), 1);
+    assert_eq!(trace.steps[0].statement_index, Some(0));
+    assert!(
+        trace.steps[0].modifications.is_empty(),
+        "denying statement must not claim attribute edits: {:?}",
+        trace.steps[0].modifications
+    );
+}
+
+#[test]
 fn modifications_render_before_and_after_from_pre_policy_values() {
     let mut statement = stmt(None, PolicyAction::Permit, vec![]);
     statement.modifications = RouteModifications {

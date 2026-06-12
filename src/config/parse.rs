@@ -266,6 +266,13 @@ pub(super) fn parse_named_policy(
     neighbor_sets: &HashMap<String, NeighborSetConfig>,
     peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Policy, ConfigError> {
+    if name.trim().is_empty() {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: "policy definitions must have a non-empty name \
+                     (the empty name is reserved for inline policies)"
+                .to_string(),
+        });
+    }
     let default_action = match cfg.default_action.as_str() {
         "permit" => PolicyAction::Permit,
         "deny" => PolicyAction::Deny,
