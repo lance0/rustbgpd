@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicRangePolicyTarget, PeerKey, PeerLifecycleError, PeerManagerCommand,
-    PeerManagerNeighborConfig, ResolvedPeerPolicy, RuntimeConfigTransactionPlanError,
-    RuntimeConfigTransactionStatus, StageConfigSnapshotError,
+    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey, PeerLifecycleError,
+    PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
@@ -1047,7 +1047,7 @@ async fn commit_apply_family(
             ))
         }
         ApplyFamily::PeerSessionReshape => {
-            let reconfigured = commit_peer_session_reshape_locked(
+            let commit = commit_peer_session_reshape_locked(
                 &deps.peer_mgr_tx,
                 config_tx,
                 candidate_toml,
@@ -1057,9 +1057,7 @@ async fn commit_apply_family(
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
-                format!(
-                    "Committed peer-group/session reshape runtime config transaction.\n{reconfigured} live session(s) reconfigured.\n"
-                ),
+                peer_session_reshape_commit_message(&commit),
             ))
         }
         ApplyFamily::StaticNeighbors => {
@@ -1351,15 +1349,57 @@ async fn commit_live_policy_impact_locked(
     Ok(priors.len())
 }
 
-/// Commit a static peer-group/session reshape transaction: stage the candidate
-/// snapshot, reconfigure the affected concrete peers (capturing prior configs),
-/// persist, and roll back live peers + snapshot on failure.
+/// Outcome of a committed peer-group/session reshape transaction.
+struct PeerSessionReshapeCommit {
+    /// Static members reconfigured in place with captured priors.
+    reconfigured: usize,
+    /// Live dynamic sessions gracefully reset after persist (plus any
+    /// per-peer signaling failures, reported rather than swallowed).
+    dynamic_bounce: DynamicPeerBounceOutcome,
+}
+
+/// Human text for a committed peer-group/session reshape: static reconfigure
+/// count, dynamic reset count, and any per-peer signaling failures (which keep
+/// their running config until reconnect — reported, never swallowed).
+fn peer_session_reshape_commit_message(commit: &PeerSessionReshapeCommit) -> String {
+    let mut message = format!(
+        "Committed peer-group/session reshape runtime config transaction.\n{} live session(s) reconfigured.\n",
+        commit.reconfigured
+    );
+    if commit.dynamic_bounce.signaled > 0 {
+        let _ = writeln!(
+            message,
+            "{} live dynamic session(s) signaled to reset; they re-accept under the committed config on reconnect.",
+            commit.dynamic_bounce.signaled
+        );
+    }
+    if !commit.dynamic_bounce.failures.is_empty() {
+        let _ = writeln!(
+            message,
+            "{} dynamic session(s)/range(s) could not be signaled and keep their running config until they reconnect: {}",
+            commit.dynamic_bounce.failures.len(),
+            commit.dynamic_bounce.failures.join("; ")
+        );
+    }
+    message
+}
+
+/// Commit a peer-group/session reshape transaction: stage the candidate
+/// snapshot, reconfigure the affected concrete static peers (capturing prior
+/// configs), persist, and roll back live peers + snapshot on failure. After a
+/// successful persist, gracefully reset the live dynamic sessions accepted by
+/// the affected ranges — they re-accept under the committed (already staged)
+/// config on reconnect. The dynamic reset is deliberately post-persist and
+/// best-effort: a failed transaction never flaps a dynamic peer, and a
+/// per-peer signaling failure degrades to the documented
+/// keep-running-config-until-reconnect semantics instead of failing the
+/// already-durable transaction.
 async fn commit_peer_session_reshape_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
-) -> Result<usize, ConfigTransactionApplyError> {
+) -> Result<PeerSessionReshapeCommit, ConfigTransactionApplyError> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
@@ -1379,9 +1419,9 @@ async fn commit_peer_session_reshape_locked(
             return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
         }
     };
-    let reconfigured = targets.len();
+    let reconfigured = targets.static_targets.len();
 
-    let priors = match send_apply_peer_reshape_snapshot(peer_mgr_tx, targets).await {
+    let priors = match send_apply_peer_reshape_snapshot(peer_mgr_tx, targets.static_targets).await {
         Ok(priors) => priors,
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
@@ -1395,13 +1435,60 @@ async fn commit_peer_session_reshape_locked(
             rollback_peer_reshape_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
         );
     }
-    Ok(reconfigured)
+
+    let dynamic_bounce =
+        send_bounce_dynamic_range_peers(peer_mgr_tx, targets.dynamic_bounce_ranges).await;
+    Ok(PeerSessionReshapeCommit {
+        reconfigured,
+        dynamic_bounce,
+    })
+}
+
+/// Send `BounceDynamicRangePeers` after a successful persist. Best-effort by
+/// contract: the transaction is already durable, so a command-channel failure
+/// is folded into the outcome's failure list (the affected sessions keep
+/// their running config until they reconnect) instead of failing the commit.
+async fn send_bounce_dynamic_range_peers(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    ranges: Vec<DynamicRangeTarget>,
+) -> DynamicPeerBounceOutcome {
+    if ranges.is_empty() {
+        return DynamicPeerBounceOutcome::default();
+    }
+    let unavailable = |ranges: &[DynamicRangeTarget]| DynamicPeerBounceOutcome {
+        signaled: 0,
+        failures: ranges
+            .iter()
+            .map(|range| {
+                format!(
+                    "{}/{} ({}): peer manager unavailable; live dynamic sessions keep \
+                     their running config until they reconnect",
+                    range.addr, range.prefix_len, range.peer_group
+                )
+            })
+            .collect(),
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if peer_mgr_tx
+        .send(PeerManagerCommand::BounceDynamicRangePeers {
+            ranges: ranges.clone(),
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable(&ranges);
+    }
+    match reply_rx.await {
+        Ok(outcome) => outcome,
+        Err(_) => unavailable(&ranges),
+    }
 }
 
 #[derive(Default)]
 struct LivePolicyTargets {
     static_targets: Vec<ResolvedPeerPolicy>,
-    dynamic_ranges: Vec<DynamicRangePolicyTarget>,
+    dynamic_ranges: Vec<DynamicRangeTarget>,
 }
 
 /// Build the resolved-chain apply set from a live-impact diff:
@@ -1449,7 +1536,7 @@ fn resolve_live_policy_targets(
                     impact.address
                 )));
             };
-            targets.dynamic_ranges.push(DynamicRangePolicyTarget {
+            targets.dynamic_ranges.push(DynamicRangeTarget {
                 addr,
                 prefix_len,
                 peer_group: range.peer_group.clone(),
@@ -1481,15 +1568,33 @@ fn resolve_live_policy_targets(
     Ok(targets)
 }
 
+/// Resolved commit set for a peer-group/session reshape transaction: static
+/// members reconfigured in place (rollback-capable) plus the dynamic ranges
+/// whose live sessions are gracefully reset after persist.
+struct PeerSessionReshapeTargets {
+    static_targets: Vec<PeerManagerNeighborConfig>,
+    dynamic_bounce_ranges: Vec<DynamicRangeTarget>,
+}
+
 fn resolve_peer_session_reshape_targets(
     previous: &Config,
     candidate: &Config,
-) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
+) -> Result<PeerSessionReshapeTargets, ConfigTransactionApplyError> {
     let diff = diff_config(previous, candidate);
     let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
     if !neighbor_diff.added.is_empty() || !neighbor_diff.removed.is_empty() {
         return Err(ConfigTransactionApplyError::Internal(
             "peer-session reshape executor received add/delete neighbor changes".to_string(),
+        ));
+    }
+    // Mirrors `session_reshape_transaction`: a `[[dynamic_neighbors]]` record
+    // edit (range add/remove, peer-group reassignment) is the dynamic-neighbor
+    // executor's family — a dynamic impact reaching this executor must be a
+    // pure peer-group field reshape over unchanged range records.
+    if previous.dynamic_neighbors != candidate.dynamic_neighbors {
+        return Err(ConfigTransactionApplyError::Internal(
+            "peer-session reshape executor received [[dynamic_neighbors]] record changes"
+                .to_string(),
         ));
     }
 
@@ -1508,13 +1613,39 @@ fn resolve_peer_session_reshape_targets(
         ));
     }
 
-    let mut targets = Vec::new();
+    let mut targets = PeerSessionReshapeTargets {
+        static_targets: Vec::new(),
+        dynamic_bounce_ranges: Vec::new(),
+    };
     for impact in &diff.effective_neighbor_impact {
-        if impact.kind != EffectiveNeighborImpactKind::SessionReshape || impact.is_dynamic_range {
+        if impact.kind != EffectiveNeighborImpactKind::SessionReshape {
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "peer-session reshape executor received unsupported impact for {}",
                 impact.address
             )));
+        }
+        if impact.is_dynamic_range {
+            let Some((addr, prefix_len)) = crate::config::effective_prefix_str(&impact.address)
+            else {
+                return Err(ConfigTransactionApplyError::Internal(format!(
+                    "peer-session reshape impact references invalid dynamic range {}",
+                    impact.address
+                )));
+            };
+            let Some(range) = candidate.dynamic_neighbors.iter().find(|range| {
+                crate::config::effective_prefix_str(&range.prefix) == Some((addr, prefix_len))
+            }) else {
+                return Err(ConfigTransactionApplyError::Internal(format!(
+                    "peer-session reshape impact references dynamic range {} absent from the candidate",
+                    impact.address
+                )));
+            };
+            targets.dynamic_bounce_ranges.push(DynamicRangeTarget {
+                addr,
+                prefix_len,
+                peer_group: range.peer_group.clone(),
+            });
+            continue;
         }
         let mut matches = candidate
             .neighbors
@@ -1541,13 +1672,15 @@ fn resolve_peer_session_reshape_targets(
         let resolved = candidate
             .resolve_neighbor(neighbor)
             .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
-        targets.push(crate::reload::build_peer_mgr_config(
-            &resolved.transport_config,
-            &resolved.label,
-            resolved.import_policy.as_ref(),
-            resolved.export_policy.as_ref(),
-            resolved.peer_group.clone(),
-        ));
+        targets
+            .static_targets
+            .push(crate::reload::build_peer_mgr_config(
+                &resolved.transport_config,
+                &resolved.label,
+                resolved.import_policy.as_ref(),
+                resolved.export_policy.as_ref(),
+                resolved.peer_group.clone(),
+            ));
     }
     Ok(targets)
 }
@@ -2599,10 +2732,30 @@ peer_group = "edge"
     }
 
     async fn fake_snapshot_peer_manager(
+        rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+        peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+    ) {
+        fake_snapshot_peer_manager_recording_bounces(
+            rx,
+            plan,
+            snapshot_toml,
+            peers,
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .await;
+    }
+
+    /// `fake_snapshot_peer_manager` with a recorder for
+    /// `BounceDynamicRangePeers` selectors. The fake reports one signaled
+    /// session per targeted range and no failures.
+    async fn fake_snapshot_peer_manager_recording_bounces(
         mut rx: mpsc::Receiver<PeerManagerCommand>,
         plan: RuntimeConfigTransactionPlan,
         snapshot_toml: Arc<Mutex<String>>,
         peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+        bounce_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -2651,6 +2804,14 @@ peer_group = "edge"
                 PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
                     let mut peers = peers.lock().await;
                     let _ = reply.send(fake_apply_peer_reshape_snapshot(&mut peers, targets));
+                }
+                PeerManagerCommand::BounceDynamicRangePeers { ranges, reply } => {
+                    let signaled = ranges.len();
+                    bounce_calls.lock().await.push(ranges);
+                    let _ = reply.send(DynamicPeerBounceOutcome {
+                        signaled,
+                        failures: Vec::new(),
+                    });
                 }
                 _ => panic!("unexpected peer-manager command in snapshot transaction test"),
             }
@@ -2896,6 +3057,69 @@ peer_group = "edge"
         )
     }
 
+    /// Peer group referenced only by a `[[dynamic_neighbors]]` range: a
+    /// hold-time edit is a dynamic-range session reshape with no static
+    /// members.
+    fn dynamic_peer_group_reshape_toml(hold_time: u32) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+hold_time = {hold_time}
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    }
+
+    /// Peer group with one static member and one `[[dynamic_neighbors]]`
+    /// range: a hold-time edit reshapes the static member and resets the
+    /// range's live dynamic sessions.
+    fn mixed_peer_group_reshape_toml(hold_time: u32) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.edge]
+hold_time = {hold_time}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "edge"
+remote_asn = 65030
+"#
+        )
+    }
+
     fn peer_group_reassignment_toml(group: &str) -> String {
         format!(
             r#"
@@ -2956,7 +3180,7 @@ peer_group = "{group}"
         apply_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
         captured_priors: Arc<Mutex<VecDeque<Vec<ResolvedPeerPolicy>>>>,
         apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
-        dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangePolicyTarget>>>>,
+        dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -4039,7 +4263,7 @@ default_action = "permit"
         assert_eq!(import_default_action(&calls[0][0]), PolicyAction::Deny);
         assert_eq!(
             dynamic_calls.lock().await.as_slice(),
-            &[Vec::<DynamicRangePolicyTarget>::new()],
+            &[Vec::<DynamicRangeTarget>::new()],
             "static live-policy impact must not send dynamic selectors"
         );
     }
@@ -4229,6 +4453,190 @@ default_action = "permit"
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].peer_group.as_deref(), Some("core"));
         assert_eq!(peers[0].hold_time, Some(45));
+    }
+
+    #[tokio::test]
+    async fn apply_commits_dynamic_range_peer_group_reshape_after_persist_ack() {
+        let previous_toml = dynamic_peer_group_reshape_toml(90);
+        let candidate_toml = dynamic_peer_group_reshape_toml(45);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+            bounce_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("hold_time = 45"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        // No static members: the reshape fan-out reconfigures nothing.
+        assert!(peers.lock().await.is_empty());
+        let bounce_calls = bounce_calls.lock().await;
+        assert_eq!(bounce_calls.len(), 1, "{bounce_calls:?}");
+        assert_eq!(bounce_calls[0].len(), 1);
+        assert_eq!(bounce_calls[0][0].addr.to_string(), "10.30.0.0");
+        assert_eq!(bounce_calls[0][0].prefix_len, 16);
+        assert_eq!(bounce_calls[0][0].peer_group, "ix");
+        assert!(
+            response
+                .human_text
+                .contains("1 live dynamic session(s) signaled to reset"),
+            "{}",
+            response.human_text
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_commits_mixed_static_and_dynamic_peer_group_reshape_after_persist_ack() {
+        let previous_toml = mixed_peer_group_reshape_toml(90);
+        let candidate_toml = mixed_peer_group_reshape_toml(45);
+        let initial_peers = resolved_static_peer_configs(&previous_toml);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(initial_peers));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+            bounce_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("hold_time = 45"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        {
+            let peers = peers.lock().await;
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].hold_time, Some(45));
+        }
+        let bounce_calls = bounce_calls.lock().await;
+        assert_eq!(bounce_calls.len(), 1, "{bounce_calls:?}");
+        assert_eq!(bounce_calls[0].len(), 1);
+        assert_eq!(bounce_calls[0][0].peer_group, "edge");
+        assert!(
+            response
+                .human_text
+                .contains("1 live session(s) reconfigured")
+        );
+        assert!(
+            response
+                .human_text
+                .contains("1 live dynamic session(s) signaled to reset"),
+            "{}",
+            response.human_text
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_range_peer_group_reshape_persistence_failure_skips_bounce() {
+        // The dynamic reset is post-persist by contract: a failed transaction
+        // must never flap a live dynamic session.
+        let previous_toml = dynamic_peer_group_reshape_toml(90);
+        let candidate_toml = dynamic_peer_group_reshape_toml(45);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+            bounce_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref m) if m == "persist failed"),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        assert!(
+            bounce_calls.lock().await.is_empty(),
+            "a failed transaction must not signal dynamic session resets"
+        );
     }
 
     #[tokio::test]

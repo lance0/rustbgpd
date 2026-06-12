@@ -94,6 +94,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0083](0083-evpn-single-active-backup-path.md) | EVPN single-active backup-path pre-install | Accepted | 2026-06-11 |
 | [0084](0084-evpn-ethernet-segment-drain.md) | Runtime Ethernet Segment drain | Accepted | 2026-06-12 |
 | [0085](0085-evpn-es-interface-binding.md) | Ethernet Segment interface binding — link-driven drain and same-ESI local bias | Accepted | 2026-06-12 |
+| [0086](0086-dynamic-peer-group-reconfigure.md) | Peer-group field edits reach live dynamic sessions via post-persist graceful reset | Accepted | 2026-06-12 |
 
 ## Template
 

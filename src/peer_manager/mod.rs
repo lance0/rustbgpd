@@ -653,6 +653,10 @@ impl PeerManager {
                             let result = self.apply_peer_reshape_snapshot(targets).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::BounceDynamicRangePeers { ranges, reply } => {
+                            let outcome = self.bounce_dynamic_peers_for_ranges(&ranges).await;
+                            let _ = reply.send(outcome);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);

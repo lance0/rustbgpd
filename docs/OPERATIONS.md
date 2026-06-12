@@ -154,11 +154,14 @@ back if apply or persistence fails.
 Because import-chain changes are re-evaluated with Route Refresh, every impacted
 Established peer must have negotiated Route Refresh or the transaction is
 rejected without committing the candidate.
-Static peer-group/session reshape transactions can also rebuild affected static
-sessions (for example, a peer-group `hold_time` edit inherited by existing
-static neighbors) with captured prior peer configs and rollback. Mixed-family
-candidates, dynamic-range session reshapes, mixed policy/session effective
-impact, and unsupported sections are rejected without mutation.
+Peer-group/session reshape transactions can also rebuild affected sessions
+(for example, a peer-group `hold_time` edit inherited by existing members):
+static neighbors are reconfigured in place with captured prior peer configs and
+rollback, and live dynamic sessions accepted by an affected
+`[[dynamic_neighbors]]` range are gracefully reset after persist so they
+re-accept under the committed config on reconnect (ADR-0086). Mixed-family
+candidates, dynamic-range peer-group reassignments, mixed policy/session
+effective impact, and unsupported sections are rejected without mutation.
 
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:

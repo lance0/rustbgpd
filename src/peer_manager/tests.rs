@@ -1,7 +1,7 @@
 use super::*;
 use bytes::BytesMut;
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, DynamicRangePolicyTarget, ImportValidationDependency, PeerKey,
+    CatalogMutationError, DynamicRangeTarget, ImportValidationDependency, PeerKey,
     SessionLifecycleEventType,
 };
 use rustbgpd_fsm::SessionState;
@@ -1198,6 +1198,216 @@ async fn apply_peer_reshape_snapshot_rolls_back_prior_peers_on_later_failure() {
         .expect("restored peer 2");
     assert_eq!(peer2.description, format!("test-peer-{addr2}"));
     assert_eq!(peer2.hold_time, Some(90));
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture mirrors ManagedPeer fields"
+)]
+fn insert_test_dynamic_managed_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+    session_id: u64,
+    handle: PeerHandle,
+    enabled: bool,
+    range_addr: IpAddr,
+    range_prefix_len: u8,
+    range_peer_group: &str,
+) {
+    let peer_config = make_config(addr, 65030);
+    let transport = mgr.build_transport_config(&peer_config);
+    let hold = transport.peer.hold_time;
+    let peer_key = key(addr);
+    mgr.peers.insert(
+        peer_key.clone(),
+        ManagedPeer {
+            handle,
+            session_id,
+            remote_asn: 65030,
+            description: format!("dynamic:{range_peer_group}"),
+            peer_group: Some(range_peer_group.to_string()),
+            enabled,
+            hold_time: Some(hold),
+            max_prefixes: None,
+            transport_config: transport,
+            import_policy: None,
+            export_policy: None,
+            pending_inbound: None,
+            is_dynamic: true,
+            accepted_dynamic_range: Some(AcceptedDynamicRange {
+                addr: range_addr,
+                prefix_len: range_prefix_len,
+                peer_group: range_peer_group.to_string(),
+            }),
+            pending_refresh: false,
+            pending_export_apply: false,
+            advertise_graceful_shutdown: false,
+        },
+    );
+    mgr.register_session(session_id, &peer_key);
+    mgr.dynamic_peer_count += 1;
+}
+
+#[tokio::test]
+async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
+    let mut mgr = dynamic_test_manager();
+
+    let static_counters = Arc::new(FakePeerCounters::default());
+    let static_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    insert_test_managed_peer(
+        &mut mgr,
+        static_addr,
+        fake_peer_handle(
+            static_addr,
+            SessionState::Established,
+            None,
+            static_counters.clone(),
+        ),
+        false,
+    );
+
+    let matched_counters = Arc::new(FakePeerCounters::default());
+    let matched_addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        matched_addr,
+        11,
+        fake_peer_handle(
+            matched_addr,
+            SessionState::Established,
+            None,
+            matched_counters.clone(),
+        ),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let other_range_counters = Arc::new(FakePeerCounters::default());
+    let other_addr = IpAddr::V4(Ipv4Addr::new(10, 40, 0, 5));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        other_addr,
+        12,
+        fake_peer_handle(
+            other_addr,
+            SessionState::Established,
+            None,
+            other_range_counters.clone(),
+        ),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 40, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let disabled_counters = Arc::new(FakePeerCounters::default());
+    let disabled_addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 6));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        disabled_addr,
+        13,
+        fake_peer_handle(
+            disabled_addr,
+            SessionState::Idle,
+            None,
+            disabled_counters.clone(),
+        ),
+        false,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let dynamic_count_before = mgr.dynamic_peer_count;
+    let outcome = mgr
+        .bounce_dynamic_peers_for_ranges(&[DynamicRangeTarget {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+            prefix_len: 16,
+            peer_group: "ix-members".to_string(),
+        }])
+        .await;
+
+    assert_eq!(outcome.signaled, 1, "{outcome:?}");
+    assert!(outcome.failures.is_empty(), "{outcome:?}");
+    wait_counter(&matched_counters.stop, 1).await;
+    assert_eq!(static_counters.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(other_range_counters.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(disabled_counters.stop.load(Ordering::SeqCst), 0);
+
+    // The bounce only signals: ManagedPeer removal, the
+    // `dynamic_peer_count` slot decrement, and metric reaping stay owned by
+    // the normal BackToIdle reap path, and the peer's admin state is
+    // untouched so that reap actually runs.
+    assert_eq!(mgr.dynamic_peer_count, dynamic_count_before);
+    let managed = mgr
+        .peers
+        .get(&key(matched_addr))
+        .expect("signaled peer must remain managed until BackToIdle reaps it");
+    assert!(managed.enabled);
+    assert!(managed.is_dynamic);
+}
+
+#[tokio::test]
+async fn bounce_dynamic_peers_reports_signaling_failures_per_peer() {
+    let mut mgr = dynamic_test_manager();
+
+    // A handle whose session task is already gone: the stop signal fails.
+    let (dead_tx, dead_rx) = mpsc::channel(1);
+    drop(dead_rx);
+    let dead_handle = PeerHandle::from_parts(dead_tx, tokio::spawn(async { Ok(()) }));
+    let dead_addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        dead_addr,
+        11,
+        dead_handle,
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let live_counters = Arc::new(FakePeerCounters::default());
+    let live_addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 6));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        live_addr,
+        12,
+        fake_peer_handle(
+            live_addr,
+            SessionState::Established,
+            None,
+            live_counters.clone(),
+        ),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let outcome = mgr
+        .bounce_dynamic_peers_for_ranges(&[DynamicRangeTarget {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+            prefix_len: 16,
+            peer_group: "ix-members".to_string(),
+        }])
+        .await;
+
+    // One failure reported by peer, and the failure does not stop the sweep:
+    // the live peer is still signaled.
+    assert_eq!(outcome.signaled, 1, "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(
+        outcome.failures[0].contains("10.30.0.5"),
+        "{:?}",
+        outcome.failures
+    );
+    wait_counter(&live_counters.stop, 1).await;
+    // The unsignalable peer stays managed; it keeps its running config until
+    // it reconnects (or its session-task exit drives BackToIdle).
+    assert!(mgr.peers.contains_key(&key(dead_addr)));
 }
 
 #[tokio::test]
@@ -4282,7 +4492,7 @@ remote_asn = 65030
     let priors = mgr
         .apply_policy_impact_snapshot(
             Vec::new(),
-            vec![DynamicRangePolicyTarget {
+            vec![DynamicRangeTarget {
                 addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
                 prefix_len: 16,
                 peer_group: "ix".to_string(),
