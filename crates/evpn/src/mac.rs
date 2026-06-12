@@ -304,6 +304,33 @@ pub enum LocalMacObservation {
         /// IP half of the binding that disappeared.
         ip: IpAddr,
     },
+    /// An FDB row for this MAC was observed on the EVPN-owned VXLAN
+    /// port of the named instance.
+    ///
+    /// The bridge FDB holds at most one row per `(bridge, MAC, VLAN)`,
+    /// so a row on the VXLAN port means the kernel does **not** hold
+    /// the MAC on any local AC port. When a remote Type 2 is
+    /// programmed over a kernel-learned local row, the kernel performs
+    /// an **in-place port move**: one `RTM_NEWNEIGH` with the new
+    /// (VXLAN) ifindex and **no** `RTM_DELNEIGH` for the old local
+    /// row. Without this variant that move is invisible to the
+    /// originator — its local-MAC cache keeps claiming a MAC the
+    /// kernel no longer holds locally, and an ADR-0084 undrain
+    /// replays a stale Type 2 (the M66 incident).
+    ///
+    /// Most messages with this shape are *not* moves — every
+    /// remote-MAC programming (ours or a foreign controller's)
+    /// echoes one. The classifier cannot tell the difference; the
+    /// originator can: it acts only when it currently claims the MAC
+    /// as local, and ignores the rest (ADR-0054 foreign-state
+    /// discipline — rows for MACs we never claimed are not local
+    /// state changes).
+    ObservedOnVxlanPort {
+        /// VNI whose VXLAN port the row appeared on.
+        vni: EvpnInstanceId,
+        /// MAC the row is for.
+        mac: MacAddress,
+    },
 }
 
 #[cfg(test)]

@@ -3600,3 +3600,382 @@ async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
         "quarantine recovery on a drained VNI must not replay the MAC"
     );
 }
+
+// --- In-place FDB port-move detection (`ObservedOnVxlanPort`) ---
+//
+// The M66 ES-drain handover proof (the topology header in
+// tests/interop/m66-evpn-es-drain-handover.clab.yml has the full
+// incident) surfaced that programming a remote Type 2 over a
+// kernel-learned local AC row is an in-place FDB port move: the
+// kernel emits one RTM_NEWNEIGH on the VXLAN port and NO RTM_DELNEIGH
+// for the replaced local row, so without the `ObservedOnVxlanPort`
+// observation the local-MAC cache keeps claiming a MAC the kernel no
+// longer holds. These tests pin the originator's handling.
+
+/// Like [`rib_capture_responder`] but also retains every injected
+/// route so tests can inspect path attributes (mobility extcomm).
+fn rib_capture_responder_with_routes(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+) -> (
+    RibActionLog,
+    Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let log: RibActionLog = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let routes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let log_clone = log.clone();
+    let routes_clone = routes.clone();
+    let join = tokio::spawn(async move {
+        while let Some(msg) = rib_rx.recv().await {
+            match msg {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    log_clone.lock().await.push(RibAction::Inject(route.key()));
+                    routes_clone.lock().await.push(route);
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::WithdrawEvpn { key, reply } => {
+                    log_clone.lock().await.push(RibAction::Withdraw(key));
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::QueryEvpnRoutes { reply } => {
+                    let _ = reply.send(vec![]);
+                }
+                _ => {}
+            }
+        }
+    });
+    (log, routes, join)
+}
+
+/// (a) A locally-claimed MAC observed moving to the VXLAN port
+/// withdraws the outstanding Type 2 routes (MAC-only AND MAC+IP) and
+/// drops every local cache entry — the kernel no longer holds the MAC
+/// on the AC port, so the local claim is stale.
+#[tokio::test]
+async fn vxlan_port_takeover_withdraws_local_mac_and_drops_caches() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    observe_test(
+        LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa("192.0.2.10"),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    observe_test(
+        LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+            RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+            RibAction::Withdraw(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+        ],
+        "VXLAN-port takeover must withdraw the advertised MAC+IP route"
+    );
+    assert!(
+        !state
+            .local_macs
+            .get(&vni(100))
+            .is_some_and(|m| m.contains_key(&mac(0xAA))),
+        "takeover must drop the local-MAC cache entry"
+    );
+    assert!(
+        !state.has_live_mac_ip_bindings(vni(100), mac(0xAA)),
+        "takeover must drop the live (MAC, IP) cache"
+    );
+    assert_eq!(counts.count(vni(100)), 0, "originated count must drain");
+}
+
+/// (b) The M66 incident: pe1 drained, the ES peer's Type 2 for the
+/// still-cached CE MAC usurps pe1's kernel-learned local AC row (an
+/// in-place port move), and the later undrain must NOT replay the
+/// stale Type 2. Without the drained-path `ObservedOnVxlanPort`
+/// handling the cache keeps claiming the MAC and the undrain replays
+/// a route for a MAC the kernel no longer holds locally.
+#[tokio::test]
+async fn m66_drained_vxlan_port_takeover_clears_cache_so_undrain_does_not_replay() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    // CE MAC learned live (pre-maintenance steady state) — advertises.
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &std::collections::BTreeSet::new(),
+    )
+    .await;
+
+    // Operator drains the ES: routes withdraw, caches stay.
+    let mut runtime = originator_runtime_for_test(
+        instances.clone(),
+        rib_tx.clone(),
+        metrics.clone(),
+        counts.clone(),
+        vni_to_esi.clone(),
+    );
+    apply_runtime_model(
+        Arc::new(OriginatorRuntimeModel {
+            instances: instances.clone(),
+            vni_to_esi: vni_to_esi.clone(),
+            drained_esis: drained_set_with(drain_test_esi()),
+        }),
+        &mut state,
+        &mut runtime,
+    )
+    .await;
+
+    // The ES peer's Type 2 is programmed over the local AC row — the
+    // kernel's in-place port move surfaces as ObservedOnVxlanPort
+    // while the VNI is drained.
+    handle_observation(
+        &LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    assert!(
+        !state
+            .local_macs
+            .get(&vni(100))
+            .is_some_and(|m| m.contains_key(&mac(0xAA))),
+        "drained takeover must drop the cached local claim"
+    );
+
+    // Undrain: nothing to replay — the kernel does not hold the MAC.
+    apply_runtime_model(
+        Arc::new(OriginatorRuntimeModel {
+            instances: instances.clone(),
+            vni_to_esi: vni_to_esi.clone(),
+            drained_esis: Arc::new(BTreeSet::new()),
+        }),
+        &mut state,
+        &mut runtime,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+        ],
+        "undrain must not replay a Type 2 for a MAC the kernel moved to the VXLAN port"
+    );
+}
+
+/// (c) The MAC comes back to the AC port (the CE transmits again —
+/// M66's maintenance-exit GARP): the kernel's in-place move back
+/// arrives as a plain local learn, and the re-advertisement must bump
+/// the RFC 7432 §15 mobility sequence above the remote contender
+/// that held the MAC in between.
+#[tokio::test]
+async fn relearn_after_vxlan_port_takeover_bumps_mobility_sequence() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, routes, _responder) = rib_capture_responder_with_routes(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    // Remote takeover: the peer's Type 2 (no mobility extcomm =
+    // seq 0 per RFC 7432 §15.1) wins the kernel row; the RIB event
+    // path records the contender view.
+    state.remote_mac_view.insert(
+        (vni(100), mac(0xAA)),
+        RemoteMacView {
+            mac: mac(0xAA),
+            mobility_sequence: None,
+            sticky: false,
+            next_hop: ipa("10.0.0.2"),
+        },
+    );
+    observe_test(
+        LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    // CE speaks again — kernel learns the MAC back on the AC port.
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+        ],
+        "relearn after takeover must re-advertise"
+    );
+    let routes = routes.lock().await;
+    let (_, first_seq) = extract_mac_mobility_full(&routes[0].attributes);
+    let (_, relearn_seq) = extract_mac_mobility_full(&routes[1].attributes);
+    assert_eq!(first_seq, None, "first advertisement carries no extcomm");
+    assert_eq!(
+        relearn_seq,
+        Some(1),
+        "re-advertisement must bump the mobility sequence above the remote contender (seq 0)"
+    );
+}
+
+/// (d) FDB rows for MACs the originator never claimed as local —
+/// our own remote-MAC programming echoes and foreign rows alike —
+/// must not trigger withdrawals or touch the caches, live or drained
+/// (ADR-0054 foreign-state discipline).
+#[tokio::test]
+async fn vxlan_port_observation_for_unclaimed_mac_is_ignored() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    // A pending IP binding for a MAC that never surfaced locally —
+    // the most fragile cache an unclaimed-row event could clobber.
+    state
+        .pending_ip_bindings
+        .entry((vni(100), mac(0xBB)))
+        .or_default()
+        .insert(ipa("192.0.2.20"));
+
+    // Live path.
+    observe_test(
+        LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xBB),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    // Drained path.
+    handle_observation(
+        &LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xBB),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+
+    assert!(
+        log.lock().await.is_empty(),
+        "unclaimed VXLAN-port rows must not produce RIB actions"
+    );
+    assert!(
+        state
+            .pending_ip_bindings
+            .get(&(vni(100), mac(0xBB)))
+            .is_some_and(|ips| ips.contains(&ipa("192.0.2.20"))),
+        "unclaimed VXLAN-port rows must not clear pending IP bindings"
+    );
+}

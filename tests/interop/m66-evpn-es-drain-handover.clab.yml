@@ -63,25 +63,32 @@
 # the receive-side handover strictly, but never that the drained /
 # non-DF AC drops unicast.
 #
-# Known daemon gaps this proof surfaces (worked around with one CE
-# maintenance-exit ARP broadcast in phase 7, not asserted away —
-# both pre-date the drain feature):
-# (1) No same-ESI local bias in the PE remote-MAC projection: while
+# Daemon gaps this proof surfaced (the CE maintenance-exit ARP
+# broadcast in phase 7 covers the remaining one, not asserted away):
+# (1) STILL OPEN (deferred to the ES↔interface binding design): no
+#     same-ESI local bias in the PE remote-MAC projection: while
 #     pe1 is drained, pe2's Type 2 for the CE MAC is programmed on
 #     pe1's bridge as a REMOTE row toward pe2, usurping pe1's
 #     kernel-learned local AC row (real EVPN implementations never
 #     point an own-segment MAC at the ES peer).
-# (2) That usurpation is an in-place FDB port move (no RTM_DELNEIGH),
-#     so no local-delete observation reaches the originator: pe1's
-#     observation cache still claims the MAC and the undrain replays
-#     it even though the kernel no longer holds it locally — in
-#     tension with ADR-0084 decision 1's "kernel events keep updating
-#     the caches so undrain replays the latest state".
-# Until the CE speaks again, the combination blackholes hr->CE at the
-# undrained PE (the VTEP unicasts to pe1, whose kernel row hairpins
-# toward pe2). The script documents and routes around this; fixing
-# either gap makes the workaround redundant without breaking the
-# asserts.
+# (2) FIXED since this proof first landed: that usurpation is an
+#     in-place FDB port move (one RTM_NEWNEIGH on the VXLAN port, no
+#     RTM_DELNEIGH for the replaced local row). Originally no
+#     local-delete observation reached the originator, so pe1's
+#     cache kept claiming the MAC and the undrain replayed a stale
+#     Type 2 — in tension with ADR-0084 decision 1. The classifier
+#     now surfaces the VXLAN-port RTM_NEWNEIGH as an
+#     ObservedOnVxlanPort observation and the originator drops the
+#     stale local claim (live or drained), so the undrain replays
+#     nothing for the usurped MAC.
+# Until the CE speaks again, gap (1) leaves the undrained pe1 unable
+# to serve the CE MAC: pre-fix, the stale replay attracted the VTEP's
+# unicast to pe1, whose kernel row hairpinned toward pe2 and dropped;
+# post-fix, pe1 simply originates no Type 2 for the CE MAC until its
+# kernel relearns it on the AC. The phase 7 broadcast is the
+# GARP-after-maintenance pattern real CEs emit and is now the
+# legitimate re-learn stimulus, not a stale-replay workaround; the
+# asserts after it hold either way.
 #
 # gRPC authorization: the PEs run `enforcement = "tier"` with two
 # principals — an operator (bearer-token TCP listener) and an

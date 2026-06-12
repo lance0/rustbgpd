@@ -213,6 +213,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The EVPN local-MAC observation layer now detects in-place FDB
+  port moves, so the originator's cache tracks the kernel instead of
+  claiming MACs the kernel no longer holds locally.** When a remote
+  Type 2 is programmed over a kernel-learned local AC row — likely
+  during a single-active ES drain, where the peer PE takes over the
+  CE MAC — the kernel performs an in-place port move: one
+  `RTM_NEWNEIGH` on the VXLAN port and **no** `RTM_DELNEIGH` for the
+  replaced local row, so no local-delete observation ever reached the
+  originator. The M66 drain-handover proof caught the consequence: the
+  drained PE's cache kept claiming the CE MAC and the undrain replayed
+  a stale Type 2 for a MAC the kernel had already handed to the peer,
+  violating ADR-0084 decision 1's "undrain replays the latest kernel
+  state". The `AF_BRIDGE` classifier now surfaces `RTM_NEWNEIGH` on an
+  EVPN-owned VXLAN port as an `ObservedOnVxlanPort` observation (the
+  bridge FDB holds one row per MAC, so a row there means the MAC is on
+  no local AC port); the originator treats it as local-gone for MACs
+  it currently claims — withdrawing the Type 2 (live) or dropping the
+  cached claim (drained) — and ignores it for MACs it never claimed,
+  so remote-programming echoes and foreign rows stay inert (ADR-0054).
+  The mobility-sequence ratchet survives, so when the CE speaks again
+  and the kernel moves the MAC back to the AC port, the
+  re-advertisement bumps the RFC 7432 §15 sequence above the peer's.
+
 - **An inbound connection no longer replaces a possibly-Established
   session when the collision state query times out.** The inbound
   handler bounds its query of the existing session's FSM state, but a

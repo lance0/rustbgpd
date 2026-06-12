@@ -154,6 +154,25 @@ daemon coordinator and pushed to both origination actors, exposed via
   reload survival, and the service handover to the surviving PE are
   asserted end-to-end with rustbgpd on both sides (the M65 topology
   already exercised the receive side of the same wire shape).
+- M66 stress-tested decision 1's "kernel events keep updating the
+  caches so undrain replays the latest state" and found the
+  observation feed blind to one event class: when the ES peer's
+  Type 2 for a drained PE's still-cached local MAC is programmed onto
+  that PE's bridge, the kernel performs an **in-place FDB port move**
+  (one `RTM_NEWNEIGH` on the VXLAN port, no `RTM_DELNEIGH` for the
+  replaced local AC row), so no local-delete observation reached the
+  originator and the undrain replayed a stale Type 2 for a MAC the
+  kernel no longer held locally. Fixed: the `AF_BRIDGE` classifier
+  surfaces `RTM_NEWNEIGH` on an EVPN-owned VXLAN port as
+  `LocalMacObservation::ObservedOnVxlanPort`, and the originator
+  treats it as local-gone for MACs it currently claims — withdrawing
+  live, dropping the cached claim while drained — while ignoring MACs
+  it never claimed (remote-programming echoes and foreign rows,
+  ADR-0054). Decision 1 now holds for the takeover case; the
+  same-ESI local-bias projection question (a real EVPN implementation
+  would not point an own-segment MAC at the ES peer in the first
+  place) remains open in the ROADMAP, deferred to the ES↔interface
+  binding design.
 
 ## References
 

@@ -217,9 +217,14 @@ has it, no broad performance sprints without profile evidence.
   can participate in multiple Ethernet Segments; same-ESI local bias in the
   remote-MAC projection (M66 surfaced: an ES peer's Type 2 for a MAC on a
   locally-configured segment is programmed as a remote row, usurping the
-  kernel-learned local AC row — and the in-place FDB port move emits no
-  local-delete observation, so the originator's cache keeps claiming the MAC;
-  both documented in the M66 topology header). Low-priority operational polish
+  kernel-learned local AC row — a real EVPN implementation never points an
+  own-segment MAC at the ES peer; deliberately deferred to the ES↔interface
+  binding design. The second half M66 surfaced — the in-place FDB port move
+  emitting no local-delete observation, so the originator's cache kept
+  claiming the MAC and undrain replayed it stale — is RESOLVED: the
+  classifier now surfaces VXLAN-port `RTM_NEWNEIGH` as an
+  `ObservedOnVxlanPort` observation and the originator drops the stale local
+  claim, live or drained). Low-priority operational polish
   once core convergence is complete.
 - **Single-active non-DF full AC blocking.** The Gate 8b dataplane DF
   enforcement sets the bridge-port BUM-flood flags only

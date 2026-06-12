@@ -21,13 +21,21 @@
 //!
 //! `AF_BRIDGE` (matches existing `fdb.rs` invariants):
 //!
-//! 1. Drop if `NTF_EXT_LEARNED` — kernel echo of our own programmed
-//!    remote-MAC entries (`crate::linux::fdb::apply_op`). Reflecting
-//!    these upward would short-circuit the bridge into thinking its
-//!    own remotes are local.
-//! 2. Drop if `header.ifindex` is a VXLAN port — those are
-//!    bridge-FDB echoes for remote MACs (`header.ifindex == VXLAN`
-//!    per RFC 8365 / `bridge fdb` design), not local observations.
+//! 1. If `header.ifindex` is the VXLAN port of a managed VNI:
+//!    `RTM_NEWNEIGH` emits `ObservedOnVxlanPort { vni, mac }` —
+//!    the bridge FDB holds one row per `(bridge, MAC, VLAN)`, so a
+//!    row appearing on the VXLAN port means the kernel does NOT hold
+//!    the MAC on any local AC port. This is the only netlink
+//!    evidence of an in-place port move off an AC port (the kernel
+//!    emits no `RTM_DELNEIGH` for the replaced local row); the
+//!    originator gates on its own local claim, so plain remote-MAC
+//!    programming echoes (which dominate this shape, and carry
+//!    `NTF_EXT_LEARNED`) cost one cheap lookup each.
+//!    `RTM_DELNEIGH` on the VXLAN port stays dropped — a remote row
+//!    withdrawing says nothing about local AC state.
+//! 2. Drop if `NTF_EXT_LEARNED` on a non-VXLAN port — programmed
+//!    rows never land there from us, so these are a foreign
+//!    controller's entries, not kernel local learns.
 //! 3. Resolve `header.ifindex` → VNI via
 //!    `LinkCache::bridge_port_to_vni`. A miss means the port isn't
 //!    enslaved to any EVPN-managed bridge.
@@ -170,14 +178,20 @@ pub(crate) fn classify_neigh(
     msg: &NeighbourMessage,
     cache: &LinkCache,
 ) -> Option<LocalMacObservation> {
-    // Drop our own programming. Same guard for both families.
-    if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
-        return None;
-    }
-
     match msg.header.family {
+        // The ExtLearned own-programming guard is per-family: the
+        // `AF_BRIDGE` path applies it AFTER the VXLAN-port check,
+        // because our own remote-MAC programming echo (which carries
+        // `NTF_EXT_LEARNED`) is exactly the message that reveals an
+        // in-place FDB port move off a local AC port.
         AddressFamily::Bridge => classify_bridge_fdb(kind, msg, cache),
-        AddressFamily::Inet | AddressFamily::Inet6 => classify_ip_neighbour(kind, msg, cache),
+        AddressFamily::Inet | AddressFamily::Inet6 => {
+            // Drop our own programming echoes.
+            if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
+                return None;
+            }
+            classify_ip_neighbour(kind, msg, cache)
+        }
         _ => None,
     }
 }
@@ -189,10 +203,37 @@ fn classify_bridge_fdb(
     msg: &NeighbourMessage,
     cache: &LinkCache,
 ) -> Option<LocalMacObservation> {
-    // Drop VXLAN-port echoes (those are remote MACs, not local
-    // observations).
+    // A row on the EVPN-owned VXLAN port of a managed VNI. Not a
+    // local learn — but not droppable either: the bridge FDB holds
+    // one row per `(bridge, MAC, VLAN)`, so an `RTM_NEWNEIGH` here
+    // means the kernel does NOT hold the MAC on any local AC port.
+    // When a remote Type 2 is programmed over a kernel-learned local
+    // row the kernel performs an in-place port move and this echo is
+    // the ONLY netlink evidence (no `RTM_DELNEIGH` for the old local
+    // row — verified empirically by the M66 ES-drain handover and
+    // matching `br_fdb.c`, where both `fdb_add_entry` and
+    // `br_fdb_update` mutate `fdb->dst` and emit a single
+    // `RTM_NEWNEIGH`). Surface it; the originator acts only on MACs
+    // it currently claims as local. Deliberately BEFORE the
+    // ExtLearned guard: our own programming echo carries
+    // `NTF_EXT_LEARNED` and is precisely the usurpation signal.
+    //
+    // `RTM_DELNEIGH` on the VXLAN port stays dropped — a remote row
+    // being withdrawn says nothing about local AC state.
     let ifindex = msg.header.ifindex;
-    if cache.vxlan_ifindex_to_vni.contains_key(&ifindex) {
+    if let Some(&vni_raw) = cache.vxlan_ifindex_to_vni.get(&ifindex) {
+        if !matches!(kind, NeighEventKind::New) {
+            return None;
+        }
+        let vni = EvpnInstanceId::new(vni_raw).ok()?;
+        let mac = extract_mac(msg)?;
+        return Some(LocalMacObservation::ObservedOnVxlanPort { vni, mac });
+    }
+
+    // Drop programmed-entry echoes on non-VXLAN ports — ours never
+    // land there, so these are a foreign controller's rows (ADR-0054
+    // foreign-state discipline: not local learns).
+    if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
         return None;
     }
 
@@ -591,17 +632,72 @@ mod tests {
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
+    /// An `RTM_NEWNEIGH` on the VXLAN port of a managed VNI surfaces
+    /// as `ObservedOnVxlanPort` — never as a local learn. With our own
+    /// programming flags (`NTF_EXT_LEARNED` among them) this is the
+    /// remote-takeover echo of an in-place FDB port move, the only
+    /// netlink evidence the kernel emits when a remote row usurps a
+    /// kernel-learned local AC row (M66 incident: no `RTM_DELNEIGH`
+    /// for the replaced local row).
     #[test]
-    fn classify_drops_vxlan_port_ifindex() {
-        // Same ifindex as the cached VXLAN port — message is a remote
-        // MAC echo, not a local learn.
+    fn classify_new_on_vxlan_port_emits_observed_on_vxlan_port() {
         let cache = cache_for(100, /* vxlan */ 11, 22);
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            11,
+            NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+            Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        );
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+        match obs {
+            LocalMacObservation::ObservedOnVxlanPort { vni, mac } => {
+                assert_eq!(vni.as_u32(), 100);
+                assert_eq!(mac.octets(), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+            }
+            other => panic!("expected ObservedOnVxlanPort, got {other:?}"),
+        }
+    }
+
+    /// Same shape without `NTF_EXT_LEARNED` — a foreign controller's
+    /// or operator's remote row. The classifier still surfaces it
+    /// (the kernel-side fact "this MAC resolves via the VXLAN port"
+    /// is identical); the originator's local-claim gate is what keeps
+    /// foreign rows from triggering withdrawals of MACs we never
+    /// claimed.
+    #[test]
+    fn classify_new_on_vxlan_port_without_ext_learned_also_emits() {
+        let cache = cache_for(100, 11, 22);
         let msg = neigh_msg(
             AddressFamily::Bridge,
             11,
             NeighbourFlags::empty(),
             Some(vec![0xaa; 6]),
         );
+        assert!(matches!(
+            classify_neigh(NeighEventKind::New, &msg, &cache),
+            Some(LocalMacObservation::ObservedOnVxlanPort { .. })
+        ));
+    }
+
+    /// `RTM_DELNEIGH` on the VXLAN port stays dropped — a remote row
+    /// being withdrawn says nothing about local AC state (the MAC
+    /// does not come back local until the kernel learns it again).
+    #[test]
+    fn classify_del_on_vxlan_port_emits_nothing() {
+        let cache = cache_for(100, 11, 22);
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            11,
+            NeighbourFlags::Own | NeighbourFlags::Controller,
+            Some(vec![0xaa; 6]),
+        );
+        assert!(classify_neigh(NeighEventKind::Del, &msg, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_new_on_vxlan_port_without_mac_attribute_emits_nothing() {
+        let cache = cache_for(100, 11, 22);
+        let msg = neigh_msg(AddressFamily::Bridge, 11, NeighbourFlags::empty(), None);
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
