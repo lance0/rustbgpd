@@ -1179,23 +1179,10 @@ fn format_esi(esi: EthernetSegmentIdentifier) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable, RouteTarget};
+    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
     use rustbgpd_wire::{EthernetTagId, ExtendedCommunity};
 
-    fn rd(asn: u16, val: u32) -> rustbgpd_wire::RouteDistinguisher {
-        let mut bytes = [0u8; 8];
-        bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-        bytes[4..8].copy_from_slice(&val.to_be_bytes());
-        rustbgpd_wire::RouteDistinguisher::new(bytes)
-    }
-
-    fn ipa(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
-
-    fn vni(n: u32) -> EvpnInstanceId {
-        EvpnInstanceId::new(n).unwrap()
-    }
+    use crate::test_support::{evpn_instance, ip as ipa, rd, vni};
 
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier::new([seed; 10])
@@ -1206,18 +1193,7 @@ mod tests {
     }
 
     fn instance_with_rd(v: u32, rd_value: u32) -> EvpnInstance {
-        EvpnInstance::new(
-            vni(v),
-            rd(65000, rd_value),
-            vec![RouteTarget::TwoOctetAs {
-                asn: 65000,
-                value: rd_value,
-            }],
-            ipa("10.0.0.1"),
-            Some(format!("br{v}")),
-            false,
-        )
-        .unwrap()
+        evpn_instance(65000, v, rd_value, Some(format!("br{v}")), false)
     }
 
     fn segment_state(id: EthernetSegmentIdentifier) -> SegmentState {

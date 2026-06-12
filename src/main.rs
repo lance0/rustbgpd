@@ -39,6 +39,8 @@ mod metrics_server;
 mod peer_manager;
 mod policy_admin;
 mod reload;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};

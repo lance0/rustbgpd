@@ -1522,13 +1522,12 @@ const fn _force_link() -> &'static dyn Fn(&[ExtendedCommunity]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::Ipv4Addr;
 
-    use prometheus::Encoder;
     use rustbgpd_evpn::ip_vrf::{IpVrf, IpVrfId};
     use rustbgpd_evpn::{
-        BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceId,
-        EvpnInstanceTable, FdbNhgDriftCounters, MacAddress, RouteDistinguisher, RouteTarget,
+        BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceTable,
+        FdbNhgDriftCounters, MacAddress, RouteDistinguisher, RouteTarget,
     };
     use rustbgpd_evpn_linux::{
         InMemoryDataplane, InstanceProbe, KernelLinkInfo, snapshot::KernelVxlanInfo,
@@ -1543,15 +1542,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn vni(n: u32) -> EvpnInstanceId {
-        EvpnInstanceId::new(n).unwrap()
-    }
-    fn mac(b: u8) -> MacAddress {
-        MacAddress::new([b; 6])
-    }
-    fn ipa(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
+    use crate::test_support::{evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni};
 
     /// Empty single-active index: `project_one`'s ADR-0083 swap arm
     /// never fires, so the mass-withdraw gate behaves exactly as it
@@ -1560,30 +1551,8 @@ mod tests {
         rustbgpd_evpn::SingleActiveEligibleIndex::new()
     }
 
-    fn gather_metrics_text(metrics: &BgpMetrics) -> String {
-        let encoder = prometheus::TextEncoder::new();
-        let families = metrics.registry().gather();
-        let mut buf = Vec::new();
-        encoder.encode(&families, &mut buf).unwrap();
-        String::from_utf8(buf).unwrap()
-    }
-
     fn local_instance(v: u32, bridge: Option<&str>) -> EvpnInstance {
-        let mut bytes = [0u8; 8];
-        bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
-        bytes[4..8].copy_from_slice(&v.to_be_bytes());
-        EvpnInstance::new(
-            vni(v),
-            RouteDistinguisher::new(bytes),
-            vec![RouteTarget::TwoOctetAs {
-                asn: 65001,
-                value: v,
-            }],
-            ipa("10.0.0.1"),
-            bridge.map(String::from),
-            false,
-        )
-        .unwrap()
+        evpn_instance(65001, v, v, bridge.map(String::from), false)
     }
 
     fn local_instance_table(v: u32, bridge: Option<&str>) -> EvpnInstanceTable {
@@ -1601,13 +1570,10 @@ mod tests {
     }
 
     fn local_ip_vrf(name: &str, v: u32, table_id: u32) -> IpVrf {
-        let mut bytes = [0u8; 8];
-        bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
-        bytes[4..8].copy_from_slice(&v.to_be_bytes());
         IpVrf::new(
             name.to_string(),
             IpVrfId::new(v).unwrap(),
-            RouteDistinguisher::new(bytes),
+            rd(65001, v),
             vec![RouteTarget::TwoOctetAs {
                 asn: 65001,
                 value: v,

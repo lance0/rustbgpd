@@ -623,16 +623,22 @@ branch is between features.
   subsection, keep one roadmap row per concern, and update exact tracking-doc
   gates instead of rewriting unrelated summary prose. A generated manifest stays
   deferred unless this process guidance fails to reduce drift.
-- [ ] **Test fixture extraction into a shared `test-support` surface.** Helpers
+- [x] **Test fixture extraction into a shared `test-support` surface.** Helpers
   like `route_event`, `session_event`, `policy_event`, `lifecycle_event`, and
-  the per-test config builders have drifted across `crates/api`, `crates/cli`,
-  `crates/rib`, and `src/`. A field addition (e.g. `event_id`) forces touching
-  three or four copies. `crates/api` now has a private `test_support` module for
-  repeated service-test `PeerInfo`, metrics, and event-stream fixtures,
-  including the event-service fake RIB / peer-manager harnesses. Remaining work:
-  route/config builders across `crates/cli`, `crates/rib`, and `src/`, possibly
-  via a single `rustbgpd-test-support` crate or per-crate `test_support`
-  modules.
+  the per-test config builders had drifted across `crates/api`, `crates/cli`,
+  `crates/rib`, and `src/`; a field addition (e.g. `event_id`) forced touching
+  three or four copies. Resolved as private per-crate `#[cfg(test)]
+  test_support` modules (a shared `rustbgpd-test-support` crate was rejected —
+  it would force `pub` visibility and dependency edges). `crates/api` covers
+  the service-test `PeerInfo`/metrics/event-stream fixtures and fake harnesses;
+  `crates/cli` already shared its mock-server fixtures; `crates/rib` now
+  centralizes the `Route` / `FlowSpecRoute` unit-test constructors; the daemon
+  bin centralizes the EVPN (`vni`/`rd`/`mac`/instance) and FIB
+  (table/key/route/route-event) builders. Deliberately left local: bench and
+  integration-test helpers (separate compilation units — sharing would require
+  new public surface) and intentionally divergent fixtures (the blackhole
+  community-route builder, the EVPN MAC/IP route family, per-module
+  minimal-config TOML snippets).
 - [ ] **`unwrap()` audit on daemon-runtime paths.** Production-code unwraps
   outside `#[cfg(test)]` measure at ~5 sites after the v0.30 quality scan
   (mostly startup metric-registration invariants, poisoned-lock guards, and a

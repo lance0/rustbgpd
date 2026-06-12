@@ -2131,10 +2131,8 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 mod tests {
     use super::*;
     use prometheus::Registry;
-    use rustbgpd_rib::{
-        FibInstallNextHop, NextHopScope, Route, RouteEvent, RouteEventType, RouteOrigin,
-    };
-    use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, RpkiValidation};
+    use rustbgpd_rib::{FibInstallNextHop, Route, RouteEvent, RouteOrigin};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     #[cfg(target_os = "linux")]
@@ -2143,7 +2141,6 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Instant;
 
     #[derive(Default)]
     struct FakeFib {
@@ -2205,20 +2202,9 @@ mod tests {
         }
     }
 
-    fn table(name: &str, table_id: u32, metric: u32, families: &[&str]) -> FibTableConfig {
-        FibTableConfig {
-            name: name.to_string(),
-            table_id,
-            metric,
-            families: families.iter().map(|f| (*f).to_string()).collect(),
-            allowed_peer_groups: Vec::new(),
-            allowed_neighbors: Vec::new(),
-            max_routes: None,
-            maximum_paths: None,
-            maximum_paths_ebgp: None,
-            maximum_paths_ibgp: None,
-        }
-    }
+    use crate::test_support::{
+        fib_route_key as key, fib_table as table, ip, route_from_peer, scoped_route,
+    };
 
     fn config() -> FibRuntimeConfig {
         FibRuntimeConfig {
@@ -2227,10 +2213,6 @@ mod tests {
             multipath_relax: false,
             link_bandwidth_weighted: false,
         }
-    }
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
     }
 
     fn v4(len: u8) -> Prefix {
@@ -2245,43 +2227,7 @@ mod tests {
     }
 
     fn route(prefix: Prefix, next_hop: IpAddr) -> Route {
-        Route {
-            prefix,
-            next_hop,
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: ip("198.51.100.1"),
-            attributes: Arc::new(vec![
-                PathAttribute::Origin(Origin::Igp),
-                PathAttribute::AsPath(AsPath { segments: vec![] }),
-            ]),
-            received_at: Instant::now(),
-            origin_type: RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-            validation_state: RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }
-    }
-
-    fn scoped_route(prefix: Prefix, next_hop: IpAddr, ifindex: u32) -> Route {
-        let mut route = route(prefix, next_hop);
-        route.next_hop_scope = Some(Box::new(NextHopScope {
-            interface: Arc::from("fib0"),
-            ifindex,
-        }));
-        route
-    }
-
-    fn key(prefix: Prefix) -> FibRouteKey {
-        FibRouteKey {
-            table_id: 1000,
-            metric: 200,
-            prefix,
-        }
+        route_from_peer(prefix, next_hop, RouteOrigin::Ebgp, 0, ip("198.51.100.1"))
     }
 
     fn fib_route(prefix: Prefix, next_hop: IpAddr) -> FibRoute {
@@ -2441,17 +2387,7 @@ mod tests {
     }
 
     fn route_event(prefix: Prefix) -> RouteEvent {
-        RouteEvent {
-            event_id: 0,
-            event_type: RouteEventType::BestChanged,
-            prefix,
-            peer: Some(ip("198.51.100.1")),
-            previous_peer: None,
-            target_peer: None,
-            timestamp: "0".to_string(),
-            path_id: 0,
-            reason: String::new(),
-        }
+        crate::test_support::route_event(prefix, ip("198.51.100.1"))
     }
 
     fn metrics() -> BgpMetrics {

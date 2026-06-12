@@ -370,32 +370,14 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustbgpd_evpn::{EvpnInstanceId, RouteTarget};
-    use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
-    use rustbgpd_wire::{PmsiTunnelIdentifier, PmsiTunnelType, RouteDistinguisher};
 
-    fn vni(n: u32) -> EvpnInstanceId {
-        EvpnInstanceId::new(n).unwrap()
-    }
-    fn rd(asn: u16, val: u32) -> RouteDistinguisher {
-        let mut bytes = [0u8; 8];
-        bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-        bytes[4..8].copy_from_slice(&val.to_be_bytes());
-        RouteDistinguisher::new(bytes)
-    }
+    use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
+    use rustbgpd_wire::{PmsiTunnelIdentifier, PmsiTunnelType};
+
+    use crate::test_support::{evpn_instance, rd, vni};
+
     fn local_instance(v: u32) -> EvpnInstance {
-        EvpnInstance::new(
-            vni(v),
-            rd(65000, v),
-            vec![RouteTarget::TwoOctetAs {
-                asn: 65000,
-                value: v,
-            }],
-            "10.0.0.1".parse().unwrap(),
-            Some(format!("br{v}")),
-            false,
-        )
-        .unwrap()
+        evpn_instance(65000, v, v, Some(format!("br{v}")), false)
     }
 
     #[test]

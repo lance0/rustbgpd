@@ -868,72 +868,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_wire::{
-        Afi, COMMUNITY_LLGR_STALE, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
-        Ipv6Prefix, PathAttribute, Safi,
-    };
+    use rustbgpd_wire::{Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, PathAttribute, Safi};
 
     use super::*;
 
-    fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
-        Route {
-            prefix: Prefix::V4(prefix),
-            next_hop: IpAddr::V4(next_hop),
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: IpAddr::V4(next_hop),
-            attributes: Arc::new(vec![]),
-            received_at: Instant::now(),
-            origin_type: crate::route::RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }
-    }
-
-    fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
-        Route {
-            prefix: Prefix::V6(prefix),
-            next_hop: IpAddr::V6(next_hop),
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: IpAddr::V6(next_hop),
-            attributes: Arc::new(vec![]),
-            received_at: Instant::now(),
-            origin_type: crate::route::RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }
-    }
-
-    fn make_flowspec_route() -> FlowSpecRoute {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-        FlowSpecRoute {
-            rule: FlowSpecRule {
-                components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
-                    prefix,
-                ))],
-            },
-            afi: Afi::Ipv4,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            attributes: vec![],
-            received_at: Instant::now(),
-            origin_type: crate::route::RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-        }
-    }
+    use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
 
     #[test]
     fn insert_and_get() {
@@ -1199,7 +1138,7 @@ mod tests {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
 
-        let mut route = make_flowspec_route();
+        let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
         route.is_stale = true;
         rib.insert_flowspec(route);
 

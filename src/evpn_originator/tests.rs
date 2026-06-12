@@ -2,20 +2,13 @@ use super::*;
 use crate::evpn_originator::duplicate_mac::*;
 use crate::evpn_originator::lifecycle::*;
 use crate::evpn_originator::rib_polling::*;
-use prometheus::Encoder;
 use rustbgpd_evpn::{
     DuplicateMacAction, DuplicateMacConfig, EvpnInstance, EvpnInstanceTable, RouteTarget,
 };
 use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
-use rustbgpd_wire::{EvpnImet, EvpnMacIp, RouteDistinguisher};
+use rustbgpd_wire::{EvpnImet, EvpnMacIp};
 
-fn gather_metrics_text(metrics: &BgpMetrics) -> String {
-    let encoder = prometheus::TextEncoder::new();
-    let families = metrics.registry().gather();
-    let mut buf = Vec::new();
-    encoder.encode(&families, &mut buf).unwrap();
-    String::from_utf8(buf).unwrap()
-}
+use crate::test_support::{evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni};
 
 fn assert_quarantine_metric(metrics: &BgpMetrics, v: u32, m: u8, value: u32) {
     let text = gather_metrics_text(metrics);
@@ -39,35 +32,8 @@ fn originator_state(instances: &EvpnInstanceTable) -> OriginatorState {
     OriginatorState::new(instances, duplicate_mac_quarantine_tx())
 }
 
-fn vni(n: u32) -> EvpnInstanceId {
-    EvpnInstanceId::new(n).unwrap()
-}
-fn mac(b: u8) -> MacAddress {
-    MacAddress::new([b; 6])
-}
-fn ipa(s: &str) -> IpAddr {
-    s.parse().unwrap()
-}
-fn rd(asn: u16, val: u32) -> RouteDistinguisher {
-    let mut bytes = [0u8; 8];
-    bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-    bytes[4..8].copy_from_slice(&val.to_be_bytes());
-    RouteDistinguisher::new(bytes)
-}
-
 fn local_instance(v: u32) -> EvpnInstance {
-    EvpnInstance::new(
-        vni(v),
-        rd(65000, v),
-        vec![RouteTarget::TwoOctetAs {
-            asn: 65000,
-            value: v,
-        }],
-        ipa("10.0.0.1"),
-        Some(format!("br{v}")),
-        false,
-    )
-    .unwrap()
+    evpn_instance(65000, v, v, Some(format!("br{v}")), false)
 }
 
 fn instance_table(v: u32) -> Arc<EvpnInstanceTable> {
