@@ -2,6 +2,11 @@
 
 **Status:** Accepted
 **Date:** 2026-06-10
+**Update (2026-06-12, post-v0.38.0):** the decision 4 strict flip
+landed — `classify_adoption_neighbor` now requires the
+`RTPROT_BGP` stamp by default, with
+`RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` as the skip-version-upgrade
+escape hatch. FDB classifiers stay prefer-mode (decision 3).
 
 ## Context
 
@@ -206,7 +211,16 @@ stamp-or-legacy migration window.**
   stores the attribute.
 - Upgrade docs gain the release-N-before-strict note (decision 4); the
   strict flip is a separate, observable change in a later release, not
-  part of this ADR's first slice.
+  part of this ADR's first slice. *Landed 2026-06-12 (post-v0.38.0):
+  v0.38.0 was release N (stamping + stamp-or-legacy adoption); the
+  next release closes the window. Operators upgrading from
+  ≤ v0.37.0 must run v0.38.0 once (so every kernel row is re-written
+  with the stamp) before a strict-default version, or set
+  `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` for the first boot. The
+  M61 kill-and-restart job proves the strict default end-to-end: a
+  planted stamp-less legacy-shaped neighbor now survives the sweep
+  untouched, alongside the existing `protocol zebra` foreign-row
+  survival assert.*
 
 ## References
 

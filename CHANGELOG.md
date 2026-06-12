@@ -115,6 +115,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **EVPN L3 neighbor adoption now requires the NDA_PROTOCOL `RTPROT_BGP`
+  ownership stamp by default (ADR-0082 strict flip).** The stamp-or-legacy
+  migration window v0.38.0 opened is closed: the crash-restart adoption
+  sweep (ADR-0079) no longer adopts a stamp-less `extern_learn` + permanent
+  L3 neighbor row — the shape a pre-stamp rustbgpd left behind — and
+  classifies it as foreign instead (preserved untouched, never reaped).
+  Foreign stamps (e.g. zebra's `proto zebra`) remain refused, FDB
+  classifiers stay in prefer mode (mainline AF_BRIDGE does not store the
+  attribute), and install-side stamping is unchanged from v0.38.0.
+  **Upgrade gate:** operators upgrading from v0.37.0 or earlier must run
+  v0.38.0 (which stamps every row it installs or re-claims) at least once
+  before this version, or set `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` for
+  the first boot — it restores the stamp-or-legacy acceptance rule for that
+  run, and the re-claims stamp the rows so the variable can then be
+  dropped. The M61 kill-and-restart job now proves the strict default: a
+  planted stamp-less legacy-shaped neighbor survives the sweep untouched
+  (the pre-flip rule would have adopted and reaped it), alongside the
+  existing `protocol zebra` foreign-row survival assert.
+
 - **EVPN dataplane intent recompute is event-driven; single-active
   failover repair drops from ~4.5 s to ~0.3 s.** The dataplane
   supervisor now subscribes to the RIB's EVPN route-event broadcast

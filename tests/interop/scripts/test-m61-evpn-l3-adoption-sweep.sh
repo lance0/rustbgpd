@@ -26,11 +26,18 @@
 #    shared rows must stay present continuously while A re-claims them.
 # 2. Foreign rows planted while rustbgpd is running — a `proto static`
 #    route in the VRF table, a permanent neighbor WITHOUT
-#    `extern_learn`, and (ADR-0082) a neighbor with the FULL legacy
+#    `extern_learn`, (ADR-0082) a neighbor with the FULL legacy
 #    marker pair (`extern_learn` + `nud permanent`) but a foreign
-#    `protocol zebra` ownership stamp — survive the entire cycle.
-#    The zebra-stamped row is the new discrimination the NDA_PROTOCOL
-#    stamp buys: the pre-stamp rule would have adopted and reaped it.
+#    `protocol zebra` ownership stamp, and (ADR-0082 strict flip) a
+#    neighbor with the legacy marker pair and NO protocol stamp at
+#    all — survive the entire cycle. The zebra-stamped row is the
+#    discrimination the NDA_PROTOCOL stamp buys (the flags-only rule
+#    would have adopted and reaped it); the stamp-LESS row proves the
+#    post-v0.38.0 strict default, which requires the stamp and no
+#    longer accepts absence as the pre-stamp legacy shape (the
+#    stamp-or-legacy rule would have adopted and reaped it; it
+#    remains reachable via RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1,
+#    deliberately NOT set here).
 # 3. After `kill -9` of the rustbgpd process (container and netns
 #    survive — this is NOT a container stop), every marker row is
 #    still in the kernel: the crash-leftover premise.
@@ -101,6 +108,13 @@ FOREIGN_NEIGH_MAC="02:99:99:99:99:97"
 # owns it — the sweep must leave it untouched.
 FOREIGN_STAMP_NEIGH_IP="10.0.0.98"
 FOREIGN_STAMP_NEIGH_MAC="02:99:99:99:99:96"
+# Foreign-by-absence neighbor (ADR-0082 strict flip): the full legacy
+# marker pair but NO NDA_PROTOCOL stamp. Under the closed migration
+# window the strict default classifies it NotOurs — never adopted,
+# never reaped — where the pre-flip stamp-or-legacy rule would have
+# adopted and reaped it.
+LEGACY_NEIGH_IP="10.0.0.97"
+LEGACY_NEIGH_MAC="02:99:99:99:99:95"
 REAP_DEFERRAL_SECS="5"
 # Bounded wait for the reap: 5 s deferral + the periodic reconcile
 # cadence (the reap fires on the first clean L3 pass after the
@@ -180,6 +194,16 @@ pe1_foreign_neigh_present() {
 pe1_foreign_stamped_neigh_present() {
     pe1_neigh | awk -v ip="$FOREIGN_STAMP_NEIGH_IP" '$1 == ip' \
         | grep -F "extern_learn" | grep -F "PERMANENT" | grep -qF "proto zebra"
+}
+
+# The stamp-less legacy-shaped neighbor must keep its row intact AND
+# stampless: the legacy marker pair still present (neither
+# adopted-and-reaped nor rewritten) and no protocol token on the line
+# (a `proto bgp` appearing would mean the sweep claimed and re-wrote
+# a row the strict rule says is not provably ours).
+pe1_legacy_neigh_present() {
+    pe1_neigh | awk -v ip="$LEGACY_NEIGH_IP" '$1 == ip' \
+        | grep -F "extern_learn" | grep -F "PERMANENT" | grep -vF "proto" | grep -q .
 }
 
 # Inject / withdraw the second tenant prefix on the FRR side. The
@@ -333,6 +357,21 @@ if pe1_foreign_stamped_neigh_present; then
     ok "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP planted (extern_learn + PERMANENT + proto zebra)"
 else
     fail "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP did not land"
+fi
+
+# extern_learn + permanent with NO protocol stamp → the exact shape a
+# pre-stamp rustbgpd left behind. The strict default (ADR-0082
+# migration window closed) must classify it NotOurs: never adopted
+# (the neighbor adopted counter stays 1 below), never reaped, never
+# re-stamped. The pre-flip stamp-or-legacy rule would have adopted
+# and reaped it as an unclaimed leftover.
+log "Planting stamp-less legacy-shaped neighbor $LEGACY_NEIGH_IP on ${L3VXLAN}..."
+docker exec "$PE1" ip neigh add "$LEGACY_NEIGH_IP" \
+    lladdr "$LEGACY_NEIGH_MAC" dev "$L3VXLAN" nud permanent extern_learn
+if pe1_legacy_neigh_present; then
+    ok "stamp-less legacy-shaped neighbor $LEGACY_NEIGH_IP planted (extern_learn + PERMANENT, no protocol)"
+else
+    fail "stamp-less legacy-shaped neighbor $LEGACY_NEIGH_IP did not land"
 fi
 
 # ---------------------------------------------------------------------------
@@ -538,6 +577,17 @@ else
     fail "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP was adopted/reaped or rewritten"
     pe1_neigh >&2
 fi
+# The foreign-by-absence row: legacy marker pair intact and STILL
+# stampless — proof of the strict default. With the migration window
+# closed, the sweep refuses a row that merely looks like a pre-stamp
+# leftover; the pre-flip rule would have adopted it and reaped it as
+# unclaimed.
+if pe1_legacy_neigh_present; then
+    ok "stamp-less legacy-shaped neighbor $LEGACY_NEIGH_IP survived the cycle untouched (strict default refused it)"
+else
+    fail "stamp-less legacy-shaped neighbor $LEGACY_NEIGH_IP was adopted/reaped or re-stamped"
+    pe1_neigh >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 7 — Prometheus adoption/reap counters
@@ -546,8 +596,10 @@ fi
 # Counters are process-local, so the restarted daemon reports exactly
 # this cycle: routes A + B adopted on the first sweep, B reaped, and
 # the single shared neighbor + FDB row adopted and never reaped
-# (claimed by A). Metrics fold in via DataplaneReport, so allow a
-# short settle.
+# (claimed by A). The neighbor adopted counter pinned at 1 is also
+# the strict-flip discriminator: had the sweep adopted the planted
+# zebra-stamped or stamp-less legacy-shaped rows it would read 2 or
+# 3. Metrics fold in via DataplaneReport, so allow a short settle.
 log "Polling Prometheus for the L3 adoption/reap counters..."
 r_adopted=""
 r_reaped=""
