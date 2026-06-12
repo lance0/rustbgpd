@@ -148,6 +148,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Peer-group reshape rollback is now best-effort across every prior
+  member (ADR-0081).** When a mid-fanout reconfigure failure triggers
+  rollback of the already-reshaped members, a failed restore no longer
+  short-circuits the reverse sweep: every captured prior is still
+  attempted, so one stuck member cannot strand the others in the
+  reshaped state. The compound `Internal` error now names exactly which
+  members could not be restored (with each underlying error) — members
+  it does not name were rolled back to their prior config — instead of
+  reporting only the first failure and leaving the fate of the
+  remaining priors unstated.
+
 - **EAD-per-EVI routes now originate with Ethernet Tag 0 (RFC 7432
   §6.1 / RFC 8365 §5.1.3), carrying the VNI in the label field.**
   rustbgpd's Type 1 EAD-per-EVI origination put the VNI in the

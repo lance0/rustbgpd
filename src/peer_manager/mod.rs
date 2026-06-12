@@ -228,13 +228,16 @@ pub struct PeerManager {
     /// [`crate::config::RuntimeSnapshotKey`].
     snapshot_key: crate::config::RuntimeSnapshotKey,
     /// Test-only deterministic fault injection: `reconfigure_peer` against
-    /// this key fails up front, before the delete/re-add cycle. Models a
+    /// a mapped key fails up front, before the delete/re-add cycle, once the
+    /// key's budget of remaining successful calls reaches zero (a value of 0
+    /// fails the next call; a value of 1 lets one call succeed, then fails
+    /// the one after — e.g. apply succeeds, rollback fails). Models a
     /// transient runtime failure (e.g. a session task that cannot start) —
     /// the only mid-fanout failure class left, since config-shaped failures
     /// are all caught by validation, resolution, or the reshape preflight
     /// before any peer is touched.
     #[cfg(test)]
-    inject_reconfigure_failure: Option<PeerKey>,
+    inject_reconfigure_failures: std::collections::BTreeMap<PeerKey, u32>,
 }
 
 impl PeerManager {
@@ -373,7 +376,7 @@ impl PeerManager {
             transport_event_sink: None,
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             #[cfg(test)]
-            inject_reconfigure_failure: None,
+            inject_reconfigure_failures: std::collections::BTreeMap::new(),
         }
     }
 
