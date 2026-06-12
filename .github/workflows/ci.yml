@@ -137,7 +137,7 @@ jobs:
           load: true
           tags: rustbgpd-netns-tests:latest
           cache-from: type=gha,scope=evpn-bum-kernel
-          cache-to: type=gha,scope=evpn-bum-kernel,mode=max
+          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
 
       - name: Run BUM-filter primitive validation
         # The helper handles cap flags + bind-mounts. We pre-built
