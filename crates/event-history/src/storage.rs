@@ -133,9 +133,12 @@ pub(crate) struct QueryWithFloorOutcome {
     pub floor: Option<u64>,
 }
 
-/// What `StoreOp::Retain` returns.
+/// What `StoreOp::Retain` returns. Public so callers of
+/// [`crate::EventHistoryManager::run_retention_pass`] (tests driving
+/// the cap check deterministically) can assert on the eviction
+/// counts; the storage-thread internals are still private.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct RetentionOutcome {
+pub struct RetentionOutcome {
     pub evicted_count_cap: usize,
     pub evicted_byte_cap: usize,
     pub db_size_bytes: u64,

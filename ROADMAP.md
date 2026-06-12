@@ -679,15 +679,6 @@ Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
 
-- [ ] **Flaky test: event-history byte-cap retention.**
-  `byte_cap_retention_evicts_oldest_rows_but_is_soft_size_target`
-  (crates/event-history/tests/byte_equality.rs) failed on a loaded CI runner
-  while passing on a twin run of the same commit (2026-06-12) — the
-  SQLite-file-size soft-target assertion is timing/IO-sensitive. Make the
-  eviction trigger deterministic in the test (drive the cap check explicitly
-  rather than relying on size sampling) or widen the assertion to the
-  guaranteed row-eviction invariant only.
-
 - [ ] **EVPN origination cross-actor seam audit.** One protocol concept (the
   Ethernet Segment lifecycle) now spans the segment orchestrator (Type 1/4),
   the local originator (Type 2), the IMET controller, and the coordinator

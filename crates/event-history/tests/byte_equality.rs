@@ -219,7 +219,13 @@ async fn byte_cap_retention_evicts_oldest_rows_but_is_soft_size_target() {
     let cfg = EventHistoryConfig {
         path: dir.path().join("events.db"),
         batch_interval: Duration::from_millis(5),
-        retention_interval: Duration::from_millis(10),
+        // Park the timer-driven retention far in the future: this
+        // test drives the cap check explicitly via
+        // `run_retention_pass`. Racing the interval timer against the
+        // batch flush made the original shape flaky on loaded hosts
+        // (the actor / storage thread could be starved past the fixed
+        // sleep, so no pass observed the rows in time).
+        retention_interval: Duration::from_secs(3600),
         max_events: 10_000,
         max_bytes: 1,
         ..EventHistoryConfig::default()
@@ -231,7 +237,36 @@ async fn byte_cap_retention_evicts_oldest_rows_but_is_soft_size_target() {
         env.payload = vec![i; 4096];
         manager.sender().try_send(env).unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Wait (bounded) until all 20 rows are committed, so the retention
+    // pass below deterministically sees every row. Commit is
+    // guaranteed to happen; only its latency varies under load.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let committed = manager
+            .query_persisted(0, u64::MAX, 100, QueryFilter::default())
+            .await
+            .unwrap()
+            .len();
+        if committed == 20 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {committed}/20 events committed before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Drive one retention pass explicitly — the same `StoreOp::Retain`
+    // the interval timer would submit. `max_bytes: 1` can never be
+    // satisfied (the SQLite file always has schema pages), so the
+    // byte-cap loop must evict rows.
+    let outcome = manager.run_retention_pass().await.unwrap();
+    assert!(
+        outcome.evicted_byte_cap > 0,
+        "byte-cap retention pass should report evicted rows, got {outcome:?}"
+    );
 
     let persisted = manager
         .query_persisted(0, u64::MAX, 100, QueryFilter::default())
