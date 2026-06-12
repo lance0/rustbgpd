@@ -2101,9 +2101,13 @@ is running, each segment originates:
 
 - **Type 4 (ES route)** — one per `[[ethernet_segments]]` block, with
   ES-Import Route Target derived from the ESI per RFC 7432 §7.6.
-- **Type 1 EAD-per-ES** — one per ES with `ethernet_tag = MAX_ET`.
-- **Type 1 EAD-per-EVI** — one per `(ES, member_vni)` pair, with the
-  per-ESI label assigned by `EsiLabelAllocator` (ADR-0057 §6).
+- **Type 1 EAD-per-ES** — one per ES with `ethernet_tag = MAX_ET` and
+  the ESI label (assigned by `EsiLabelAllocator`, ADR-0057 §6) in the
+  ESI Label extended community.
+- **Type 1 EAD-per-EVI** — one per `(ES, member_vni)` pair, with
+  `ethernet_tag = 0` (RFC 7432 §6.1 VLAN-based service) and the member
+  VNI in the route's label field (RFC 8365 §5.1.3). The per-VNI RD
+  keeps the routes distinct.
 
 The DF election runs on the union of locally configured ES and
 remote Type 4 routes for the same ESI; the elected DF role drives
