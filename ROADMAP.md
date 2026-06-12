@@ -188,11 +188,10 @@ has it, no broad performance sprints without profile evidence.
   after a 200 ms debounce (5 s poll retained as backstop); M65
   re-measured the AC-failure blackout at 300 ms (from ~4.5 s) and its
   hard bound tightened from 30 s to 3 s; (2) Ethernet-Tag
-  alignment — rustbgpd's EAD-per-EVI originates with `ethernet_tag =
-  VNI` while its Type 2s use tag 0, so a rustbgpd-originated
-  EAD-per-EVI never joins a remote rustbgpd's eligible set (receive
-  side proven against standards-shaped senders; rustbgpd↔rustbgpd
-  single-active backup needs an alignment decision); (3)
+  alignment — **done:** EAD-per-EVI now originates with
+  `ethernet_tag = 0` and the VNI in the label field per RFC 7432 §6.1
+  / RFC 8365 §5.1.3 (FRR parity), so rustbgpd-originated EAD-per-EVI
+  joins remote `(ESI, tag 0)` alias/eligible sets; (3)
   origination-side withdrawal stimulus — an ES has no AC/interface
   binding, so rustbgpd cannot emit the EAD-withdrawn-MACs-retained
   mass-withdraw shape (ES↔interface binding or an ES-drain RPC closes

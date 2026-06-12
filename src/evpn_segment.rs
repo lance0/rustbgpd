@@ -1081,8 +1081,17 @@ fn build_es_route(
                 EvpnRoute::EadPerEvi(EvpnEadPerEvi {
                     rd: *rd,
                     esi: *esi,
+                    // 0 for VLAN-based service (RFC 7432 §6.1 /
+                    // RFC 8365 §5.1.3) — must match the Type 2 routes'
+                    // tag so remote `(ESI, EthernetTag)` aliasing /
+                    // eligible-set joins resolve.
                     ethernet_tag: *ethernet_tag,
-                    label: MplsLabel::new(ethernet_tag.0),
+                    // RFC 8365 §5.1.3: the EAD-per-EVI label field
+                    // carries the VNI. Every per-EVI Inject reaches
+                    // this builder with the member VNI's own instance
+                    // (`run_election_with_candidates` looks it up per
+                    // VNI before `apply_with_instance`).
+                    label: MplsLabel::new(instance.id.as_u32()),
                 }),
                 // RFC 7432 §14: EAD-per-EVI carries no ESI Label —
                 // the per-EVI label comes from the route's own MPLS
@@ -1418,12 +1427,15 @@ mod tests {
     }
 
     #[test]
-    fn build_ead_per_evi_route_carries_vni_label() {
+    fn build_ead_per_evi_route_carries_vni_label_and_zero_tag() {
+        // RFC 8365 §5.1.3: the VNI rides in the route's label field;
+        // the Ethernet Tag stays 0 for VLAN-based service (RFC 7432
+        // §6.1) so the route joins remote (ESI, tag 0) MAC keys.
         let inst = instance(100);
         let key = EvpnRouteKey::EadPerEvi {
             rd: rd(65000, 100),
             esi: esi(1),
-            ethernet_tag: EthernetTagId(100),
+            ethernet_tag: EthernetTagId(0),
         };
         let route = build_es_route(
             &inst,
@@ -1436,8 +1448,8 @@ mod tests {
         );
         match route.route {
             EvpnRoute::EadPerEvi(r) => {
-                assert_eq!(r.ethernet_tag.0, 100);
-                assert_eq!(r.label.value(), 100);
+                assert_eq!(r.ethernet_tag.0, 0);
+                assert_eq!(r.label.value(), 100, "label must carry the instance VNI");
             }
             other => panic!("expected EadPerEvi, got {other:?}"),
         }
@@ -1878,7 +1890,7 @@ mod tests {
         let key = EvpnRouteKey::EadPerEvi {
             rd: rd(65000, 100),
             esi: esi(1),
-            ethernet_tag: EthernetTagId(100),
+            ethernet_tag: EthernetTagId(0),
         };
         let route = build_es_route(
             &inst,
@@ -2074,11 +2086,14 @@ mod tests {
         assert!(control.replace_segments(Arc::new(vec![segment(esi(0x22), &[200])])));
 
         let injected = wait_for_keys(&injects, 6, "runtime-added VNI ES injections").await;
+        // The Ethernet Tag is pinned to 0 (RFC 7432 §6.1); the per-VNI
+        // RD is what identifies the member VNI's EAD-per-EVI route.
+        let added_rd = instance(200).rd;
         assert!(
             injected.iter().any(|key| {
                 matches!(
                     key,
-                    EvpnRouteKey::EadPerEvi { ethernet_tag, .. } if ethernet_tag.0 == 200
+                    EvpnRouteKey::EadPerEvi { rd, .. } if *rd == added_rd
                 )
             }),
             "segment actor should originate EAD-per-EVI for the runtime-added VNI"

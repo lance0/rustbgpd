@@ -121,7 +121,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the same stream the local-MAC originator and the segment
   orchestrator consume) and re-projects 200 ms after the last event of
   a burst, instead of waiting for its 5 s RIB-poll tick. Any EVPN
-  best-path change (Type 1/2/3/5 add/withdraw/best-change) triggers
+  best-path change (Type 1/2/3/4/5 add/withdraw/best-change) triggers
   the debounced recompute; the unchanged-intent early return keeps
   spurious triggers free, and the 5 s poll is retained as the backstop
   (lost subscription, sustained sub-debounce churn). M65 re-measured
@@ -147,6 +147,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single-dst at the active PE, no backup pre-create).
 
 ### Fixed
+
+- **EAD-per-EVI routes now originate with Ethernet Tag 0 (RFC 7432
+  §6.1 / RFC 8365 §5.1.3), carrying the VNI in the label field.**
+  rustbgpd's Type 1 EAD-per-EVI origination put the VNI in the
+  Ethernet Tag ID while its Type 2 MAC/IP routes carry tag 0 — a spec
+  deviation for VLAN-based service (both RFCs pin the tag to 0; the
+  VNI belongs in the route's 3-octet label field) found while building
+  M65. Because the receive-side aliasing and ADR-0083 single-active
+  eligibility joins are keyed on `(ESI, Ethernet Tag)`, a
+  rustbgpd-originated EAD-per-EVI could never join a remote rustbgpd's
+  alias/eligible set for its tag-0 MACs, structurally breaking
+  rustbgpd↔rustbgpd multi-homing aliasing and backup paths; FRR peers
+  additionally misclassified the non-zero-tag route as an EAD-per-ES
+  contribution (FRR discriminates the two variants by `tag != 0`).
+  Origination now emits tag 0 with the member VNI in the label
+  (matching FRR's `BGP_EVPN_AD_EVI_ETH_TAG`), and per-VNI route
+  distinctness rides on the per-VNI RD, which config validation
+  already requires to be unique. Receive-side behavior is unchanged
+  (M65 already proves the tag-0 + VNI-label shape end to end).
+  **Upgrade note:** the Ethernet Tag is part of the EAD-per-EVI NLRI
+  key, so upgrading a multi-homed PE re-keys its EAD-per-EVI routes —
+  one withdraw/advertise per `(ES, member VNI)` as sessions
+  re-establish (under graceful restart the stale VNI-tagged route is
+  purged at End-of-RIB). EAD routes are not forwarding state; remote
+  receive-side joins recompute from the new advertisements, and peers
+  that ignored the old route (FRR per-EVI handling, remote rustbgpd
+  joins) only gain function.
 
 - **Adoption-retained nexthop IDs are re-evaluated on every drift
   cycle (ADR-0059/0079/0083).** A crash-leftover tagged nexthop
