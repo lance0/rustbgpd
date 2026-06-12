@@ -49,11 +49,12 @@
 #    pe1 re-wins DF (revertive highest-preference), pe2 demotes. The
 #    CE then emits one maintenance-exit ARP broadcast (the GARP
 #    pattern real CEs produce) and the CE MAC's Type 2 from pe1 plus
-#    end-to-end service are asserted. The broadcast works around two
-#    documented daemon gaps the drain surfaces but does not own (no
-#    same-ESI local bias in the PE remote-MAC projection; no
-#    local-delete observation for the in-place port usurpation it
-#    causes) — see the phase 7 comment.
+#    end-to-end service are asserted. The broadcast is pe1's re-learn
+#    stimulus: the remaining same-ESI local-bias gap means pe2's
+#    Type 2 usurped pe1's kernel-learned local AC row while drained,
+#    and (now that the in-place port move IS observed and drops the
+#    stale local claim) pe1 originates nothing for the CE MAC until
+#    its kernel relearns it on the AC — see the phase 7 comment.
 # 7. Foreign state: the start-script's pre-loaded foreign FDB row and
 #    the static all-zero flood entries survive the whole cycle.
 #
@@ -750,25 +751,28 @@ fi
 # The CE speaks on maintenance exit (one ARP broadcast to an unused
 # address — the GARP-after-maintenance pattern real CEs emit). This
 # floods out both CE legs and re-teaches both PEs' kernel bridges
-# that the CE MAC is local on their ACs. It is required here for two
-# documented daemon gaps the drain feature surfaces but does not own:
-# (1) the PE remote-MAC projection has no same-ESI local bias, so
-# while pe1 was drained, pe2's Type 2 for the CE MAC was programmed
-# as a REMOTE row on pe1's bridge, usurping its kernel-learned local
-# AC row (real EVPN implementations never point an own-segment MAC
-# at the ES peer); and (2) the in-place port move that usurpation
-# performs emits no local-delete observation, so pe1's observation
-# cache still claims the MAC and the undrain replays it — see the
-# stale-replay note in the topology header. Without CE chatter the
-# combination leaves hr->CE blackholed at pe1 (the vtep unicasts to
-# pe1, whose kernel row hairpins toward pe2). With it, traffic
-# re-pins and the steady state below holds regardless of whether the
-# replay was fresh or stale — so these asserts survive the daemon
-# fix too.
+# that the CE MAC is local on their ACs. It is required because the
+# PE remote-MAC projection has no same-ESI local bias (still open,
+# deferred to the ES↔interface binding design): while pe1 was
+# drained, pe2's Type 2 for the CE MAC was programmed as a REMOTE
+# row on pe1's bridge, usurping its kernel-learned local AC row
+# (real EVPN implementations never point an own-segment MAC at the
+# ES peer). The second gap this proof originally surfaced — that
+# in-place port move emitting no local-delete observation, so pe1's
+# cache kept claiming the MAC and the undrain replayed a stale
+# Type 2 — is FIXED (the classifier surfaces the VXLAN-port
+# RTM_NEWNEIGH and the originator drops the stale claim, live or
+# drained; see the topology header). Without CE chatter pe1 now
+# simply has no Type 2 for the CE MAC after undrain; with it, pe1's
+# kernel relearns the MAC on the AC (another in-place move, observed
+# as a local learn), pe1 re-advertises with a bumped RFC 7432 §15
+# mobility sequence, and the steady state below holds — the asserts
+# were written to survive exactly this fix (fresh relearn instead of
+# stale replay).
 log "[phase 7] CE maintenance-exit broadcast (ARP for an unused address)"
 docker exec "$CE" ping -c 1 -W 1 192.168.66.99 >/dev/null 2>&1 || true
 
-log "[phase 7] CE MAC Type 2 from pe1 present after undrain (cache replay and/or relearn)"
+log "[phase 7] CE MAC Type 2 from pe1 present after undrain (fresh kernel relearn after the CE broadcast)"
 got=$(wait_vtep_routes_at_least 2 "$PE1_IP" ".mac == \"${CE_MAC}\"" 1 60) \
     && ok "pe1 Type 2 for $CE_MAC present after undrain ($got)" \
     || fail "pe1 Type 2 for $CE_MAC did not return"

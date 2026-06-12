@@ -39,7 +39,8 @@ pub(super) async fn handle_observation(
         LocalMacObservation::Learned { vni, .. }
         | LocalMacObservation::Aged { vni, .. }
         | LocalMacObservation::IpAdded { vni, .. }
-        | LocalMacObservation::IpRemoved { vni, .. } => vni,
+        | LocalMacObservation::IpRemoved { vni, .. }
+        | LocalMacObservation::ObservedOnVxlanPort { vni, .. } => vni,
     };
     if super::vni_is_drained(obs_vni, vni_to_esi, drained_esis) {
         debug!(
@@ -105,6 +106,46 @@ pub(super) async fn handle_observation(
             )
             .await;
         }
+        LocalMacObservation::ObservedOnVxlanPort { vni, mac } => {
+            // Only meaningful for a MAC we currently claim as local:
+            // the bridge FDB holds one row per (bridge, MAC, VLAN),
+            // so the kernel moving the row to the VXLAN port means
+            // it no longer holds the MAC on the AC port — the local
+            // claim is stale and the Type 2 must come down. Rows for
+            // MACs we never claimed are remote-MAC programming
+            // (ours or a foreign controller's, stamped or not) and
+            // are not a local state change — acting on them would
+            // misread foreign state (ADR-0054).
+            if !state
+                .local_macs
+                .get(&vni)
+                .is_some_and(|m| m.contains_key(&mac))
+            {
+                return;
+            }
+            debug!(
+                ?vni,
+                ?mac,
+                "EVPN originator: locally-claimed MAC moved to the VXLAN port in place — \
+                 treating as local-gone"
+            );
+            // Same effect as a kernel age/delete: withdraw MAC-only
+            // and MAC+IP routes, drop the local caches. The
+            // originator's per-MAC entry survives, so a later
+            // re-learn on the AC port keeps the RFC 7432 §15
+            // mobility-sequence ratchet.
+            handle_aged(
+                vni,
+                mac,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+        }
     }
 }
 
@@ -134,12 +175,25 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
             }
         }
         LocalMacObservation::Aged { vni, mac } => {
-            if let Some(per_vni) = state.local_macs.get_mut(&vni) {
-                per_vni.remove(&mac);
-            }
-            state.pending_ip_bindings.remove(&(vni, mac));
-            if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
-                per_vni.remove(&mac);
+            drop_local_mac_caches(state, vni, mac);
+        }
+        LocalMacObservation::ObservedOnVxlanPort { vni, mac } => {
+            // The M66 incident shape: while the VNI's ES is drained,
+            // the ES peer's Type 2 for a still-cached local MAC gets
+            // programmed onto our bridge, and the kernel moves the
+            // FDB row to the VXLAN port in place. The kernel no
+            // longer holds the MAC locally, so the cache must drop
+            // it — otherwise a later undrain replays a Type 2 for a
+            // MAC we don't have (a stale claim, violating ADR-0084
+            // decision 1's "undrain replays the latest kernel
+            // state"). MACs we never claimed stay untouched (foreign
+            // or plain remote programming, not a local change).
+            let claimed = state
+                .local_macs
+                .get(&vni)
+                .is_some_and(|m| m.contains_key(&mac));
+            if claimed {
+                drop_local_mac_caches(state, vni, mac);
             }
         }
         LocalMacObservation::IpAdded { vni, mac, ip } => {
@@ -179,6 +233,19 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
                 }
             }
         }
+    }
+}
+
+/// Drop every local-claim cache entry for `(vni, mac)`: the kernel no
+/// longer holds the MAC on a local AC port. Shared by [`handle_aged`]
+/// and the drained `Aged` / drained `ObservedOnVxlanPort` arms.
+fn drop_local_mac_caches(state: &mut OriginatorState, vni: EvpnInstanceId, mac: MacAddress) {
+    if let Some(per_vni) = state.local_macs.get_mut(&vni) {
+        per_vni.remove(&mac);
+    }
+    state.pending_ip_bindings.remove(&(vni, mac));
+    if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
+        per_vni.remove(&mac);
     }
 }
 
@@ -368,13 +435,7 @@ pub(super) async fn handle_aged(
     let Some(inst) = instances.get(vni) else {
         return;
     };
-    if let Some(per_vni) = state.local_macs.get_mut(&vni) {
-        per_vni.remove(&mac);
-    }
-    state.pending_ip_bindings.remove(&(vni, mac));
-    if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
-        per_vni.remove(&mac);
-    }
+    drop_local_mac_caches(state, vni, mac);
 
     // Withdraw both MAC-only and any MAC+IP routes for this MAC.
     // At most one set is non-empty under the replace model, but
