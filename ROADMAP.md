@@ -203,7 +203,11 @@ has it, no broad performance sprints without profile evidence.
   the remaining piece is the
   ES↔interface binding so an AC failure emits the
   EAD-withdrawn-MACs-retained mass-withdraw shape automatically
-  (reuses the same drain primitive, gets its own ADR); a cross-vendor preference-DF smoke
+  (reuses the same drain primitive; ADR-0085 accepted — slice 1, the
+  `RTNLGRP_LINK` carrier monitor with poll backstop and runtime
+  watched-set replace, landed in `rustbgpd-evpn-linux`; binding
+  config, drain-coordinator wiring, and the same-ESI local bias
+  follow); a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today); shape-aware EVPN `--diff` classification so the static diff
@@ -213,7 +217,11 @@ has it, no broad performance sprints without profile evidence.
   checks). Demand-shaped; keep as follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support; rustbgpd-managed
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
-  poll-only link inventory; learned-port-to-ESI disambiguation so one local VNI
+  poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
+  the `link_carrier` monitor subscribes for the attributes link-driven
+  drain needs — name + `IFF_LOWER_UP`; the wider bridge/VXLAN inventory
+  stays poll-based until something else needs eventing); learned-port-to-ESI
+  disambiguation so one local VNI
   can participate in multiple Ethernet Segments; same-ESI local bias in the
   remote-MAC projection (M66 surfaced: an ES peer's Type 2 for a MAC on a
   locally-configured segment is programmed as a remote row, usurping the

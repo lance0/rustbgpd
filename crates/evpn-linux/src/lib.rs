@@ -92,6 +92,9 @@ pub mod linux;
 pub use linux::LinuxDataplane;
 
 #[cfg(target_os = "linux")]
+pub use linux::link_carrier::{LinkCarrierHandle, LinkCarrierMap, spawn_link_carrier_monitor};
+
+#[cfg(target_os = "linux")]
 pub use linux::nexthop_raw::{
     NexthopError, NexthopGroupMember, NexthopSocket, NexthopValidationError,
 };
