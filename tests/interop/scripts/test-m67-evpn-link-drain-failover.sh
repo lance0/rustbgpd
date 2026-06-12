@@ -60,13 +60,16 @@
 #    all-zero flood entries survive the whole cycle. The script is
 #    re-runnable against a live topology (end state == start state).
 #
-# Inherited M66 enforcement limit (designed around, not asserted
-# away): dataplane DF enforcement is BUM-flood-only, so a drained /
-# non-DF AC does not block known unicast — asserts are on route
-# state and the receive-side handover, never on the failed AC
-# dropping traffic (here the AC is administratively dead anyway, so
-# unlike M66's RPC drain the stale-unicast path through pe1 is
-# physically gone and the measured blackout is the real failover).
+# Single-active whole-port AC gate (the close of the M66-era
+# "BUM-flood-only enforcement" limit for bound single-active
+# segments): the non-DF PE's bound AC bridge port is held in STP
+# state `disabled` — ALL traffic blocked, known unicast included —
+# and re-opened on DF promotion. Asserted at three points: steady
+# state (pe2 disabled / pe1 forwarding), post-failover (promoted pe2
+# forwarding — a prerequisite for the flood-path relearn), and
+# post-revert (demoted pe2 re-blocked). The gate needs the
+# `interface` binding for the port handle; unbound segments remain
+# BUM-flood-only.
 #
 # Usage:
 #   docker build -t rustbgpd:dev .
@@ -266,6 +269,37 @@ wait_for_role() {
         sleep 1
     done
     return 1
+}
+
+# Single-active whole-port AC gate (the RFC 7432 non-DF full-AC
+# blocking complement to the BUM flood flags): read a PE's bound AC
+# bridge-port STP state from the kernel.
+ac_port_state() {
+    docker exec "$1" bridge -d link show dev "$AC_IF" 2>/dev/null         | grep -o 'state [a-z]*' | head -1 | cut -d' ' -f2
+}
+
+# Poll until the AC port state reads $2 (disabled|forwarding). The
+# gate rides the same DF-role flow as the BUM flags, so it settles
+# shortly after a role/drain transition lands in the dataplane.
+wait_ac_gate_state() {
+    local container=${1:?} want=${2:?} attempts=${3:-60}
+    for _ in $(seq 1 "$attempts"); do
+        [ "$(ac_port_state "$container")" = "$want" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# ok/fail wrapper for one AC-gate expectation, dumping the live
+# bridge-port row on failure.
+assert_ac_gate() {
+    local container=${1:?} want=${2:?} label=${3:?}
+    if wait_ac_gate_state "$container" "$want"; then
+        ok "$label (state $want)"
+    else
+        fail "$label (want state $want, got '$(ac_port_state "$container")')"
+        docker exec "$container" bridge -d link show dev "$AC_IF" >&2 || true
+    fi
 }
 
 # evpn_es_drained{esi=...,reason=$2} on $1, normalized: an absent
@@ -555,6 +589,10 @@ assert_drain_gauge "$PE1" link 0 "pe1 link drain gauge clear at steady state"
 assert_drain_gauge "$PE1" operator 0 "pe1 operator drain gauge clear at steady state"
 assert_drain_gauge "$PE2" link 0 "pe2 link drain gauge clear at steady state"
 
+log "[phase 1] single-active AC gate: the non-DF blocks its whole AC port, the DF forwards"
+assert_ac_gate "$PE2" disabled "pe2 (NonDF) AC port blocked"
+assert_ac_gate "$PE1" forwarding "pe1 (DF) AC port forwarding"
+
 log "[phase 1] vtep RIB: segment route classes from both PEs"
 for peer in "$PE1_IP" "$PE2_IP"; do
     got=$(wait_vtep_routes_at_least 4 "$peer" "true" 1 90) \
@@ -686,6 +724,9 @@ else
     prom_scrape "$PE2" | grep '^evpn_df_role' >&2 || true
 fi
 
+log "[phase 2] single-active AC gate: promoted pe2 must open its AC port (prerequisite for the flood-path relearn below)"
+assert_ac_gate "$PE2" forwarding "pe2 (promoted DF) AC port forwarding"
+
 log "[phase 2] service handover: pe2 learns the CE MAC via the flood path and takes over Type 2 origination"
 got=$(wait_vtep_routes_at_least 2 "$PE2_IP" ".mac == \"${CE_MAC}\"" 1 120) \
     && ok "Type 2 for $CE_MAC now originated by pe2 ($got)" \
@@ -801,6 +842,10 @@ if wait_for_role "$PE2" nondf 1 90; then
 else
     fail "pe2 did not demote within 90s"
 fi
+
+log "[phase 3] single-active AC gate re-engages after the revert: demoted pe2 blocks, recovered pe1 forwards"
+assert_ac_gate "$PE2" disabled "pe2 (demoted NonDF) AC port re-blocked"
+assert_ac_gate "$PE1" forwarding "pe1 (re-elected DF) AC port forwarding"
 
 log "[phase 3] CE maintenance-exit broadcast (pe1's AC re-learn stimulus, M66 pattern)"
 ce_recovery_broadcast

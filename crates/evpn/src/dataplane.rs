@@ -149,10 +149,88 @@ pub struct BumEnforcementEntry {
     pub bridge: String,
 }
 
-/// Complete desired BUM-enforcement table.
+/// Desired whole-port attachment-circuit gate for one single-active
+/// Ethernet Segment (the "single-active non-DF full AC blocking"
+/// ROADMAP item; ADR-0085 follow-on).
+///
+/// RFC 7432 §14.1.1: in single-active redundancy mode the non-DF PE
+/// must block **all** traffic on the segment attachment circuit —
+/// known unicast included — not just the BUM classes the
+/// [`BumForwardingAction`] flood flags cover. The kernel primitive is
+/// the bridge-port STP state (`IFLA_BRPORT_STATE`):
+/// `BR_STATE_DISABLED` blocks every frame through the port,
+/// `BR_STATE_FORWARDING` restores it. The state is **per port**, not
+/// per VLAN, which is why the daemon only requests `Blocked` when
+/// this PE is non-DF for *every* member VNI of the ES (see
+/// [`AcGateState::MixedRoles`]).
+///
+/// Rows exist only for single-active segments **with** an
+/// ADR-0085 `interface` binding — the binding is what gives the
+/// daemon the AC port handle. All-active segments never get a row
+/// (every member PE forwards known unicast by design), and unbound
+/// single-active segments cannot be gated (no port handle; the BUM
+/// flood flags remain the only enforcement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AcGateState {
+    /// Non-DF for every member VNI of the ES (or the ES is drained):
+    /// block the whole AC port (`BR_STATE_DISABLED`).
+    Blocked,
+    /// DF for every member VNI: the AC port forwards
+    /// (`BR_STATE_FORWARDING`).
+    Forwarding,
+    /// RFC 8584 service carving split the DF roles across the ES's
+    /// member VNIs (DF for some, non-DF for others). A port-level
+    /// block would break the VNIs this PE *is* DF for, so the port
+    /// is left forwarding and only the per-VNI BUM flood flags
+    /// enforce — partial enforcement, surfaced to operators via the
+    /// `evpn_es_ac_gate` gauge and a structured warning.
+    MixedRoles,
+}
+
+impl AcGateState {
+    /// `true` when the desired kernel port state is
+    /// `BR_STATE_DISABLED`. `MixedRoles` resolves to forwarding —
+    /// the partial-enforcement fallback.
+    #[must_use]
+    pub const fn is_blocked(self) -> bool {
+        matches!(self, Self::Blocked)
+    }
+
+    /// Gauge / log label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Forwarding => "forwarding",
+            Self::MixedRoles => "mixed-roles",
+        }
+    }
+}
+
+/// One desired AC-gate row: the bound attachment-circuit link of a
+/// single-active ES plus the role-derived gate state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcGateEntry {
+    /// Ethernet Segment the gate belongs to.
+    pub esi: EthernetSegmentIdentifier,
+    /// ADR-0085 `interface` binding — the AC port, by kernel link
+    /// name. The Linux dataplane resolves it to an ifindex at
+    /// reconcile time (names are the operator contract; ifindexes
+    /// can be reused).
+    pub interface: String,
+    /// Desired gate state derived from redundancy mode × per-VNI DF
+    /// roles × drain state.
+    pub state: AcGateState,
+}
+
+/// Complete desired BUM-enforcement table, plus the single-active
+/// AC-gate rows that ride the same segment-actor → dataplane flow
+/// (both derive from the same per-ES DF-role state, so one snapshot
+/// publishes both).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BumEnforcementTable {
     entries: BTreeMap<BumEnforcementKey, BumEnforcementEntry>,
+    ac_gates: BTreeMap<EthernetSegmentIdentifier, AcGateEntry>,
 }
 
 impl BumEnforcementTable {
@@ -208,6 +286,40 @@ impl BumEnforcementTable {
     /// Iterate rows in deterministic `(ESI, VNI)` order.
     pub fn iter(&self) -> impl Iterator<Item = &BumEnforcementEntry> {
         self.entries.values()
+    }
+
+    /// Insert or replace the AC-gate row for one ES.
+    pub fn set_ac_gate(
+        &mut self,
+        esi: EthernetSegmentIdentifier,
+        interface: String,
+        state: AcGateState,
+    ) {
+        self.ac_gates.insert(
+            esi,
+            AcGateEntry {
+                esi,
+                interface,
+                state,
+            },
+        );
+    }
+
+    /// Look up the AC-gate row for one ES.
+    #[must_use]
+    pub fn ac_gate(&self, esi: EthernetSegmentIdentifier) -> Option<&AcGateEntry> {
+        self.ac_gates.get(&esi)
+    }
+
+    /// Iterate AC-gate rows in deterministic ESI order.
+    pub fn ac_gates(&self) -> impl Iterator<Item = &AcGateEntry> {
+        self.ac_gates.values()
+    }
+
+    /// Number of AC-gate rows.
+    #[must_use]
+    pub fn ac_gates_len(&self) -> usize {
+        self.ac_gates.len()
     }
 }
 
@@ -601,6 +713,18 @@ pub enum DataplaneOpKind {
         /// CE-facing bridge port ifindex.
         ifindex: u32,
     },
+    /// Apply the single-active AC gate to a bound attachment-circuit
+    /// bridge port (`IFLA_BRPORT_STATE` — `BR_STATE_DISABLED` when
+    /// `blocked`, `BR_STATE_FORWARDING` otherwise). Like
+    /// [`Self::SetBumPortFlags`] the affected kernel object is a
+    /// bridge port identified by ifindex, not a `(VNI, MAC)` row.
+    SetAcPortState {
+        /// Bound AC bridge-port ifindex.
+        ifindex: u32,
+        /// `true` → `BR_STATE_DISABLED`; `false` →
+        /// `BR_STATE_FORWARDING`.
+        blocked: bool,
+    },
     /// Install an FDB row pointing at an FDB nexthop group via
     /// `NDA_NH_ID` (ADR-0059 slice 3 aliasing-ECMP). The kernel
     /// group ID isn't reported here — operators trace it via
@@ -719,6 +843,40 @@ mod tests {
         assert_eq!(row.role, DfRole::NonDf);
         assert_eq!(row.action, BumForwardingAction::Suppress);
         assert_eq!(row.bridge, "br100");
+    }
+
+    #[test]
+    fn ac_gate_rows_round_trip_and_affect_equality() {
+        let esi = EthernetSegmentIdentifier::new([2; 10]);
+        let mut table = BumEnforcementTable::new();
+        assert_eq!(table.ac_gates_len(), 0);
+        table.set_ac_gate(esi, "eth2".to_string(), AcGateState::Blocked);
+
+        let row = table.ac_gate(esi).unwrap();
+        assert_eq!(row.interface, "eth2");
+        assert_eq!(row.state, AcGateState::Blocked);
+        assert!(row.state.is_blocked());
+
+        // A gate-state change alone must make tables unequal — the
+        // supervisor's unchanged-intent early return and the segment
+        // actor's publish dedupe both rely on PartialEq seeing it.
+        let mut other = table.clone();
+        assert_eq!(table, other);
+        other.set_ac_gate(esi, "eth2".to_string(), AcGateState::MixedRoles);
+        assert_ne!(table, other);
+        assert!(!other.ac_gate(esi).unwrap().state.is_blocked());
+    }
+
+    #[test]
+    fn ac_gate_state_labels_match_gauge_convention() {
+        assert_eq!(AcGateState::Blocked.as_str(), "blocked");
+        assert_eq!(AcGateState::Forwarding.as_str(), "forwarding");
+        assert_eq!(AcGateState::MixedRoles.as_str(), "mixed-roles");
+        // Only Blocked maps to BR_STATE_DISABLED; MixedRoles is the
+        // forwarding fallback.
+        assert!(AcGateState::Blocked.is_blocked());
+        assert!(!AcGateState::Forwarding.is_blocked());
+        assert!(!AcGateState::MixedRoles.is_blocked());
     }
 
     #[test]

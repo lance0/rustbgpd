@@ -102,6 +102,31 @@ pub enum DataplaneOp {
         /// Desired flag triplet for this port.
         flags: crate::bum_filter::BumPortFlags,
     },
+    /// Apply the single-active AC gate: set the bound AC bridge
+    /// port's `IFLA_BRPORT_STATE` to `BR_STATE_DISABLED` (`blocked`)
+    /// or `BR_STATE_FORWARDING`. Realized in `crate::LinuxDataplane`
+    /// via `RTM_SETLINK`/`AF_BRIDGE` + nested `IFLA_PROTINFO` — the
+    /// `bridge link set ... state` wire shape, deliberately NOT the
+    /// [`Self::SetBumPortFlags`] `set_port` shape, whose
+    /// `NETDEV_CHANGE` side effect makes the bridge's carrier check
+    /// instantly re-enable a just-disabled oper-up port (see
+    /// `linux::ac_gate` module docs). The message carries **only**
+    /// the state attribute so the flood-flag triplet on the same
+    /// port is never clobbered (the kernel's `br_setport` applies
+    /// only the attributes present). Failure classification:
+    /// [`DataplaneError::PermissionDenied`] (`EPERM` / `EACCES`),
+    /// [`DataplaneError::LinkNotFound`] (`ENODEV` — stale ifindex),
+    /// [`DataplaneError::InvalidArgument`] (`EOPNOTSUPP` / `EINVAL` —
+    /// the ifindex is not a bridge port, e.g. the bound link was
+    /// unenslaved between snapshot and apply), or
+    /// [`DataplaneError::Other`] for the actor's backoff.
+    SetAcPortState {
+        /// Bound AC bridge-port ifindex.
+        ifindex: u32,
+        /// `true` → `BR_STATE_DISABLED`; `false` →
+        /// `BR_STATE_FORWARDING`.
+        blocked: bool,
+    },
     /// Install a remote IP-prefix route into the IP-VRF's
     /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
     /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and
