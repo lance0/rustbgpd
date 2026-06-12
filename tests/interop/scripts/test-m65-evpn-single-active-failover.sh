@@ -358,7 +358,9 @@ ping_burst_ok "baseline ping burst hr -> CE"
 
 log "[phase 3] starting the 100ms blackout prober on hr..."
 docker exec "$HR" sh -c "rm -f /tmp/m65-prober.log" || true
-docker exec -d "$HR" sh -c "ping -i 0.1 -O $CE_HOST_IP >/tmp/m65-prober.log 2>&1"
+# Record the prober's PID so teardown kills exactly this ping and
+# never an interactive diagnostic one.
+docker exec -d "$HR" sh -c "ping -i 0.1 -O $CE_HOST_IP >/tmp/m65-prober.log 2>&1 & echo \$! >/tmp/m65-prober.pid"
 sleep 2
 
 log "[phase 3] injecting the AC failure: pe1 CE leg down + EAD-per-ES withdrawal"
@@ -435,7 +437,7 @@ wait_prom_value "evpn_single_active_backup_active" "1" "failover window open (ga
 
 # Let the prober record a recovery segment, then stop it and measure.
 sleep 3
-docker exec "$HR" sh -c 'kill -TERM $(pidof ping) 2>/dev/null' || true
+docker exec "$HR" sh -c 'kill -TERM "$(cat /tmp/m65-prober.pid)" 2>/dev/null' || true
 sleep 1
 
 log "[phase 3] traffic restored through the backup PE"
