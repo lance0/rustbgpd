@@ -32,11 +32,12 @@
 //! takes precedence over the ring.
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::time::SystemTime;
 
 use lru::LruCache;
-use rustbgpd_policy::{PolicyAction, RouteModifications};
+use rustbgpd_policy::{PolicyAction, RouteModifications, StatementAttribution};
 use rustbgpd_wire::{Afi, AspaValidation, PathAttribute, Prefix, RpkiValidation, Safi};
 
 /// Default per-peer cap. Per ADR-0073 this is a deliberate fabric /
@@ -104,6 +105,13 @@ pub struct CachedDecision {
     /// Path attributes exactly as received before policy applied them.
     /// Cloned at the eval site; the original UPDATE-path is unchanged.
     pub pre_policy_attrs: Vec<PathAttribute>,
+    /// The next-hop the evaluation context saw. Stored separately
+    /// because it is not always recoverable from `pre_policy_attrs`:
+    /// MP-unicast routes carry it in `MP_REACH` framing, which is
+    /// stripped before the attributes are stored. Needed so the
+    /// statement-level explain re-derivation rebuilds the *exact*
+    /// evaluation-time `RouteContext`.
+    pub next_hop: Option<IpAddr>,
     /// Modifications the policy chain would apply on permit. Carried
     /// for both permit and deny entries — for a deny they describe what
     /// *would* have happened if the chain had reached its inline-deny
@@ -139,6 +147,15 @@ pub enum LookupResult {
 pub struct ResolvedMatch {
     pub path_id: u32,
     pub result: LookupResult,
+    /// Statement-level attribution, re-derived at query time by the
+    /// session command handler (not by the cache — the cache holds no
+    /// policy chain). Populated only for current-generation `Hit`
+    /// entries with a `Permit` / `Deny` outcome: a `Stale` entry's
+    /// chain is gone (re-deriving against the current chain could
+    /// contradict the recorded outcome) and a `Withdrawn` tombstone
+    /// has shed the attributes the re-derivation needs. Empty
+    /// otherwise.
+    pub statements: Vec<StatementAttribution>,
 }
 
 /// The session's reply to an explain query. Carries the session's
@@ -271,6 +288,7 @@ impl ImportDecisionCache {
             .map(|(k, decision)| ResolvedMatch {
                 path_id: k.path_id,
                 result: Self::classify(decision.clone(), current_generation),
+                statements: Vec::new(),
             })
             .collect();
         if matches.is_empty() {
@@ -281,6 +299,7 @@ impl ImportDecisionCache {
                     .map(|k| ResolvedMatch {
                         path_id: k.path_id,
                         result: LookupResult::Evicted,
+                        statements: Vec::new(),
                     }),
             );
         }
@@ -352,6 +371,7 @@ mod tests {
             rpki: RpkiValidation::NotFound,
             aspa: AspaValidation::Unknown,
             pre_policy_attrs: Vec::new(),
+            next_hop: None,
             modifications: RouteModifications::default(),
             evaluated_at: SystemTime::UNIX_EPOCH,
             policy_generation: generation,
@@ -365,6 +385,7 @@ mod tests {
             rpki: RpkiValidation::NotFound,
             aspa: AspaValidation::Unknown,
             pre_policy_attrs: Vec::new(),
+            next_hop: None,
             modifications: RouteModifications::default(),
             evaluated_at: SystemTime::UNIX_EPOCH,
             policy_generation: generation,

@@ -857,6 +857,30 @@ Each result reports an outcome:
 | `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
 | `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart), or explain is disabled. |
 
+A `permit` / `deny` result additionally carries a **statement trace** —
+which statement inside the matched chain decided, per policy evaluated:
+
+```
+  permit
+    policy:  edge-import
+    ...
+    statements:
+      [0] policy edge-import statement 1 permit  match: prefix 192.0.2.0/24  set: local_pref 100 -> 200
+```
+
+One row per policy the chain consulted (a deny ends the trace at the
+denying policy — later policies were never evaluated). `default-action`
+rows mean no statement in that policy matched and its default decided.
+Matched conditions lead with stable labels (`prefix`, `community`,
+`as_path`, `neighbor_set`, `rpki`, `local_pref`, …; `any` for an
+unconditional statement) and attribute edits render as
+`before -> after` against the route's pre-policy values. The trace is
+re-derived on demand from the cached pre-policy attributes, so it
+attaches only to current-generation `permit` / `deny` results — a
+`stale` decision's chain no longer exists and a `withdrawn` tombstone
+has dropped the attributes the re-derivation needs. `--json` carries
+the same trace as a `statements` array per match.
+
 This is a side-effect-free read: it does not touch the RIB or move any
 policy counter. The cache is **diagnostic session state**, not durable
 history — it resets on peer flap and daemon restart.

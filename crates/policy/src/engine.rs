@@ -497,6 +497,13 @@ impl AsPathRegex {
     pub fn is_match(&self, aspath_str: &str) -> bool {
         self.regex.is_match(aspath_str)
     }
+
+    /// The pattern as configured (before `_` boundary expansion).
+    /// Explain surfaces render this back to the operator.
+    #[must_use]
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
 }
 
 impl fmt::Debug for AsPathRegex {
@@ -1192,6 +1199,10 @@ fn apply_as_path_prepend(attrs: &mut Vec<PathAttribute>, asn: u32, count: u8) {
         }));
     }
 }
+
+/// Statement-level chain attribution for explain surfaces. Explain-only:
+/// the live evaluation path never routes through this module.
+pub mod explain;
 
 #[cfg(test)]
 mod tests;

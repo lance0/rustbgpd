@@ -149,20 +149,27 @@ fn otc_ingress_action(
 /// occurrence). The four `AS_PATH`-derived surfaces (`as_path`,
 /// `as_path_str`, `as_path_len`, `origin_asn`) all come from the same
 /// first `AS_PATH` attribute.
-struct PolicyAttrSummary<'a> {
-    extended_communities: &'a [rustbgpd_wire::ExtendedCommunity],
-    communities: &'a [u32],
-    large_communities: &'a [rustbgpd_wire::LargeCommunity],
+/// `pub(super)` (not private): the explain command handler in
+/// `super::commands` reuses this exact extraction to rebuild the
+/// evaluation-time `RouteContext` from a cached decision's pre-policy
+/// attributes — sharing the extractor (instead of duplicating it) is
+/// what guarantees the re-derived statement trace sees the same
+/// context fields the live evaluation saw. Visibility-only change;
+/// the hot path is untouched.
+pub(super) struct PolicyAttrSummary<'a> {
+    pub(super) extended_communities: &'a [rustbgpd_wire::ExtendedCommunity],
+    pub(super) communities: &'a [u32],
+    pub(super) large_communities: &'a [rustbgpd_wire::LargeCommunity],
     as_path: Option<&'a AsPath>,
-    as_path_str: String,
-    as_path_len: usize,
+    pub(super) as_path_str: String,
+    pub(super) as_path_len: usize,
     origin_asn: Option<u32>,
-    local_pref: Option<u32>,
-    med: Option<u32>,
+    pub(super) local_pref: Option<u32>,
+    pub(super) med: Option<u32>,
 }
 
 impl<'a> PolicyAttrSummary<'a> {
-    fn from_route_attrs(attrs: &'a [PathAttribute]) -> Self {
+    pub(super) fn from_route_attrs(attrs: &'a [PathAttribute]) -> Self {
         let mut extended_communities: Option<&'a [rustbgpd_wire::ExtendedCommunity]> = None;
         let mut communities: Option<&'a [u32]> = None;
         let mut large_communities: Option<&'a [rustbgpd_wire::LargeCommunity]> = None;
@@ -908,6 +915,7 @@ impl PeerSession {
                                     rpki: rpki_state,
                                     aspa: body_aspa_state,
                                     pre_policy_attrs: (*attr_bundle.unicast).clone(),
+                                    next_hop: Some(body_next_hop),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
                                     policy_generation: self.import_policy_generation,
@@ -1207,6 +1215,7 @@ impl PeerSession {
                                     rpki: mp_rpki_state,
                                     aspa: mp_aspa_state,
                                     pre_policy_attrs: (*attr_bundle.mp_unicast).clone(),
+                                    next_hop: Some(mp.next_hop),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
                                     policy_generation: self.import_policy_generation,

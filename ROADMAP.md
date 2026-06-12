@@ -383,15 +383,23 @@ has it, no broad performance sprints without profile evidence.
   now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
-  unit-test coverage; per-statement attribution within a matched import chain
-  (the `rustbgpctl policy explain --neighbor X --prefix Y` decision trace itself
-  shipped in v0.31.0, ADR-0073); best-path explain surfacing the tiebreaker step
-  that won (the RIB-side sibling to the export-side policy-clause attribution —
-  shipped in `[Unreleased]`: per-loser decisive step with compared values, the
-  winner's step vs the runner-up, multipath-cut classification, `NOT_FOUND` for
-  unknown prefixes).
-  Also: named-policy / statement identity in explain output; verbose policy
-  trace including non-match steps; route history / why-changed timeline;
+  unit-test coverage. Per-statement attribution within a matched import chain —
+  **shipped in `[Unreleased]`**: each `policy explain` permit/deny match carries
+  a statement trace (policy + statement identity, matched conditions with
+  stable labels, default-action fallthrough, `before -> after` attribute
+  edits), re-derived at query time from the ADR-0073 cached pre-policy
+  attributes so the live import path is untouched, agreement-tested against the
+  live evaluator (the decision trace itself shipped in v0.31.0; this also
+  covers the "named-policy / statement identity in explain output" item that
+  used to sit below — traces attach to current-generation permit/deny outcomes
+  only, not `stale`/`withdrawn`). Best-path explain surfacing the tiebreaker
+  step that won (the RIB-side sibling to the export-side policy-clause
+  attribution — shipped in `[Unreleased]`: per-loser decisive step with
+  compared values, the winner's step vs the runner-up, multipath-cut
+  classification, `NOT_FOUND` for unknown prefixes).
+  Also: verbose policy trace including non-match steps (the shipped trace
+  reports the deciding statement per policy, not every statement consulted);
+  route history / why-changed timeline;
   looking-glass integration for explain; `rustbgpd --diff` output formatted by
   reload class (cross-reference each diff line against `docs/reload-matrix.md`).
 - **Performance — remaining items.** The scale & memory sprint shipped

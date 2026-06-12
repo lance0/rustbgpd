@@ -850,6 +850,54 @@ message ImportExplainMatch {
   // session's current generation; STALE is the outcome when these
   // disagree.
   uint64 policy_generation     = 12;
+
+  // Statement-level attribution within the matched chain: one step
+  // per policy the chain evaluated, in chain order (a deny terminates
+  // the walk, so policies after a denying one carry no step). The
+  // trace is re-derived at query time from the cached pre-policy
+  // attributes against the session's import chain — the live import
+  // path records no extra state for it. Populated only on PERMIT /
+  // DENY outcomes at the current policy generation: STALE entries
+  // were decided by a chain that no longer exists, WITHDRAWN
+  // tombstones have shed the attributes the re-derivation needs, and
+  // NOT_SEEN / EVICTED have no decision at all. Empty also when the
+  // peer has no import chain (implicit permit — nothing to attribute).
+  repeated ImportExplainStatementStep statements = 13;
+}
+
+// One step of the statement-level import-chain trace: how a single
+// policy in the chain disposed of the route. Mirrors the granularity
+// of the export-side policy-clause reasons and the best-path
+// tiebreaker detail: structured identity fields are machine-stable,
+// the rendered condition / modification strings carry a stable leading
+// label with human-oriented detail (not a machine-parsable grammar).
+message ImportExplainStatementStep {
+  // 0-based position of the policy within the resolved import chain.
+  uint32 policy_index = 1;
+  // Configured policy name. Empty when the policy is inline /
+  // anonymous (operators read "inline", matching `matched_policy`).
+  string policy_name = 2;
+  // True when no statement in this policy matched and the policy's
+  // default action decided (fallthrough). `statement_index` is
+  // meaningless in that case and `matched_conditions` is empty.
+  bool default_action = 3;
+  // 0-based index of the first matching statement within the policy.
+  // Valid only when `default_action` is false.
+  uint32 statement_index = 4;
+  // The action this policy contributed: "permit" or "deny" (stable).
+  string action = 5;
+  // Rendered summaries of every condition the matched statement
+  // carries — all matched (statement conditions AND together). Each
+  // entry leads with a stable label (`prefix`, `community`, `as_path`,
+  // `neighbor_set`, `route_type`, `evpn_route_type`, `rpki`, `aspa`,
+  // `as_path_len`, `local_pref`, `med`, `next_hop`); an unconditional
+  // statement renders as the single entry "any".
+  repeated string matched_conditions = 6;
+  // Rendered attribute modifications this statement contributes, with
+  // "before -> after" for scalar attributes (the before side is the
+  // route's pre-policy value — chain modifications accumulate and
+  // apply once, so later statements never see earlier edits).
+  repeated string modifications = 7;
 }
 
 message ExplainImportPolicyResponse {

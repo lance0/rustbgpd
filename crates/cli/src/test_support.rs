@@ -1237,6 +1237,15 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             modifications: modifications.clone(),
             evaluated_at_unix_ns: 1_700_000_000_000_000_000,
             policy_generation: 3,
+            statements: vec![server_proto::ImportExplainStatementStep {
+                policy_index: 0,
+                policy_name: "from-transit".to_string(),
+                default_action: false,
+                statement_index: 1,
+                action: "permit".to_string(),
+                matched_conditions: vec!["community 65001:100".to_string()],
+                modifications: vec!["local_pref 100 -> 200".to_string()],
+            }],
         };
         // When the caller pins a path_id, return exactly that path;
         // otherwise return two paths so the Add-Path "all matches"
@@ -1258,6 +1267,15 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                     modifications: None,
                     evaluated_at_unix_ns: 1_700_000_000_000_000_000,
                     policy_generation: 3,
+                    statements: vec![server_proto::ImportExplainStatementStep {
+                        policy_index: 0,
+                        policy_name: "block-bogons".to_string(),
+                        default_action: true,
+                        statement_index: 0,
+                        action: "deny".to_string(),
+                        matched_conditions: vec![],
+                        modifications: vec![],
+                    }],
                 },
             ],
         };
