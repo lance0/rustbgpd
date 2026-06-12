@@ -45,8 +45,9 @@
 #    == 1`, gauge == 1, pings flow again.
 # 3. Blackout window: measured from the 100 ms ping stream (max
 #    consecutive missed-probe run) and logged prominently —
-#    informational. One generous hard bound: < 30 s, which separates
-#    the event-driven swap from the ≤60 s periodic-reconcile backstop
+#    informational. One hard bound: < 3 s, which pins the supervisor's
+#    debounced RIB-event recompute (200 ms debounce + one netlink
+#    replace) against a regression back to the 5 s poll backstop
 #    (no Type 3 routes are injected, so the DUT has no flood entries:
 #    the swap is the ONLY restoration path — connectivity back ⇔ swap
 #    landed; a relearn wave cannot mask a broken swap).
@@ -102,9 +103,12 @@ PRELOADED_FOREIGN_MAC="02:99:99:99:99:99"
 FOREIGN_NH_ID="4242"
 PROBE_INTERVAL_MS="100"
 # Hard sanity bound on the measured blackout: generous vs. the
-# expected sub-second repair, but strictly below the ≤60 s periodic
-# reconcile cadence, so it proves the event-driven swap path fired.
-BLACKOUT_BOUND_MS="30000"
+# expected sub-second repair (200 ms event debounce + EAD-withdrawal
+# propagation + one netlink replace + the driver's ~100-200 ms
+# injection serialization gap), but strictly below the supervisor's
+# 5 s poll backstop, so a regression back to poll-driven recompute
+# fails the job.
+BLACKOUT_BOUND_MS="3000"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -449,9 +453,9 @@ ping_burst_ok "post-swap ping burst hr -> CE (via $PE2_IP)"
 # ---------------------------------------------------------------------------
 
 # Max consecutive missed-probe run from the reply sequence numbers.
-# INFORMATIONAL measurement; the only hard gate is the generous
-# <30s sanity bound (see header). At a 100 ms grain the floor of the
-# measurable window is one probe.
+# INFORMATIONAL measurement; the only hard gate is the <3s sanity
+# bound (see header). At a 100 ms grain the floor of the measurable
+# window is one probe.
 prober_log=$(docker exec "$HR" cat /tmp/m65-prober.log 2>/dev/null || true)
 max_gap=$(echo "$prober_log" | grep 'bytes from' \
     | grep -oE 'icmp_seq=[0-9]+' | cut -d= -f2 \

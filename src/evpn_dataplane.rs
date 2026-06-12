@@ -10,17 +10,28 @@
 //! `tokio::sync::watch::Sender<Arc<DataplaneIntent>>` that the
 //! [`ReconcileActor`] consumes.
 //!
-//! ## Polling vs. push
+//! ## Event-driven recompute with a poll backstop
 //!
-//! Phase 5b uses a fixed-cadence polling supervisor that re-projects
-//! every [`SupervisorConfig::poll_interval`] (default 5 s). The
-//! reconcile actor's 60 s periodic dump backstop and the
-//! 100ms→5s op retry already handle kernel drift at finer
-//! granularity. The Gate 7c push notification (`EvpnRouteEvent`
-//! broadcast added in v0.17, see `crates/rib`) is consumed by the
-//! local-MAC originator only; the dataplane supervisor stays
-//! poll-driven because 5 s is acceptable for FDB programming, while
-//! the originator's mobility window must be sub-second.
+//! The supervisor subscribes to the RIB's `EvpnRouteEvent` broadcast
+//! (the Gate 7c push stream the local-MAC originator and the segment
+//! orchestrator already consume) and re-projects
+//! [`EVPN_ROUTE_EVENT_DEBOUNCE`] after the last event of a burst —
+//! the same debounced trigger shape as the blackhole reconciler. Any
+//! EVPN best-path change (Type 1/2/3/4/5 add / withdraw / best-change)
+//! marks the supervisor dirty; the recompute is a full re-projection,
+//! so spurious triggers from route types the projection ignores are
+//! cheap no-ops absorbed by the unchanged-intent early return. This
+//! makes the ADR-0083 single-active failover repair sub-second
+//! instead of poll-cadence-bound.
+//!
+//! The fixed-cadence poll ([`SupervisorConfig::poll_interval`],
+//! default 5 s) is retained as the backstop: it covers a lost or
+//! never-established event subscription, and it bounds staleness
+//! under sustained sub-debounce churn (the trailing-edge re-arm
+//! defers the event-path recompute until the stream quiets, exactly
+//! like the blackhole reconciler). The reconcile actor's 60 s
+//! periodic dump backstop and the 100ms→5s op retry handle kernel
+//! drift below that.
 //!
 //! ## Report broadcast
 //!
@@ -63,14 +74,27 @@ use tracing::{debug, info, warn};
 
 pub(crate) type RemoteIpPrefixDropCounts = BTreeMap<(String, String), u64>;
 
+/// Debounce window for RIB EVPN route events. An event re-arms the
+/// timer (trailing edge), so a burst — an EAD-per-ES withdrawal
+/// rippling through best-path recomputes, an initial table flood —
+/// coalesces into one re-projection once the stream has been quiet
+/// this long. Matches the blackhole reconciler's
+/// `ROUTE_EVENT_DEBOUNCE` precedent; under sustained sub-debounce
+/// churn the periodic poll bounds staleness.
+const EVPN_ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
+
 /// Defaults for the daemon-side supervisor.
 #[derive(Debug, Clone, Copy)]
 pub struct SupervisorConfig {
-    /// How often to re-project from the RIB. Higher = lower CPU
-    /// during MAC churn at the cost of slower convergence on the
-    /// dataplane side. The reconcile actor's 60 s periodic dump
-    /// repairs any missed transitions, so this can be tuned freely
-    /// without correctness impact.
+    /// Backstop re-projection cadence. The hot path is the debounced
+    /// RIB event trigger; the poll covers a lost / never-established
+    /// event subscription and bounds staleness under sustained
+    /// sub-debounce churn (where the trailing-edge re-arm keeps
+    /// deferring the event-path recompute). Kept at 5 s — the
+    /// pre-event-trigger cadence — so the worst case under
+    /// pathological churn is no worse than the old poll-only
+    /// behavior; an unchanged projection is a cheap no-op (the
+    /// unchanged-intent early return skips the watch send).
     pub poll_interval: Duration,
     /// Reconcile-actor configuration forwarded to the spawned actor.
     pub actor_config: ReconcileActorConfig,
@@ -759,14 +783,24 @@ fn publish_cached_dataplane_intent(
     true
 }
 
-/// Periodic supervisor loop: query the RIB, project, publish.
+/// Supervisor loop: query the RIB, project, publish — triggered by
+/// the debounced RIB EVPN route-event stream, with the periodic poll
+/// as backstop.
 ///
 /// Generation only advances when the effective EVPN tables, projected
 /// `RemoteMacTable`, projected Type 5 prefix table, or BUM-enforcement
 /// table differ from the previously-published intent. The reconcile
 /// actor uses generation as the trigger to clear permanent-failure
-/// suppression; incrementing on every poll regardless of content change
-/// would defeat that suppression and hammer the kernel every 5 s.
+/// suppression; incrementing on every pass regardless of content change
+/// would defeat that suppression and hammer the kernel.
+///
+/// Storm safety: events only set a dirty flag and re-arm the debounce
+/// timer (re-arm semantics, not queue-per-event), so a continuous
+/// churn stream coalesces instead of piling up; a `Lagged` broadcast
+/// error is just another dirty mark because the recompute is a full
+/// re-projection. Under churn faster than the debounce the event arm
+/// defers and the poll tick bounds staleness at the old poll-only
+/// worst case.
 ///
 /// ADR-0063 table inputs are watch channels rather than mutable shared
 /// tables. A future coordinator commit can publish a complete effective
@@ -789,6 +823,12 @@ async fn supervisor_loop(
     let mut duplicate_mac_quarantine_updates_open = true;
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Subscribe BEFORE the first projection (the interval's first
+    // tick fires immediately), so a route change landing between the
+    // first RIB snapshot and the subscription cannot be lost.
+    let mut evpn_events = subscribe_evpn_route_events(&rib_tx).await;
+    let mut event_debounce = Box::pin(tokio::time::sleep(EVPN_ROUTE_EVENT_DEBOUNCE));
+    let mut route_event_dirty = false;
 
     loop {
         tokio::select! {
@@ -798,6 +838,30 @@ async fn supervisor_loop(
                 return;
             }
             _ = tick.tick() => {
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                match publish_dataplane_intent(
+                    &rib_tx,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
+                    quarantined.as_ref(),
+                    &metrics,
+                    &mut state,
+                    &remote_prefix_drop_counts_tx,
+                ).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                    },
+                }
+            }
+            () = &mut event_debounce, if route_event_dirty => {
+                route_event_dirty = false;
                 let instances = instances_rx.borrow().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
@@ -939,7 +1003,73 @@ async fn supervisor_loop(
                     },
                 }
             }
+            maybe_event = recv_evpn_route_event(&mut evpn_events) => {
+                if maybe_event.is_none() {
+                    // Broadcast closed (RIB manager restarted its
+                    // sender or is going away). Resubscribe; if that
+                    // fails the receiver parks forever and the poll
+                    // backstop takes over.
+                    evpn_events = subscribe_evpn_route_events(&rib_tx).await;
+                }
+                // Either way the RIB changed (or events may have been
+                // lost across a resubscribe gap): mark dirty and
+                // re-project after the debounce window.
+                route_event_dirty = true;
+                event_debounce
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + EVPN_ROUTE_EVENT_DEBOUNCE);
+            }
         }
+    }
+}
+
+/// Subscribe to the RIB's EVPN route-event broadcast — the same Gate
+/// 7c `EvpnRouteEvent` stream the local-MAC originator and the
+/// segment orchestrator consume; it fires on every EVPN best-path
+/// change (any route type, add / withdraw / best-change), so it is
+/// already family-filtered for this supervisor. Returns `None` if
+/// the RIB channel is closed or the reply was dropped — the
+/// supervisor then runs poll-only and the periodic tick covers
+/// convergence at the old cadence.
+async fn subscribe_evpn_route_events(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+) -> Option<broadcast::Receiver<rustbgpd_rib::EvpnRouteEvent>> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if rib_tx
+        .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
+        .await
+        .is_err()
+    {
+        warn!("EVPN dataplane supervisor could not subscribe to RIB EVPN route events");
+        return None;
+    }
+    reply_rx.await.ok()
+}
+
+/// Receive the next EVPN route event. The payload is discarded — the
+/// recompute is a full re-projection, so any event is just a dirty
+/// mark. `Lagged` also returns `Some(())`: missed events only mean
+/// more changes for the same pass to pick up. `Closed` returns `None`
+/// so the caller can resubscribe. A `None` receiver parks forever
+/// (poll-only mode), letting the surrounding `select!` service the
+/// other arms.
+async fn recv_evpn_route_event(
+    rx: &mut Option<broadcast::Receiver<rustbgpd_rib::EvpnRouteEvent>>,
+) -> Option<()> {
+    let Some(rx) = rx.as_mut() else {
+        std::future::pending::<()>().await;
+        return None;
+    };
+    match rx.recv().await {
+        Ok(_event) => Some(()),
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            debug!(
+                lagged = n,
+                "EVPN dataplane supervisor lagged the RIB event stream; full re-projection follows"
+            );
+            Some(())
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
     }
 }
 
@@ -1411,6 +1541,7 @@ mod tests {
     };
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
@@ -2482,19 +2613,16 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
         let shutdown = CancellationToken::new();
 
-        // Stub RIB responder: answer one QueryEvpnRoutes with a fake
-        // MacIp route, then close. The supervisor will keep polling
-        // but get no further data.
+        // Stub RIB responder: answer the first QueryEvpnRoutes with a
+        // fake MacIp route, the rest with nothing. The supervisor's
+        // event subscription is ignored (reply dropped → poll-only).
         let _rib_responder = tokio::spawn({
             let route = evpn_macip_route(100, 1, "10.0.0.2", Some(3));
             async move {
-                if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
-                    let _ = reply.send(vec![route]);
-                }
-                // Drain subsequent queries.
+                let mut first = Some(route);
                 while let Some(msg) = rib_rx.recv().await {
                     if let RibUpdate::QueryEvpnRoutes { reply } = msg {
-                        let _ = reply.send(vec![]);
+                        let _ = reply.send(first.take().into_iter().collect());
                     }
                 }
             }
@@ -2827,12 +2955,16 @@ mod tests {
         let shutdown = CancellationToken::new();
 
         let _rib_responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
-                let _ = reply.send(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
-            }
-            // Drop the receiver after the initial projection. A BUM
+            // Skip the event subscription (reply dropped → poll-only),
+            // answer exactly one query, then drop the receiver. A BUM
             // update must republish cached route projection instead
             // of depending on another RIB query.
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let _ = reply.send(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
+                    break;
+                }
+            }
         });
 
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
@@ -2981,6 +3113,202 @@ mod tests {
         assert!(
             updated.remote_macs.get(vni(100), mac(1)).is_none(),
             "quarantine update should re-project before the next long poll interval"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    // ─── Event-driven recompute (debounced RIB EVPN route events) ───
+
+    /// Stub RIB endpoint for the event-trigger tests: answers
+    /// `SubscribeEvpnRouteEvents` with a broadcast receiver, answers
+    /// every `QueryEvpnRoutes` with `routes`, and counts the queries.
+    fn rib_with_evpn_events(
+        routes: Vec<EvpnRibRoute>,
+    ) -> (
+        mpsc::Sender<RibUpdate>,
+        Arc<AtomicUsize>,
+        broadcast::Sender<rustbgpd_rib::EvpnRouteEvent>,
+    ) {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let (events_tx, _) = broadcast::channel(64);
+        let task_count = query_count.clone();
+        let task_events = events_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        task_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(routes.clone());
+                    }
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(task_events.subscribe());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (rib_tx, query_count, events_tx)
+    }
+
+    /// Minimal `Added` event for VNI 100 / `mac(m)`. The supervisor
+    /// discards the payload (full re-projection), so only the shape
+    /// matters.
+    fn evpn_route_event(m: u8) -> rustbgpd_rib::EvpnRouteEvent {
+        let route = evpn_macip_route(100, m, "10.0.0.2", None);
+        rustbgpd_rib::EvpnRouteEvent {
+            event_type: rustbgpd_rib::RouteEventType::Added,
+            key: route.key(),
+            peer: Some(route.peer),
+            previous_peer: None,
+            best: Some(route),
+            previous_best: None,
+            timestamp: "0".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_reprojects_on_evpn_route_event_without_poll_tick() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+        let (events_tx, _keepalive_rx) = broadcast::channel(16);
+
+        // First query: only mac(1). Later queries: mac(1) + mac(2) —
+        // the post-change RIB snapshot the event announces.
+        let responder_events = events_tx.clone();
+        let _rib_responder = tokio::spawn(async move {
+            let mut queries = 0u32;
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(responder_events.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        queries += 1;
+                        let mut routes = vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))];
+                        if queries > 1 {
+                            routes.push(evpn_macip_route(100, 2, "10.0.0.3", Some(1)));
+                        }
+                        let _ = reply.send(routes);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        // One-minute poll: only the event path can produce the second
+        // projection inside this test's budget.
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            drop_counts_tx,
+            BgpMetrics::new(),
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(initial.remote_macs.get(vni(100), mac(1)).is_some());
+        assert!(initial.remote_macs.get(vni(100), mac(2)).is_none());
+
+        events_tx.send(evpn_route_event(2)).unwrap();
+
+        // Debounce is 200 ms; 2 s of headroom is generous and still
+        // far below the 60 s poll, so a pass proves the event path
+        // drove the recompute.
+        tokio::time::timeout(Duration::from_secs(2), intent_rx.changed())
+            .await
+            .expect("EVPN route event must trigger a re-projection before the poll tick")
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(
+            updated.remote_macs.get(vni(100), mac(2)).is_some(),
+            "the event-triggered re-projection must reflect the new RIB snapshot"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_coalesces_evpn_event_storm_into_one_recompute() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, query_count, events_tx) =
+            rib_with_evpn_events(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
+        let shutdown = CancellationToken::new();
+
+        let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            drop_counts_tx,
+            BgpMetrics::new(),
+            supervisor_shutdown,
+        ));
+
+        // Startup: subscription established, exactly one initial query.
+        for _ in 0..50 {
+            if query_count.load(Ordering::SeqCst) == 1 && events_tx.receiver_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "startup performs exactly one initial RIB query"
+        );
+
+        // A churn burst: many events in quick succession only mark
+        // the supervisor dirty (re-arm semantics — no query per event,
+        // nothing queued)…
+        for _ in 0..25 {
+            events_tx.send(evpn_route_event(2)).unwrap();
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "events mark the supervisor dirty without an immediate RIB query"
+        );
+
+        // …and coalesce into exactly one debounced re-projection.
+        tokio::time::sleep(EVPN_ROUTE_EVENT_DEBOUNCE + Duration::from_millis(150)).await;
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            2,
+            "a storm of EVPN route events coalesces into one re-projection"
         );
 
         shutdown.cancel();
