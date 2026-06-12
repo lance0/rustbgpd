@@ -182,6 +182,7 @@ async fn observe_test(
         metrics,
         counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 }
@@ -282,6 +283,7 @@ async fn local_learn_with_remote_contender_records_duplicate_mac_counter() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -316,6 +318,7 @@ async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -340,6 +343,7 @@ async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -402,6 +406,7 @@ async fn duplicate_mac_suppress_local_first_learn_does_not_withdraw_unadvertised
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -436,6 +441,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     state.remote_mac_view.insert(
@@ -459,6 +465,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -470,6 +477,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -542,6 +550,7 @@ async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -581,6 +590,7 @@ async fn duplicate_mac_manual_clear_inactive_returns_not_active_and_clears_windo
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -603,6 +613,7 @@ async fn duplicate_mac_manual_clear_unknown_vni_returns_unknown_vni() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -697,6 +708,7 @@ async fn duplicate_mac_mac_ip_quarantine_replays_multiple_live_ips_after_recover
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -1205,6 +1217,7 @@ fn originator_runtime_for_test(
     let (_, model_rx) = watch::channel(Arc::new(OriginatorRuntimeModel {
         instances: instances.clone(),
         vni_to_esi: vni_to_esi.clone(),
+        drained_esis: Arc::new(BTreeSet::new()),
     }));
     OriginatorRuntime {
         instances,
@@ -1214,6 +1227,7 @@ fn originator_runtime_for_test(
         originated_local_mac_counts,
         shutdown: CancellationToken::new(),
         vni_to_esi,
+        drained_esis: Arc::new(BTreeSet::new()),
     }
 }
 
@@ -1263,7 +1277,11 @@ async fn runtime_model_esi_change_restamps_local_mac_with_segment_esi() {
     ]);
     let mut vni_to_esi = std::collections::BTreeMap::new();
     vni_to_esi.insert(vni(100), segment_esi);
-    assert!(h.replace_runtime_model(instances, Arc::new(vni_to_esi)));
+    assert!(h.replace_runtime_model(
+        instances,
+        Arc::new(vni_to_esi),
+        Arc::new(std::collections::BTreeSet::new())
+    ));
 
     wait_for_macip_with_esi(
         &injected,
@@ -1336,6 +1354,7 @@ async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
         Arc::new(OriginatorRuntimeModel {
             instances,
             vni_to_esi: Arc::new(next_vni_to_esi),
+            drained_esis: Arc::new(BTreeSet::new()),
         }),
         &mut state,
         &mut runtime,
@@ -1421,6 +1440,7 @@ async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
         Arc::new(OriginatorRuntimeModel {
             instances: redefined_instances,
             vni_to_esi: Arc::new(BTreeMap::new()),
+            drained_esis: Arc::new(BTreeSet::new()),
         }),
         &mut state,
         &mut runtime,
@@ -1493,6 +1513,7 @@ async fn runtime_model_esi_change_preserves_pending_ip_bindings() {
         Arc::new(OriginatorRuntimeModel {
             instances: instances.clone(),
             vni_to_esi: Arc::new(next_vni_to_esi),
+            drained_esis: Arc::new(BTreeSet::new()),
         }),
         &mut state,
         &mut runtime,
@@ -1518,6 +1539,7 @@ async fn runtime_model_esi_change_preserves_pending_ip_bindings() {
         &metrics,
         &counts,
         runtime.vni_to_esi.as_ref(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -1558,6 +1580,7 @@ async fn runtime_model_add_allows_future_local_mac_learns() {
     assert!(h.replace_runtime_model(
         instance_table_many(&[100, 200]),
         Arc::new(std::collections::BTreeMap::new()),
+        Arc::new(std::collections::BTreeSet::new()),
     ));
     local_tx
         .send(LocalMacObservation::Learned {
@@ -1625,6 +1648,7 @@ async fn runtime_model_remove_drains_originated_local_mac_routes() {
     assert!(h.replace_runtime_model(
         Arc::new(EvpnInstanceTable::new()),
         Arc::new(std::collections::BTreeMap::new()),
+        Arc::new(std::collections::BTreeSet::new()),
     ));
     wait_for_key(
         &withdraws,
@@ -1681,7 +1705,11 @@ async fn runtime_model_esi_change_drains_originated_local_mac_routes() {
             0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
         ]),
     );
-    assert!(h.replace_runtime_model(instances, Arc::new(vni_to_esi)));
+    assert!(h.replace_runtime_model(
+        instances,
+        Arc::new(vni_to_esi),
+        Arc::new(std::collections::BTreeSet::new())
+    ));
     wait_for_key(
         &withdraws,
         key,
@@ -1759,7 +1787,11 @@ async fn runtime_model_redefine_reoriginates_local_mac_under_new_rd() {
         ip: None,
     };
 
-    assert!(h.replace_runtime_model(new_instances, Arc::new(std::collections::BTreeMap::new())));
+    assert!(h.replace_runtime_model(
+        new_instances,
+        Arc::new(std::collections::BTreeMap::new()),
+        Arc::new(std::collections::BTreeSet::new()),
+    ));
     wait_for_key(
         &withdraws,
         old_key,
@@ -2557,6 +2589,7 @@ async fn learned_then_ip_added_replaces_mac_only_with_mac_ip() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2572,6 +2605,7 @@ async fn learned_then_ip_added_replaces_mac_only_with_mac_ip() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2610,6 +2644,7 @@ async fn ip_added_before_learned_parks_pending_no_rib_action() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2648,6 +2683,7 @@ async fn learned_after_pending_ip_skips_mac_only_inject() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2664,6 +2700,7 @@ async fn learned_after_pending_ip_skips_mac_only_inject() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2711,6 +2748,7 @@ async fn last_ip_removed_downgrades_to_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     handle_observation(
@@ -2725,6 +2763,7 @@ async fn last_ip_removed_downgrades_to_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     // Clear the log to focus on the IpRemoved phase.
@@ -2742,6 +2781,7 @@ async fn last_ip_removed_downgrades_to_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2780,6 +2820,7 @@ async fn non_last_ip_removed_keeps_mac_in_mac_ip_regime() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     for ip in ["192.0.2.10", "192.0.2.11"] {
@@ -2795,6 +2836,7 @@ async fn non_last_ip_removed_keeps_mac_in_mac_ip_regime() {
             &metrics,
             &counts,
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
         )
         .await;
     }
@@ -2812,6 +2854,7 @@ async fn non_last_ip_removed_keeps_mac_in_mac_ip_regime() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2851,6 +2894,7 @@ async fn aged_with_live_ips_cascades_mac_ip_withdraws() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     for ip in ["192.0.2.10", "2001:db8::1"] {
@@ -2866,6 +2910,7 @@ async fn aged_with_live_ips_cascades_mac_ip_withdraws() {
             &metrics,
             &counts,
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
         )
         .await;
     }
@@ -2882,6 +2927,7 @@ async fn aged_with_live_ips_cascades_mac_ip_withdraws() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -2946,6 +2992,7 @@ async fn non_last_ip_removed_keeps_originated_count_stable() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     for ip in ["192.0.2.10", "2001:db8::1"] {
@@ -2961,6 +3008,7 @@ async fn non_last_ip_removed_keeps_originated_count_stable() {
             &metrics,
             &counts,
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
         )
         .await;
     }
@@ -2981,6 +3029,7 @@ async fn non_last_ip_removed_keeps_originated_count_stable() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     assert_eq!(
@@ -3003,6 +3052,7 @@ async fn non_last_ip_removed_keeps_originated_count_stable() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     assert_eq!(
@@ -3023,6 +3073,7 @@ async fn non_last_ip_removed_keeps_originated_count_stable() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     assert_eq!(counts.count(vni(100)), 0, "Aged clears the count");
@@ -3056,6 +3107,7 @@ async fn relearn_while_mac_ip_live_does_not_re_emit_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     handle_observation(
@@ -3070,6 +3122,7 @@ async fn relearn_while_mac_ip_live_does_not_re_emit_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     // Snapshot the action log: should be exactly the upgrade
@@ -3090,6 +3143,7 @@ async fn relearn_while_mac_ip_live_does_not_re_emit_mac_only() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -3156,6 +3210,7 @@ async fn sticky_macs_propagates_to_mac_ip_route() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
     handle_observation(
@@ -3170,6 +3225,7 @@ async fn sticky_macs_propagates_to_mac_ip_route() {
         &metrics,
         &counts,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
     )
     .await;
 
@@ -3193,5 +3249,354 @@ async fn sticky_macs_propagates_to_mac_ip_route() {
     assert!(
         mobility.0,
         "sticky bit must propagate from sticky_macs to MAC+IP route"
+    );
+}
+
+// -----------------------------------------------------------------
+// ADR-0084 — Ethernet Segment drain (originator side)
+// -----------------------------------------------------------------
+
+fn drain_test_esi() -> EthernetSegmentIdentifier {
+    EthernetSegmentIdentifier::new([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01])
+}
+
+fn drain_test_vni_to_esi() -> Arc<BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>> {
+    let mut map = BTreeMap::new();
+    map.insert(vni(100), drain_test_esi());
+    Arc::new(map)
+}
+
+fn drained_set_with(esi: EthernetSegmentIdentifier) -> Arc<BTreeSet<EthernetSegmentIdentifier>> {
+    Arc::new(BTreeSet::from([esi]))
+}
+
+#[tokio::test]
+async fn runtime_model_drain_withdraws_local_macs_without_clearing_caches() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &std::collections::BTreeSet::new(),
+    )
+    .await;
+    assert_eq!(
+        log.lock().await.clone(),
+        vec![RibAction::Inject(macip_key_with(100, 0xAA, None))],
+        "undrained local learn must originate"
+    );
+
+    let mut runtime = originator_runtime_for_test(
+        instances.clone(),
+        rib_tx,
+        metrics,
+        counts,
+        vni_to_esi.clone(),
+    );
+    apply_runtime_model(
+        Arc::new(OriginatorRuntimeModel {
+            instances,
+            vni_to_esi,
+            drained_esis: drained_set_with(drain_test_esi()),
+        }),
+        &mut state,
+        &mut runtime,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+        ],
+        "drain must withdraw the advertised local MAC route and emit no replay"
+    );
+    assert!(
+        state
+            .local_macs
+            .get(&vni(100))
+            .is_some_and(|m| m.contains_key(&mac(0xAA))),
+        "drain must preserve the local observation cache"
+    );
+}
+
+#[tokio::test]
+async fn kernel_events_while_drained_update_caches_without_originating() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    // Fresh kernel learn + IP bind while drained: no origination, but
+    // both caches must track the events for the undrain replay.
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xBB),
+            ifindex: 20,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    handle_observation(
+        &LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xBB),
+            ip: ipa("192.0.2.20"),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+
+    assert!(
+        log.lock().await.is_empty(),
+        "kernel events on a drained VNI must not originate"
+    );
+    assert!(
+        state
+            .local_macs
+            .get(&vni(100))
+            .is_some_and(|m| m.get(&mac(0xBB)) == Some(&20)),
+        "drained learn must still update local_macs"
+    );
+    assert!(
+        state
+            .live_mac_ip
+            .get(&vni(100))
+            .and_then(|m| m.get(&mac(0xBB)))
+            .is_some_and(|ips| ips.contains(&ipa("192.0.2.20"))),
+        "drained IpAdded must still update live_mac_ip"
+    );
+}
+
+#[tokio::test]
+async fn runtime_model_undrain_replays_cached_local_macs() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    // MAC + IP learned entirely while drained (kernel kept feeding us
+    // during the maintenance window).
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    handle_observation(
+        &LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa("192.0.2.10"),
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    assert!(log.lock().await.is_empty());
+
+    // Undrain: runtime starts in the drained state; the new model
+    // lifts it.
+    let mut runtime = originator_runtime_for_test(
+        instances.clone(),
+        rib_tx,
+        metrics,
+        counts,
+        vni_to_esi.clone(),
+    );
+    runtime.drained_esis = drained_set_with(drain_test_esi());
+    apply_runtime_model(
+        Arc::new(OriginatorRuntimeModel {
+            instances,
+            vni_to_esi,
+            drained_esis: Arc::new(BTreeSet::new()),
+        }),
+        &mut state,
+        &mut runtime,
+    )
+    .await;
+
+    assert_eq!(
+        log.lock().await.clone(),
+        vec![RibAction::Inject(macip_key_with(
+            100,
+            0xAA,
+            Some("192.0.2.10")
+        ))],
+        "undrain must replay the latest cached local state (MAC+IP, not the stale MAC-only)"
+    );
+}
+
+#[tokio::test]
+async fn runtime_model_undrain_respects_duplicate_mac_quarantine() {
+    let inst = suppress_local_instance(100);
+    let instances = instance_table_with(inst.clone());
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    // Learn while drained, then activate a quarantine for the key.
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    assert!(record_duplicate_mac_move(
+        &metrics,
+        &mut state,
+        &inst,
+        vni(100),
+        mac(0xAA)
+    ));
+
+    let mut runtime = originator_runtime_for_test(
+        instances.clone(),
+        rib_tx,
+        metrics,
+        counts,
+        vni_to_esi.clone(),
+    );
+    runtime.drained_esis = drained_set_with(drain_test_esi());
+    apply_runtime_model(
+        Arc::new(OriginatorRuntimeModel {
+            instances,
+            vni_to_esi,
+            drained_esis: Arc::new(BTreeSet::new()),
+        }),
+        &mut state,
+        &mut runtime,
+    )
+    .await;
+
+    assert!(
+        log.lock().await.is_empty(),
+        "undrain replay must skip quarantined MACs"
+    );
+    assert!(
+        state
+            .duplicate_mac_detector
+            .is_quarantined(DuplicateMacKey::new(vni(100), mac(0xAA)), Instant::now()),
+        "quarantine must survive the undrain"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
+    // The timed quarantine recovery path goes through the same replay
+    // primitive; while the VNI is drained it must not re-originate.
+    let inst = suppress_local_instance_with(100, 1, Duration::from_millis(1));
+    let instances = instance_table_with(inst.clone());
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let vni_to_esi = drain_test_vni_to_esi();
+    let drained = BTreeSet::from([drain_test_esi()]);
+
+    handle_observation(
+        &LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+    assert!(record_duplicate_mac_move(
+        &metrics,
+        &mut state,
+        &inst,
+        vni(100),
+        mac(0xAA)
+    ));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    recover_duplicate_macs(
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        vni_to_esi.as_ref(),
+        &drained,
+    )
+    .await;
+
+    assert!(
+        log.lock().await.is_empty(),
+        "quarantine recovery on a drained VNI must not replay the MAC"
     );
 }

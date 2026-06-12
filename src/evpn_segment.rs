@@ -41,7 +41,7 @@
 //! mass-withdraw on `AS_PATH` change, DF-role-aware MAC origination)
 //! remains Gate 8b — see ADR-0057.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,9 +70,11 @@ use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 /// commits publish complete ES snapshots through this control; the
 /// segment actor remains the only Type 1/4 originator.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_field_names)] // the `_tx` postfix is load-bearing: each field is the sender half of an actor watch
 pub(crate) struct EvpnSegmentRuntimeControl {
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
+    drained_esis_tx: watch::Sender<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
 }
 
 impl EvpnSegmentRuntimeControl {
@@ -80,7 +82,9 @@ impl EvpnSegmentRuntimeControl {
     /// and ES snapshots.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.instances_tx.is_closed() && !self.segments_tx.is_closed()
+        !self.instances_tx.is_closed()
+            && !self.segments_tx.is_closed()
+            && !self.drained_esis_tx.is_closed()
     }
 
     /// Replace the EVPN instance snapshot the segment actor resolves
@@ -105,6 +109,20 @@ impl EvpnSegmentRuntimeControl {
         self.segments_tx.send_replace(segments);
         true
     }
+
+    /// Replace the operator-drained ESI set (ADR-0084). Newly-drained
+    /// ESIs withdraw their Type 4 + EAD-per-ES + EAD-per-EVI routes
+    /// without dropping their `SegmentState`; newly-undrained ESIs
+    /// re-originate and re-run DF election. Returns `false` if the
+    /// actor has already exited.
+    #[must_use]
+    pub fn replace_drained_esis(&self, drained: Arc<BTreeSet<EthernetSegmentIdentifier>>) -> bool {
+        if self.drained_esis_tx.is_closed() {
+            return false;
+        }
+        self.drained_esis_tx.send_replace(drained);
+        true
+    }
 }
 
 /// Handle returned to the daemon for shutdown coordination.
@@ -114,6 +132,7 @@ pub struct EvpnSegmentHandle {
     pub(crate) join: tokio::task::JoinHandle<()>,
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
+    drained_esis_tx: watch::Sender<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
 }
 
 impl EvpnSegmentHandle {
@@ -123,6 +142,7 @@ impl EvpnSegmentHandle {
         EvpnSegmentRuntimeControl {
             instances_tx: self.instances_tx.clone(),
             segments_tx: self.segments_tx.clone(),
+            drained_esis_tx: self.drained_esis_tx.clone(),
         }
     }
 
@@ -151,19 +171,30 @@ pub fn spawn(
     }
     let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
     let (instances_tx, instances_rx) = watch::channel(instances.clone());
+    // Drain state is runtime-only and in-memory (ADR-0084): the set
+    // always starts empty, so a daemon restart clears any drain and
+    // replays configured state.
+    let (drained_esis_tx, drained_esis_rx) = watch::channel(Arc::new(BTreeSet::new()));
     let runtime = SegmentRuntime {
         instances: instances.clone(),
         rib_tx,
         bum_enforcement_tx,
         metrics,
         shutdown: daemon_shutdown.clone(),
+        drained_esis: Arc::new(BTreeSet::new()),
     };
-    let join = tokio::spawn(segment_loop(runtime, instances_rx, segments_rx));
+    let join = tokio::spawn(segment_loop(
+        runtime,
+        instances_rx,
+        segments_rx,
+        drained_esis_rx,
+    ));
     Some(EvpnSegmentHandle {
         shutdown: daemon_shutdown,
         join,
         instances_tx,
         segments_tx,
+        drained_esis_tx,
     })
 }
 
@@ -173,6 +204,11 @@ struct SegmentRuntime {
     bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
+    /// ADR-0084 operator-drained ESIs. While an ESI is in this set the
+    /// actor keeps its `SegmentState` but originates nothing for it —
+    /// startup, election, and snapshot reapplication all skip it, so a
+    /// SIGHUP/runtime snapshot republish cannot resurrect the routes.
+    drained_esis: Arc<BTreeSet<EthernetSegmentIdentifier>>,
 }
 
 /// Per-ESI runtime state.
@@ -203,6 +239,7 @@ async fn segment_loop(
     mut runtime: SegmentRuntime,
     mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
     mut segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
+    mut drained_esis_rx: watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
 ) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
     // One allocator per spawn so two operators on different daemons
@@ -291,6 +328,20 @@ async fn segment_loop(
                     }
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
+                    drain(&runtime, &mut by_esi).await;
+                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    return;
+                }
+            },
+            changed = drained_esis_rx.changed() => {
+                if let Ok(()) = changed {
+                    let drained = drained_esis_rx.borrow_and_update().clone();
+                    apply_drained_esi_snapshot(&mut runtime, &mut by_esi, drained).await;
+                } else {
+                    // The drained-set sender lives on the same handle as the
+                    // instance/segment senders, so a closed watch here means
+                    // daemon teardown — same exit path as the other watches.
+                    debug!("EVPN segment: runtime drained-ESI watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
                     publish_empty_bum_enforcement_snapshot(&runtime);
                     return;
@@ -495,18 +546,31 @@ async fn initial_startup(
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
 ) {
     for state in by_esi.values_mut() {
-        // Type 4 ES first so peers see us as a candidate before any
-        // EAD routes show up.
-        let actions = state.es_origin.on_startup();
-        apply(runtime, state, actions).await;
-
-        let actions = state.ead_per_es.on_startup();
-        apply(runtime, state, actions).await;
-
-        // Initial election with self as sole candidate. Local PE is
-        // DF for all member VNIs.
-        run_election_for(runtime, state).await;
+        // ADR-0084: an operator-drained ESI stays withdrawn across
+        // instance/segment snapshot reapplication — a SIGHUP while
+        // drained must not resurrect the routes.
+        if runtime.drained_esis.contains(&state.config.esi) {
+            continue;
+        }
+        startup_segment_state(runtime, state).await;
     }
+}
+
+/// Originate one ES's Type 4 + EAD-per-ES and run its DF election.
+/// Shared by startup and by an ADR-0084 undrain, which mirrors what
+/// segment-set application does for a new ES.
+async fn startup_segment_state(runtime: &SegmentRuntime, state: &mut SegmentState) {
+    // Type 4 ES first so peers see us as a candidate before any
+    // EAD routes show up.
+    let actions = state.es_origin.on_startup();
+    apply(runtime, state, actions).await;
+
+    let actions = state.ead_per_es.on_startup();
+    apply(runtime, state, actions).await;
+
+    // Initial election with self as sole candidate. Local PE is
+    // DF for all member VNIs.
+    run_election_for(runtime, state).await;
 }
 
 async fn drain(
@@ -514,12 +578,65 @@ async fn drain(
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
 ) {
     for state in by_esi.values_mut() {
-        let actions = state.ead_per_evi.drain_to_withdraws();
-        apply(runtime, state, actions).await;
-        let actions = state.ead_per_es.on_shutdown();
-        apply(runtime, state, actions).await;
-        let actions = state.es_origin.on_shutdown();
-        apply(runtime, state, actions).await;
+        drain_segment_state(runtime, state).await;
+    }
+}
+
+/// Withdraw one ES's three route classes (EAD-per-EVI, EAD-per-ES,
+/// Type 4 — most-specific NLRI shape down, the shutdown convention)
+/// without dropping its `SegmentState`. Clears the per-VNI role
+/// tracking so a later re-origination re-runs election from a clean
+/// slate (the EAD-per-EVI re-emit rides the role-transition diff) and
+/// the BUM enforcement table stops carrying rows for the ES.
+async fn drain_segment_state(runtime: &SegmentRuntime, state: &mut SegmentState) {
+    let actions = state.ead_per_evi.drain_to_withdraws();
+    apply(runtime, state, actions).await;
+    let actions = state.ead_per_es.on_shutdown();
+    apply(runtime, state, actions).await;
+    let actions = state.es_origin.on_shutdown();
+    apply(runtime, state, actions).await;
+
+    let esi_str = format_esi(state.config.esi);
+    for (vni, _) in std::mem::take(&mut state.last_roles) {
+        runtime
+            .metrics
+            .set_evpn_df_role(esi_str.as_str(), vni.as_u32(), false);
+    }
+}
+
+/// Apply an ADR-0084 drained-ESI snapshot: withdraw routes for
+/// newly-drained ESIs, re-originate + re-elect newly-undrained ones,
+/// and republish the BUM enforcement snapshot when anything moved.
+/// ESIs not in the current segment config are ignored — the
+/// coordinator GCs their drain entries on segment-set replace.
+async fn apply_drained_esi_snapshot(
+    runtime: &mut SegmentRuntime,
+    by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    drained: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+) {
+    let prior = std::mem::replace(&mut runtime.drained_esis, drained.clone());
+    if *prior == *drained {
+        return;
+    }
+    let mut changed = false;
+    for esi in drained.iter().filter(|esi| !prior.contains(*esi)) {
+        let Some(state) = by_esi.get_mut(esi) else {
+            continue;
+        };
+        info!(esi = %format_esi(*esi), "EVPN segment: draining Ethernet Segment (operator)");
+        drain_segment_state(runtime, state).await;
+        changed = true;
+    }
+    for esi in prior.iter().filter(|esi| !drained.contains(*esi)) {
+        let Some(state) = by_esi.get_mut(esi) else {
+            continue;
+        };
+        info!(esi = %format_esi(*esi), "EVPN segment: undraining Ethernet Segment (operator)");
+        startup_segment_state(runtime, state).await;
+        changed = true;
+    }
+    if changed {
+        publish_bum_enforcement_snapshot(runtime, by_esi);
     }
 }
 
@@ -593,6 +710,13 @@ async fn run_election_with_candidates(
     state: &mut SegmentState,
     candidates: Vec<DfCandidate>,
 ) {
+    // ADR-0084: a drained ES has withdrawn its Type 4 and exited DF
+    // election; role transitions must not re-emit EAD-per-EVI routes
+    // for it (sweeps and remote Type 4 events keep firing while
+    // drained).
+    if runtime.drained_esis.contains(&state.config.esi) {
+        return;
+    }
     let new_roles = match state.election.run(&candidates, state.config.originator_ip) {
         Ok(r) => r,
         Err(e) => {
@@ -2167,6 +2291,7 @@ mod tests {
             bum_enforcement_tx: None,
             metrics: BgpMetrics::new(),
             shutdown: CancellationToken::new(),
+            drained_esis: Arc::new(BTreeSet::new()),
         };
         let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
         let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
@@ -2232,5 +2357,220 @@ mod tests {
         let table =
             build_bum_enforcement_table_from_roles(&instances, [(esi(7), vni(100), DfRole::NonDf)]);
         assert!(table.is_empty());
+    }
+
+    // -- ADR-0084 Ethernet Segment drain/undrain ---------------------
+
+    fn drained_set(esis: &[EthernetSegmentIdentifier]) -> Arc<BTreeSet<EthernetSegmentIdentifier>> {
+        Arc::new(esis.iter().copied().collect())
+    }
+
+    fn esi_of_key(key: &EvpnRouteKey) -> Option<EthernetSegmentIdentifier> {
+        match key {
+            EvpnRouteKey::Es { esi, .. }
+            | EvpnRouteKey::EadPerEs { esi, .. }
+            | EvpnRouteKey::EadPerEvi { esi, .. } => Some(*esi),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_withdraws_exactly_target_esi_route_classes() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        t.insert(instance(200)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x31), &[100]), segment(esi(0x32), &[200])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 6, "initial ES injections").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[esi(0x31)])));
+        let drained_keys = wait_for_keys(&withdraws, 3, "drain withdraws").await;
+        assert_eq!(
+            drained_keys.len(),
+            3,
+            "drain must withdraw exactly the three route classes; got {drained_keys:?}"
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .all(|key| esi_of_key(key) == Some(esi(0x31))),
+            "drain must only withdraw the target ESI's routes; got {drained_keys:?}"
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. }))
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. }))
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. }))
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn undrain_reoriginates_all_route_classes() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x33), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[esi(0x33)])));
+        let _ = wait_for_keys(&withdraws, 3, "drain withdraws").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[])));
+        let injected = wait_for_keys(&injects, 6, "undrain re-originations").await;
+        let reoriginated = &injected[3..];
+        assert!(
+            reoriginated
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. })),
+            "undrain must re-originate the Type 4 ES route; got {reoriginated:?}"
+        );
+        assert!(
+            reoriginated
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. })),
+            "undrain must re-originate the EAD-per-ES route; got {reoriginated:?}"
+        );
+        assert!(
+            reoriginated
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. })),
+            "undrain must re-originate the EAD-per-EVI route; got {reoriginated:?}"
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn segment_snapshot_reapply_while_drained_does_not_resurrect_routes() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        t.insert(instance(200)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x34), &[100]), segment(esi(0x35), &[200])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 6, "initial ES injections").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[esi(0x34)])));
+        let _ = wait_for_keys(&withdraws, 3, "drain withdraws").await;
+        let injected_before_reapply = injects.lock().await.len();
+
+        // Republish a changed segment snapshot (the drained ES kept,
+        // the other ES redefined) — the SIGHUP/runtime-apply shape.
+        // The full drain + rebuild + startup pass must skip the
+        // drained ESI.
+        let mut redefined = segment(esi(0x35), &[200]);
+        redefined.df_preference = 100;
+        assert!(control.replace_segments(Arc::new(vec![segment(esi(0x34), &[100]), redefined])));
+
+        let injected = wait_for_keys(
+            &injects,
+            injected_before_reapply + 3,
+            "snapshot-reapply re-originations",
+        )
+        .await;
+        assert!(
+            injected[injected_before_reapply..]
+                .iter()
+                .all(|key| esi_of_key(key) != Some(esi(0x34))),
+            "snapshot reapply while drained must not resurrect the drained ESI's routes; got {injected:?}"
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drained_esi_removed_from_config_drops_cleanly() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x36), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        assert!(control.replace_drained_esis(drained_set(&[esi(0x36)])));
+        let _ = wait_for_keys(&withdraws, 3, "drain withdraws").await;
+
+        // Remove the drained ES from config entirely; the actor must
+        // drop its state without re-emitting anything (routes are
+        // already withdrawn) and stay healthy.
+        assert!(control.replace_segments(Arc::new(Vec::new())));
+        // The coordinator GCs the drain entry on segment-set replace;
+        // mirror that here and confirm the empty set is a no-op (no
+        // resurrected routes for an ESI with no state).
+        assert!(control.replace_drained_esis(drained_set(&[])));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            injects.lock().await.len(),
+            3,
+            "no route may re-originate after the drained ES was removed from config"
+        );
+
+        handle.shutdown().await;
+        assert!(!control.is_open());
     }
 }

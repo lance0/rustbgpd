@@ -931,6 +931,11 @@ enum EvpnAction {
         #[arg(long)]
         mac: String,
     },
+    /// Ethernet Segment runtime controls (ADR-0084 drain/undrain).
+    Es {
+        #[command(subcommand)]
+        action: EsAction,
+    },
     /// Show the committed ADR-0063 EVPN runtime generation.
     Runtime,
     /// List local EVPN instances configured on this VTEP. Empty when
@@ -948,6 +953,26 @@ enum EvpnAction {
     },
     /// Summarize EVPN VTEP alpha state and key metrics.
     Diagnose,
+}
+
+#[derive(Subcommand)]
+enum EsAction {
+    /// Drain an Ethernet Segment before access-circuit maintenance:
+    /// withdraw its Type 4 + EAD routes (exiting DF election) and the
+    /// member VNIs' local Type 2 routes, and suppress new local-MAC
+    /// origination. In-memory only — a daemon restart clears the drain.
+    Drain {
+        /// ESI as 10 colon-separated hex octets,
+        /// e.g. "00:11:22:33:44:55:66:77:88:99".
+        esi: String,
+    },
+    /// Undrain an Ethernet Segment: re-originate its Type 4 + EAD
+    /// routes, re-run DF election, and replay cached local MAC state.
+    Undrain {
+        /// ESI as 10 colon-separated hex octets,
+        /// e.g. "00:11:22:33:44:55:66:77:88:99".
+        esi: String,
+    },
 }
 
 fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
@@ -1663,6 +1688,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             Some(EvpnAction::ClearDuplicateMac { vni, mac }) => {
                 commands::evpn::clear_duplicate_mac(connection, vni, mac, json).await
             }
+            Some(EvpnAction::Es { action }) => match action {
+                EsAction::Drain { esi } => {
+                    commands::evpn::set_es_drain(connection, esi, true, json).await
+                }
+                EsAction::Undrain { esi } => {
+                    commands::evpn::set_es_drain(connection, esi, false, json).await
+                }
+            },
             Some(EvpnAction::Runtime) => commands::evpn::runtime(connection, json).await,
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
             Some(EvpnAction::Nexthops) => commands::evpn::list_nexthops(connection, json).await,
@@ -2418,6 +2451,48 @@ mod tests {
         } else {
             panic!("expected Evpn ClearDuplicateMac command");
         }
+    }
+
+    #[test]
+    fn test_parse_evpn_es_drain_and_undrain() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "es",
+            "drain",
+            "00:11:22:33:44:55:66:77:88:99",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action:
+                Some(EvpnAction::Es {
+                    action: EsAction::Drain { esi },
+                }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(esi, "00:11:22:33:44:55:66:77:88:99");
+        } else {
+            panic!("expected Evpn Es Drain command");
+        }
+
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "es",
+            "undrain",
+            "00:11:22:33:44:55:66:77:88:99",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: Some(EvpnAction::Es {
+                    action: EsAction::Undrain { .. }
+                }),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -739,6 +739,25 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         ))
     }
 
+    async fn set_ethernet_segment_drain(
+        &self,
+        request: Request<server_proto::SetEthernetSegmentDrainRequest>,
+    ) -> Result<Response<server_proto::SetEthernetSegmentDrainResponse>, Status> {
+        let req = request.into_inner();
+        Ok(Response::new(
+            server_proto::SetEthernetSegmentDrainResponse {
+                drained: req.drained,
+                changed: true,
+                member_vni_count: 1,
+                message: if req.drained {
+                    format!("Ethernet Segment {} drained", req.esi)
+                } else {
+                    format!("Ethernet Segment {} undrained", req.esi)
+                },
+            },
+        ))
+    }
+
     async fn apply_evpn_runtime(
         &self,
         _request: Request<server_proto::ApplyEvpnRuntimeRequest>,

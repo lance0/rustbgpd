@@ -23,6 +23,7 @@ mod config;
 mod config_persister;
 mod config_transaction_control;
 mod evpn_dataplane;
+mod evpn_es_drain;
 mod evpn_imet;
 mod evpn_l3_originator;
 mod evpn_originator;
@@ -1883,14 +1884,20 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .as_ref()
         .map(evpn_l3_originator::EvpnL3OriginatorHandle::runtime_control);
     let evpn_runtime_apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    // ADR-0084 runtime ES drain: shared in-memory drained-ESI set. The
+    // converger consults it on every originator-model publish and GCs it
+    // on segment-set replace; the gRPC SetEthernetSegmentDrain hook below
+    // mutates it under the same apply lock.
+    let evpn_es_drain_state = evpn_es_drain::EvpnEsDrainState::default();
     let evpn_runtime_converger = Arc::new(evpn_runtime_converger::EvpnRuntimeActorConverger::new(
         rib_tx.clone(),
         evpn_imet_controller.clone(),
         evpn_dataplane_runtime_control,
-        evpn_originator_runtime_control,
+        evpn_originator_runtime_control.clone(),
         evpn_svi_runtime_control,
         evpn_l3_originator_runtime_control,
-        evpn_segment_runtime_control,
+        evpn_segment_runtime_control.clone(),
+        evpn_es_drain_state.clone(),
     ));
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
@@ -2027,6 +2034,60 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             }) as rustbgpd_api::evpn_service::DuplicateMacClearFuture
         }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
     });
+    // ADR-0084 SetEthernetSegmentDrain hook. Only offered when the
+    // segment actor is running (no [[ethernet_segments]] → no actor →
+    // every ESI is NotFound anyway, so the hook stays absent and the
+    // RPC fails closed). The hook validates against the committed
+    // coordinator model and pushes the mutation to BOTH actors through
+    // the shared `apply_ethernet_segment_drain` primitive, serialized
+    // by the EVPN runtime apply lock.
+    let evpn_es_drain = evpn_segment_runtime_control.as_ref().map(|_| {
+        let apply_lock = evpn_runtime_apply_lock.clone();
+        let coordinator = evpn_runtime_coordinator.clone();
+        let drain_state = evpn_es_drain_state.clone();
+        let segment_control = evpn_segment_runtime_control.clone();
+        let originator_control = evpn_originator_runtime_control.clone();
+        Arc::new(
+            move |esi: rustbgpd_wire::EthernetSegmentIdentifier, drained: bool| {
+                let apply_lock = apply_lock.clone();
+                let coordinator = coordinator.clone();
+                let drain_state = drain_state.clone();
+                let segment_control = segment_control.clone();
+                let originator_control = originator_control.clone();
+                Box::pin(async move {
+                    match evpn_es_drain::apply_ethernet_segment_drain(
+                        esi,
+                        drained,
+                        &apply_lock,
+                        &coordinator,
+                        &drain_state,
+                        segment_control.as_ref(),
+                        originator_control.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            Ok(rustbgpd_api::evpn_service::EthernetSegmentDrainOutcome {
+                                drained: outcome.drained,
+                                changed: outcome.changed,
+                                member_vni_count: outcome.member_vni_count,
+                            })
+                        }
+                        Err(evpn_es_drain::EsDrainError::UnknownEsi(message)) => Err(
+                            rustbgpd_api::evpn_service::EthernetSegmentDrainError::NotFound(
+                                message,
+                            ),
+                        ),
+                        Err(evpn_es_drain::EsDrainError::Unavailable(message)) => Err(
+                            rustbgpd_api::evpn_service::EthernetSegmentDrainError::Unavailable(
+                                message,
+                            ),
+                        ),
+                    }
+                }) as rustbgpd_api::evpn_service::EthernetSegmentDrainFuture
+            },
+        ) as rustbgpd_api::evpn_service::EthernetSegmentDrainFn
+    });
     // Coordinator lock serializing persisted runtime config mutations with
     // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
     // catalog CRUD, and the SIGHUP reload path hold it across their
@@ -2114,6 +2175,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 as rustbgpd_api::evpn_service::EvpnRuntimeApplyFn)
         },
         evpn_duplicate_mac_clear,
+        evpn_es_drain,
         blackhole_discard_snapshot: {
             let rx = blackhole_status_rx.clone();
             Arc::new(move || {

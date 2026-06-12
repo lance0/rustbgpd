@@ -92,6 +92,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Proposed | 2026-06-10 |
 | [0082](0082-nda-protocol-ownership-stamp.md) | NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state | Accepted | 2026-06-10 |
 | [0083](0083-evpn-single-active-backup-path.md) | EVPN single-active backup-path pre-install | Accepted | 2026-06-11 |
+| [0084](0084-evpn-ethernet-segment-drain.md) | Runtime Ethernet Segment drain | Accepted | 2026-06-12 |
 
 ## Template
 
