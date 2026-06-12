@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Peer-group field edits now reach live dynamic sessions on the
+  config-transaction path (ADR-0086, closes the ADR-0081 decision-4
+  deferral).** A peer-group edit affecting a `[[dynamic_neighbors]]`
+  range (e.g. `hold_time`) previously classified as unsupported
+  "effective neighbor inheritance impact" and was rejected by
+  `ApplyConfigTransaction` / gNMI Set, while the live sessions kept
+  their old config until a natural reconnect. The session reshape
+  executor now commits it: static members are reconfigured in place
+  with captured priors exactly as before, and — only after the
+  transaction persists — the live dynamic sessions accepted by each
+  affected range are gracefully reset (Cease NOTIFICATION with an
+  RFC 8203 shutdown communication, `"peer-group configuration
+  change"`). The remote's reconnect is re-accepted under the committed
+  config (snapshot staging advances the accept matcher before
+  persist), and `dynamic_neighbor_limit` slot accounting stays owned
+  by the normal session-idle reaping — the reset never delete/re-adds
+  an ephemeral peer. A failed transaction never flaps a dynamic peer
+  (pinned by test); a session that cannot be signaled keeps its
+  running config until reconnect and is reported in the apply
+  response, never silently swallowed. Dynamic-range peer-group
+  *reassignments* remain outside the reshape family (a
+  `[[dynamic_neighbors]]` record edit; sessions accepted under the
+  old group cannot be live-reassigned), and SIGHUP / targeted
+  peer-group RPCs deliberately keep their no-preview skip semantics
+  (see ADR-0086).
 - **RIB distribution-health observability for the wedged
   post-Established advertisement path (ROADMAP, observed in an M66 CI
   run).** Root-cause analysis identified a silent failure mode:

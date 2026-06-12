@@ -7386,10 +7386,12 @@ remote_asn = 65030
 }
 
 #[test]
-fn transaction_v1_rejects_dynamic_range_peer_group_field_reshape_as_inheritance_impact() {
+fn transaction_v1_classifies_dynamic_range_peer_group_field_reshape_as_session_reshape() {
     // A dynamic range whose peer-group policy did not move but whose inherited
-    // session settings did move is not a dynamic live-policy impact; it still
-    // needs the generic inheritance/session-reshape rejection.
+    // session settings did move is not a dynamic live-policy impact; it routes
+    // to the session reshape executor, which gracefully resets the range's
+    // live sessions after persist so they re-accept under the committed
+    // config.
     let config = |hold: u32| {
         format!(
             r#"
@@ -7420,21 +7422,15 @@ remote_asn = 65030
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
-    assert!(!class.is_committable());
-    assert!(
-        class
-            .unsupported_sections
-            .contains(&"effective neighbor inheritance impact".to_string()),
-        "{:?}",
-        class.unsupported_sections
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        class.supported_sections,
+        vec![
+            "[peer_groups] catalog",
+            "effective neighbor session reshape"
+        ]
     );
-    assert!(
-        !class
-            .unsupported_sections
-            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
-        "{:?}",
-        class.unsupported_sections
-    );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
     assert!(
         diff.effective_neighbor_impact
             .iter()
@@ -7448,14 +7444,17 @@ remote_asn = 65030
 }
 
 #[test]
-fn transaction_v1_rejects_dynamic_range_combined_transport_and_policy_change_as_inheritance_impact()
+fn transaction_v1_classifies_dynamic_range_combined_transport_and_policy_change_as_session_reshape()
 {
     // A peer-group edit that moves BOTH the resolved policy chain AND a
     // transport/session field (hold_time) for a dynamic range is not a pure
     // policy-chain move: the live-impact executor reconfigures policy via a
-    // Route Refresh but cannot reconfigure the session transport. It must be
-    // rejected as inheritance impact, never mis-classified as a committable
-    // dynamic live-policy move (which would silently drop the reconfigure).
+    // Route Refresh but cannot reconfigure the session transport. It routes to
+    // the session reshape executor instead — the post-persist graceful reset
+    // covers both deltas, because the re-accepted session resolves its
+    // transport AND policy chains from the committed config. It must never be
+    // mis-classified as a committable dynamic live-policy move (which would
+    // silently drop the reconfigure).
     let config = |hold: u32, action: &str| {
         format!(
             r#"
@@ -7490,6 +7489,74 @@ remote_asn = 65030
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
+    assert!(class.is_committable(), "{class:?}");
+    assert!(
+        class
+            .supported_sections
+            .contains(&"effective neighbor session reshape".to_string()),
+        "{:?}",
+        class.supported_sections
+    );
+    assert!(
+        !class
+            .supported_sections
+            .contains(&"[policy] live impact".to_string()),
+        "{:?}",
+        class.supported_sections
+    );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(
+                |impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape
+                    && impact.is_dynamic_range
+            ),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
+}
+
+#[test]
+fn transaction_v1_rejects_dynamic_range_peer_group_reassignment_as_inheritance_impact() {
+    // Reassigning a `[[dynamic_neighbors]]` range to a different peer group is
+    // a range-record edit, not a peer-group field reshape: sessions accepted
+    // under the old group cannot be live-reassigned, and the record edit
+    // belongs to the dynamic-neighbor executor family. The reshape family must
+    // not claim it.
+    let config = |group: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+hold_time = 90
+
+[peer_groups.transit]
+hold_time = 45
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "{group}"
+remote_asn = 65030
+"#
+        )
+    };
+    let old = parse(&config("ix")).unwrap();
+    let new = parse(&config("transit")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
     assert!(!class.is_committable(), "{class:?}");
     assert!(
         class
@@ -7500,20 +7567,10 @@ remote_asn = 65030
     );
     assert!(
         !class
-            .unsupported_sections
-            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
+            .supported_sections
+            .contains(&"effective neighbor session reshape".to_string()),
         "{:?}",
-        class.unsupported_sections
-    );
-    assert!(
-        diff.effective_neighbor_impact
-            .iter()
-            .all(
-                |impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape
-                    && impact.is_dynamic_range
-            ),
-        "{:?}",
-        diff.effective_neighbor_impact
+        class.supported_sections
     );
 }
 
