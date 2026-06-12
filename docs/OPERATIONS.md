@@ -387,12 +387,16 @@ Prometheus gauge.
 
 ### Ingress rejection / route-leak detection
 
-Routes rejected at the session boundary before reaching the RIB.
-The `reason` label values below are the canonical contract pinned in
-`crates/telemetry/src/reason_labels.rs` — they are stable across
+Mechanisms that block routes for protocol-correctness reasons: most
+reject at the session boundary before the route reaches the RIB; the
+one egress case is `egress_to_upstream_via_otc`, which suppresses an
+outbound advertisement after best-path selection. Where a metric
+carries a `reason` label, its values are the canonical contract
+pinned in `crates/telemetry/src/reason_labels.rs` — stable across
 releases and shared verbatim by the metric label, the log-line
 `reason` token, and (for OTC) the structured `OTC_ROUTE_BLOCKED`
-event payload, so alert expressions can key on them safely.
+event payload, so alert expressions can key on them safely. Metrics
+without a `reason` label encode the mechanism in the metric name.
 
 | Metric | What it tells you |
 |--------|-------------------|
