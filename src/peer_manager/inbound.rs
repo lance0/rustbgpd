@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::{PeerHandle, SessionIdentity};
+use rustbgpd_transport::{PeerHandle, SessionIdentity, StateQueryOutcome};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -291,11 +291,34 @@ impl PeerManager {
 
         // Bounded so an inbound TCP arriving during a TCP-back-pressure
         // wedge on the existing session can't park the peer-manager actor
-        // mid-collision-resolution. A timeout falls back to `Idle` here,
-        // which sends us through the "accept immediately" arm — equivalent
-        // to the existing "no session yet" path, with the same
-        // `replace_with_inbound` outcome.
-        let current_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+        // mid-collision-resolution. The outcome keeps a dead session task
+        // separate from a query that merely missed the deadline:
+        //
+        // - SessionGone: the session task has exited, so there is nothing
+        //   to collide with. Treat it as `Idle` and take the "accept
+        //   immediately" arm — equivalent to the no-session-yet path.
+        // - TimedOut: the task may still be alive. The documented cause of
+        //   a missed deadline is precisely a TCP-back-pressure wedge, and a
+        //   wedged session may be Established — RFC 4271 §6.8 requires the
+        //   NEW connection to lose a collision against an Established
+        //   session, so treating a timeout as `Idle` would convert a
+        //   transient stall into a session reset. Drop the inbound instead:
+        //   if the existing session is genuinely wedged-dead, hold-timer
+        //   expiry tears it down and the remote's retry then lands in the
+        //   genuine `Idle` arm. Losing one inbound attempt is cheap;
+        //   tearing down an Established session on a transient stall is
+        //   not.
+        let current_state = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
+            StateQueryOutcome::State(state) => Some(state),
+            StateQueryOutcome::SessionGone => None,
+            StateQueryOutcome::TimedOut => {
+                info!(
+                    %peer_addr,
+                    "session state query timed out during inbound handling; keeping the existing session and dropping the inbound connection (remote will retry)"
+                );
+                return;
+            }
+        };
         let fsm_state = current_state
             .as_ref()
             .map_or(SessionState::Idle, |s| s.fsm_state);

@@ -167,6 +167,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An inbound connection no longer replaces a possibly-Established
+  session when the collision state query times out.** The inbound
+  handler bounds its query of the existing session's FSM state, but a
+  timeout was mapped to Idle and took the replace-the-session path —
+  yet the documented cause of a missed deadline (a session task wedged
+  on TCP write back-pressure) is exactly a case where the existing
+  session may be Established, which RFC 4271 §6.8 says must win the
+  collision. A transient stall plus one inbound SYN could therefore
+  reset a healthy session. The state query now distinguishes a timeout
+  from an exited session task: on timeout the inbound connection is
+  dropped (logged; the remote retries, and a genuinely dead session is
+  torn down by hold-timer expiry so the retry lands in the normal
+  accept path), while a dead session task still accepts the inbound
+  immediately as before.
+
 - **GR restarters no longer receive End-of-RIB for ORF-gated families
   before the gated flood.** The RFC 5291 §6 initial-advertisement gate
   withholds a family's table until the peer's first ROUTE-REFRESH, but

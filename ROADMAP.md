@@ -312,14 +312,18 @@ has it, no broad performance sprints without profile evidence.
   state or persistence mutation, so the `dynamic_neighbor_limit` slot stays
   accounted (the `BackToIdle` decrement still runs at session end) and the
   persist-failure rollback can no longer resurrect an ephemeral peer as
-  persisted static config. Also listed here: a BFD Down stops the primary
-  session but not a pending collision candidate, which `BackToIdle` promotion
-  then establishes over the BFD-down path; the inbound handler treats a
-  state-query timeout as Idle and replaces a possibly-Established session
-  instead of rejecting the new connection (RFC 4271 §6.8); and peer-group
-  field edits still don't reach live dynamic sessions (pairs with the deferred
-  dynamic reconfigure executor). (The per-peer Prometheus series leak listed
-  here previously was fixed — deleted peers now reap their label series.)
+  persisted static config. The BFD-down collision-candidate gap is also fixed
+  (#416, v0.37.0): a BFD Down now shuts a pending collision candidate down
+  too, and `BackToIdle` promotion checks the BFD withhold before promoting.
+  The inbound state-query-timeout hazard is fixed as well: the collision
+  state query now distinguishes a deadline expiry from an exited session
+  task, and a timeout drops the inbound connection instead of treating the
+  existing — possibly Established — session as Idle and replacing it
+  (RFC 4271 §6.8); a dead session task still accepts the inbound. What
+  remains: peer-group field edits still don't reach live dynamic sessions
+  (pairs with the deferred dynamic reconfigure executor). (The per-peer
+  Prometheus series leak listed here previously was fixed — deleted peers
+  now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
   unit-test coverage; per-statement attribution within a matched import chain

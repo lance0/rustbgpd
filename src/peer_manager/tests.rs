@@ -6117,6 +6117,170 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     panic!("promoted inbound candidate did not reach Established");
 }
 
+/// RFC 4271 §6.8 regression: a state query that merely times out (the
+/// session task is wedged on TCP back-pressure but may be Established)
+/// must NOT be treated as Idle. Before the fix, the timeout mapped to
+/// `SessionState::Idle` and routed through `replace_with_inbound`,
+/// shutting down a possibly-Established session because of a transient
+/// stall. The conservative behavior is to drop the inbound connection
+/// and keep the existing session: if it is genuinely dead, hold-timer
+/// expiry tears it down and the remote's retry lands in the genuine
+/// Idle arm.
+#[tokio::test]
+async fn inbound_state_query_timeout_keeps_existing_session() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let counters = Arc::new(FakePeerCounters::default());
+    let task_counters = counters.clone();
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    // Simulate a TCP-back-pressure wedge: the task holds the command
+    // channel open but services nothing until well past
+    // PEER_QUERY_TIMEOUT (100ms). Commands sent meanwhile sit buffered.
+    // It eventually drains and answers Shutdown so a buggy
+    // replace-the-session path fails the assertions below instead of
+    // deadlocking the test in `PeerHandle::shutdown`.
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    task_counters.query_state.fetch_add(1, Ordering::SeqCst);
+                    // Stale answer — the manager's deadline has long expired.
+                    drop(reply);
+                }
+                PeerCommand::Shutdown => {
+                    task_counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client_stream = client.await.unwrap();
+
+    mgr.handle_inbound(server_stream, remote_addr).await;
+
+    let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
+    assert_eq!(
+        counters.shutdown.load(Ordering::SeqCst),
+        0,
+        "the wedged (possibly-Established) session must NOT be shut down \
+         because a state query timed out"
+    );
+    assert_eq!(
+        managed.session_id, 1,
+        "the existing session must NOT be replaced on a state-query timeout"
+    );
+    assert!(
+        managed.pending_inbound.is_none(),
+        "no collision candidate may be spawned while the existing session's \
+         state is unknown"
+    );
+
+    // The inbound connection itself must have been dropped: the client
+    // observes EOF, not a BGP OPEN from a freshly-started session.
+    let mut buf = [0u8; 64];
+    let read = tokio::time::timeout(Duration::from_secs(2), client_stream.read(&mut buf))
+        .await
+        .expect("inbound socket must be closed promptly")
+        .expect("clean EOF expected");
+    assert_eq!(read, 0, "inbound connection must be dropped, got data");
+}
+
+/// Companion to `inbound_state_query_timeout_keeps_existing_session`:
+/// a genuinely dead session task (command channel closed because the
+/// task exited) still takes the accept path — `query_state_outcome`
+/// reports `SessionGone`, which maps to Idle and replaces the dead
+/// session with the inbound connection.
+#[tokio::test]
+async fn inbound_after_session_task_exit_takes_accept_path() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // Burn session id 1 so the helper-inserted peer's hardcoded
+    // `session_id: 1` differs from whatever a replacement allocates.
+    let _ = mgr.allocate_session_id();
+    // Dead session task: receiver dropped, task already exited.
+    let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(8);
+    drop(session_rx);
+    let task = tokio::spawn(async move { Ok(()) });
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client_stream = client.await.unwrap();
+
+    mgr.handle_inbound(server_stream, remote_addr).await;
+
+    let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
+    assert_ne!(
+        managed.session_id, 1,
+        "a dead session task must be replaced by the inbound connection"
+    );
+    assert!(managed.pending_inbound.is_none());
+
+    // The replacement is a live inbound session that was started:
+    // TcpConnectionConfirmed sends our OPEN to the remote.
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client_stream, &mut buf),
+    )
+    .await
+    .expect("accepted inbound session must send OPEN");
+    assert!(matches!(msg, Message::Open(_)));
+}
+
 #[tokio::test]
 async fn collision_local_wins_drops_inbound_candidate() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
