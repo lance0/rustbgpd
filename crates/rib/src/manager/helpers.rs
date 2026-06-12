@@ -16,6 +16,13 @@ pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duratio
 pub(super) const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Per-peer LLGR configuration stored when `PeerGracefulRestart` is received.
+///
+/// The entry stays alive through the LLGR stale phase — `handle_peer_up`
+/// reads `stale_routes_time` when the peer re-establishes during LLGR, and a
+/// second GR-deadline expiry re-promotes from it. It is removed at every
+/// terminal point: GR/LLGR completion on End-of-RIB, LLGR expiry sweep,
+/// the no-LLGR purge branch of the GR expiry sweep, and `handle_peer_down`.
+#[derive(Clone)]
 pub(super) struct LlgrPeerConfig {
     pub(super) peer_llgr_capable: bool,
     pub(super) peer_llgr_families: Vec<LlgrFamily>,
