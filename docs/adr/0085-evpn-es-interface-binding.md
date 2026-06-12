@@ -44,11 +44,15 @@ in practice:
 
 ## Decision 1 — `interface` binding on `[[ethernet_segments]]`
 
-Add an optional `interface = "<linkname>"` key to
-`[[ethernet_segments]]`. Semantics:
+Add two optional keys to `[[ethernet_segments]]`:
+`interface = "<linkname>"` (the binding) and `recovery_delay_secs`
+(the Decision 3 hold-off; meaningful only with `interface` set).
+Binding semantics:
 
 - The named link is the ES's attachment circuit. AC health =
-  **carrier** (kernel operstate `LOWER_UP`), not admin state: an
+  **carrier**: the `IFF_LOWER_UP` bit in the rtnetlink link flags
+  (`ifi_flags`) — not `IFLA_OPERSTATE`, which is a separate attribute
+  with different semantics, and not admin state: an
   operator running `ip link set ... down` gets the same drain a cable
   pull gets, which is the correct forwarding answer in both cases.
 - Unbound segments (no `interface`) behave exactly as today —
@@ -90,10 +94,11 @@ A down→up transition does not undrain immediately. Per-ES
 `recovery_delay_secs` (default **30**, range 0–3600) holds the `Link`
 reason for that long after carrier returns:
 
-- Rationale: RFC 7432 §8.2.1 models timed EAD (re-)advertisement so a
-  recovering PE does not attract traffic before it can forward it
-  (bridge port re-learning, DF re-election propagation). FRR ships
-  the same concept as its EVPN-MH startup/recovery delay. A flapping
+- Rationale: RFC 8584's AC-influenced DF model (§3) and its DF-wait
+  behavior exist precisely so a recovering attachment circuit does
+  not attract traffic before the segment has re-converged (bridge
+  port re-learning, DF re-election propagation). FRR ships the same
+  concept as its EVPN-MH startup/recovery delay. A flapping
   circuit also gets natural damping: the timer re-arms on every up
   edge, so an unstable link stays drained until it holds carrier for
   the full window.
@@ -122,12 +127,20 @@ The binding gives the dataplane supervisor a per-ESI **local
 attachment health** snapshot (alongside the existing BUM-enforcement
 flow from the segment actor). Projection rule (`project_one`):
 
-- A remote MAC/MAC-IP route whose ESI is **locally attached and
-  healthy and not drained** does not program a remote FDB row — the
-  local AC is the correct egress for that segment's MACs on this PE,
-  and RFC 7432 §15.1 says same-ES reachability is not mobility. The
-  kernel-learned local row (or local flood toward the AC) serves the
-  traffic.
+- A remote MAC/MAC-IP route whose ESI is **locally attached, healthy,
+  not drained — and for which this PE is entitled to forward** does
+  not program a remote FDB row: the local AC is then the correct
+  egress, and RFC 7432 §15.1 says same-ES reachability is not
+  mobility. "Entitled to forward" is redundancy-mode-aware:
+  **all-active** — always (every member PE forwards); **single-active
+  — only when this PE is the DF for that `(ESI, VNI)`**. A healthy
+  single-active *backup* keeps the remote row toward the active PE —
+  its own AC is non-forwarding by definition, and biasing there would
+  become a blackhole the moment the non-DF all-traffic AC blocking
+  gap is closed. The bias-eligibility snapshot is therefore published
+  by the **segment actor** (the one owner of both redundancy mode and
+  the per-`(ESI, VNI)` DF role), composed with link health, rather
+  than derived from link state alone.
 - The bias lifts the moment the attachment is unhealthy **or
   drained**: remote rows program and the peer PE takes over — which
   is exactly the M66 takeover behavior, now by design instead of by
