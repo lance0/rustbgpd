@@ -398,11 +398,25 @@ impl LocalEadPerEviOriginator {
         self.by_vni.iter().map(|(&vni, s)| (vni, s.key))
     }
 
+    /// Wire-shaped key for one `(ESI, VNI)` advertisement.
+    ///
+    /// RFC 7432 §6.1 (VLAN-based service: "The Ethernet Tag ID in all
+    /// EVPN routes MUST be set to 0") and RFC 8365 §5.1.3 (VXLAN: the
+    /// Ethernet Tag field in the EAD-per-EVI route MUST be zero; the
+    /// VNI travels in the route's label field) pin the Ethernet Tag to
+    /// 0 — matching the tag our Type 2 MAC/IP routes carry, so remote
+    /// receivers can join the `(ESI, EthernetTag)` aliasing /
+    /// eligible-set keys (RFC 7432 §8.4, §14.1.2). FRR does the same
+    /// (`BGP_EVPN_AD_EVI_ETH_TAG == 0`).
+    ///
+    /// With the tag fixed at 0, per-VNI route distinctness rides on
+    /// the per-VNI RD (`set_rds`); the daemon always populates it from
+    /// the `[[evpn_instances]]` table, whose RDs are validated unique.
     fn key_for(&self, vni: EvpnInstanceId) -> EvpnRouteKey {
         EvpnRouteKey::EadPerEvi {
             rd: self.rd_for_vni.get(&vni).copied().unwrap_or(self.rd),
             esi: self.esi,
-            ethernet_tag: EthernetTagId(vni.as_u32()),
+            ethernet_tag: EthernetTagId(0),
         }
     }
 }
@@ -636,7 +650,12 @@ mod tests {
     }
 
     #[test]
-    fn ead_per_evi_key_uses_vni_as_ethernet_tag() {
+    fn ead_per_evi_key_uses_ethernet_tag_zero() {
+        // RFC 7432 §6.1 / RFC 8365 §5.1.3: VLAN-based service pins the
+        // Ethernet Tag to 0 on ALL EVPN routes; the VNI rides in the
+        // route's label field, never the tag. Regression guard for the
+        // M65-era bug where the tag carried the VNI and the route could
+        // never join a remote receiver's `(ESI, tag 0)` aliasing key.
         let mut o = LocalEadPerEviOriginator::new(rd(65000, 100), esi(1));
         let actions = o.on_vni_role_changed(vni(100), DfRole::Df);
         let OriginationAction::Inject { key, .. } = &actions[0] else {
@@ -645,7 +664,91 @@ mod tests {
         let EvpnRouteKey::EadPerEvi { ethernet_tag, .. } = *key else {
             panic!("expected EvpnRouteKey::EadPerEvi, got {key:?}");
         };
-        assert_eq!(ethernet_tag.0, 100);
+        assert_eq!(ethernet_tag.0, 0);
+    }
+
+    #[test]
+    fn ead_per_evi_key_joins_type2_eligibility_and_alias_indexes() {
+        // The cross-rustbgpd join that PR #442's "bonus finding" showed
+        // was structurally broken: a rustbgpd-originated EAD-per-EVI
+        // must land on the same `(ESI, EthernetTag)` key as a
+        // rustbgpd-originated Type 2 MAC/IP route, or the receive-side
+        // all-active aliasing (`AliasIndex`) and ADR-0083 single-active
+        // eligible-set (`SingleActiveEligibleIndex`) joins can never
+        // resolve a rustbgpd peer as an alternative/backup PE.
+        use crate::aliasing::{
+            AliasEadPerEvi, AliasIndex, EadPerEsMode, SingleActiveEligibleIndex,
+        };
+        use crate::origination::LocalMacOriginator;
+
+        let segment = esi(1);
+        let remote_pe: IpAddr = ipa("10.0.0.2");
+
+        // The EAD-per-EVI key as the segment originator emits it.
+        let mut ead = LocalEadPerEviOriginator::new(rd(65000, 100), segment);
+        let mut rds = BTreeMap::new();
+        rds.insert(vni(100), rd(65000, 100));
+        ead.set_rds(rds);
+        let actions = ead.on_vni_role_changed(vni(100), DfRole::Df);
+        let OriginationAction::Inject { key, .. } = &actions[0] else {
+            panic!("expected Inject, got {:?}", actions[0]);
+        };
+        let EvpnRouteKey::EadPerEvi {
+            esi: ead_esi,
+            ethernet_tag: ead_tag,
+            ..
+        } = *key
+        else {
+            panic!("expected EvpnRouteKey::EadPerEvi, got {key:?}");
+        };
+
+        // The Type 2 key as the local-MAC originator emits it.
+        let mut macs = LocalMacOriginator::new(vni(100), rd(65000, 100));
+        let mac = MacAddress::new([0x02, 0, 0, 0, 0, 0x01]);
+        let mac_actions = macs.on_local_learned(mac, 1, false, None);
+        let OriginationAction::Inject { key: mac_key, .. } = &mac_actions[0] else {
+            panic!("expected Inject, got {:?}", mac_actions[0]);
+        };
+        let EvpnRouteKey::MacIp {
+            ethernet_tag: mac_tag,
+            ..
+        } = *mac_key
+        else {
+            panic!("expected EvpnRouteKey::MacIp, got {mac_key:?}");
+        };
+
+        // All-active aliasing: the EAD-per-EVI row must resolve under
+        // the Type 2's (ESI, tag) lookup key.
+        let alias_index = AliasIndex::build([AliasEadPerEvi {
+            esi: ead_esi,
+            ethernet_tag: ead_tag,
+            vtep_ip: remote_pe,
+        }]);
+        assert_eq!(
+            alias_index.vtep_ips_for(segment, mac_tag),
+            Some(&[remote_pe][..]),
+            "EAD-per-EVI tag {ead_tag:?} must join the Type 2 tag {mac_tag:?}",
+        );
+
+        // ADR-0083 single-active eligibility: same join, both route
+        // types advertised by the remote PE.
+        let eligible = SingleActiveEligibleIndex::build(
+            [EadPerEsMode {
+                esi: segment,
+                vtep_ip: remote_pe,
+                single_active: true,
+            }],
+            [AliasEadPerEvi {
+                esi: ead_esi,
+                ethernet_tag: ead_tag,
+                vtep_ip: remote_pe,
+            }],
+        );
+        assert_eq!(
+            eligible.eligible_pes(segment, mac_tag),
+            Some(&[remote_pe][..]),
+            "EAD-per-EVI tag {ead_tag:?} must make the eligible set for the Type 2 tag {mac_tag:?}",
+        );
     }
 
     #[test]
@@ -667,7 +770,9 @@ mod tests {
             panic!("expected EvpnRouteKey::EadPerEvi, got {key:?}");
         };
         assert_eq!(rd, self::rd(65000, 200));
-        assert_eq!(ethernet_tag.0, 200);
+        // Tag stays 0 (RFC 7432 §6.1); the per-VNI RD is what keeps
+        // the two member VNIs' routes distinct.
+        assert_eq!(ethernet_tag.0, 0);
     }
 
     #[test]

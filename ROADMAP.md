@@ -186,11 +186,10 @@ has it, no broad performance sprints without profile evidence.
   event-driven intent recompute — the 5 s RIB-poll cadence dominates
   the measured window; the swap itself is one netlink op, so this is
   the gap between 4.5 s and genuinely sub-second; (2) Ethernet-Tag
-  alignment — rustbgpd's EAD-per-EVI originates with `ethernet_tag =
-  VNI` while its Type 2s use tag 0, so a rustbgpd-originated
-  EAD-per-EVI never joins a remote rustbgpd's eligible set (receive
-  side proven against standards-shaped senders; rustbgpd↔rustbgpd
-  single-active backup needs an alignment decision); (3)
+  alignment — **done:** EAD-per-EVI now originates with
+  `ethernet_tag = 0` and the VNI in the label field per RFC 7432 §6.1
+  / RFC 8365 §5.1.3 (FRR parity), so rustbgpd-originated EAD-per-EVI
+  joins remote `(ESI, tag 0)` alias/eligible sets; (3)
   origination-side withdrawal stimulus — an ES has no AC/interface
   binding, so rustbgpd cannot emit the EAD-withdrawn-MACs-retained
   mass-withdraw shape (ES↔interface binding or an ES-drain RPC closes

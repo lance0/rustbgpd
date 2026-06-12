@@ -5318,6 +5318,13 @@ table_id = 6000
             .await
             .unwrap();
 
+        // The Ethernet Tag is pinned to 0 (RFC 7432 §6.1); the
+        // runtime-added VNI's EAD-per-EVI is identified by its RD.
+        let added_rd = current_after_l2
+            .instances()
+            .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+            .expect("VNI 200 present after the L2 add")
+            .rd;
         let deadline = StdInstant::now() + Duration::from_secs(2);
         loop {
             let observed = injects.lock().await.clone();
@@ -5325,9 +5332,9 @@ table_id = 6000
                 matches!(
                     key,
                     rustbgpd_wire::EvpnRouteKey::EadPerEvi {
-                        ethernet_tag,
+                        rd,
                         ..
-                    } if ethernet_tag.0 == 200
+                    } if *rd == added_rd
                 )
             }) {
                 break;
@@ -5811,14 +5818,16 @@ table_id = 6000
         wait_for_recorded_evpn_key_matching(
             &injects,
             "additive build-up should publish EAD-per-EVI for the added member VNI",
+            // Ethernet Tag is pinned to 0 (RFC 7432 §6.1); the added
+            // member VNI's EAD-per-EVI is identified by its RD.
             |key| {
                 matches!(
                     key,
                     rustbgpd_wire::EvpnRouteKey::EadPerEvi {
                         esi,
-                        ethernet_tag,
+                        rd,
                         ..
-                    } if *esi == added_esi && ethernet_tag.0 == 200
+                    } if *esi == added_esi && *rd == added_rd
                 )
             },
         )
@@ -7034,6 +7043,17 @@ table_id = 6000
         let current_instances = Arc::new(current.instances().clone());
         let redefined_esi =
             rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        // Ethernet Tag is pinned to 0 (RFC 7432 §6.1); member VNIs'
+        // EAD-per-EVI routes are told apart by their per-VNI RDs.
+        let member_rd = |raw_vni: u32| {
+            current
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(raw_vni).unwrap())
+                .unwrap_or_else(|| panic!("VNI {raw_vni} present in the current model"))
+                .rd
+        };
+        let old_member_rd = member_rd(100);
+        let new_member_rd = member_rd(200);
 
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
         let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -7057,9 +7077,9 @@ table_id = 6000
                     key,
                     rustbgpd_wire::EvpnRouteKey::EadPerEvi {
                         esi,
-                        ethernet_tag,
+                        rd,
                         ..
-                    } if *esi == redefined_esi && ethernet_tag.0 == 100
+                    } if *esi == redefined_esi && *rd == old_member_rd
                 )
             }) {
                 break;
@@ -7097,9 +7117,9 @@ table_id = 6000
                     key,
                     rustbgpd_wire::EvpnRouteKey::EadPerEvi {
                         esi,
-                        ethernet_tag,
+                        rd,
                         ..
-                    } if *esi == redefined_esi && ethernet_tag.0 == 100
+                    } if *esi == redefined_esi && *rd == old_member_rd
                 )
             });
             let injected_new_evi = injected.iter().any(|key| {
@@ -7107,9 +7127,9 @@ table_id = 6000
                     key,
                     rustbgpd_wire::EvpnRouteKey::EadPerEvi {
                         esi,
-                        ethernet_tag,
+                        rd,
                         ..
-                    } if *esi == redefined_esi && ethernet_tag.0 == 200
+                    } if *esi == redefined_esi && *rd == new_member_rd
                 )
             });
             if drained_old_evi && injected_new_evi {
