@@ -108,7 +108,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M1 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -142,7 +142,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M13 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -176,7 +176,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M15 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -210,7 +210,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M10 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -244,7 +244,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M14 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -278,7 +278,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M17 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -316,7 +316,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M22 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -350,7 +350,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M24 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -384,7 +384,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M25 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -427,7 +427,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M29 (deploy + test + destroy with retry)
         # The composite always destroys before each attempt, so an
@@ -467,7 +467,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M30 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -504,7 +504,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M34 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -541,7 +541,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M35 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -578,7 +578,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M35b (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -614,7 +614,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M35c (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -652,7 +652,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M41 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -686,7 +686,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container. Generated here
@@ -730,7 +730,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container.
@@ -770,7 +770,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M55 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -807,7 +807,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       # Reuses the M54 mTLS PKI; same operator cert chain.
       - name: Generate M54 mTLS certs
@@ -845,7 +845,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M45 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -882,7 +882,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M57 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -920,7 +920,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M63 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -958,7 +958,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Run M64 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test

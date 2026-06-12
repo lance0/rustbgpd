@@ -64,4 +64,8 @@ runs:
         load: true
         tags: rustbgpd:dev
         cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # ignore-error: a flaking GHA cache backend ("error writing
+        # layer blob: not_found") must cost the NEXT build its cache
+        # hit, not kill THIS build — the cache is an optimization,
+        # never a correctness input.
+        cache-to: type=gha,mode=max,ignore-error=true
