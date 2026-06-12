@@ -255,6 +255,19 @@ has it, no broad performance sprints without profile evidence.
   equivalent single-netlink toggle) driven by the same DF-role map that
   feeds the BUM filter, with the drain path reusing it. Distinct from
   the deferred all-active local-bias item.
+- **Wedged post-Established advertisement path (observed once, CI,
+  2026-06-12).** During an M66 CI run, every advertisement pe1 issued
+  AFTER initial convergence (fresh Type 2 origination, drain
+  withdrawals) failed to reach the peer VTEP for minutes and across an
+  in-job re-run, while the session stayed Established (keepalives
+  flowing) and previously-advertised state kept forwarding. Bring-up
+  itself was instant, so this is not slow-runner convergence — it has
+  the shape of a stalled RIB→peer distribution / session TX path (or
+  VTEP RX) that heals on session replacement. One occurrence, not yet
+  reproduced; M67's fixture added carrier-monitor + gauge pins and
+  pe1-log dumps for diagnosability if it recurs. Investigate against
+  the ADR-0078 inbound-backpressure and hold-expiry re-arm work — a
+  TX-side sibling of those bugs would look exactly like this.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent
