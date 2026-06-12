@@ -121,7 +121,7 @@ impl RibManager {
             .iter_evpn()
             .map(crate::route::EvpnRibRoute::key)
             .collect();
-        debug!(%peer, cleared = count, "peer session reset — rib cleared");
+        debug!(%peer, cleared = count, "peer adj-rib-in cleared");
         self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
         self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
         let changed = self.recompute_best(&affected);
