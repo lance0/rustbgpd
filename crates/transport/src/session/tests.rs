@@ -1786,7 +1786,7 @@ async fn otc_ingress_provider_publishes_structured_event() {
     let events = sink.snapshot();
     assert_eq!(events.len(), 1, "exactly one event per blocked UPDATE");
     let event = &events[0];
-    assert_eq!(event.reason, "ingress_from_customer_rsclient");
+    assert_eq!(event.reason.as_str(), "ingress_from_customer_rsclient");
     assert_eq!(event.direction, crate::event_sink::OtcDirection::Ingress);
     assert_eq!(event.prefixes, vec![prefix.to_string()]);
     assert_eq!(event.local_role, Some(BgpRole::Provider));
@@ -1828,7 +1828,7 @@ async fn otc_ingress_peer_mismatch_publishes_structured_event() {
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
     let event = &events[0];
-    assert_eq!(event.reason, "ingress_peer_mismatch");
+    assert_eq!(event.reason.as_str(), "ingress_peer_mismatch");
     assert_eq!(event.otc_value, Some(64512));
     assert_eq!(event.local_role, Some(BgpRole::Peer));
 }
@@ -1873,7 +1873,7 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
     let event = &events[0];
-    assert_eq!(event.reason, "malformed_length");
+    assert_eq!(event.reason.as_str(), "malformed_length");
     assert!(
         event.otc_value.is_none(),
         "malformed_length must not surface a decoded OTC value"

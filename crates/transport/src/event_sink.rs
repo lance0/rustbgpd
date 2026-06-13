@@ -20,6 +20,7 @@
 
 use std::net::IpAddr;
 
+use rustbgpd_telemetry::reason_labels::OtcBlockReason;
 use rustbgpd_wire::BgpRole;
 
 /// Direction in which an OTC route-leak rule fired.
@@ -61,19 +62,19 @@ impl OtcDirection {
 /// unchanged — this is a parallel structured surface for incident
 /// reconstruction, not a replacement.
 ///
-/// `reason` is one of the four bounded label values used by the
-/// counter (`ingress_from_customer_rsclient`, `ingress_peer_mismatch`,
-/// `malformed_length`, `egress_to_upstream_via_otc`). Sinks should
-/// treat it as `&'static str` rather than allocating.
+/// `reason` is the typed canonical vocabulary shared with the
+/// counter — see
+/// [`rustbgpd_telemetry::reason_labels::OtcBlockReason`]. Sinks
+/// render it with `as_str()` (a `&'static str`, no allocation).
 #[derive(Debug, Clone)]
 pub struct OtcRouteBlockedEvent {
     /// Address of the peer that triggered the decision.
     pub peer: IpAddr,
     /// Whether this was an inbound or outbound decision.
     pub direction: OtcDirection,
-    /// Bounded reason code matching the
+    /// Canonical reason shared with the
     /// `bgp_otc_routes_blocked_total{reason=…}` label vocabulary.
-    pub reason: &'static str,
+    pub reason: OtcBlockReason,
     /// Wire-format prefix strings (`"203.0.113.0/24"`). For ingress
     /// this is every announced unicast prefix in the rejected
     /// UPDATE — body NLRI plus any IPv4/IPv6 unicast `MP_REACH_NLRI`
