@@ -474,6 +474,7 @@ impl PeerSession {
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
                         peer: self.peer_ip,
+                        session_id: self.session_identity.id,
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
                     })
@@ -498,6 +499,7 @@ impl PeerSession {
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
                         peer: self.peer_ip,
+                        session_id: self.session_identity.id,
                         afi: mp.afi,
                         safi: mp.safi,
                     })
@@ -666,6 +668,7 @@ impl PeerSession {
                 && self
                     .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                         peer: self.peer_ip,
+                        session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_withdrawn,
                         flowspec_announced: vec![],
@@ -747,6 +750,7 @@ impl PeerSession {
                 && self
                     .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                         peer: self.peer_ip,
+                        session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_withdrawn,
                         flowspec_announced: vec![],
@@ -1364,6 +1368,7 @@ impl PeerSession {
             && self
                 .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                     peer: self.peer_ip,
+                    session_id: self.session_identity.id,
                     announced,
                     withdrawn,
                     flowspec_announced,

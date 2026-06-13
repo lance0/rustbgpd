@@ -63,6 +63,7 @@ impl PeerSession {
                 .rib_tx
                 .send(RibUpdate::PeerOrfUpdate {
                     peer: self.peer_ip,
+                    session_id: self.session_identity.id,
                     afi,
                     safi,
                     when: orf.when_to_refresh,
@@ -391,6 +392,7 @@ impl PeerSession {
                                             .rib_tx
                                             .send(RibUpdate::RouteRefreshRequest {
                                                 peer: self.peer_ip,
+                                                session_id: self.session_identity.id,
                                                 afi,
                                                 safi,
                                             })
@@ -418,6 +420,7 @@ impl PeerSession {
                                         .rib_tx
                                         .send(RibUpdate::BeginRouteRefresh {
                                             peer: self.peer_ip,
+                                            session_id: self.session_identity.id,
                                             afi,
                                             safi,
                                         })
@@ -451,6 +454,7 @@ impl PeerSession {
                                         .rib_tx
                                         .send(RibUpdate::EndRouteRefresh {
                                             peer: self.peer_ip,
+                                            session_id: self.session_identity.id,
                                             afi,
                                             safi,
                                         })

@@ -658,21 +658,26 @@ impl RibManager {
         match update {
             RibUpdate::RoutesReceived {
                 peer,
+                session_id,
                 announced,
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
                 evpn_announced,
                 evpn_withdrawn,
-            } => self.enqueue_routes_received(
-                peer,
-                announced,
-                withdrawn,
-                flowspec_announced,
-                flowspec_withdrawn,
-                evpn_announced,
-                evpn_withdrawn,
-            ),
+            } => {
+                if !self.stale_session_message(peer, session_id, "RoutesReceived", "routes") {
+                    self.enqueue_routes_received(
+                        peer,
+                        announced,
+                        withdrawn,
+                        flowspec_announced,
+                        flowspec_withdrawn,
+                        evpn_announced,
+                        evpn_withdrawn,
+                    );
+                }
+            }
             RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
@@ -704,12 +709,21 @@ impl RibManager {
             ),
             RibUpdate::PeerOrfUpdate {
                 peer,
+                session_id,
                 afi,
                 safi,
                 when,
                 entries,
                 reply,
-            } => self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply),
+            } => {
+                if self.stale_session_message(peer, session_id, "PeerOrfUpdate", "orf") {
+                    let _ = reply.send(Err(format!(
+                        "stale ORF update from superseded session {session_id} discarded"
+                    )));
+                } else {
+                    self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply);
+                }
+            }
             RibUpdate::SetPeerPolicyContext { peer, peer_group } => {
                 self.handle_set_peer_policy_context(peer, peer_group);
             }
@@ -794,15 +808,45 @@ impl RibManager {
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }
-            RibUpdate::EndOfRib { peer, afi, safi } => self.handle_end_of_rib(peer, afi, safi),
-            RibUpdate::RouteRefreshRequest { peer, afi, safi } => {
-                self.handle_route_refresh_request(peer, afi, safi);
+            RibUpdate::EndOfRib {
+                peer,
+                session_id,
+                afi,
+                safi,
+            } => {
+                if !self.stale_session_message(peer, session_id, "EndOfRib", "eor") {
+                    self.handle_end_of_rib(peer, afi, safi);
+                }
             }
-            RibUpdate::BeginRouteRefresh { peer, afi, safi } => {
-                self.handle_begin_route_refresh(peer, afi, safi);
+            RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id,
+                afi,
+                safi,
+            } => {
+                if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", "refresh") {
+                    self.handle_route_refresh_request(peer, afi, safi);
+                }
             }
-            RibUpdate::EndRouteRefresh { peer, afi, safi } => {
-                self.handle_end_route_refresh(peer, afi, safi);
+            RibUpdate::BeginRouteRefresh {
+                peer,
+                session_id,
+                afi,
+                safi,
+            } => {
+                if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", "refresh") {
+                    self.handle_begin_route_refresh(peer, afi, safi);
+                }
+            }
+            RibUpdate::EndRouteRefresh {
+                peer,
+                session_id,
+                afi,
+                safi,
+            } => {
+                if !self.stale_session_message(peer, session_id, "EndRouteRefresh", "refresh") {
+                    self.handle_end_route_refresh(peer, afi, safi);
+                }
             }
             RibUpdate::PeerGracefulRestart {
                 peer,
