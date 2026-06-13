@@ -558,6 +558,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics are unchanged for matching ids. `SetPeerPolicyContext`
   stays unstamped (idempotent, config-derived); `PeerDeleted` is
   config-scoped by design.
+- **Ethernet Segment drain-GC split state on a failed runtime apply
+  (ADR-0084 annotation resolved, from the cross-actor seam audit).**
+  A runtime apply / SIGHUP that deleted a drained ES GC'd the
+  coordinator's drain entry BEFORE publishing the candidate snapshots
+  to the EVPN actors; if a publish then failed mid-converge, the
+  rollback (deliberately, per ADR-0084) did not restore the entry —
+  but the segment actor's drained-set mirror had never been updated
+  either, so the ES stayed withdrawn actor-side while the coordinator
+  (gauge, RPC drain reasons) reported it undrained, and a bare
+  operator undrain was an idempotent no-op that fanned nothing out
+  (manual remedy: re-drain, then undrain). Both converge paths
+  (`publish_ethernet_segment_runtime_snapshot`,
+  `converge_tenant_teardown`) now GC and push the GC'd set only after
+  the last fallible actor publish has succeeded: a failed converge
+  leaves the drain entry intact on both sides — coordinator and actor
+  agree (still drained) and a subsequent undrain is a real transition
+  that fans out — while ADR-0084's no-restore-on-rollback stance is
+  preserved by construction (nothing is GC'd that a rollback would
+  need to restore). In practice the window required an actor publish
+  failure mid-apply (i.e. daemon teardown), so blast radius was near
+  nil; pinned by converger-level invariant tests on both paths.
 - **Silent advertisement wedge after a BGP session collision: a stale
   collision-loser `PeerDown` is now discarded by session identity.**
   When two sessions for one peer address overlapped during the

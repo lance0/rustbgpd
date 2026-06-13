@@ -835,20 +835,22 @@ branch is between features.
   chain at 100-300 ms), and the two dataplane snapshots ride separate watch
   channels (one supervisor wake of skew). Single-ownership consolidation
   evaluated and not justified — see the PR's proposal section.
-- [ ] **Drain-GC split-state on a failed ES-delete apply (from the seam
-  audit).** `publish_ethernet_segment_runtime_snapshot` /
-  `converge_tenant_teardown` GC the coordinator's drain entries BEFORE the
-  actor publishes; if a publish then fails, the rollback (per ADR-0084,
-  deliberately) does not restore the GC'd entry — but contrary to the
-  ADR's "routes re-advertise" consequence, the segment actor's drained-set
-  mirror was never updated either, so the ES stays withdrawn while the
-  coordinator (gauge, RPC reasons) reports it undrained, and an operator
-  undrain is an idempotent no-op that fans nothing out. Heals on the next
-  drained-set publish of any kind; re-drain + undrain is the manual
-  remedy. Blast radius ≈ nil today (a failed actor publish means the
-  actor exited, i.e. daemon teardown), so tracked rather than fixed;
-  the clean fix is to GC after the last actor publish succeeds, or to
-  push the restored set on rollback. ADR-0084 carries an annotation.
+- [x] **Drain-GC split-state on a failed ES-delete apply — RESOLVED**
+  (2026-06-12). `publish_ethernet_segment_runtime_snapshot` /
+  `converge_tenant_teardown` GC'd the coordinator's drain entries BEFORE
+  the actor publishes; on a mid-converge publish failure the rollback
+  (per ADR-0084, deliberately) did not restore the GC'd entry — and the
+  segment actor's drained-set mirror was never updated either, so the ES
+  stayed withdrawn while the coordinator (gauge, RPC reasons) reported it
+  undrained, and an operator undrain was an idempotent no-op. Fixed with
+  GC-after-success: both paths now GC + push the GC'd set only after the
+  last fallible actor publish succeeded, so a failed converge leaves the
+  entry intact on both sides (still drained, still agreeing) and there is
+  nothing for the rollback to restore — ADR-0084's no-restore stance is
+  preserved by construction. Invariant pinned at the converger level
+  (failed publish ⇒ coordinator state + actor mirror agree, and a
+  subsequent undrain fans out) for both the ES-delete and tenant-teardown
+  paths; the ADR-0084 annotation is updated to resolved.
 - [x] **Poll-cadence tail sweep.** The dataplane intent recompute went
   event-driven with the 5 s poll demoted to a backstop, and segment
   re-election subscribes to the EVPN event broadcast with a 10 s backstop

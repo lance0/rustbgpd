@@ -370,8 +370,9 @@ pub(crate) struct EvpnRuntimeActorConverger {
     l3_originator: Option<evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
     segment: Option<evpn_segment::EvpnSegmentRuntimeControl>,
     /// ADR-0084 operator drained-ESI set. Every originator runtime-model
-    /// publish carries the current snapshot; segment-set publishes GC
-    /// drain entries for ESIs that left the config.
+    /// publish carries the current snapshot; a converge whose segment-set
+    /// publish succeeded GCs drain entries for ESIs that left the config
+    /// (after the last fallible publish — see `gc_drained_esis`).
     es_drain: crate::evpn_es_drain::EvpnEsDrainState,
 }
 
@@ -399,13 +400,20 @@ impl EvpnRuntimeActorConverger {
         }
     }
 
-    /// GC the ADR-0084 drained-ESI set against a segment snapshot about
-    /// to be published (drop entries for ESIs leaving the config) and
-    /// return the new set when it changed so the caller can republish it
-    /// to the segment actor. Deliberately not restored on a failed
-    /// converge's rollback: losing a drain entry is conservative (routes
-    /// re-advertise; the operator re-drains), whereas restoring one
-    /// could silently re-suppress an ES the operator believes undrained.
+    /// GC the ADR-0084 drained-ESI set against a segment snapshot the
+    /// converge just published (drop entries for ESIs that left the
+    /// config) and return the new set when it changed so the caller can
+    /// republish it to the segment actor. Must run only AFTER every
+    /// fallible actor publish of the converge succeeded: GC'ing before a
+    /// publish that then fails would split the drain state — the
+    /// coordinator (gauge, RPC drain reasons) would report the ES
+    /// undrained while the segment actor's drained-set mirror keeps it
+    /// withdrawn, and a bare operator undrain would be an idempotent
+    /// no-op that fans nothing out (the cross-actor seam audit's
+    /// split-state finding). With this ordering a failed converge leaves
+    /// the entry in place on BOTH sides, so the rollback has nothing to
+    /// restore (preserving ADR-0084's no-restore stance) and a
+    /// subsequent undrain is a real transition.
     fn gc_drained_esis(
         &self,
         segments: &[rustbgpd_evpn::EthernetSegment],
@@ -1013,10 +1021,6 @@ impl EvpnRuntimeActorConverger {
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
         let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
-        // ADR-0084 GC: a teardown can delete a drained ES; drop its drain
-        // entry before the publishes below so the originator model and the
-        // segment actor both see the GC'd set.
-        let gc_drained = self.gc_drained_esis(candidate.ethernet_segments());
         let ip_vrf_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
         let dataplane = self.require_l2vni_dataplane("tenant teardown")?;
@@ -1111,6 +1115,10 @@ impl EvpnRuntimeActorConverger {
             }
         }
 
+        // The drained-set snapshot may still carry a to-be-deleted ESI's
+        // entry (the ADR-0084 GC at the end runs only after every publish
+        // succeeded); it is inert here — the originator keys drain through
+        // the published vni->esi map, which no longer maps it.
         if !originator.replace_runtime_model(
             candidate_instances.clone(),
             candidate_vni_to_esi,
@@ -1143,12 +1151,6 @@ impl EvpnRuntimeActorConverger {
                     "EVPN segment runtime model publish failed",
                 ));
             }
-            // Push the GC'd ADR-0084 drain set so a re-added ESI cannot
-            // pick up a stale drain entry inside the segment actor.
-            // Best-effort: a closed control here means daemon teardown.
-            if let Some(gc_drained) = gc_drained.clone() {
-                let _ = segment.replace_drained_esis(gc_drained);
-            }
         }
         if let Some(l3) = l3_originator
             && !l3.replace_ip_vrfs(candidate_ip_vrfs)
@@ -1160,6 +1162,20 @@ impl EvpnRuntimeActorConverger {
                 restored,
                 "EVPN Type 5 originator runtime model publish failed",
             ));
+        }
+
+        // ADR-0084 GC, only now that every fallible publish above
+        // succeeded: a teardown can delete a drained ES; drop its drain
+        // entry and push the GC'd set so a re-added ESI cannot pick up
+        // a stale drain inside the segment actor. GC-after-success keeps
+        // the coordinator and the actors agreeing (all still drained)
+        // when a publish fails mid-converge — see `gc_drained_esis`.
+        // The push is best-effort: a closed control here means daemon
+        // teardown.
+        if let Some(gc_drained) = self.gc_drained_esis(candidate.ethernet_segments())
+            && let Some(segment) = segment
+        {
+            let _ = segment.replace_drained_esis(gc_drained);
         }
 
         Ok(())
@@ -1593,10 +1609,6 @@ impl EvpnRuntimeActorConverger {
         operation: &str,
     ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
         let segment = self.require_segment_runtime_control(operation)?;
-        // ADR-0084 GC: an ES delete drops its drain entry (a redefine
-        // keeps the ESI, so its drain survives). Run before the
-        // originator publish below so the model carries the GC'd set.
-        let gc_drained = self.gc_drained_esis(candidate.ethernet_segments());
         // ES add/delete/redefine leaves the instance table unchanged
         // (`plan.evpn_instances.has_changes() == false`), so clone it once
         // and share the Arc across the segment + originator publishes.
@@ -1610,6 +1622,10 @@ impl EvpnRuntimeActorConverger {
         // re-originates them under the candidate ESI map.
         // RR / no-local-MAC deployments have no originator and are left
         // untouched (the segment publish below still runs).
+        // The drained-set snapshot may still carry a to-be-deleted ESI's
+        // entry (the ADR-0084 GC below runs only after every publish
+        // succeeded); it is inert here — the originator keys drain
+        // through the published vni->esi map, which no longer maps it.
         let republished_originator = if let Some(originator) = self.originator.as_ref() {
             if !originator.is_open() {
                 return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -1647,10 +1663,15 @@ impl EvpnRuntimeActorConverger {
                 "EVPN segment runtime model publish failed",
             ));
         }
-        // Push the GC'd ADR-0084 drain set so a re-added ESI cannot pick
-        // up a stale drain entry inside the segment actor. Best-effort:
-        // a closed control here means daemon teardown.
-        if let Some(gc_drained) = gc_drained {
+        // ADR-0084 GC, only now that every fallible publish above
+        // succeeded: an ES delete drops its drain entry (a redefine keeps
+        // the ESI, so its drain survives), and the GC'd set is pushed so
+        // a re-added ESI cannot pick up a stale drain inside the segment
+        // actor. GC-after-success keeps the coordinator and the actors
+        // agreeing (all still drained) when a publish fails mid-converge
+        // — see `gc_drained_esis`. The push is best-effort: a closed
+        // control here means daemon teardown.
+        if let Some(gc_drained) = self.gc_drained_esis(candidate.ethernet_segments()) {
             let _ = segment.replace_drained_esis(gc_drained);
         }
         Ok(())
@@ -8616,6 +8637,221 @@ table_id = 6000
 
         originator_handle.shutdown().await;
         segment_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    /// The drain-GC split-state fix (cross-actor seam audit follow-up to
+    /// ADR-0084): an ES-delete apply whose Type 2 originator publish
+    /// fails mid-converge must leave the coordinator's drain state
+    /// (the gauge / RPC drain-reason source) and the segment actor's
+    /// drained-set mirror AGREEING — both still drained — and a
+    /// subsequent bare operator undrain must be a real transition that
+    /// fans the undrained set out to the actor, not an idempotent no-op
+    /// against an entry the converge already GC'd.
+    #[tokio::test]
+    async fn failed_es_delete_publish_keeps_coordinator_and_actor_drain_agreeing() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_two_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let removed_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let es_drain = crate::evpn_es_drain::EvpnEsDrainState::default();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let coordinator = Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::from_model(&current));
+        let mut probe = evpn_segment::EvpnSegmentControlProbe::new();
+
+        // Operator-drain the ES the apply will delete, through the shared
+        // primitive: coordinator state + the segment actor's mirror.
+        let outcome = crate::evpn_es_drain::apply_ethernet_segment_drain(
+            removed_esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            true,
+            &apply_lock,
+            &coordinator,
+            &es_drain,
+            Some(&probe.control),
+            None,
+        )
+        .await
+        .expect("drain applies against the committed model");
+        assert!(outcome.drained && outcome.changed);
+        assert!(probe.drained_rx.borrow_and_update().contains(&removed_esi));
+
+        // ES delete whose originator publish fails mid-converge (the
+        // actor exited) — after the segment actor already received the
+        // candidate instance snapshot.
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: Some(evpn_originator::EvpnOriginatorRuntimeControl::closed_for_test()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(probe.control.clone()),
+            es_drain: es_drain.clone(),
+        };
+        let err = converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap_err();
+        assert!(
+            err.message()
+                .contains("originator runtime control is closed"),
+            "expected the originator publish failure; got {err:?}"
+        );
+
+        // The invariant: both sides still report the ES drained.
+        assert!(
+            es_drain.snapshot().contains(&removed_esi),
+            "a failed converge must not GC the coordinator's drain entry"
+        );
+        assert_eq!(
+            es_drain.reasons_for(removed_esi),
+            std::collections::BTreeSet::from([crate::evpn_es_drain::EsDrainReason::Operator]),
+            "the RPC drain-reason source must still report the operator drain"
+        );
+        assert!(
+            probe.drained_rx.borrow_and_update().contains(&removed_esi),
+            "the segment actor's drained mirror must still hold the ES"
+        );
+
+        // And a bare operator undrain is a real transition that fans out.
+        let outcome = crate::evpn_es_drain::apply_ethernet_segment_drain(
+            removed_esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            false,
+            &apply_lock,
+            &coordinator,
+            &es_drain,
+            Some(&probe.control),
+            None,
+        )
+        .await
+        .expect("undrain applies against the committed model");
+        assert!(
+            outcome.changed,
+            "the undrain after the failed apply must not be an idempotent no-op"
+        );
+        assert!(!outcome.drained);
+        assert!(
+            !probe.drained_rx.borrow_and_update().contains(&removed_esi),
+            "the undrain must fan the undrained set out to the segment actor"
+        );
+    }
+
+    /// The same invariant on the tenant-teardown path: a teardown that
+    /// would delete a drained ES but fails before completing (here: the
+    /// Type 2 originator is gone) must leave the coordinator drain state
+    /// and the segment actor's mirror agreeing (both drained), with a
+    /// subsequent operator undrain fanning out.
+    #[tokio::test]
+    async fn failed_tenant_teardown_keeps_coordinator_and_actor_drain_agreeing() {
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(minimal_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let drained_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let es_drain = crate::evpn_es_drain::EvpnEsDrainState::default();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let coordinator = Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::from_model(&current));
+        let mut probe = evpn_segment::EvpnSegmentControlProbe::new();
+
+        let outcome = crate::evpn_es_drain::apply_ethernet_segment_drain(
+            drained_esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            true,
+            &apply_lock,
+            &coordinator,
+            &es_drain,
+            Some(&probe.control),
+            None,
+        )
+        .await
+        .expect("drain applies against the committed model");
+        assert!(outcome.drained && outcome.changed);
+
+        // Open dataplane control so the teardown reaches the originator
+        // requirement, which fails (the actor exited).
+        let (evpn_instances_tx, _evpn_instances_rx) =
+            watch::channel(Arc::new(current.instances().clone()));
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(evpn_originator::EvpnOriginatorRuntimeControl::closed_for_test()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(probe.control.clone()),
+            es_drain: es_drain.clone(),
+        };
+        let err = converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap_err();
+        assert!(
+            err.message()
+                .contains("originator runtime control is closed"),
+            "expected the originator failure; got {err:?}"
+        );
+
+        assert!(
+            es_drain.snapshot().contains(&drained_esi),
+            "a failed teardown must not GC the coordinator's drain entry"
+        );
+        assert!(
+            probe.drained_rx.borrow_and_update().contains(&drained_esi),
+            "the segment actor's drained mirror must still hold the ES"
+        );
+
+        let outcome = crate::evpn_es_drain::apply_ethernet_segment_drain(
+            drained_esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            false,
+            &apply_lock,
+            &coordinator,
+            &es_drain,
+            Some(&probe.control),
+            None,
+        )
+        .await
+        .expect("undrain applies against the committed model");
+        assert!(
+            outcome.changed,
+            "the undrain after the failed teardown must not be an idempotent no-op"
+        );
+        assert!(
+            !probe.drained_rx.borrow_and_update().contains(&drained_esi),
+            "the undrain must fan the undrained set out to the segment actor"
+        );
+
         dataplane_handle.shutdown().await;
     }
 }

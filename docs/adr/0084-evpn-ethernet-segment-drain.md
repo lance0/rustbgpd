@@ -155,6 +155,17 @@ daemon coordinator and pushed to both origination actors, exposed via
   actor publish failure mid-apply (in practice: daemon teardown) on
   an apply that deleted a drained ES; tracked on the ROADMAP rather
   than fixed.
+  **Resolved (2026-06-12):** the converger now runs the GC only after
+  the last fallible actor publish of the apply succeeded
+  (`gc_drained_esis` in `src/evpn_runtime_converger.rs`, both the
+  ES-delete and tenant-teardown paths). A failed mid-converge publish
+  therefore leaves the drain entry intact on BOTH the coordinator and
+  the segment actor's mirror — nothing is GC'd that a rollback would
+  need to restore, so the deliberate no-restore stance above stands
+  unchanged while the two sides always agree and a subsequent undrain
+  is a real transition that fans out. Invariant pinned by
+  `failed_es_delete_publish_keeps_coordinator_and_actor_drain_agreeing`
+  and `failed_tenant_teardown_keeps_coordinator_and_actor_drain_agreeing`.
 - Duplicate-MAC quarantines and the drain compose: undrain replays are
   quarantine-respecting, and quarantine recovery while drained keeps
   the MAC withdrawn until undrain.
