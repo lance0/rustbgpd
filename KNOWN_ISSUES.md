@@ -94,9 +94,8 @@ resolved.
   back-pressure can no longer park the session's `select!`. Bulk-
   channel saturation triggers a `Cease/8` (Out of Resources) and a
   clean BGP session restart instead of silent drops. Validated by the
-  M33 1h soak in `tests/soak/runs/20260427T230448Z/`: 0 drops, 0
-  flaps, memory flat at 83 MB, slope 0.50 MB/h under sustained 1k rps
-  EVPN churn.
+  M33 1h soak: 0 drops, 0 flaps, memory flat at 83 MB, slope 0.50 MB/h
+  under sustained 1k rps EVPN churn.
 
 ## Limitations (by design, not bugs)
 

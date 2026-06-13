@@ -31,6 +31,7 @@ matrix below runs on the hosted kernel-dataplane workflow or manual gates).
 - **BLACKHOLE FIB discard** — RFC 7999 receiver scoping plus opt-in kernel discard install / withdraw: **M41**.
 - **gRPC/gNMI + EVPN injection** — ADR-0064 mTLS tier enforcement, ADR-0070 gNMI / OpenConfig telemetry + Set, and EVPN Type 5 control-plane injection: **M44**, **M54**, **M45**.
 - **Inbound RIB backpressure** — ADR-0078 hold-timer survival under an artificially stalled RIB: **M63**.
+- **IPv6-only peering** — a session with `disable_ipv4_unicast` negotiating only IPv6 unicast against an FRR 10.3.1 peer: **M64**.
 
 Plus one **kernel-primitive** PR-CI gate that lives in `ci.yml`
 rather than `interop.yml` (no containerlab — single Docker

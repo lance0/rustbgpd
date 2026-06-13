@@ -39,8 +39,8 @@ are present.
 ## Inspect
 
 ```bash
-rustbgpctl rib fib
-rustbgpctl -j rib fib
+rbgp rib fib
+rbgp -j rib fib
 ip route show table 1000
 ip -6 route show table 1000
 curl -s localhost:9179/metrics | grep '^bgp_fib_'

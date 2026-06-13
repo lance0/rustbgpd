@@ -109,7 +109,7 @@ through the same `pending_refresh` / `pending_export_apply` carry-forward
 plumbing used elsewhere in the reload path; transient failures surface as
 `warn!` log lines rather than aborting the whole reload.
 
-The matching initiator-side toggle (`rustbgpctl gshut`) is a runtime gRPC
+The matching initiator-side toggle (`rbgp gshut`) is a runtime gRPC
 operation, not a config field; see `docs/OPERATIONS.md` for the operator
 workflow.
 
@@ -164,13 +164,13 @@ Note this marker is a userspace convention: an operator's manual
 state and will be adopted, and co-residency with another proto-bgp daemon
 (e.g. FRR zebra, which claims the same marker) is unsupported.
 
-`rustbgpctl rib blackholes` shows the current discard status for every
+`rbgp rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`
 (`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
 (`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
 `dump_failed`, `remove_failed`, `reap_failed`, or the kernel install
 error). The same surface is available as JSON with
-`rustbgpctl -j rib blackholes`. Adoption and reaping are counted by
+`rbgp -j rib blackholes`. Adoption and reaping are counted by
 `bgp_blackhole_discard_adopted_total` and
 `bgp_blackhole_discard_reaped_total`.
 If the reconciler cannot start at all (for example netlink setup failure, or
@@ -476,7 +476,7 @@ peer address family matches the configured listener socket. If a configured
 TCP-AO listener key cannot be installed, startup fails closed instead of
 running a partially protected listener. Active-open key installation failures
 fail that session connect attempt and retry later; they do not fall back to an
-unauthenticated session. `rustbgpctl global` / `GlobalService.GetGlobal` expose
+unauthenticated session. `rbgp global` / `GlobalService.GetGlobal` expose
 the host capability probe so operators can verify kernel support before
 enabling the field.
 
@@ -586,7 +586,7 @@ deferred even though the BGP neighbor itself can be interface scoped. Like
 TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
 `[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
 reports them as restart-required in `--diff`. Inspect sessions with
-`rustbgpctl bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)).
+`rbgp bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)).
 
 ### Address families
 
@@ -789,15 +789,15 @@ Validation rules:
   and length) are rejected; overlapping ranges of *different* lengths are
   allowed and resolve by longest-prefix-match at accept time
 
-### Runtime management (gRPC / `rustbgpctl`)
+### Runtime management (gRPC / `rbgp`)
 
 Ranges can be added and removed at runtime without a restart, in addition to
 the static TOML form above:
 
 ```sh
-rustbgpctl dynamic-neighbor list
-rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members [--asn 65010] [--description "..."]
-rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+rbgp dynamic-neighbor list
+rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members [--asn 65010] [--description "..."]
+rbgp dynamic-neighbor delete 10.0.0.0/24
 ```
 
 - Backed by `NeighborService` (`AddDynamicNeighbor` / `DeleteDynamicNeighbor` /
@@ -1003,7 +1003,7 @@ modified by the v1 implementation. Existing OTC attributes are preserved;
 rustbgpd only adds OTC when RFC 9234 requires it and the attribute is absent.
 Malformed OTC length is handled as treat-as-withdraw for unicast announcements:
 withdrawals in the same UPDATE still apply and the BGP session stays up.
-`rustbgpctl neighbor <addr>` and `NeighborService.GetNeighborState` report the
+`rbgp neighbor <addr>` and `NeighborService.GetNeighborState` report the
 configured local role, any remote role advertised in OPEN, whether the role was
 mutually negotiated, and the running `otc_routes_blocked` count.
 
@@ -1337,7 +1337,7 @@ same direction on the same neighbor. This is a config validation error.
 ### Import-decision explain (`[policy.explain]`)
 
 Optional. Controls the per-session import-decision cache that backs
-`PolicyService.ExplainImportPolicy` and `rustbgpctl policy explain`
+`PolicyService.ExplainImportPolicy` and `rbgp policy explain`
 (ADR-0073). Every import evaluation — permit **and** deny — is recorded
 at the transport eval site keyed by `(AFI, SAFI, prefix, path_id)`, so a
 prefix that was denied and never reached the RIB stays explainable.
@@ -1705,7 +1705,7 @@ When BMP is not configured, overhead remains minimal: raw frame capture uses
 
 Optional. Configures periodic MRT TABLE_DUMP_V2 (RFC 6396) RIB snapshots for
 offline analysis and archival. Dumps can also be triggered on demand via the
-gRPC `TriggerMrtDump` RPC or the `rustbgpctl mrt-dump` CLI command.
+gRPC `TriggerMrtDump` RPC or the `rbgp mrt-dump` CLI command.
 
 ```toml
 [mrt]
@@ -1786,7 +1786,7 @@ declared tables only. The actor preserves foreign kernel rows, writes
 routes as `RTPROT_BGP` with the configured table and metric, drains
 daemon-owned rows on coordinated shutdown, and publishes per-route
 status through `RibService.ListFibRoutes` and
-`rustbgpctl rib fib`. The actor also writes a crash-recovery owned-state
+`rbgp rib fib`. The actor also writes a crash-recovery owned-state
 file at `<runtime_state_dir>/fib-owned.json` so an ungraceful process
 restart can recover routes the previous rustbgpd instance installed.
 
@@ -1850,7 +1850,7 @@ alive but idle, and re-adding a table later hot-applies.
 **gRPC / CLI runtime CRUD** (same lifecycle rules as SIGHUP): `RibService`
 exposes `SetFibTable` (create-or-replace by name — the request carries the full
 table definition, not a patch), `DeleteFibTable`, and `ListFibTables`, surfaced
-as `rustbgpctl fib-table {list,set,delete}`. A `set` that changes `table_id` or
+as `rbgp fib-table {list,set,delete}`. A `set` that changes `table_id` or
 `metric` for an existing name is a table-key move: the old kernel rows withdraw
 and the new table back-fills. The candidate is validated against the live config
 (reserved/duplicate ids, families, ECMP caps, peer-group references) before it
@@ -1887,26 +1887,26 @@ executors exist.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.
-Operators can drive the workflow through `rustbgpctl config plan --from-file`
-and `rustbgpctl config apply --from-file --expected-runtime-snapshot-token`;
+Operators can drive the workflow through `rbgp config plan --from-file`
+and `rbgp config apply --from-file --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
-the normal apply invocation — `rustbgpctl config apply --from-file <config.toml>
+the normal apply invocation — `rbgp config apply --from-file <config.toml>
 --expected-runtime-snapshot-token <token> --confirm-id <id> --confirm-timeout
 <seconds>` — or set the matching gRPC fields directly. The confirm flags are
 additions; `--from-file` and `--expected-runtime-snapshot-token` are still
 required. The timeout defaults to 600 seconds
 and is capped at 86400. The change applies immediately, then remains pending
-until `rustbgpctl config confirm <id>` (or `ConfirmConfigTransaction`) makes it
-permanent. `rustbgpctl config abort <id>` rolls it back immediately, and an
+until `rbgp config confirm <id>` (or `ConfirmConfigTransaction`) makes it
+permanent. `rbgp config abort <id>` rolls it back immediately, and an
 expired timer automatically re-applies the pre-commit runtime snapshot through
 the same transaction executor. While a confirmed transaction is applying or
 pending, persisted runtime config mutators such as static/dynamic neighbor CRUD,
 policy/peer-group CRUD, FIB-table CRUD, and another config transaction are
 rejected with `FAILED_PRECONDITION`; SIGHUP reload is skipped and logged until
 the transaction is confirmed, aborted, or auto-reverted. Use
-`rustbgpctl config status` to inspect the redacted pending or last
+`rbgp config status` to inspect the redacted pending or last
 confirmed-transaction state. If abort or timer rollback fails, status records
 the failed lifecycle result and clears the pending fence so operators can apply
 a corrective transaction instead of leaving runtime config mutations blocked
@@ -1917,10 +1917,10 @@ most 128 characters, and free of control characters; the CLI validates those
 constraints before reading the candidate file or calling the daemon.
 
 ```console
-$ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
+$ rbgp fib-table set edge --table-id 1000 --metric 200 \
     --families ipv4_unicast,ipv6_unicast --max-routes 50000
-$ rustbgpctl fib-table list
-$ rustbgpctl fib-table delete edge
+$ rbgp fib-table list
+$ rbgp fib-table delete edge
 ```
 
 ---
@@ -2146,7 +2146,7 @@ kernel routes + L3 neighbor + L3VXLAN FDB rows atomically with
 four-phase apply ordering (route-remove → resolution-add → route-add
 → resolution-remove) and Router MAC conflict detection. Operators
 read readiness, originated-route count, and installed-route count
-via `rustbgpctl evpn vrfs [NAME]` and the `EvpnService.ListIpVrfs` /
+via `rbgp evpn vrfs [NAME]` and the `EvpnService.ListIpVrfs` /
 `EvpnService.GetIpVrf` gRPC RPCs. Sub-second tenant withdraw is
 driven by `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast.
 
@@ -2366,7 +2366,7 @@ event. The `bgp_event_outbox_cursor_gap_total` counter
 tracks how often that fires — alert on non-zero to know your
 retention is undersized for the collector reconnect SLA.
 
-The CLI `rustbgpctl events watch --from-event-id <N>` drives
+The CLI `rbgp events watch --from-event-id <N>` drives
 the same RPC and is mutually exclusive with `--backfill`
 (`--backfill` replays the daemon's process-local route ring,
 which resets on restart; `--from-event-id` replays the

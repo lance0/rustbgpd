@@ -487,19 +487,19 @@ outside the reshape family (ADR-0086).
 CLI equivalent:
 
 ```bash
-rustbgpctl config diff --from-file /tmp/new-config.toml
-rustbgpctl --json config diff --from-file /tmp/new-config.toml
-rustbgpctl config plan --from-file /tmp/new-config.toml
-rustbgpctl config apply --from-file /tmp/new-config.toml \
+rbgp config diff --from-file /tmp/new-config.toml
+rbgp --json config diff --from-file /tmp/new-config.toml
+rbgp config plan --from-file /tmp/new-config.toml
+rbgp config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
-rustbgpctl config apply --from-file /tmp/new-config.toml \
+rbgp config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --client-request-id deploy-2026-06-03-003 \
   --confirm-id deploy-2026-06-03-003 \
   --confirm-timeout 120
-rustbgpctl config status
-rustbgpctl config confirm deploy-2026-06-03-003
-rustbgpctl config abort deploy-2026-06-03-003
+rbgp config status
+rbgp config confirm deploy-2026-06-03-003
+rbgp config abort deploy-2026-06-03-003
 ```
 
 ---
@@ -790,19 +790,19 @@ through one RPC shape.
 | Need | Surface | Shape | Retention / loss behavior |
 |------|---------|-------|---------------------------|
 | Live unicast route deltas | `WatchRoutes`, `WatchRouteEvents`, or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; `WatchRouteEvents` / `WatchEvents` emit `stream_lagged` when slow subscribers miss events |
-| Recent unicast route timeline | `ListRouteEvents` / `rustbgpctl events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Recent unicast route timeline | `ListRouteEvents` / `rbgp events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
-| Recent session lifecycle | `EventService.ListSessionEvents` / `rustbgpctl events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Recent session lifecycle | `EventService.ListSessionEvents` / `rbgp events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live policy mutation summaries | `EventService.WatchEvents` with `EVENT_CATEGORY_POLICY` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
-| Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rustbgpctl events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rbgp events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live EVPN route best-path deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_EVPN` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
-| Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rustbgpctl events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
-| RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
-| ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
-| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
-| EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
-| ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rustbgpctl bfd` | Snapshot | Current BFD actor snapshot |
-| Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rustbgpctl events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
+| Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rbgp events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| RFC 7999 discard programming | `ListBlackholeDiscards` / `rbgp rib blackholes` | Snapshot | Current reconcile snapshot only |
+| ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
+| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
+| EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
+| ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rbgp bfd` | Snapshot | Current BFD actor snapshot |
+| Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rbgp events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
 
 Use a live stream when you need a tail, `ListRouteEvents` when you need recent
@@ -1032,11 +1032,11 @@ best routes are currently visible.
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFibRoutes
 
-rustbgpctl rib fib          # human table
-rustbgpctl rib fib --json   # JSON array for scripts
-rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
-rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
-rustbgpctl rib fib --page-size 100
+rbgp rib fib          # human table
+rbgp rib fib --json   # JSON array for scripts
+rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
+rbgp rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rbgp rib fib --page-size 100
 ```
 
 Returns one row per desired route, daemon-owned route, or one-pass
@@ -1056,7 +1056,7 @@ with AND semantics. The prefix filter is an exact route-key match, not
 longest-prefix or containment matching, so `203.0.113.0/24` does not match
 `203.0.113.128/25`. Empty strings and `FIB_ROUTE_STATE_UNSPECIFIED` mean "no
 filter"; for direct gRPC callers, `prefix_length` must be `0` when `prefix` is
-empty. `rustbgpctl rib fib` exposes the same filters as `--table`, `--state`,
+empty. `rbgp rib fib` exposes the same filters as `--table`, `--state`,
 `--reason`, `--prefix`, and `--peer`. `page_size` and `page_token` enable
 optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
@@ -1165,7 +1165,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
-`ListRouteEvents` history and it does not persist events. The `rustbgpctl
+`ListRouteEvents` history and it does not persist events. The `rbgp
 events watch --backfill N` command composes both RPCs client-side for route
 events by subscribing live first, printing recent `ListRouteEvents` results
 through the same `BgpEvent` renderer used by the live stream, and suppressing
@@ -1682,8 +1682,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Or via CLI:
 
 ```bash
-rustbgpctl evpn runtime           # human format
-rustbgpctl evpn runtime --json    # JSON output
+rbgp evpn runtime           # human format
+rbgp evpn runtime --json    # JSON output
 ```
 
 ### List local EVPN instances
@@ -1696,9 +1696,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Or via CLI:
 
 ```bash
-rustbgpctl evpn instances           # human format
-rustbgpctl evpn instances --json    # JSON output
-rustbgpctl evpn diagnose            # instance / Type 2 / Type 3 / metric summary
+rbgp evpn instances           # human format
+rbgp evpn instances --json    # JSON output
+rbgp evpn diagnose            # instance / Type 2 / Type 3 / metric summary
 ```
 
 The human CLI includes `originated-local-macs=N` per instance. JSON and
@@ -1723,8 +1723,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Or via CLI:
 
 ```bash
-rustbgpctl evpn nexthops          # human format
-rustbgpctl evpn nexthops --json   # JSON output
+rbgp evpn nexthops          # human format
+rbgp evpn nexthops --json   # JSON output
 ```
 
 An empty `groups` list is normal on RR-only deployments, single-homed
@@ -1750,9 +1750,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Or via CLI:
 
 ```bash
-rustbgpctl evpn vrfs                  # human format
-rustbgpctl evpn vrfs --json           # JSON output
-rustbgpctl evpn vrfs vrf1             # single-VRF detail (matches GetIpVrf)
+rbgp evpn vrfs                  # human format
+rbgp evpn vrfs --json           # JSON output
+rbgp evpn vrfs vrf1             # single-VRF detail (matches GetIpVrf)
 ```
 
 ### Get IP-VRF detail
@@ -1786,8 +1786,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Or via CLI:
 
 ```bash
-rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
-rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff --json
+rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
+rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff --json
 ```
 
 ### Apply EVPN runtime candidate

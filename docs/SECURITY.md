@@ -23,7 +23,7 @@ Preferred posture:
   loopback TCP does not.
 - If you need TCP for local tooling or container networking, configure
   `[global.telemetry.grpc_tcp]` on `127.0.0.1:50051` and access it locally via
-  `rustbgpctl`, `grpcurl`, or SSH.
+  `rbgp`, `grpcurl`, or SSH.
 - Optional bearer-token auth can be enabled per listener with `token_file`, but
   same-host UDS access is still the preferred local posture.
 - For occasional remote administration, tunnel to the local listener or socket

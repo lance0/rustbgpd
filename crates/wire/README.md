@@ -33,7 +33,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers |
-| 6811 | RPKI prefix-origin validation state (typed extended community) |
+| 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
