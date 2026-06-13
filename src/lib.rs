@@ -13,6 +13,16 @@ mod fib_common;
 #[cfg(feature = "bench-internals")]
 mod fib;
 
+// `fib`'s unit tests (the only bench-internals lib module with tests
+// that use the shared builders) reach for `crate::test_support`. The
+// bin declares it in `main.rs`; the lib needs its own declaration so
+// `cargo clippy` and `cargo test` (with `--features bench-internals
+// --all-targets`) can compile the lib test target. `test_support`
+// only depends on
+// `crate::config` + `crate::fib`, both exposed under this feature.
+#[cfg(all(test, feature = "bench-internals"))]
+mod test_support;
+
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub mod bench_internals {
