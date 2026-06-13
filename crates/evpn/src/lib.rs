@@ -131,7 +131,7 @@ pub use instance::{
 };
 pub use ip_vrf::{
     IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfRouteDump, IpVrfTable, IpVrfTableError,
-    LocalIpRouteObservation, RouteFilterReason, RouteSource,
+    LocalIpRouteObservation, OverlayIndexMode, RouteFilterReason, RouteSource,
 };
 pub use label_allocator::{AllocateError, EsiLabelAllocator, synthesize_from_esi};
 pub use mac::{

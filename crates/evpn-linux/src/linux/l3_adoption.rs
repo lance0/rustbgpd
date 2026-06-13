@@ -46,9 +46,7 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
-use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteProtocol,
-};
+use netlink_packet_route::route::{RouteFlags, RouteMessage, RouteProtocol};
 use rtnetlink::{Handle, IpVersion, RouteMessageBuilder};
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfTable};
@@ -168,7 +166,7 @@ pub(crate) fn classify_adoption_route(
     }
     let (Some(prefix), Some(next_hop), Some(l3vxlan_ifindex)) = (
         extract_prefix(msg),
-        extract_gateway(msg),
+        super::routes::extract_gateway(msg),
         extract_output_ifindex(msg),
     ) else {
         return RouteAdoptionVerdict::MarkedButUnusable;
@@ -295,17 +293,6 @@ fn state_has_permanent(state: NeighbourState) -> bool {
         NeighbourState::Other(bits) => bits & NUD_PERMANENT != 0,
         _ => false,
     }
-}
-
-/// Gateway address from the first `RouteAttribute::Gateway`. The
-/// observation path (`super::routes`) never needs the gateway, so
-/// this lives with the adoption walk that does.
-fn extract_gateway(msg: &RouteMessage) -> Option<IpAddr> {
-    msg.attributes.iter().find_map(|attr| match attr {
-        RouteAttribute::Gateway(RouteAddress::Inet(v4)) => Some(IpAddr::V4(*v4)),
-        RouteAttribute::Gateway(RouteAddress::Inet6(v6)) => Some(IpAddr::V6(*v6)),
-        _ => None,
-    })
 }
 
 /// Walk all three kernel surfaces and collect marker-matching rows.
@@ -455,7 +442,9 @@ async fn dump_l3vxlan_fdb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netlink_packet_route::route::{RouteHeader, RouteProtocol, RouteScope, RouteType};
+    use netlink_packet_route::route::{
+        RouteAddress, RouteAttribute, RouteHeader, RouteProtocol, RouteScope, RouteType,
+    };
     use rustbgpd_evpn::Ipv4Prefix;
     use std::net::Ipv4Addr;
 

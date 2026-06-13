@@ -2162,6 +2162,7 @@ router_mac = "02:00:00:00:00:01"   # Router MAC ext-community value
 vrf_device = "vrf-blue"            # Linux VRF device (observe-only)
 l3vxlan_device = "vni5000"         # Linux L3 VXLAN device (observe-only)
 table_id = 5000                    # VRF route table id
+overlay_index_mode = "interface_less" # or "gateway_ip" (ADR-0087); default interface_less
 
 # An `[[evpn_instances]]` entry binds to this IP-VRF by name.
 [[evpn_instances]]
@@ -2186,6 +2187,7 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
 | `l3vxlan_device` | string    | yes      | --      | Linux L3 VXLAN device name (operator-managed, observe-only) |
 | `table_id`       | u32       | yes      | --      | VRF route table id (> 0); cross-checked against `vrf_device`'s `IFLA_VRF_TABLE` |
+| `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.2) keeps the Gateway Address zero + Router's MAC extcomm. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"gateway_ip"` requires at least one `ip_vrf`-linked L2VNI |
 
 ### L2VNI binding
 
@@ -2226,6 +2228,12 @@ the transition once per state change rather than every pass.
 - `router_mac` is a unicast non-zero MAC.
 - `vrf_device` and `l3vxlan_device` are non-blank.
 - `table_id` is `> 0`.
+- `overlay_index_mode` is `"interface_less"` (default) or `"gateway_ip"`.
+  `"gateway_ip"` is rejected at load unless at least one
+  `[[evpn_instances]]` links to this IP-VRF via `ip_vrf` — the GW-IP
+  receive side scopes its recursive Type 2 lookup to the linked
+  L2VNIs, so a `gateway_ip` VRF with no L2VNI link could never
+  originate a resolvable route (ADR-0087).
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
 - `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
   snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
@@ -2235,7 +2243,37 @@ the transition once per state change rather than every pass.
   (and any Ethernet Segment) in one pass; `ip_vrf` relink and L3VNI/device/table
   IP-VRF redefine remain fail-closed #210 shapes.
 
-See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) for the design rationale.
+### GW-IP overlay-index origination (`overlay_index_mode = "gateway_ip"`)
+
+By default (`"interface_less"`) every originated Type 5 carries
+Gateway Address zero and the Router's MAC extended community —
+receivers reach the prefix's VTEP and resolve the inner MAC from that
+extcomm (RFC 9136 §4.4.2). With `"gateway_ip"` (RFC 9136 §4.1/§4.2,
+ADR-0087), a kernel route whose via (`ip route add <prefix> via <gw>`)
+lands inside a connected subnet of the VRF is originated with that via
+in the Gateway Address and **no** Router's MAC extcomm; receivers
+resolve the gateway recursively through its Type 2 MAC/IP route and
+forward straight to wherever the gateway host lives. When the gateway
+host moves, its Type 2 alone re-converges every prefix that points at
+it.
+
+- The via must land on a `Connected` (kernel) prefix of the same VRF
+  with prefix length > 0; an off-subnet via (no Type 2 will ever name
+  it) falls back to the interface-less shape, as does a route with no
+  via.
+- The companion Type 2 is a dependency, not a precondition: rustbgpd
+  originates the Type 5 immediately, and receivers hold it unresolved
+  (surfaced via the `unresolved_overlay_index_gateway` drop counter)
+  until the Type 2 arrives. The L3VNI stays in the label slot in both
+  modes (deviating from the RFC 9136 §3.1 SHOULD-zero — our own
+  receive side and FRR both keep it).
+- A via change re-originates in place (same route key, new Gateway
+  Address) — one UPDATE, no withdraw/announce pulse.
+- ESI overlay-index origination (RFC 9136 §4.3) is not yet supported.
+
+See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) and
+[ADR-0087](adr/0087-evpn-type5-gateway-ip-overlay-index-origination.md)
+for the design rationale.
 
 ---
 

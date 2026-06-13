@@ -61,10 +61,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use rustbgpd_evpn::ip_vrf::{
-    IpVrfStatus, LocalIpRoute, OriginationError, originate_ip_prefix_route,
+    IpVrfStatus, LocalIpRoute, OriginationError, originate_ip_prefix_route, select_overlay_gateway,
 };
 use rustbgpd_evpn::{
     EvpnIpPrefixValue, IpVrf, IpVrfDataplaneStatus, IpVrfId, IpVrfTable, LocalIpRouteObservation,
+    RouteSource,
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_rib::route::{EvpnRibRoute, RouteOrigin};
@@ -257,10 +258,25 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     })
 }
 
+/// What the originator recorded for one currently-originated
+/// `(IpVrfId, prefix)`. The `key` is the RIB withdraw handle; the
+/// `gateway` is the Type 5 Gateway Address we last advertised. The
+/// gateway is tracked separately because `EvpnRouteKey::IpPrefix` is
+/// `{rd, ethernet_tag, prefix}` and deliberately excludes the
+/// gateway (RFC 7432/9136 route identity), so a GW-IP via change
+/// keeps the same key — the originator must compare the gateway to
+/// notice it and re-originate in place (ADR-0087 decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OriginatedEntry {
+    key: EvpnRouteKey,
+    gateway: std::net::IpAddr,
+}
+
 async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrf_model: EffectiveIpVrfModelWatch) {
-    // (IpVrfId, prefix) -> EvpnRouteKey we used for the inject (so the
-    // matching withdraw uses the same key).
-    let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> = BTreeMap::new();
+    // (IpVrfId, prefix) -> the route we injected (key + gateway), so a
+    // matching withdraw uses the same key and a via change is
+    // detectable even though it leaves the key unchanged.
+    let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry> = BTreeMap::new();
     let mut ip_vrfs = ip_vrf_model.rx.borrow().clone();
     let mut vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
 
@@ -326,8 +342,38 @@ async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrf_model: EffectiveIpVrfM
     }
 }
 
+/// Per-Ready-VRF connected-subnet set for GW-IP overlay-index gateway
+/// selection (ADR-0087 decision 1). Built once per reconcile pass from
+/// the same observation snapshot: a via is only a valid gateway if it
+/// lands inside a `Connected` (kernel-installed) prefix in the same
+/// VRF. Cheap — a handful of prefixes per VRF — and only populated for
+/// VRFs in GW-IP mode (Interface-less VRFs never consult it).
+fn gateway_mode_connected_subnets(
+    ready_vrfs: &HashMap<IpVrfId, &IpVrf>,
+    observations: &HashMap<IpVrfId, Vec<LocalIpRouteObservation>>,
+) -> HashMap<IpVrfId, Vec<EvpnIpPrefixValue>> {
+    let mut connected_subnets: HashMap<IpVrfId, Vec<EvpnIpPrefixValue>> = HashMap::new();
+    for (vrf_id, vrf) in ready_vrfs {
+        if vrf.overlay_index_mode != rustbgpd_evpn::OverlayIndexMode::GatewayIp {
+            continue;
+        }
+        let Some(obs_vec) = observations.get(vrf_id) else {
+            continue;
+        };
+        let subnets: Vec<EvpnIpPrefixValue> = obs_vec
+            .iter()
+            .filter(|o| o.source == RouteSource::Connected)
+            .map(|o| o.prefix)
+            .collect();
+        if !subnets.is_empty() {
+            connected_subnets.insert(*vrf_id, subnets);
+        }
+    }
+    connected_subnets
+}
+
 async fn reconcile(
-    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
+    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
     cfg: &mut SpawnConfig,
     ip_vrfs: &IpVrfTable,
     vrf_names: &BTreeMap<IpVrfId, String>,
@@ -381,6 +427,10 @@ async fn reconcile(
         );
     }
 
+    // Per-Ready-VRF connected-subnet set for GW-IP overlay-index
+    // gateway selection (ADR-0087 decision 1).
+    let connected_subnets = gateway_mode_connected_subnets(&ready_vrfs, &observations);
+
     // Phase 1: withdrawals — `have - want`. Only drop the entry
     // from `originated` once the RIB has acknowledged the withdraw;
     // a transient channel/reply failure leaves the entry in place so
@@ -388,7 +438,7 @@ async fn reconcile(
     let to_withdraw: Vec<((IpVrfId, EvpnIpPrefixValue), EvpnRouteKey)> = originated
         .iter()
         .filter(|(k, _)| !want.contains_key(k))
-        .map(|(k, v)| (*k, *v))
+        .map(|(k, v)| (*k, v.key))
         .collect();
     for ((vrf_id, prefix), key) in to_withdraw {
         if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
@@ -402,49 +452,90 @@ async fn reconcile(
         }
     }
 
-    // Phase 2: injections — `want - have`, plus stale-key repair for
-    // same-(VRF,prefix) route-attribute changes. Only record the entry in
-    // `originated` once the RIB has acknowledged the inject. A failed inject
-    // leaves us in the "want, not yet originated" state so the next pass
-    // retries with the same shape.
+    // Phase 2: injections — `want - have`, plus stale-key/gateway repair
+    // for same-(VRF,prefix) changes. The per-prefix body lives in
+    // `originate_one` so this loop stays small.
     for ((vrf_id, prefix), obs) in &want {
         let Some(vrf) = ready_vrfs.get(vrf_id) else {
             continue; // checked above, but keep the guard for clarity
         };
-        let route = match try_originate(vrf, obs) {
-            Ok(r) => r,
-            Err(OriginationError::FamilyMismatch { .. }) => {
-                cfg.metrics.add_evpn_ip_vrf_origination_suppressed(
-                    &vrf.name,
-                    SUPPRESS_FAMILY_MISMATCH,
-                    1,
-                );
-                if let Some(stale_key) = originated.get(&(*vrf_id, *prefix)).copied()
-                    && withdraw_one(&cfg.rib_tx, *vrf_id, stale_key, &cfg.originated_counts).await
-                {
-                    originated.remove(&(*vrf_id, *prefix));
-                    publish_originated_gauge(cfg, *vrf_id, &vrf.name);
-                }
-                continue;
+        let subnets = connected_subnets.get(vrf_id).map_or(&[][..], Vec::as_slice);
+        let gateway = select_overlay_gateway(vrf, obs.prefix, obs.via, subnets);
+        originate_one(originated, cfg, vrf, *vrf_id, *prefix, obs, gateway).await;
+    }
+}
+
+/// Originate (or re-originate) one `(VRF, prefix)`. Records the entry
+/// in `originated` only after the RIB acks the inject — a failed inject
+/// leaves the "want, not yet originated" state so the next pass retries.
+/// Handles three sub-cases: fresh inject, in-place gateway repair (same
+/// route key, new GW-IP payload — ADR-0087 decision 5, no intermediate
+/// withdraw), and key change (withdraw-then-inject).
+async fn originate_one(
+    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
+    cfg: &SpawnConfig,
+    vrf: &IpVrf,
+    vrf_id: IpVrfId,
+    prefix: EvpnIpPrefixValue,
+    obs: &LocalIpRouteObservation,
+    gateway: Option<std::net::IpAddr>,
+) {
+    let route = match try_originate(vrf, obs, gateway) {
+        Ok(r) => r,
+        // `select_overlay_gateway` never emits a cross-family gateway,
+        // so `GatewayFamilyMismatch` is unreachable in practice; both
+        // arms suppress + drop the stale entry identically (structural
+        // safety net).
+        Err(
+            OriginationError::FamilyMismatch { .. }
+            | OriginationError::GatewayFamilyMismatch { .. },
+        ) => {
+            cfg.metrics.add_evpn_ip_vrf_origination_suppressed(
+                &vrf.name,
+                SUPPRESS_FAMILY_MISMATCH,
+                1,
+            );
+            if let Some(stale) = originated.get(&(vrf_id, prefix)).copied()
+                && withdraw_one(&cfg.rib_tx, vrf_id, stale.key, &cfg.originated_counts).await
+            {
+                originated.remove(&(vrf_id, prefix));
+                publish_originated_gauge(cfg, vrf_id, &vrf.name);
             }
-        };
-        let key = route.key();
-        if let Some(existing_key) = originated.get(&(*vrf_id, *prefix)).copied() {
-            if existing_key == key {
-                continue; // already originated with the desired key
-            }
-            if !withdraw_one(&cfg.rib_tx, *vrf_id, existing_key, &cfg.originated_counts).await {
-                continue;
-            }
-            originated.remove(&(*vrf_id, *prefix));
-            publish_originated_gauge(cfg, *vrf_id, &vrf.name);
+            return;
         }
-        if inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await {
-            originated.insert((*vrf_id, *prefix), key);
-            // We have `&IpVrf` in hand here (`vrf.name`), so skip
-            // the cache lookup — same value as `vrf_names[vrf_id]`.
-            publish_originated_gauge(cfg, *vrf_id, &vrf.name);
+    };
+    let key = route.key();
+    let desired = OriginatedEntry {
+        key,
+        gateway: route_gateway(&route),
+    };
+    if let Some(existing) = originated.get(&(vrf_id, prefix)).copied() {
+        if existing == desired {
+            return; // already originated with this key + gateway
         }
+        if existing.key == key {
+            // Same route identity, different gateway payload (a GW-IP
+            // via change): re-inject in place. `insert_evpn` replaces
+            // last-write-wins on the key and re-distributes, so peers
+            // see one UPDATE rather than a withdraw/announce pulse.
+        } else if withdraw_one(&cfg.rib_tx, vrf_id, existing.key, &cfg.originated_counts).await {
+            originated.remove(&(vrf_id, prefix));
+            publish_originated_gauge(cfg, vrf_id, &vrf.name);
+        } else {
+            return;
+        }
+    }
+    if inject_one(&cfg.rib_tx, vrf_id, key, route, &cfg.originated_counts).await {
+        // `inject_one` increments the count on every ack. For an
+        // in-place gateway change the key was already counted, so step
+        // the count back down to avoid double counting the same prefix.
+        if originated
+            .insert((vrf_id, prefix), desired)
+            .is_some_and(|prev| prev.key == key)
+        {
+            cfg.originated_counts.dec(vrf_id);
+        }
+        publish_originated_gauge(cfg, vrf_id, &vrf.name);
     }
 }
 
@@ -454,7 +545,7 @@ async fn reconcile(
 /// would remain in `originated` under the same `(IpVrfId, prefix)` key and the
 /// normal `want - have` pass would skip re-injection.
 async fn drain_changed_ip_vrfs(
-    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
+    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
     cfg: &SpawnConfig,
     current: &IpVrfTable,
     next: &IpVrfTable,
@@ -474,7 +565,7 @@ async fn drain_changed_ip_vrfs(
     let to_withdraw: Vec<((IpVrfId, EvpnIpPrefixValue), EvpnRouteKey)> = originated
         .iter()
         .filter(|((vrf_id, _), _)| changed_ids.contains(vrf_id))
-        .map(|(k, v)| (*k, *v))
+        .map(|(k, v)| (*k, v.key))
         .collect();
     for ((vrf_id, prefix), key) in to_withdraw {
         if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
@@ -489,11 +580,13 @@ async fn drain_changed_ip_vrfs(
 fn try_originate(
     vrf: &IpVrf,
     obs: &LocalIpRouteObservation,
+    gateway: Option<std::net::IpAddr>,
 ) -> Result<EvpnRibRoute, OriginationError> {
     let local = match obs.prefix {
         EvpnIpPrefixValue::V4(p) => LocalIpRoute::v4(p),
         EvpnIpPrefixValue::V6(p) => LocalIpRoute::v6(p),
-    };
+    }
+    .with_gateway(gateway);
     let originated = originate_ip_prefix_route(vrf, &local)?;
     Ok(EvpnRibRoute {
         route: originated.route,
@@ -507,6 +600,17 @@ fn try_originate(
         is_stale: false,
         is_llgr_stale: false,
     })
+}
+
+/// The Type 5 Gateway Address carried by an originated route. Used to
+/// detect a GW-IP via change that leaves the route key unchanged
+/// (ADR-0087 decision 5). Non-IpPrefix EVPN routes never flow through
+/// this originator; the fallback keeps the helper total.
+fn route_gateway(route: &EvpnRibRoute) -> std::net::IpAddr {
+    match &route.route {
+        rustbgpd_wire::EvpnRoute::IpPrefix(p) => p.gateway,
+        _ => std::net::Ipv4Addr::UNSPECIFIED.into(),
+    }
 }
 
 /// Issue an `InjectEvpn` over the RIB channel and wait for the
@@ -601,11 +705,11 @@ async fn withdraw_one(
 /// are not retried here (the next daemon start would re-originate
 /// off the kernel observation, then re-issue a normal withdraw).
 async fn drain_all(
-    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
+    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
     cfg: &SpawnConfig,
     vrf_names: &BTreeMap<IpVrfId, String>,
 ) {
-    let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, *v)).collect();
+    let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, v.key)).collect();
     for ((vrf_id, _prefix), key) in &snapshot {
         if withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await
             && let Some(name) = vrf_names.get(vrf_id)
@@ -733,7 +837,36 @@ mod tests {
             vrf_id: IpVrfId::new(vrf_id).unwrap(),
             prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::from(prefix_octets), len)),
             source: RouteSource::Static,
+            via: None,
         }
+    }
+
+    /// A `Connected` observation (a tenant connected subnet) so a
+    /// GW-IP via can resolve against it in the same pass.
+    fn connected(vrf_id: u32, prefix_octets: [u8; 4], len: u8) -> LocalIpRouteObservation {
+        LocalIpRouteObservation {
+            vrf_id: IpVrfId::new(vrf_id).unwrap(),
+            prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::from(prefix_octets), len)),
+            source: RouteSource::Connected,
+            via: None,
+        }
+    }
+
+    /// A static route with a via, used for GW-IP overlay-index tests.
+    fn observation_via(
+        vrf_id: u32,
+        prefix_octets: [u8; 4],
+        len: u8,
+        via: &str,
+    ) -> LocalIpRouteObservation {
+        LocalIpRouteObservation {
+            via: Some(via.parse().unwrap()),
+            ..observation(vrf_id, prefix_octets, len)
+        }
+    }
+
+    fn gw_vrf(id: u32, vtep: IpAddr) -> IpVrf {
+        vrf(id, vtep).with_overlay_index_mode(rustbgpd_evpn::OverlayIndexMode::GatewayIp)
     }
 
     fn ready_status(vrf_id: u32) -> IpVrfDataplaneStatus {
@@ -894,9 +1027,9 @@ mod tests {
         }
 
         async fn drive_one(
-            mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
+            mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
             cfg: &mut SpawnConfig,
-        ) -> BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> {
+        ) -> BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry> {
             let ip_vrfs = cfg.ip_vrfs.clone();
             let vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
             reconcile(&mut originated, cfg, ip_vrfs.as_ref(), &vrf_names).await;
@@ -943,7 +1076,7 @@ mod tests {
         assert_eq!(
             originated
                 .get(&(IpVrfId::new(100).unwrap(), prefix))
-                .copied(),
+                .map(|e| e.key),
             Some(predicted),
         );
         let calls = h.collect_calls().await;
@@ -1408,7 +1541,7 @@ mod tests {
         assert_eq!(
             originated
                 .get(&(IpVrfId::new(100).unwrap(), prefix))
-                .copied(),
+                .map(|e| e.key),
             Some(old_key),
             "failed withdraw must keep the stale key pending for retry"
         );
@@ -1577,5 +1710,199 @@ mod tests {
         let originated = Harness::drive_one(originated, &mut h.cfg).await;
         assert!(originated.is_empty());
         assert_eq!(scrape_originated_gauge(&h.cfg, "vrf100"), Some(0));
+    }
+
+    // --- ADR-0087 GW-IP overlay-index reconcile behavior ---
+
+    /// Auto-acking RIB responder that records the full injected route
+    /// (so a test can read the Gateway Address) and the withdraw keys.
+    /// Replaces `cfg.rib_tx` so `reconcile`'s ack-await completes; the
+    /// recorded log is read after the responder task is dropped.
+    type GwResponderLog = Arc<std::sync::Mutex<Vec<RibUpdate>>>;
+
+    fn recording_rib_responder(
+        cfg: &mut SpawnConfig,
+    ) -> (GwResponderLog, tokio::task::JoinHandle<()>) {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+        cfg.rib_tx = tx;
+        let log: GwResponderLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        let handle = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        log2.lock().unwrap().push(RibUpdate::InjectEvpn {
+                            route,
+                            reply: oneshot::channel().0,
+                        });
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        log2.lock().unwrap().push(RibUpdate::WithdrawEvpn {
+                            key,
+                            reply: oneshot::channel().0,
+                        });
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (log, handle)
+    }
+
+    fn inject_gateway_for(log: &GwResponderLog, octets: [u8; 4]) -> Vec<IpAddr> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                RibUpdate::InjectEvpn { route, .. } => match &route.route {
+                    rustbgpd_wire::EvpnRoute::IpPrefix(p)
+                        if matches!(p.prefix, EvpnIpPrefixValue::V4(pre) if pre.addr == Ipv4Addr::from(octets)) =>
+                    {
+                        Some(p.gateway)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn withdraw_count(log: &GwResponderLog) -> usize {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m, RibUpdate::WithdrawEvpn { .. }))
+            .count()
+    }
+
+    /// A static route via a host on a connected tenant subnet
+    /// originates with that via in the Gateway Address; the connected
+    /// subnet itself stays interface-less.
+    #[tokio::test]
+    async fn gateway_mode_via_on_subnet_originates_with_gateway() {
+        let v = gw_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.1.1.5"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 2);
+
+        assert_eq!(
+            inject_gateway_for(&log, [192, 168, 50, 0]),
+            vec!["10.1.1.5".parse::<IpAddr>().unwrap()],
+            "the via-on-subnet route must carry the gateway",
+        );
+        assert_eq!(
+            inject_gateway_for(&log, [10, 1, 1, 0]),
+            vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)],
+            "the connected subnet route must stay interface-less",
+        );
+    }
+
+    /// A via outside every connected subnet falls back to
+    /// interface-less (gateway zero).
+    #[tokio::test]
+    async fn gateway_mode_via_off_subnet_falls_back_to_interface_less() {
+        let v = gw_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.9.9.1"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+
+        let _ = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(
+            inject_gateway_for(&log, [192, 168, 50, 0]),
+            vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)],
+            "off-subnet via must fall back to interface-less",
+        );
+    }
+
+    /// A via change for the same prefix re-originates in place — same
+    /// key, new Gateway Address — without an intermediate withdraw
+    /// (ADR-0087 decision 5).
+    #[tokio::test]
+    async fn gateway_mode_via_change_reoriginates_in_place() {
+        let v = gw_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.1.1.5"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        log.lock().unwrap().clear(); // drop the cold-start injects
+
+        let target = (
+            IpVrfId::new(100).unwrap(),
+            EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 50, 0), 24)),
+        );
+        let key_before = originated.get(&target).unwrap().key;
+        assert_eq!(
+            originated.get(&target).unwrap().gateway,
+            "10.1.1.5".parse::<IpAddr>().unwrap()
+        );
+
+        // The host moves to a new gateway on the same connected subnet.
+        let mut moved = HashMap::new();
+        moved.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.1.1.9"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(moved));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        let entry = originated.get(&target).unwrap();
+        assert_eq!(
+            entry.key, key_before,
+            "the route key is gateway-independent and must not change",
+        );
+        assert_eq!(
+            entry.gateway,
+            "10.1.1.9".parse::<IpAddr>().unwrap(),
+            "the in-place re-origination must carry the new gateway",
+        );
+
+        // Exactly one re-inject for the moved prefix, no withdraw.
+        assert_eq!(
+            inject_gateway_for(&log, [192, 168, 50, 0]),
+            vec!["10.1.1.9".parse::<IpAddr>().unwrap()],
+            "exactly one in-place re-inject with the new gateway",
+        );
+        assert_eq!(withdraw_count(&log), 0, "no withdraw on a via change");
+        // The shared count stays at 2 (connected + moved prefix), not
+        // 3 — the in-place re-inject must not double count.
+        assert_eq!(h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()), 2);
     }
 }

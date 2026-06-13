@@ -1176,6 +1176,29 @@ pub struct EvpnIpVrfConfig {
     /// VRF route table id, cross-checked against `vrf_device`'s
     /// `IFLA_VRF_TABLE`.
     pub table_id: u32,
+    /// Outbound Type 5 overlay-index mode (ADR-0087). `"interface_less"`
+    /// (default) keeps the RFC 9136 §4.4.2 shape — Gateway Address zero,
+    /// Router's MAC extended community. `"gateway_ip"` opts into RFC 9136
+    /// §4.1/§4.2 GW-IP overlay index: a kernel route whose via lands on a
+    /// connected subnet of this VRF originates with that via in the
+    /// Gateway Address and no Router's MAC extcomm; routes without an
+    /// eligible via fall back to the interface-less shape. `"gateway_ip"`
+    /// requires at least one `[[evpn_instances]].ip_vrf`-linked L2VNI
+    /// (the receive side needs it to scope the recursive Type 2 lookup).
+    #[serde(default)]
+    pub overlay_index_mode: OverlayIndexModeConfig,
+}
+
+/// Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayIndexModeConfig {
+    /// RFC 9136 §4.4.2 Interface-less — the default, byte-for-byte the
+    /// pre-ADR-0087 behavior.
+    #[default]
+    InterfaceLess,
+    /// RFC 9136 §4.1/§4.2 GW-IP overlay index.
+    GatewayIp,
 }
 
 /// Explicit opt-in for ordinary unicast kernel FIB export.

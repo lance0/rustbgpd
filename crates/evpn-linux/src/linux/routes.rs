@@ -53,6 +53,8 @@ use std::collections::HashMap;
 
 use futures::stream::TryStreamExt;
 use netlink_packet_route::AddressFamily;
+use std::net::IpAddr;
+
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteType,
 };
@@ -288,11 +290,27 @@ pub(crate) fn ingest_route_message(
                     vrf_id,
                     prefix,
                     source,
+                    via: extract_gateway(msg),
                 },
             );
         }
         Classification::Drop(reason) => note_filter(out, vrf_id, reason),
     }
+}
+
+/// Via (`RTA_GATEWAY`) from the first `RouteAttribute::Gateway`, when
+/// present. Connected / direct routes carry no gateway and observe as
+/// `None`; multipath routes (`RTA_MULTIPATH`) carry per-hop gateways
+/// in the nexthop list rather than a top-level attribute, so they too
+/// observe as `None` (ADR-0087 keeps overlay-index origination to the
+/// single-via shape). `pub(super)` so the `super::l3_adoption` walk —
+/// which had its own copy — shares this one decoding.
+pub(super) fn extract_gateway(msg: &RouteMessage) -> Option<IpAddr> {
+    msg.attributes.iter().find_map(|attr| match attr {
+        RouteAttribute::Gateway(RouteAddress::Inet(v4)) => Some(IpAddr::V4(*v4)),
+        RouteAttribute::Gateway(RouteAddress::Inet6(v6)) => Some(IpAddr::V6(*v6)),
+        _ => None,
+    })
 }
 
 /// Effective routing table id for one `RouteMessage`. Prefers the
