@@ -472,7 +472,7 @@ has it, no broad performance sprints without profile evidence.
   existing — possibly Established — session as Idle and replacing it
   (RFC 4271 §6.8); a dead session task still accepts the inbound.
   Peer-group field edits now reach live dynamic sessions on the transaction
-  path (`[Unreleased]`, ADR-0086): the session reshape executor gracefully
+  path (v0.39.0, ADR-0086): the session reshape executor gracefully
   resets affected dynamic sessions after persist so they re-accept under the
   committed config. SIGHUP and targeted peer-group RPCs now hot-apply
   policy-only peer-group edits to live dynamic sessions; session-shaping
@@ -485,13 +485,13 @@ has it, no broad performance sprints without profile evidence.
   deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths — **shipped in
-  `[Unreleased]`**: the canonical vocabulary is pinned in
+  v0.39.0**: the canonical vocabulary is pinned in
   `crates/telemetry/src/reason_labels.rs` (typed `OtcBlockReason` /
   `RrLoopReason` shared by the metric labels, log tokens, and the structured
   OTC event; exact strings pinned by tests; documented per metric in
   `docs/OPERATIONS.md` "Ingress rejection / route-leak detection").
   Per-statement attribution within a matched import chain —
-  **shipped in `[Unreleased]`**: each `policy explain` permit/deny match carries
+  **shipped in v0.39.0**: each `policy explain` permit/deny match carries
   a statement trace (policy + statement identity, matched conditions with
   stable labels, default-action fallthrough, `before -> after` attribute
   edits), re-derived at query time from the ADR-0073 cached pre-policy
@@ -501,7 +501,7 @@ has it, no broad performance sprints without profile evidence.
   used to sit below — traces attach to current-generation permit/deny outcomes
   only, not `stale`/`withdrawn`). Best-path explain surfacing the tiebreaker
   step that won (the RIB-side sibling to the export-side policy-clause
-  attribution — shipped in `[Unreleased]`: per-loser decisive step with
+  attribution — shipped in v0.39.0: per-loser decisive step with
   compared values, the winner's step vs the runner-up, multipath-cut
   classification, `NOT_FOUND` for unknown prefixes).
   Also: verbose policy trace including non-match steps (the shipped trace
@@ -975,7 +975,7 @@ branch is between features.
   reshape existing static sessions now commit as transactions: stage the
   candidate snapshot, reconfigure affected peers with captured prior configs,
   persist with ack, and restore live peers plus the snapshot on failure.
-  Dynamic-range session reshapes shipped in `[Unreleased]` (ADR-0086): after a
+  Dynamic-range session reshapes shipped in v0.39.0 (ADR-0086): after a
   successful persist, the executor gracefully resets the live dynamic sessions
   accepted by an affected range (Cease + RFC 8203 shutdown communication);
   each remote's reconnect is re-accepted under the committed config and the

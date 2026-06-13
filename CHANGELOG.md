@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-06-13
+
 ### Added
 
 - **Native GW-IP overlay-index Type 5 origination (RFC 9136 §4.1/§4.2,
