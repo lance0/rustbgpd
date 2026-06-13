@@ -222,7 +222,14 @@ pub fn originate_ip_prefix_route(
             local_vtep_ip: vrf.local_vtep_ip,
         });
     }
-    if let Some(gw) = route.gateway {
+    // Normalize an unspecified gateway (0.0.0.0 / ::) to None. All-zeros
+    // IS the interface-less wire shape, so it must also keep the Router
+    // MAC extcomm — otherwise the route is gateway-zero AND RMAC-less,
+    // valid as neither model and unresolvable on the receive side.
+    // `select_overlay_gateway` already screens these out; this keeps the
+    // public origination boundary self-consistent for any other caller.
+    let overlay_gateway = route.gateway.filter(|gw| !gw.is_unspecified());
+    if let Some(gw) = overlay_gateway {
         let gw_family_ok = matches!(
             (route.prefix, gw),
             (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
@@ -241,7 +248,7 @@ pub fn originate_ip_prefix_route(
     // the MPLS label field on the wire — kept in GW-IP mode too, see
     // ADR-0087 decision 4). Gateway: zero in the Interface-less
     // model; the vetted via in GW-IP mode.
-    let gateway = route.gateway.unwrap_or(match route.prefix {
+    let gateway = overlay_gateway.unwrap_or(match route.prefix {
         EvpnIpPrefixValue::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         EvpnIpPrefixValue::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
     });
@@ -263,7 +270,7 @@ pub fn originate_ip_prefix_route(
     }
     // BGP Encapsulation = VXLAN (8) — RFC 8365 §6.
     ext_comms.push(ExtendedCommunity::bgp_encapsulation(VXLAN_ENCAP));
-    if route.gateway.is_none() {
+    if overlay_gateway.is_none() {
         // Router MAC (RFC 9135 §4.2 / RFC 9136). Subtype 0x03 of
         // opaque type 0x06; the wire helper handles the byte layout.
         // Interface-less only: with a GW-IP overlay index the inner
@@ -641,5 +648,38 @@ mod tests {
             err,
             OriginationError::GatewayFamilyMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn unspecified_gateway_normalizes_to_interface_less_shape() {
+        // A Some(0.0.0.0) via must be treated as "no gateway": gateway-zero
+        // on the wire AND the Router MAC kept — never the malformed
+        // gateway-zero-without-RMAC mix that is valid as neither model and
+        // unresolvable on the receive side (ADR-0087 decision 4).
+        let v = gw_vrf("10.0.0.1");
+        let r = route_v4([10, 1, 0, 0], 24).with_gateway(Some("0.0.0.0".parse().unwrap()));
+        let out = originate_ip_prefix_route(&v, &r).unwrap();
+        match &out.route {
+            EvpnRoute::IpPrefix(p) => {
+                assert_eq!(p.gateway, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            }
+            other => panic!("expected IpPrefix, got {other:?}"),
+        }
+        let ext_comms = out
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert_eq!(
+            ext_comms
+                .iter()
+                .filter_map(|c| c.as_router_mac())
+                .collect::<Vec<_>>(),
+            vec![[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]],
+            "an unspecified gateway keeps the Router MAC (interface-less)",
+        );
     }
 }
