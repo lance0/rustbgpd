@@ -48,9 +48,10 @@ suite implementation.
     mass-withdraw, §8.5 kernel BUM-port enforcement, ADR-0059
     FDB-nexthop-group ECMP for multi-homed Type 2, M40 FRR-validated);
     and symmetric Interface-less IRB / L3VNI / Type 5 (RFC 9136 §4.4.2)
-    end-to-end with transactional L3 ownership plus receive-side
-    overlay-index recursion. Still ahead: RFC 9135 overlay-index *local*
-    origination, route types 6-11 / MPLS / PBB / MVPN. See
+    end-to-end with transactional L3 ownership, receive-side overlay-index
+    recursion, and native GW-IP overlay-index Type 5 origination. Still ahead:
+    RFC 9136 ESI overlay-index origination, route types 6-11 / MPLS / PBB /
+    MVPN. See
     [evpn-enablement.md](evpn-enablement.md) for the full gate ladder.
 
 ## Core Protocol

@@ -52,7 +52,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
   Remaining big investments are the remaining ADR-0063 runtime
-  convergence shapes, native overlay-index origination / protected
+  convergence shapes, ESI overlay-index origination / broader protected
   recursion-path interop, and lower-priority VTEP operability gaps
   such as VLAN-aware bridges and rustbgpd-managed netdev creation.
 
@@ -535,18 +535,19 @@ Ships:
   — RFC 7432 §8.5 service carving + RFC 8584 §3.2 Highest Random
   Weight + RFC 9785 Highest-/Lowest-Preference, with fallback to
   default when candidates disagree, callable from a unit test. Local
-  Don't-Preempt origination shipped (`df_dont_preempt`); proactive
-  non-revertive failover (single-active backup-path pre-install) remains
-  deferred.
+  Don't-Preempt origination shipped (`df_dont_preempt`); stateful
+  non-revertive election remains deferred. Receive-side single-active
+  backup-path pre-install is covered by ADR-0083.
 - Three Type 1/4 origination state machines
   (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
   EAD-per-ES with the MAX_ET marker and ESI Label single-active flag,
   and Type 1 EAD-per-EVI. Receiver-side aliasing ECMP is limited to
-  all-active remote ES reachability; single-active backup-path
-  pre-install remains a follow-up. The EAD-per-EVI originator tracks
-  per-VNI DF role internally for Gate 8b but emits no wire churn on
-  role flips (the Gate 8 wire shape is role-independent per RFC 7432
-  §14).
+  all-active remote ES reachability; receive-side single-active
+  backup-path pre-install is covered by ADR-0083, with local-PE-side
+  L3/symmetric-IRB extension still deferred. The EAD-per-EVI
+  originator tracks per-VNI DF role internally for Gate 8b but emits
+  no wire churn on role flips (the Gate 8 wire shape is
+  role-independent per RFC 7432 §14).
 - Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
   above off the EVPN best-path broadcast (Gate 7c).
 - Cloneable runtime owner/control surface for complete desired-ES
@@ -766,12 +767,12 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Overlay-index IRB follow-through (RFC 9135 §9.2): the receive-side
+- Overlay-index IRB follow-through (RFC 9135 §9.2): receive-side
   recursive resolution (non-zero Type 5 Gateway Address through matching
-  Type 2 MAC/IP state), bounded drop metrics, and aggregated per-VRF /
-  per-reason drop counts in gRPC / CLI status now ship; add local
-  origination and a protected interop smoke for overlay-index Type 5
-  topologies.
+  Type 2 MAC/IP state), bounded drop metrics, aggregated per-VRF /
+  per-reason drop counts in gRPC / CLI status, and native GW-IP
+  origination (ADR-0087) now ship; add ESI-overlay origination and broader
+  protected interop smokes for overlay-index Type 5 topologies.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged

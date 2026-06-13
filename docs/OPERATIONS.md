@@ -652,6 +652,8 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="replace"}` | Kernel rejected a replace operation |
 | `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
 | `bgp_fib_kernel_failures_total{action="unsupported_platform"}` | Config requested FIB programming on a non-Linux build |
+| `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
+| `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
 
 Use `rbgp rib fib --json` as the per-route companion to these counters.
 The most important states to investigate are `foreign_route_exists` and
@@ -1384,8 +1386,8 @@ session machinery:
 > multi-homing enforcement, auto-derived RTs, partial ADR-0063 live
 > EVPN runtime mutation, receive-side RFC 9135 overlay-index recursion,
 > and controller Gateway Address Type 5 injection have since shipped.
-> Still ahead: remaining ADR-0063 shapes, native overlay-index local
-> origination / recursion-path interop, and deeper cross-vendor/scale
+> Still ahead: remaining ADR-0063 shapes, ESI overlay-index origination /
+> broader recursion-path interop, and deeper cross-vendor/scale
 > validation. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual

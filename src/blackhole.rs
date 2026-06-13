@@ -270,7 +270,7 @@ pub fn spawn(
 
     #[cfg(target_os = "linux")]
     {
-        match LinuxBlackholeFib::connect() {
+        match LinuxBlackholeFib::connect(metrics.clone()) {
             Ok(fib) => Some(spawn_with_fib(
                 config, rib_tx, fib, metrics, status_tx, shutdown,
             )),
@@ -1011,9 +1011,11 @@ struct LinuxBlackholeFib {
 
 #[cfg(target_os = "linux")]
 impl LinuxBlackholeFib {
-    fn connect() -> Result<Self, String> {
-        let (handle, events) =
-            crate::kernel_route_notify::connect_with_route_notifications("BLACKHOLE discard")?;
+    fn connect(metrics: BgpMetrics) -> Result<Self, String> {
+        let (handle, events) = crate::kernel_route_notify::connect_with_route_notifications(
+            "blackhole_discard",
+            metrics,
+        )?;
         Ok(Self {
             handle,
             kernel_route_events: Some(events),
