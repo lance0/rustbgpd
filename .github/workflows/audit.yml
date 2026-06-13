@@ -1,19 +1,23 @@
 name: Security audit
 
-# Runs `cargo audit` against the RustSec Advisory Database to surface
-# CVEs and yanked-with-reason crates in our dependency tree.
+# Two complementary dependency gates:
+#   - `cargo audit` (RustSec advisories; ignores in .cargo/audit.toml)
+#   - `cargo deny check advisories bans licenses sources` (advisories
+#     again via the same DB, plus license allowlist, wildcard/duplicate
+#     bans, and registry-source pinning; config in deny.toml)
 #
 # Triggers:
 #   - Daily at 06:00 UTC (catches advisories filed overnight before
 #     the next workday starts)
 #   - Every push to main (so a freshly-merged dep bump can't slip
 #     a regression past the daily window)
-#   - Pull requests that touch Cargo manifests / lockfiles (so
-#     dependabot PRs and manual bumps get checked at PR time)
+#   - Pull requests that touch Cargo manifests / lockfiles / the gate
+#     configs (so dependabot PRs and manual bumps get checked at PR
+#     time)
 #
-# `cargo audit` exits non-zero on any unignored advisory. Runs against
-# the workspace lockfile + the wire crate's transitive deps via a
-# single invocation at the repo root (Cargo unifies the lock).
+# Both gates exit non-zero on any unignored finding. Runs against the
+# workspace lockfile + the wire crate's transitive deps via a single
+# invocation at the repo root (Cargo unifies the lock).
 
 on:
   schedule:
@@ -25,11 +29,15 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "deny.toml"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "deny.toml"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   workflow_dispatch: {}
 
@@ -60,3 +68,20 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # EmbarkStudios' official action; installs a pinned cargo-deny
+      # and runs the four checks against deny.toml. Pinned to a
+      # release tag for reproducibility, matching the audit job.
+      - name: Run cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        with:
+          command: check advisories bans licenses sources

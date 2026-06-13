@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cargo deny` dependency gate.** `deny.toml` enforces a
+  permissive-license allowlist, registry-source pinning, wildcard
+  bans (with a path-dependency exemption for the deliberately
+  unversioned decoupled `rustbgpd-wire`), and RustSec advisories; CI
+  runs `cargo deny check advisories bans licenses sources` as a
+  second job in the security-audit workflow beside `cargo audit`, on
+  the same manifest/lockfile path scope plus the gate configs.
 - **Peer-group field edits now reach live dynamic sessions on the
   config-transaction path (ADR-0086, closes the ADR-0081 decision-4
   deferral).** A peer-group edit affecting a `[[dynamic_neighbors]]`
