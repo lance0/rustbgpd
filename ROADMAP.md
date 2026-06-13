@@ -478,6 +478,9 @@ has it, no broad performance sprints without profile evidence.
   policy-only peer-group edits to live dynamic sessions; session-shaping
   peer-group edits on those no-preview paths still leave dynamic sessions on
   their running config until reconnect (deliberate; see ADR-0086's deferral).
+  A no-op `SetPeerGroup` (definition identical to the running config) still
+  takes the reshape path and bounces affected static sessions — pre-existing,
+  benign, low-priority: short-circuit identical definitions before reshaping.
   (The per-peer Prometheus series leak listed here previously was fixed —
   deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
