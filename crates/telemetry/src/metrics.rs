@@ -66,6 +66,7 @@ pub struct BgpMetrics {
     rib_outbound_registered_peers: IntGauge,
     rib_outbound_registration_replaced: IntCounterVec,
     rib_stale_peer_down_ignored: IntCounterVec,
+    rib_stale_session_message_ignored: IntCounterVec,
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_ingest_channel_depth: IntGauge,
@@ -416,6 +417,21 @@ impl BgpMetrics {
                  state is untouched.",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_stale_session_message_ignored = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_stale_session_message_ignored_total",
+                "Session-scoped RIB messages (RoutesReceived, End-of-RIB, \
+                 route-refresh begin/end/request, ORF updates) discarded \
+                 because their session id did not match the registered \
+                 session for the peer — a message from a superseded session \
+                 (collision loser) queued behind the replacement's PeerUp. \
+                 The registered session's state is untouched. `kind` is one \
+                 of: routes, eor, refresh, orf.",
+            ),
+            &["peer", "kind"],
         )
         .expect("valid metric definition");
 
@@ -1103,6 +1119,9 @@ impl BgpMetrics {
             .register(Box::new(rib_stale_peer_down_ignored.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_stale_session_message_ignored.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_outbound_registration_failover.clone()))
             .expect("metric not already registered");
         registry
@@ -1344,6 +1363,7 @@ impl BgpMetrics {
             rib_outbound_registered_peers,
             rib_outbound_registration_replaced,
             rib_stale_peer_down_ignored,
+            rib_stale_session_message_ignored,
             rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_ingest_channel_depth,
@@ -1461,6 +1481,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.rib_stale_peer_down_ignored, peer);
+        Self::reap_peer_series_from_vec(&self.rib_stale_session_message_ignored, peer);
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_failover, peer);
         Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
@@ -1756,6 +1777,22 @@ impl BgpMetrics {
     pub fn record_rib_stale_peer_down_ignored(&self, peer: &str) {
         self.rib_stale_peer_down_ignored
             .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Record a session-scoped RIB message (routes, End-of-RIB,
+    /// route-refresh begin/end/request, ORF update) discarded because
+    /// its session id did not match the registered session for the peer
+    /// (a message from a superseded session).
+    ///
+    /// `kind` is bounded: `"routes"`, `"eor"`, `"refresh"`, or `"orf"`.
+    pub fn record_rib_stale_session_message_ignored(&self, peer: &str, kind: &str) {
+        debug_assert!(
+            matches!(kind, "routes" | "eor" | "refresh" | "orf"),
+            "unbounded stale-session-message kind label: {kind:?}"
+        );
+        self.rib_stale_session_message_ignored
+            .with_label_values(&[peer, kind])
             .inc();
     }
 
@@ -3283,6 +3320,9 @@ mod tests {
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_stale_peer_down_ignored("10.0.0.1");
+        m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
+        m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
+        m.record_rib_stale_session_message_ignored("10.0.0.1", "eor");
         m.record_rib_outbound_registration_failover("10.0.0.1");
         m.record_rib_dirty_resync("still_dirty");
         m.record_rib_dirty_resync("cleared");
@@ -3298,6 +3338,18 @@ mod tests {
         assert_eq!(
             m.rib_stale_peer_down_ignored
                 .with_label_values(&["10.0.0.1"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.rib_stale_session_message_ignored
+                .with_label_values(&["10.0.0.1", "routes"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.rib_stale_session_message_ignored
+                .with_label_values(&["10.0.0.1", "eor"])
                 .get(),
             1
         );
@@ -3339,6 +3391,7 @@ mod tests {
         m.record_hold_timer_rearmed_pending_input(peer);
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
+        m.record_rib_stale_session_message_ignored(peer, "routes");
         m.record_rib_outbound_registration_failover(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
@@ -3385,8 +3438,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 30 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 31);
+        // 31 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 32);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -3396,7 +3449,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 31);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 32);
     }
 
     #[test]

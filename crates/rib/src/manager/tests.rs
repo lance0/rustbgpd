@@ -302,6 +302,7 @@ async fn routes_received_and_queried() {
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -362,6 +363,7 @@ async fn large_routes_received_batch_preserves_final_state() {
     let routes: Vec<Route> = (0..2500).map(|i| make_indexed_route(i, next_hop)).collect();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: routes,
         withdrawn: vec![],
@@ -430,6 +432,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
         .map(|i| make_indexed_route(i, next_hop))
         .collect();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: routes,
         withdrawn: vec![],
@@ -481,6 +484,7 @@ async fn query_channel_observes_partial_progress_during_large_batch() {
         .collect();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: routes,
         withdrawn: vec![],
@@ -526,6 +530,7 @@ async fn peer_down_clears_routes() {
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -570,6 +575,7 @@ async fn withdrawal_removes_route() {
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![
             make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1)),
@@ -585,6 +591,7 @@ async fn withdrawal_removes_route() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
@@ -622,6 +629,7 @@ async fn query_all_peers() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
@@ -637,6 +645,7 @@ async fn query_all_peers() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24),
@@ -680,6 +689,7 @@ async fn best_routes_returns_winner() {
 
     // Peer1: local_pref 100
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -693,6 +703,7 @@ async fn best_routes_returns_winner() {
 
     // Peer2: local_pref 200 — should win
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -728,6 +739,7 @@ async fn peer_down_promotes_second_best() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -740,6 +752,7 @@ async fn peer_down_promotes_second_best() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -783,6 +796,7 @@ async fn withdrawal_updates_best() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -795,6 +809,7 @@ async fn withdrawal_updates_best() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -808,6 +823,7 @@ async fn withdrawal_updates_best() {
 
     // Peer2 withdraws the prefix
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -845,6 +861,7 @@ async fn different_best_per_prefix() {
 
     // Peer1 wins prefix_a (higher LP), peer2 wins prefix_b (higher LP)
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![
             make_route_with_lp(prefix_a, Ipv4Addr::new(1, 0, 0, 1), 200),
@@ -860,6 +877,7 @@ async fn different_best_per_prefix() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![
             make_route_with_lp(prefix_a, Ipv4Addr::new(1, 0, 0, 2), 100),
@@ -911,6 +929,7 @@ async fn peer_up_triggers_initial_table_dump() {
 
     // Inject a route from source
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -980,6 +999,7 @@ async fn route_change_distributes_to_peer() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1030,6 +1050,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     route.path_id = 42;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: route.peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -1079,6 +1100,7 @@ async fn split_horizon_prevents_echo() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     // The route is FROM this peer — should not be sent back
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1160,6 +1182,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1209,6 +1232,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1262,6 +1286,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1338,6 +1363,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
 
     // eBGP route → should be advertised to iBGP peer
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: ebgp_source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1366,6 +1392,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     // iBGP source announces the same prefix
     let ibgp_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: ibgp_source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 3))],
         withdrawn: vec![],
@@ -1732,6 +1759,7 @@ async fn export_policy_counter_records_single_best_permit() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1813,6 +1841,7 @@ async fn graceful_restart_clears_export_policy_stats() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1882,6 +1911,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -1986,6 +2016,7 @@ async fn export_policy_blocks_denied() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     // This route matches the deny entry
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2046,6 +2077,7 @@ async fn query_advertised_routes() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2155,6 +2187,7 @@ async fn per_peer_export_policy() {
     // Source peer sends both prefixes
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![
             make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1)),
@@ -2239,6 +2272,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2371,6 +2405,7 @@ async fn export_policy_match_next_hop_filters_route() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2465,6 +2500,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
         Ipv4Addr::new(10, 0, 0, 1),
     );
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![route],
         withdrawn: vec![],
@@ -2572,6 +2608,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     drain_eor(&mut out_rx).await;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![denied, permitted],
         withdrawn: vec![],
@@ -2668,6 +2705,7 @@ async fn explain_advertised_route_reports_modifications() {
         Ipv4Addr::new(10, 0, 0, 1),
     );
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![route],
         withdrawn: vec![],
@@ -2753,6 +2791,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
 
     let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_v6_route(prefix, "2001:db8::1".parse().unwrap())],
         withdrawn: vec![],
@@ -2885,6 +2924,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
 
     // First route: should succeed (channel empty → fits)
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2913,6 +2953,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
 
     // Send prefix2 — fills the channel (capacity 1)
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -2927,6 +2968,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     // DON'T drain — channel is now full. Withdraw prefix1 to trigger
     // another distribute_changes that will fail on try_send.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
@@ -3035,6 +3077,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 
     // Announce prefix1
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3049,6 +3092,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 
     // Withdraw prefix1 — channel is empty so this fills it
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
@@ -3063,6 +3107,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     // That send succeeded (channel was empty). Now announce again to fill.
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3078,6 +3123,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     // distribute_changes, marking the peer dirty.
     let prefix3 = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix3, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3140,6 +3186,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
 
     // Pre-populate Loc-RIB
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3204,6 +3251,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
 
     // Pre-populate Loc-RIB
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3345,6 +3393,7 @@ async fn route_event_added_on_new_best() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3375,6 +3424,7 @@ async fn route_event_history_records_events_without_subscriber() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3419,6 +3469,7 @@ async fn route_event_history_records_withdrawn_events() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3430,6 +3481,7 @@ async fn route_event_history_records_withdrawn_events() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -3467,6 +3519,7 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![
             make_route_with_lp(prefix1, Ipv4Addr::new(10, 0, 0, 1), 100),
@@ -3481,6 +3534,7 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix1, Ipv4Addr::new(10, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -3523,6 +3577,7 @@ async fn route_event_history_filters_exact_ipv4_prefix() {
 
     for prefix in [other, target] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
@@ -3555,6 +3610,7 @@ async fn route_event_history_filters_exact_ipv6_prefix() {
 
     for prefix in [other, target] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_v6_route(prefix, Ipv6Addr::LOCALHOST)],
             withdrawn: vec![],
@@ -3587,6 +3643,7 @@ async fn route_event_history_prefix_peer_and_limit_interact() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(target, Ipv4Addr::new(10, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -3598,6 +3655,7 @@ async fn route_event_history_prefix_peer_and_limit_interact() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route(other, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3609,6 +3667,7 @@ async fn route_event_history_prefix_peer_and_limit_interact() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(target, Ipv4Addr::new(10, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -3620,6 +3679,7 @@ async fn route_event_history_prefix_peer_and_limit_interact() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(target), 0)],
@@ -3667,6 +3727,7 @@ async fn route_event_history_prefix_filter_no_matches_returns_empty() {
     let observed = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let missing = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(observed, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3697,6 +3758,7 @@ async fn route_event_history_filters_ipv6_and_preserves_limited_order() {
     let v4_prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(v4_prefix1, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3708,6 +3770,7 @@ async fn route_event_history_filters_ipv6_and_preserves_limited_order() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V6(Ipv6Addr::LOCALHOST),
         announced: vec![make_v6_route(v6_prefix, Ipv6Addr::LOCALHOST)],
         withdrawn: vec![],
@@ -3719,6 +3782,7 @@ async fn route_event_history_filters_ipv6_and_preserves_limited_order() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(v4_prefix2, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3754,6 +3818,7 @@ async fn route_event_history_limit_zero_returns_all_available() {
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 2), 32);
     for prefix in [prefix1, prefix2] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
@@ -3784,6 +3849,7 @@ async fn route_event_history_capacity_evicts_oldest_event() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     for index in 0..=ROUTE_EVENT_HISTORY_CAPACITY {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_indexed_route(
                 u32::try_from(index).unwrap(),
@@ -3848,6 +3914,7 @@ async fn route_event_history_gauges_track_depth_and_capacity() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     for index in 0..3 {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_indexed_route(index, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
@@ -3886,6 +3953,7 @@ async fn route_event_withdrawn_on_last_removed() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -3902,6 +3970,7 @@ async fn route_event_withdrawn_on_last_removed() {
 
     // Withdraw the route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -3934,6 +4003,7 @@ async fn route_event_best_changed_on_better_path() {
 
     // Peer1 announces first
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -3950,6 +4020,7 @@ async fn route_event_best_changed_on_better_path() {
 
     // Peer2 announces with higher local-pref — best changes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -3982,6 +4053,7 @@ async fn multiple_subscribers_receive_same_events() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4014,6 +4086,7 @@ async fn route_event_withdrawn_carries_previous_peer() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4028,6 +4101,7 @@ async fn route_event_withdrawn_carries_previous_peer() {
     let mut events_rx = subscribe_events(&tx).await;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -4059,6 +4133,7 @@ async fn route_event_best_changed_carries_both_peers() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -4073,6 +4148,7 @@ async fn route_event_best_changed_carries_both_peers() {
     let mut events_rx = subscribe_events(&tx).await;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -4104,6 +4180,7 @@ async fn route_event_has_timestamp() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4139,6 +4216,7 @@ async fn route_event_added_has_no_previous_peer() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4173,6 +4251,7 @@ async fn route_event_carries_best_path_id() {
     let peer = route.peer;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -4206,6 +4285,7 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4268,6 +4348,7 @@ async fn loc_rib_gauge_tracks_best() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4328,6 +4409,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4369,6 +4451,7 @@ async fn query_loc_rib_count() {
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![
             make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1)),
@@ -4423,6 +4506,7 @@ async fn query_advertised_count() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -4523,6 +4607,7 @@ async fn distribute_changes_filters_unsendable_families() {
 
     // Send both IPv4 and IPv6 routes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![v4_route, v6_route],
         withdrawn: vec![],
@@ -4589,6 +4674,7 @@ async fn send_initial_table_filters_unsendable_families() {
 
     // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![v4_route, v6_route],
         withdrawn: vec![],
@@ -4676,6 +4762,7 @@ async fn dual_stack_peer_receives_both_families() {
 
     // Pre-populate Loc-RIB
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![v4_route, v6_route],
         withdrawn: vec![],
@@ -4726,6 +4813,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let fs_rule = fs_route.rule.clone();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -4781,6 +4869,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let fs_rule = fs_route.rule.clone();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -4816,6 +4905,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let _ = out_rx.recv().await.unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
         safi: Safi::FlowSpec,
@@ -4846,6 +4936,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route.clone()],
         withdrawn: vec![],
@@ -4858,6 +4949,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     .unwrap();
 
     tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -4872,6 +4964,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     tokio::task::yield_now().await;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -4884,6 +4977,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     .unwrap();
 
     tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -4917,6 +5011,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route1.clone(), route2],
         withdrawn: vec![],
@@ -4929,6 +5024,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     .unwrap();
 
     tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -4943,6 +5039,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 2.0);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route1],
         withdrawn: vec![],
@@ -4961,6 +5058,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 1.0);
 
     tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -4992,6 +5090,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route.clone()],
         withdrawn: vec![],
@@ -5005,6 +5104,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
 
     for _ in 0..2 {
         tx.send(RibUpdate::BeginRouteRefresh {
+            session_id: 0,
             peer,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
@@ -5014,6 +5114,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     }
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -5026,6 +5127,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     .unwrap();
 
     tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5052,6 +5154,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -5064,6 +5167,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
     .unwrap();
 
     tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5094,6 +5198,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route1.clone(), route2],
         withdrawn: vec![],
@@ -5106,6 +5211,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     .unwrap();
 
     tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5119,6 +5225,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     let _ = reply_rx.await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route1],
         withdrawn: vec![],
@@ -5159,6 +5266,7 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     let v6_prefix = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0), 64);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![
             make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)),
@@ -5174,6 +5282,7 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     .unwrap();
 
     tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5235,6 +5344,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let fs_rule = fs_route.rule.clone();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -5296,6 +5406,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5372,6 +5483,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let rule = route_a.rule.clone();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source_a,
         announced: vec![],
         withdrawn: vec![],
@@ -5388,6 +5500,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     assert_eq!(initial.flowspec_announce[0].peer, source_a);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source_b,
         announced: vec![],
         withdrawn: vec![],
@@ -5425,6 +5538,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     assert_eq!(best_during_gr[0].peer, source_b);
 
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source_a,
         afi: Afi::Ipv4,
         safi: Safi::FlowSpec,
@@ -5456,6 +5570,7 @@ async fn gr_eor_clears_stale() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5491,6 +5606,7 @@ async fn gr_eor_clears_stale() {
 
     // Send End-of-RIB
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5527,6 +5643,7 @@ async fn gr_timer_sweeps_stale_routes() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5589,6 +5706,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5652,6 +5770,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
 
     // End-of-RIB clears stale and completes GR
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -5687,6 +5806,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5771,6 +5891,7 @@ async fn gr_peer_down_aborts_gr() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5847,6 +5968,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)), v6_route],
         withdrawn: vec![],
@@ -5912,6 +6034,7 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
 
     // Source sends a route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -5973,6 +6096,7 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6039,6 +6163,7 @@ async fn llgr_eor_clears_llgr_stale() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6101,6 +6226,7 @@ async fn llgr_eor_clears_llgr_stale() {
 
     // EoR should clear LLGR-stale
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -6132,6 +6258,7 @@ async fn llgr_peer_down_aborts_llgr() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6202,6 +6329,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6364,6 +6492,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6420,6 +6549,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6482,6 +6612,7 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -6606,6 +6737,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     // Source client sends a route
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 4))],
         withdrawn: vec![],
@@ -6708,6 +6840,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Source sends a route
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
         withdrawn: vec![],
@@ -6770,6 +6903,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     // Source sends iBGP route
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
         withdrawn: vec![],
@@ -6827,6 +6961,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 5))],
         withdrawn: vec![],
@@ -7086,6 +7221,7 @@ async fn routes_validated_on_insert_with_vrp_table() {
         vec![65001],
     );
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -7129,6 +7265,7 @@ async fn rpki_cache_update_revalidates_existing_routes() {
 
     // Insert route (no VRP table yet → NotFound)
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -7191,6 +7328,7 @@ async fn rpki_cache_update_changes_best_path() {
     let route2 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 2), vec![65002]);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![route1],
         withdrawn: vec![],
@@ -7202,6 +7340,7 @@ async fn rpki_cache_update_changes_best_path() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![route2],
         withdrawn: vec![],
@@ -7264,6 +7403,7 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
     let route2 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 2), vec![65002]);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![route1],
         withdrawn: vec![],
@@ -7275,6 +7415,7 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![route2],
         withdrawn: vec![],
@@ -7321,6 +7462,7 @@ async fn rpki_no_table_all_not_found() {
         vec![65001],
     );
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -7367,6 +7509,7 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
     };
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -7443,6 +7586,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         vec![65001],
     );
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -7563,6 +7707,7 @@ async fn multipath_send_advertises_multiple_routes() {
 
     // Inject two routes for the same prefix from different peers
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -7579,6 +7724,7 @@ async fn multipath_send_advertises_multiple_routes() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -7652,6 +7798,7 @@ async fn multipath_send_respects_send_max() {
         (peer3, Ipv4Addr::new(10, 0, 0, 3), 65003, 100),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_multipath_route(prefix, peer_addr, vec![asn], lp)],
             withdrawn: vec![],
@@ -7710,6 +7857,7 @@ async fn multipath_send_split_horizon() {
 
     // Inject route from peer1 and target (target's own route)
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -7726,6 +7874,7 @@ async fn multipath_send_split_horizon() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: target,
         announced: vec![make_multipath_route(
             prefix,
@@ -7809,6 +7958,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
 
     // Inject 2 routes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -7828,6 +7978,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     assert_eq!(update.announce.len(), 1);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -7849,6 +8000,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
 
     // Now withdraw peer2's route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -7883,6 +8035,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
 
     // Inject 2 routes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -7899,6 +8052,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -7994,6 +8148,7 @@ async fn multipath_peer_down_cleans_up_state() {
     let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -8069,6 +8224,7 @@ async fn multipath_send_incremental_route_addition() {
 
     // Add first route
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -8090,6 +8246,7 @@ async fn multipath_send_incremental_route_addition() {
 
     // Add second route — should get an incremental update
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -8135,6 +8292,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
 
     // Inject 2 routes
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source1,
         announced: vec![make_multipath_route(
             prefix,
@@ -8151,6 +8309,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source2,
         announced: vec![make_multipath_route(
             prefix,
@@ -8254,6 +8413,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     };
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![mk(Ipv4Addr::new(10, 0, 0, 1), 65001, 200)],
         withdrawn: vec![],
@@ -8265,6 +8425,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![mk(Ipv4Addr::new(10, 0, 0, 2), 65002, 100)],
         withdrawn: vec![],
@@ -8321,6 +8482,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     let prefix6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 1), vec![65001], 200),
@@ -8341,6 +8503,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 2), vec![65002], 100),
@@ -8415,6 +8578,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     let prefix6 = Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 1), vec![65001], 200),
@@ -8435,6 +8599,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 2), vec![65002], 100),
@@ -8513,6 +8678,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     let prefix6 = Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 48);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 1), vec![65001], 200),
@@ -8533,6 +8699,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![
             make_multipath_route(prefix4, Ipv4Addr::new(10, 0, 0, 2), vec![65002], 100),
@@ -8574,6 +8741,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     drain_eor(&mut out_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -8593,6 +8761,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
@@ -8626,6 +8795,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -8642,6 +8812,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -8762,6 +8933,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
 
     // Inject 2 routes for the denied prefix
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_multipath_route(
             prefix,
@@ -8778,6 +8950,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_multipath_route(
             prefix,
@@ -8838,6 +9011,7 @@ async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -8889,6 +9063,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -8941,6 +9116,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
     let route_b = make_route_with_lp(prefix, peer_b, 100);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer_a),
         announced: vec![route_a],
         withdrawn: vec![],
@@ -8953,6 +9129,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
     .unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer_b),
         announced: vec![route_b],
         withdrawn: vec![],
@@ -9034,6 +9211,7 @@ async fn explain_best_path_single_path_has_no_best_reason() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let peer = Ipv4Addr::new(1, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer),
         announced: vec![make_route_with_lp(prefix, peer, 100)],
         withdrawn: vec![],
@@ -9093,6 +9271,7 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
         .collect();
     for route in &all {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer: route.peer,
             announced: vec![route.clone()],
             withdrawn: vec![],
@@ -9177,6 +9356,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
         (peer3, Ipv4Addr::new(10, 0, 0, 3), 65003, 100),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_multipath_route(prefix, peer_addr, vec![asn], lp)],
             withdrawn: vec![],
@@ -9269,6 +9449,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
         (peer_runner_up, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
@@ -9337,6 +9518,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
@@ -9406,6 +9588,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
         (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
@@ -9488,6 +9671,7 @@ async fn explain_best_path_global_view_unchanged() {
     let peer_b = Ipv4Addr::new(1, 0, 0, 2);
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer_a),
         announced: vec![make_route_with_lp(prefix, peer_a, 200)],
         withdrawn: vec![],
@@ -9499,6 +9683,7 @@ async fn explain_best_path_global_view_unchanged() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer_b),
         announced: vec![make_route_with_lp(prefix, peer_b, 100)],
         withdrawn: vec![],
@@ -9587,6 +9772,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -9697,6 +9883,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -9799,6 +9986,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     let imet1 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet1_key = imet1.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -9817,6 +10005,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     let imet2 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
     let imet2_key = imet2.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -9877,6 +10066,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
 /// survives, and a post-convergence advertisement MUST be delivered on
 /// the winner's outbound channel.
 #[tokio::test]
+#[expect(clippy::too_many_lines)]
 async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let (tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
@@ -9922,6 +10112,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let imet_winner = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
     let imet_winner_key = imet_winner.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 2,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -9976,6 +10167,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 3,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10088,6 +10280,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 3,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10169,6 +10362,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let imet_winner = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
     let imet_winner_key = imet_winner.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -10216,8 +10410,8 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     );
 
     // FAILOVER, half 2 — inbound: W's Adj-RIB-In was cleared by the
-    // loser's replacement reset (RoutesReceived is unstamped, so the RIB
-    // cannot attribute inbound routes to a session). The manager must
+    // loser's replacement reset (and W's routes were discarded by the
+    // session-identity gate while superseded). The manager must
     // request an inbound ROUTE-REFRESH through W's channel so the peer
     // re-advertises; family selection is delegated to the session task's
     // negotiated set (the session task also enforces the RFC 2918
@@ -10248,6 +10442,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     // The peer answers the refresh: W's route lands back in the Loc-RIB.
     let imet_again = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -10287,6 +10482,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 3,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10492,6 +10688,504 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
     handle.await.unwrap();
 }
 
+/// `RibUpdate::PeerUp` boilerplate for the stale-data-message tests
+/// below: an iBGP RR-client peer with the given sendable families.
+fn session_peer_up(
+    peer: IpAddr,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    sendable_families: Vec<(Afi, Safi)>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    }
+}
+
+/// `RoutesReceived` queued by a superseded session and processed after
+/// the replacement's `PeerUp` must be discarded by session identity —
+/// otherwise stale routes from the dumped session land in the
+/// replacement session's Adj-RIB-In (an announce/withdraw race can
+/// leave entries the new session never sent). The ACTIVE session's
+/// routes must still be accepted.
+#[tokio::test]
+async fn stale_routes_received_from_superseded_session_is_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Loser registers, winner's PeerUp replaces the registration.
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, loser_tx, evpn_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, winner_tx, evpn_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // Stale routes from the superseded session, queued behind the
+    // winner's PeerUp.
+    let imet_stale = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
+    let imet_stale_key = imet_stale.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet_stale],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let evpn_routes = query_evpn_routes(&tx).await;
+    assert!(
+        !evpn_routes.iter().any(|r| r.key() == imet_stale_key),
+        "stale RoutesReceived from a superseded session must not land in the \
+         replacement session's Adj-RIB-In"
+    );
+
+    // The ACTIVE session's routes still flow.
+    let imet_active = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 60);
+    let imet_active_key = imet_active.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 2,
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet_active],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let evpn_routes = query_evpn_routes(&tx).await;
+    assert!(
+        evpn_routes.iter().any(|r| r.key() == imet_active_key),
+        "the active session's RoutesReceived must not be discarded"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A stale `EndOfRib` from a superseded session must not complete the
+/// registered session's graceful-restart window for the family — a
+/// premature completion ends stale-route retention on the strength of
+/// a table dump the surviving session never finished.
+#[tokio::test]
+async fn stale_end_of_rib_from_superseded_session_is_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Session 1 establishes, announces a route, then goes down with GR —
+    // the route is retained stale, awaiting the reconnect's End-of-RIB.
+    let (s1_tx, mut s1_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, s1_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut s1_rx).await;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 1,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // The peer reconnects as session 2 (re-registers during the GR
+    // window; GR completion now waits on SESSION 2's End-of-RIB).
+    let (s2_tx, mut s2_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, s2_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut s2_rx).await;
+
+    // A stale EoR from the dumped session must NOT complete the sweep.
+    tx.send(RibUpdate::EndOfRib {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    // Barrier: the query is processed after the EoR (same channel).
+    let _ = query_received_routes(&tx, peer).await;
+    let gr_active = gauge_metric_value(&metrics, "bgp_gr_active_peers", &[("peer", "10.0.0.2")]);
+    assert!(
+        (gr_active - 1.0).abs() < f64::EPSILON,
+        "stale EndOfRib from a superseded session must not complete the \
+         registered session's GR window, gr_active = {gr_active}"
+    );
+
+    // The ACTIVE session's EoR completes GR normally.
+    tx.send(RibUpdate::EndOfRib {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let _ = query_received_routes(&tx, peer).await;
+    let gr_active = gauge_metric_value(&metrics, "bgp_gr_active_peers", &[("peer", "10.0.0.2")]);
+    assert!(
+        gr_active.abs() < f64::EPSILON,
+        "the active session's EndOfRib must complete GR, gr_active = {gr_active}"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Stale RFC 7313 demarcation markers (`BoRR`/`EoRR`) from a superseded
+/// session must be discarded — a stale `BoRR` would mark the
+/// replacement session's Adj-RIB-In refresh-stale and a stale `EoRR`
+/// would close the window and sweep routes the new session was about
+/// to re-send. The ACTIVE session's markers keep their semantics.
+#[tokio::test]
+async fn stale_enhanced_refresh_markers_from_superseded_session_are_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, winner_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // The active session's route sits in the Adj-RIB-In.
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 2,
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Stale BoRR + EoRR from the superseded session: without the gate,
+    // this pair opens a refresh window over the active session's
+    // Adj-RIB-In and immediately sweeps every route in the family.
+    for subtype_is_begin in [true, false] {
+        let update = if subtype_is_begin {
+            RibUpdate::BeginRouteRefresh {
+                peer,
+                session_id: 1,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            }
+        } else {
+            RibUpdate::EndRouteRefresh {
+                peer,
+                session_id: 1,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            }
+        };
+        tx.send(update).await.unwrap();
+    }
+    let received = query_received_routes(&tx, peer).await;
+    assert!(
+        received.iter().any(|r| r.prefix == Prefix::V4(prefix)),
+        "stale BoRR/EoRR from a superseded session must not sweep the \
+         registered session's Adj-RIB-In"
+    );
+
+    // The ACTIVE session's BoRR + EoRR keep their semantics: the route
+    // is not re-announced inside the window, so it is swept at EoRR.
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let received = query_received_routes(&tx, peer).await;
+    assert!(
+        !received.iter().any(|r| r.prefix == Prefix::V4(prefix)),
+        "the active session's BoRR/EoRR must still sweep unreplaced routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A stale `RouteRefreshRequest` from a superseded session must be
+/// discarded (it would only trigger a spurious re-advertisement, but
+/// the same active-or-drop rule applies to every session-scoped
+/// message); the ACTIVE session's request still gets the full
+/// refresh response.
+#[tokio::test]
+async fn stale_route_refresh_request_from_superseded_session_is_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, winner_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // Stale request: no refresh response may reach the active session's
+    // outbound channel.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    // Barrier: the query reply proves the request was processed.
+    let _ = query_received_routes(&tx, peer).await;
+    assert!(
+        winner_rx.try_recv().is_err(),
+        "stale RouteRefreshRequest from a superseded session must not \
+         trigger a re-advertisement"
+    );
+
+    // The ACTIVE session's request produces the refresh response (EoR +
+    // demarcation markers even with an empty table).
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), winner_rx.recv())
+        .await
+        .expect("the active session's RouteRefreshRequest must get a response")
+        .expect("winner outbound channel closed unexpectedly");
+    assert!(
+        !response.refresh_markers.is_empty() || !response.end_of_rib.is_empty(),
+        "refresh response must carry the demarcation markers / EoR"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Stale ORF entries from a superseded session must not install or
+/// modify the replacement session's outbound filter — ORF state is
+/// per-session (RFC 5291). The discard is observable on the reply
+/// channel; the ACTIVE session's ORF update still applies.
+#[tokio::test]
+async fn stale_orf_update_from_superseded_session_is_discarded() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, winner_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    let entry = AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_: OrfMatch::Deny,
+        sequence: 10,
+        min_len: 0,
+        max_len: 32,
+        prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16))),
+    };
+
+    // Stale ORF push: rejected on the reply channel, filter not installed.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries: vec![entry],
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let result = reply_rx.await.unwrap();
+    assert!(
+        result.is_err(),
+        "stale PeerOrfUpdate from a superseded session must be rejected, got {result:?}"
+    );
+
+    // The ACTIVE session's ORF push is accepted.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries: vec![entry],
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let result = reply_rx.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "the active session's PeerOrfUpdate must be accepted, got {result:?}"
+    );
+
+    drop(winner_rx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// No-false-drops guard for the session-identity gate on data messages:
+/// every message kind stamped with the ACTIVE session's id (and the
+/// legacy id-0 flavor on an id-0 registration) flows exactly as before
+/// stamping.
+#[tokio::test]
+async fn active_session_messages_flow_after_replacement() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Replacement scenario: the gate sees a non-trivial registration.
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    tx.send(session_peer_up(peer, 2, winner_tx, ipv4_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // Routes from the active session land in the Adj-RIB-In.
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 2,
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let received = query_received_routes(&tx, peer).await;
+    assert!(
+        received.iter().any(|r| r.prefix == Prefix::V4(prefix)),
+        "the active session's routes must be accepted"
+    );
+
+    // A refresh request from the active session gets its response.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), winner_rx.recv())
+        .await
+        .expect("the active session's RouteRefreshRequest must get a response")
+        .expect("winner outbound channel closed unexpectedly");
+    assert!(
+        !response.refresh_markers.is_empty() || !response.end_of_rib.is_empty(),
+        "refresh response must carry the demarcation markers / EoR"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // EVPN GR/LLGR tests (Gate 2) — mirror the unicast + FlowSpec GR/LLGR suite.
 // Each test spawns a RibManager with a cluster-id so iBGP reflection works,
@@ -10510,6 +11204,7 @@ async fn evpn_gr_marks_stale_and_demotes_routes() {
 
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10554,6 +11249,7 @@ async fn evpn_gr_eor_clears_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10582,6 +11278,7 @@ async fn evpn_gr_eor_clears_stale() {
     assert!(best[0].is_stale);
 
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source,
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -10609,6 +11306,7 @@ async fn evpn_gr_timer_sweeps_stale_routes() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10663,6 +11361,7 @@ async fn evpn_llgr_gr_timer_promotes_to_llgr_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10728,6 +11427,7 @@ async fn evpn_llgr_timer_sweeps_llgr_stale_routes() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10790,6 +11490,7 @@ async fn evpn_llgr_eor_clears_llgr_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -10837,6 +11538,7 @@ async fn evpn_llgr_eor_clears_llgr_stale() {
     // EoR during LLGR phase: clears is_llgr_stale + strips locally-injected
     // LLGR_STALE community
     tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
         peer: source,
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -10892,6 +11594,7 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
         is_llgr_stale: false,
     };
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -11084,6 +11787,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: early,
         announced: vec![],
         withdrawn: vec![],
@@ -11155,6 +11859,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11169,6 +11874,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     // Stage 2: peer initiates ERR for L2VPN/EVPN. The manager snapshots
     // imet_key into refresh_stale_evpn[peer] at this point.
     tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -11183,6 +11889,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     // Stage 3: peer re-advertises the same key — must remove it from
     // the stale set. Without the fix this is a no-op on the stale set.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11198,6 +11905,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     // in the stale set; with the fix that set is empty, so the route
     // survives. Without the fix, the route gets withdrawn here.
     tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
         peer,
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -11306,6 +12014,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![],
         withdrawn: vec![],
@@ -11520,6 +12229,7 @@ async fn evpn_route_event_added_on_new_best() {
     );
     let key = route.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11561,6 +12271,7 @@ async fn evpn_event_history_records_events_without_subscriber() {
     );
     let key = route.key();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11597,6 +12308,7 @@ async fn evpn_event_history_filters_peer_rd_type_and_limit() {
     let rd = crate::event::evpn_key_rd(&route1.key());
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![],
         withdrawn: vec![],
@@ -11608,6 +12320,7 @@ async fn evpn_event_history_filters_peer_rd_type_and_limit() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![],
         withdrawn: vec![],
@@ -11653,6 +12366,7 @@ async fn evpn_event_history_capacity_evicts_oldest_event() {
             index_bytes[3],
         ];
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![],
             withdrawn: vec![],
@@ -11689,6 +12403,7 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
 
     // First peer originates with seq=0.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(original_peer),
         announced: vec![],
         withdrawn: vec![],
@@ -11707,6 +12422,7 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
     // Second peer originates the same MAC with a higher mobility seq.
     // Best-path tiebreak (RFC 7432 §15.1) prefers the higher seq.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(new_peer),
         announced: vec![],
         withdrawn: vec![],
@@ -11753,6 +12469,7 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     let key = route.key();
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11767,6 +12484,7 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     let mut events_rx = subscribe_evpn_events(&tx).await;
 
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer,
         announced: vec![],
         withdrawn: vec![],
@@ -11809,6 +12527,7 @@ async fn fib_install_candidates_groups_equal_cost_ecmp() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
     // Two equal-cost eBGP paths (empty attrs ⇒ same LP/AS/origin/MED/class).
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
         withdrawn: vec![],
@@ -11820,6 +12539,7 @@ async fn fib_install_candidates_groups_equal_cost_ecmp() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
         withdrawn: vec![],
@@ -11874,6 +12594,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: route.peer,
         announced: vec![route],
         withdrawn: vec![],
@@ -11931,6 +12652,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         make_scoped("eth2", 9, "fe80::3"),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer: route.peer,
             announced: vec![route],
             withdrawn: vec![],
@@ -11973,6 +12695,7 @@ async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
     // Same AS_PATH *length* (2), different ASNs: strict refuses to group, relax
     // (ADR-0066 multipath-relax) groups them as ECMP.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer1),
         announced: vec![make_route_with_as_path(prefix, peer1, vec![65001, 65010])],
         withdrawn: vec![],
@@ -11984,6 +12707,7 @@ async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer2),
         announced: vec![make_route_with_as_path(prefix, peer2, vec![65001, 65020])],
         withdrawn: vec![],
@@ -12044,6 +12768,7 @@ async fn fib_install_candidates_weighted_proportional_to_link_bandwidth() {
     let peer2 = Ipv4Addr::new(1, 0, 0, 2); // sibling, 10G
     for (peer, bw) in [(peer1, 40e9), (peer2, 10e9)] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer: IpAddr::V4(peer),
             announced: vec![make_route_with_link_bw(
                 prefix,
@@ -12090,6 +12815,7 @@ async fn fib_install_candidates_weighted_all_or_nothing_on_missing_bandwidth() {
     let peer2 = Ipv4Addr::new(1, 0, 0, 2);
     // peer1 carries a Link Bandwidth community; peer2 does not.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer1),
         announced: vec![make_route_with_link_bw(
             prefix,
@@ -12106,6 +12832,7 @@ async fn fib_install_candidates_weighted_all_or_nothing_on_missing_bandwidth() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(peer2),
         announced: vec![make_route_with_link_bw(
             prefix,
@@ -12152,6 +12879,7 @@ async fn fib_install_candidates_respects_max_paths() {
         ),
     ] {
         tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![make_route(prefix, nh)],
             withdrawn: vec![],
@@ -12190,6 +12918,7 @@ async fn fib_install_candidates_dedupes_same_next_hop_before_cap() {
     let mut r2 = make_route(prefix, shared_nh);
     r2.peer = peer2;
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer1,
         announced: vec![r1],
         withdrawn: vec![],
@@ -12201,6 +12930,7 @@ async fn fib_install_candidates_dedupes_same_next_hop_before_cap() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: peer2,
         announced: vec![r2],
         withdrawn: vec![],
@@ -12233,6 +12963,7 @@ async fn fib_install_candidates_excludes_non_equal_cost() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     // peer2 has higher LOCAL_PREF ⇒ it is the sole best; peer1 is not equal-cost.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
         withdrawn: vec![],
@@ -12244,6 +12975,7 @@ async fn fib_install_candidates_excludes_non_equal_cost() {
     .await
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2)),
         announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
         withdrawn: vec![],
@@ -12300,6 +13032,7 @@ async fn send_peer_orf(
 ) {
     let (rtx, rrx) = oneshot::channel();
     tx.send(RibUpdate::PeerOrfUpdate {
+        session_id: 0,
         peer,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -12343,6 +13076,7 @@ async fn orf_setup() -> (
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: source,
         announced: vec![
             make_route(
@@ -12597,6 +13331,7 @@ async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
     // are re-advertised and previously-advertised routes denied by the installed
     // ORF must be explicitly withdrawn.
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -12755,6 +13490,7 @@ async fn graceful_restart_clears_orf_filter() {
     // dump deliberately bypasses ORF filters): announce a fresh prefix the
     // dead session's 10/8-only filter would deny and assert it floods.
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12),
@@ -12935,6 +13671,7 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
     );
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -12969,6 +13706,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
     let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64);
     tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         announced: vec![
             make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)),
@@ -13017,6 +13755,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
 
     // Lift IPv4 only: the v4 flood + v4 EoR arrive; the v6 EoR must wait.
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -13034,6 +13773,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
 
     // Lift IPv6: its flood + EoR follow.
     tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
         peer: target,
         afi: Afi::Ipv6,
         safi: Safi::Unicast,

@@ -41,9 +41,10 @@ pub struct OutboundRouteUpdate {
     /// peer (RFC 2918) for **every negotiated family**, so the peer
     /// re-advertises its routes. Used by the RIB manager's
     /// outbound-registration failover: the survivor's Adj-RIB-In was
-    /// cleared by the superseded session's replacement reset (inbound
-    /// `RoutesReceived` carries no session identity, so per-session
-    /// attribution is impossible) and must be re-learned from the peer.
+    /// cleared by the superseded session's replacement reset (the
+    /// Adj-RIB-In is keyed by peer address, and while superseded the
+    /// survivor's stamped `RoutesReceived` are discarded by the
+    /// session-identity gate) and must be re-learned from the peer.
     ///
     /// Family selection is deliberately delegated to the session task:
     /// the manager cannot know the receive-side family set, because
@@ -203,6 +204,15 @@ pub enum RibUpdate {
     RoutesReceived {
         /// Source peer address.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation) of
+        /// the session that received these routes. The RIB manager
+        /// discards a batch whose id doesn't match the peer's registered
+        /// session, so routes from a superseded session (RFC 4271 §6.8
+        /// collision loser) queued behind the winner's `PeerUp` cannot
+        /// land in the replacement session's Adj-RIB-In. `0` = legacy
+        /// emitters without identity tracking (degrades to the
+        /// pre-stamping accept behavior; see `PeerDown::session_id`).
+        session_id: u64,
         /// Newly announced routes.
         announced: Vec<Route>,
         /// Withdrawn prefixes with Add-Path path identifiers.
@@ -282,6 +292,12 @@ pub enum RibUpdate {
     PeerOrfUpdate {
         /// The peer that sent the ORF entries.
         peer: IpAddr,
+        /// Transport session identity of the emitting session. ORF state
+        /// is per-session (RFC 5291), so a stale ORF push from a
+        /// superseded session is discarded rather than installed as the
+        /// replacement session's outbound filter (see
+        /// `RoutesReceived::session_id`).
+        session_id: u64,
         /// Address family of the ORF section.
         afi: Afi,
         /// Sub-address family of the ORF section.
@@ -444,6 +460,11 @@ pub enum RibUpdate {
     EndOfRib {
         /// The peer that sent the `EoR`.
         peer: IpAddr,
+        /// Transport session identity of the emitting session. A stale
+        /// `EoR` from a superseded session must not complete the
+        /// registered session's GR/LLGR stale sweep for the family (see
+        /// `RoutesReceived::session_id`).
+        session_id: u64,
         /// Address family identifier.
         afi: Afi,
         /// Subsequent address family identifier.
@@ -515,6 +536,11 @@ pub enum RibUpdate {
     RouteRefreshRequest {
         /// The requesting peer.
         peer: IpAddr,
+        /// Transport session identity of the emitting session. A stale
+        /// request from a superseded session would only trigger a
+        /// spurious re-advertisement, but it is discarded by the same
+        /// rule for consistency (see `RoutesReceived::session_id`).
+        session_id: u64,
         /// Address family identifier.
         afi: Afi,
         /// Subsequent address family identifier.
@@ -524,6 +550,11 @@ pub enum RibUpdate {
     BeginRouteRefresh {
         /// The peer that sent `BoRR`.
         peer: IpAddr,
+        /// Transport session identity of the emitting session. A stale
+        /// `BoRR` from a superseded session must not open an enhanced-
+        /// refresh window over the registered session's Adj-RIB-In (see
+        /// `RoutesReceived::session_id`).
+        session_id: u64,
         /// Address family identifier.
         afi: Afi,
         /// Subsequent address family identifier.
@@ -533,6 +564,11 @@ pub enum RibUpdate {
     EndRouteRefresh {
         /// The peer that sent `EoRR`.
         peer: IpAddr,
+        /// Transport session identity of the emitting session. A stale
+        /// `EoRR` from a superseded session must not close the registered
+        /// session's enhanced-refresh window early and sweep its
+        /// refresh-stale routes (see `RoutesReceived::session_id`).
+        session_id: u64,
         /// Address family identifier.
         afi: Afi,
         /// Subsequent address family identifier.

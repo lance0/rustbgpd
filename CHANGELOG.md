@@ -522,6 +522,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Session-identity gating now covers every session-scoped RIB
+  message, not just teardowns — a superseded session's queued data
+  messages can no longer mutate the replacement session's state.**
+  The collision-window fix below stamped
+  `PeerUp`/`PeerDown`/`PeerGracefulRestart`, but a dumped session's
+  messages already queued in the ingest channel were still attributed
+  by bare peer IP when processed after the winner's `PeerUp`: stale
+  `RoutesReceived` landed in the replacement session's Adj-RIB-In (an
+  announce/withdraw race could leave entries the new session never
+  sent), a stale `EndOfRib` could prematurely complete the winner's
+  GR stale sweep for a family, a stale RFC 7313 `BoRR`/`EoRR` could
+  open or close an enhanced-refresh window over the wrong session's
+  table and sweep refresh-stale routes early, a stale
+  `RouteRefreshRequest` triggered a spurious re-advertisement, and a
+  stale `PeerOrfUpdate` installed the dumped session's ORF entries as
+  the replacement session's outbound filter (ORF state is
+  per-session, RFC 5291). All six variants now carry the transport
+  session id, stamped at every transport emit site (`0` stays the
+  documented legacy degraded mode), and the RIB manager discards any
+  whose id doesn't match the peer's active registration: INFO log
+  with both ids + the new
+  `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter
+  (`kind` ∈ `routes`/`eor`/`refresh`/`orf`, documented in
+  docs/OPERATIONS.md); a discarded ORF push also reports the
+  rejection on its reply channel. A message for a peer with no
+  registration keeps the pre-stamping accept-all behavior, mirroring
+  the teardown rule — per-producer FIFO puts a session's data
+  messages strictly between its own `PeerUp` and its down event, so
+  only legacy unregistered emitters can hit that arm. During the
+  collision overlap only the registered session's routes are accepted
+  into the address-keyed Adj-RIB-In; if the registration later fails
+  over, the existing failover ROUTE-REFRESH re-learns the survivor's
+  routes from the peer, so nothing is permanently lost. GR/LLGR
+  semantics are unchanged for matching ids. `SetPeerPolicyContext`
+  stays unstamped (idempotent, config-derived); `PeerDeleted` is
+  config-scoped by design.
 - **Silent advertisement wedge after a BGP session collision: a stale
   collision-loser `PeerDown` is now discarded by session identity.**
   When two sessions for one peer address overlapped during the
