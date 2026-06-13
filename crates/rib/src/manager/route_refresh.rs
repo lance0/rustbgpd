@@ -578,7 +578,7 @@ impl RibManager {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
-            request_refresh: vec![],
+            request_refresh_all_negotiated: false,
         };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");

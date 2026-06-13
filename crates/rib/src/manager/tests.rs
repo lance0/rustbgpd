@@ -3230,7 +3230,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
-            request_refresh: vec![],
+            request_refresh_all_negotiated: false,
         })
         .await
         .unwrap();
@@ -10208,7 +10208,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         )
         .expect("winner outbound channel closed unexpectedly");
     assert!(
-        !dump.end_of_rib.is_empty() || !dump.request_refresh.is_empty(),
+        !dump.end_of_rib.is_empty() || dump.request_refresh_all_negotiated,
         "first post-failover update must be the initial dump EoR or the inbound \
          refresh request, got announce={} withdraw={}",
         dump.announce.len(),
@@ -10219,14 +10219,16 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     // loser's replacement reset (RoutesReceived is unstamped, so the RIB
     // cannot attribute inbound routes to a session). The manager must
     // request an inbound ROUTE-REFRESH through W's channel so the peer
-    // re-advertises (the session task enforces the RFC 2918 capability).
-    let mut saw_refresh_request = dump.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
+    // re-advertises; family selection is delegated to the session task's
+    // negotiated set (the session task also enforces the RFC 2918
+    // capability).
+    let mut saw_refresh_request = dump.request_refresh_all_negotiated;
     if !saw_refresh_request {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
                 Ok(Some(update)) => {
-                    if update.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                    if update.request_refresh_all_negotiated {
                         saw_refresh_request = true;
                         break;
                     }
@@ -10239,8 +10241,8 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     assert!(
         saw_refresh_request,
         "failover must request an inbound ROUTE-REFRESH toward the surviving \
-         session for its negotiated families (its Adj-RIB-In was cleared by \
-         the replacement reset)"
+         session (its Adj-RIB-In was cleared by the replacement reset; the \
+         session task picks the families from its negotiated set)"
     );
 
     // The peer answers the refresh: W's route lands back in the Loc-RIB.
@@ -10384,7 +10386,7 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
             Ok(Some(update)) => {
-                if update.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                if update.request_refresh_all_negotiated {
                     saw_refresh_request = true;
                     break;
                 }
@@ -10405,6 +10407,84 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
     assert!(
         gr_active.abs() < f64::EPSILON,
         "failover must not enter GR stale-path retention, gr_active = {gr_active}"
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The failover inbound refresh must NOT be limited to the sendable
+/// (outbound) family subset the manager sees in `PeerUp` — a family
+/// negotiated for receive but pruned from the sendable set (e.g. IPv6
+/// with no usable local IPv6 next-hop) still needs its Adj-RIB-In
+/// repopulated. The manager therefore delegates family selection to the
+/// session task via `request_refresh_all_negotiated`. Modeled here as
+/// the extreme case: a survivor whose sendable set is EMPTY must still
+/// get the refresh request (a sendable-derived selection would request
+/// nothing at all).
+#[tokio::test]
+async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Both sessions advertise an EMPTY sendable set — every negotiated
+    // family is receive-only from the manager's point of view.
+    let peer_up =
+        |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![],
+            is_ebgp: false,
+            route_reflector_client: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        };
+
+    // Winner registers first, loser's PeerUp replaces the registration,
+    // loser goes down — the registration fails over to the winner. (No
+    // EoR drain: with an empty sendable set there is no initial dump.)
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(peer_up(winner_tx, 1)).await.unwrap();
+    let (loser_tx, _loser_rx) = mpsc::channel(8);
+    tx.send(peer_up(loser_tx, 2)).await.unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    })
+    .await
+    .unwrap();
+
+    let mut saw_refresh_request = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update.request_refresh_all_negotiated {
+                    saw_refresh_request = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("winner outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_refresh_request,
+        "failover must request the inbound ROUTE-REFRESH even when the \
+         survivor's sendable family set is empty — the refresh covers \
+         receive-side families the manager cannot see, so family selection \
+         belongs to the session task"
     );
 
     drop(winner_session_tx);

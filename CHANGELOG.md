@@ -499,7 +499,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requests an inbound ROUTE-REFRESH (RFC 2918) through it so the
   Adj-RIB-In cleared by the replacement reset is re-learned from the
   peer (inbound `RoutesReceived` carries no session identity, so
-  local recovery is impossible by construction; without the
+  local recovery is impossible by construction; the session task
+  picks the refresh families from its negotiated set, since the
+  manager sees only the sendable subset and a family negotiated for
+  receive but not sendable must still be refreshed; without the
   negotiated Route Refresh capability the request is skipped with a
   warning and inbound state recovers only on the peer's natural
   re-advertisement). A GR-down of the active session with a live

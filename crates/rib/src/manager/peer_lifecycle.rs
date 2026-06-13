@@ -161,11 +161,15 @@ impl RibManager {
 
     /// Ask the active session's peer to re-advertise its routes
     /// (ROUTE-REFRESH request, RFC 2918) for the session's negotiated
-    /// families — the inbound half of a registration failover. One-shot
-    /// best-effort: a full outbound channel only loses the *request*; the
-    /// peer's natural re-advertisement remains the fallback, and the
-    /// outbound table resync is handled separately by the dirty-peer
-    /// mechanism.
+    /// families — the inbound half of a registration failover. The
+    /// manager only raises the flag; the family set is chosen by the
+    /// session task from its authoritative negotiated set, because the
+    /// manager's live-session record holds only the *sendable* (outbound)
+    /// subset and a family negotiated for receive but pruned from it must
+    /// still be refreshed. One-shot best-effort: a full outbound channel
+    /// only loses the *request*; the peer's natural re-advertisement
+    /// remains the fallback, and the outbound table resync is handled
+    /// separately by the dirty-peer mechanism.
     fn request_inbound_refresh(&mut self, peer: IpAddr) {
         let Some(record) = self
             .live_sessions
@@ -174,10 +178,6 @@ impl RibManager {
         else {
             return;
         };
-        let families = record.sendable_families.clone();
-        if families.is_empty() {
-            return;
-        }
         let update = OutboundRouteUpdate {
             announce: vec![],
             withdraw: vec![],
@@ -188,7 +188,7 @@ impl RibManager {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
-            request_refresh: families,
+            request_refresh_all_negotiated: true,
         };
         if record.outbound_tx.try_send(update).is_err() {
             warn!(
@@ -786,7 +786,7 @@ impl RibManager {
                 flowspec_withdraw: vec![],
                 evpn_announce: vec![],
                 evpn_withdraw: vec![],
-                request_refresh: vec![],
+                request_refresh_all_negotiated: false,
             };
             if tx.try_send(eor).is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");

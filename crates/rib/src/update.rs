@@ -37,18 +37,25 @@ pub struct OutboundRouteUpdate {
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
     pub evpn_withdraw: Vec<EvpnRouteKey>,
-    /// Families for which the session task should send a ROUTE-REFRESH
-    /// *request* toward the peer (RFC 2918), asking it to re-advertise
-    /// its routes. Used by the RIB manager's outbound-registration
-    /// failover: the survivor's Adj-RIB-In was cleared by the superseded
-    /// session's replacement reset (inbound `RoutesReceived` carries no
-    /// session identity, so per-session attribution is impossible) and
-    /// must be re-learned from the peer. The session task enforces the
-    /// negotiated Route Refresh capability and family set; for a peer
-    /// without the capability the request is skipped with a warning and
-    /// inbound state recovers only on the peer's natural
-    /// re-advertisement.
-    pub request_refresh: Vec<(Afi, Safi)>,
+    /// Ask the session task to send a ROUTE-REFRESH *request* toward the
+    /// peer (RFC 2918) for **every negotiated family**, so the peer
+    /// re-advertises its routes. Used by the RIB manager's
+    /// outbound-registration failover: the survivor's Adj-RIB-In was
+    /// cleared by the superseded session's replacement reset (inbound
+    /// `RoutesReceived` carries no session identity, so per-session
+    /// attribution is impossible) and must be re-learned from the peer.
+    ///
+    /// Family selection is deliberately delegated to the session task:
+    /// the manager cannot know the receive-side family set, because
+    /// `PeerUp` carries only the *sendable* subset (families with a
+    /// usable local next-hop), while the refresh repopulates inbound
+    /// state — a family negotiated for receive but pruned from the
+    /// sendable set must still be refreshed. The session task iterates
+    /// its authoritative negotiated set and enforces the Route Refresh
+    /// capability; for a peer without the capability the request is
+    /// skipped with a warning and inbound state recovers only on the
+    /// peer's natural re-advertisement.
+    pub request_refresh_all_negotiated: bool,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.
