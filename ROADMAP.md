@@ -1055,6 +1055,17 @@ branch is between features.
   deliberately differ: cargo-deny warns (not fails) on unsound-class
   advisories, so only the unmaintained `paste` entry needs a deny.toml
   ignore while `.cargo/audit.toml` also carries the rand unsoundness entry.
+- [ ] **`netlink-packet-route` 0.31 upgrade — blocked on rtnetlink lockstep.**
+  0.31.0 has two breaking changes (`InfoIpTunnel::CollectMetadata`,
+  `InfoVxlan::Df`) that we don't use, so the bump itself is safe — but
+  `rtnetlink` (latest 0.21.0) pins `netlink-packet-route ^0.30`, and our code
+  feeds `netlink_packet_route` types straight into `rtnetlink::Handle`, so a
+  lone bump produces a duplicate-version tree and ~31 type-mismatch errors
+  (this is why dependabot #452 is red). **Revisit when `rtnetlink` 0.22 (or
+  later) lands with 0.31 support**, then bump the pair together in one PR; the
+  raw `IFLA_PROTINFO` AC-gate encode and `link_carrier` flag reads are the
+  surfaces to re-verify. Until then #452 stays open as the upstream-watch
+  tracker. Verified during the FIB route-drift eventing work (#482).
 - [ ] **Workspace `cargo doc` warning posture.** CI runs
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
   as the standing local pre-flight expectation so broken intra-doc links surface
