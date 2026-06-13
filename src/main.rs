@@ -36,6 +36,7 @@ mod fib_common;
 mod fib_runtime;
 mod fib_table_control;
 mod gnmi_set_bridge;
+mod kernel_route_notify;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;

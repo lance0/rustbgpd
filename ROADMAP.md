@@ -849,11 +849,16 @@ branch is between features.
   periodic dump stays as the backstop. **Stays on cadence, deliberately:**
   BMP statistics (RFC 7854 interval reporting), BFD protocol timers, MRT
   dump rotation, and the retained backstop ticks themselves. **Follow-up
-  inventory (demand-shaped):** the FIB runtime and blackhole reconcilers
-  bound *kernel*-side drift at 30 s — RIB-side changes are already
-  event-driven — and converting them needs an `RTNLGRP_IPV4/6_ROUTE`
-  subscription surfaced through the `UnicastFib` seam (the evpn-linux
-  notify task is the template).
+  (done):** the FIB runtime and blackhole reconcilers bounded *kernel*-side
+  drift at 30 s — RIB-side changes were already event-driven — and now
+  subscribe their own NETLINK_ROUTE connections to `RTNLGRP_IPV4/6_ROUTE`
+  (`src/kernel_route_notify.rs`), surfaced through the `UnicastFib` /
+  `BlackholeFib` seams: a delete of an owned-signature row (`proto bgp` in
+  a configured table identity / the ADR-0079 blackhole marker in `main`)
+  or a foreign replace on an owned identity wakes a coalesced reconcile
+  (200 ms debounce, shared with the RIB-event path); install echoes and
+  unrelated host churn stay silent, and the 30 s pass remains the
+  backstop.
 
 - [x] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
   `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Multi-PR batches keep

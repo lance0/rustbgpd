@@ -29,6 +29,7 @@ use crate::fib::{
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
+use crate::kernel_route_notify::{KernelRouteEvent, KernelRouteEventKind, recv_kernel_route_event};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -302,6 +303,7 @@ async fn run_loop<F>(
     let mut cmd_open = true;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
+    let mut kernel_route_events = fib.take_kernel_route_events();
     reconcile_once_with_events(
         &config,
         &rib_query_tx,
@@ -435,6 +437,86 @@ async fn run_loop<F>(
                     None => route_events = subscribe_route_events(&rib_tx).await,
                 }
             }
+            maybe_drift = recv_kernel_route_event(&mut kernel_route_events) => {
+                match maybe_drift {
+                    Some(event) => {
+                        if kernel_route_drift_wakes(&event, &config.tables, &owned) {
+                            debug!(
+                                table_id = event.table_id,
+                                metric = event.metric,
+                                "kernel route drift on an owned FIB surface; \
+                                 coalesced reconcile follows"
+                            );
+                            route_event_dirty = true;
+                            event_debounce
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + ROUTE_EVENT_DEBOUNCE);
+                        }
+                    }
+                    // Notification stream closed (connection teardown);
+                    // retire the arm — the periodic backstop still
+                    // repairs kernel drift, as before eventing.
+                    None => kernel_route_events = None,
+                }
+            }
+        }
+    }
+}
+
+/// Kernel route-event drift classifier — should this
+/// `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` notification wake the
+/// reconciler ahead of the 30 s periodic backstop?
+///
+/// The actor owns `RTPROT_BGP` rows at the configured
+/// `(table_id, metric)` identities, so:
+///
+/// - **`RTM_DELROUTE`** wakes when the deleted row carries our
+///   protocol *and* sits on a configured table key or on the table key
+///   of a still-owned route (the latter covers a table just removed
+///   from config whose withdraws failed and stay owned). This is the
+///   dominant external-interference shape (`ip route del` / `ip route
+///   flush table N`); our own withdraws echo the same message and cost
+///   one coalesced no-op pass, exactly like the evpn-linux FDB-drift
+///   wake's self-echo.
+/// - **`RTM_NEWROUTE`** wakes only when a *foreign*-protocol row lands
+///   on an exact owned route identity `(table, metric, prefix)` — an
+///   `ip route replace` clobbering our row emits exactly this (the
+///   kernel sends no `DELROUTE` for the replaced row). Own-protocol
+///   `NEWROUTE`s never wake: every install echoes one, and waking
+///   there would re-reconcile after every programming pass (the
+///   `RTM_NEWNEIGH` precedent from the evpn-linux drift classifier).
+///   The cost is that a replace which *spoofs* `proto bgp` is
+///   indistinguishable from our own echo and rides the periodic
+///   backstop.
+///
+/// Anything else — host churn in `main`, other daemons' tables, other
+/// protocols — must not wake the actor.
+fn kernel_route_drift_wakes(
+    event: &KernelRouteEvent,
+    tables: &[FibTableConfig],
+    owned: &FibOwnedState,
+) -> bool {
+    let table_key = FibTableKey {
+        table_id: event.table_id,
+        metric: event.metric,
+    };
+    match event.kind {
+        KernelRouteEventKind::Del => {
+            event.protocol_is_bgp
+                && (tables
+                    .iter()
+                    .any(|t| t.table_id == table_key.table_id && t.metric == table_key.metric)
+                    || owned.routes.keys().any(|key| key.table_key() == table_key))
+        }
+        KernelRouteEventKind::New => {
+            !event.protocol_is_bgp
+                && event.prefix.is_some_and(|prefix| {
+                    owned.routes.contains_key(&FibRouteKey {
+                        table_id: event.table_id,
+                        metric: event.metric,
+                        prefix,
+                    })
+                })
         }
     }
 }
@@ -1668,20 +1750,31 @@ trait UnicastFib {
         &'a mut self,
         op: &'a FibOp,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Take the kernel route-change notification stream, if the
+    /// backing can surface one. Called once at actor startup; `None`
+    /// (fakes, non-Linux, subscription unavailable) leaves kernel-side
+    /// drift repair to the periodic reconcile backstop.
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
 struct LinuxUnicastFib {
     handle: rtnetlink::Handle,
+    kernel_route_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxUnicastFib {
     fn connect() -> Result<Self, String> {
-        let (connection, handle, _) =
-            rtnetlink::new_connection().map_err(|e| format!("open NETLINK_ROUTE: {e}"))?;
-        tokio::spawn(connection);
-        Ok(Self { handle })
+        let (handle, events) =
+            crate::kernel_route_notify::connect_with_route_notifications("general FIB")?;
+        Ok(Self {
+            handle,
+            kernel_route_events: Some(events),
+        })
     }
 }
 
@@ -1699,6 +1792,10 @@ impl UnicastFib for LinuxUnicastFib {
         op: &'a FibOp,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move { apply_linux_op(&self.handle, op).await })
+    }
+
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+        self.kernel_route_events.take()
     }
 }
 
@@ -2148,6 +2245,7 @@ mod tests {
         fail_dump: Option<String>,
         fail_apply: Vec<String>,
         applied: Vec<FibOp>,
+        kernel_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
     }
 
     impl UnicastFib for FakeFib {
@@ -2199,6 +2297,12 @@ mod tests {
                 }
                 Ok(())
             })
+        }
+
+        fn take_kernel_route_events(
+            &mut self,
+        ) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+            self.kernel_events.take()
         }
     }
 
@@ -3333,6 +3437,177 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(query_count.load(Ordering::SeqCst) > initial);
+        handle.shutdown().await;
+    }
+
+    // --- Kernel route-drift classifier (`kernel_route_drift_wakes`) ---
+
+    fn drift_event(
+        kind: KernelRouteEventKind,
+        table_id: u32,
+        metric: u32,
+        prefix: Option<Prefix>,
+        protocol_is_bgp: bool,
+    ) -> KernelRouteEvent {
+        KernelRouteEvent {
+            kind,
+            table_id,
+            metric,
+            prefix,
+            protocol_is_bgp,
+            route_type: crate::kernel_route_notify::KernelRouteType::Unicast,
+        }
+    }
+
+    fn owned_with(prefix: Prefix) -> FibOwnedState {
+        let route = fib_route(prefix, ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        owned
+    }
+
+    #[test]
+    fn drift_del_of_bgp_route_in_configured_table_wakes() {
+        let event = drift_event(KernelRouteEventKind::Del, 1000, 200, Some(v4(24)), true);
+        assert!(kernel_route_drift_wakes(
+            &event,
+            &config().tables,
+            &FibOwnedState::default(),
+        ));
+    }
+
+    #[test]
+    fn drift_del_outside_configured_and_owned_tables_does_not_wake() {
+        // Wrong table id and wrong metric each miss the owned surface.
+        for (table_id, metric) in [(999, 200), (1000, 100)] {
+            let event = drift_event(KernelRouteEventKind::Del, table_id, metric, None, true);
+            assert!(!kernel_route_drift_wakes(
+                &event,
+                &config().tables,
+                &FibOwnedState::default(),
+            ));
+        }
+    }
+
+    #[test]
+    fn drift_del_of_foreign_protocol_route_does_not_wake() {
+        // Host churn in a configured table: not our protocol, not drift.
+        let event = drift_event(KernelRouteEventKind::Del, 1000, 200, Some(v4(24)), false);
+        assert!(!kernel_route_drift_wakes(
+            &event,
+            &config().tables,
+            &owned_with(v4(24)),
+        ));
+    }
+
+    #[test]
+    fn drift_del_in_owned_but_no_longer_configured_table_wakes() {
+        // A table removed from config whose withdraw failed stays owned;
+        // kernel deletes there must still wake the flush retry.
+        let event = drift_event(KernelRouteEventKind::Del, 1000, 200, Some(v4(24)), true);
+        assert!(kernel_route_drift_wakes(&event, &[], &owned_with(v4(24))));
+    }
+
+    #[test]
+    fn drift_new_foreign_route_on_owned_identity_wakes() {
+        // `ip route replace` clobbering our row: NEWROUTE, foreign proto,
+        // exact owned (table, metric, prefix).
+        let event = drift_event(KernelRouteEventKind::New, 1000, 200, Some(v4(24)), false);
+        assert!(kernel_route_drift_wakes(
+            &event,
+            &config().tables,
+            &owned_with(v4(24)),
+        ));
+    }
+
+    #[test]
+    fn drift_new_foreign_route_off_owned_identity_does_not_wake() {
+        let owned = owned_with(v4(24));
+        // Different prefix, different metric, and a missing prefix all
+        // miss the owned identity.
+        for event in [
+            drift_event(KernelRouteEventKind::New, 1000, 200, Some(v4(25)), false),
+            drift_event(KernelRouteEventKind::New, 1000, 100, Some(v4(24)), false),
+            drift_event(KernelRouteEventKind::New, 1000, 200, None, false),
+        ] {
+            assert!(!kernel_route_drift_wakes(&event, &config().tables, &owned));
+        }
+    }
+
+    #[test]
+    fn drift_new_own_protocol_route_does_not_wake() {
+        // Our own install echo: waking here would re-reconcile after
+        // every programming pass.
+        let event = drift_event(KernelRouteEventKind::New, 1000, 200, Some(v4(24)), true);
+        assert!(!kernel_route_drift_wakes(
+            &event,
+            &config().tables,
+            &owned_with(v4(24)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn kernel_drift_event_wakes_actor_before_periodic_interval() {
+        let (rib_tx, query_count, _events_tx) =
+            rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let (drift_tx, drift_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let handle = spawn_with_fib(
+            config(),
+            rib_tx.clone(),
+            rib_tx,
+            FakeFib {
+                kernel_events: Some(drift_rx),
+                ..FakeFib::default()
+            },
+            metrics(),
+            status_tx,
+            event_tx,
+            shutdown.clone(),
+        );
+
+        tokio::task::yield_now().await;
+        for _ in 0..20 {
+            if query_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(query_count.load(Ordering::SeqCst), 1);
+
+        // A burst of qualifying kernel deletes coalesces into one
+        // reconcile after the debounce window — no 30 s wait.
+        for _ in 0..5 {
+            drift_tx
+                .send(drift_event(
+                    KernelRouteEventKind::Del,
+                    1000,
+                    200,
+                    Some(v4(24)),
+                    true,
+                ))
+                .unwrap();
+        }
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(query_count.load(Ordering::SeqCst), 2);
+
+        // A non-qualifying event (foreign protocol delete) does not wake.
+        drift_tx
+            .send(drift_event(
+                KernelRouteEventKind::Del,
+                1000,
+                200,
+                Some(v4(24)),
+                false,
+            ))
+            .unwrap();
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(query_count.load(Ordering::SeqCst), 2);
+
         handle.shutdown().await;
     }
 

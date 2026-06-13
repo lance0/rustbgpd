@@ -440,6 +440,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The general-FIB and BLACKHOLE reconcilers now wake on kernel route
+  drift instead of waiting out the 30 s periodic pass.** Each actor's
+  NETLINK_ROUTE connection subscribes to `RTNLGRP_IPV4_ROUTE` /
+  `RTNLGRP_IPV6_ROUTE` (`src/kernel_route_notify.rs`, the evpn-linux
+  notify-task pattern), and a pure per-actor classifier decides what
+  is drift of owned state: a deleted row carrying the actor's
+  ownership signature (`proto bgp` at a configured
+  `[[fib_tables]]` table/metric identity, or the ADR-0079
+  `proto bgp` + blackhole marker in `main`), or a foreign-protocol
+  replace landing on an exact owned route identity. Qualifying events
+  coalesce into one reconcile through the existing 200 ms debounce
+  shared with the RIB-event path, so externally deleted or clobbered
+  routes are repaired in ~0.2 s instead of up to 30 s; install echoes
+  and unrelated host churn never wake the actors, and the 30 s pass
+  remains as the level-triggered backstop (it alone catches a replace
+  that spoofs `proto bgp`). Subscription failure degrades to exactly
+  the previous periodic-only behavior.
 - **EVPN L3 neighbor adoption now requires the NDA_PROTOCOL `RTPROT_BGP`
   ownership stamp by default (ADR-0082 strict flip).** The stamp-or-legacy
   migration window v0.38.0 opened is closed: the crash-restart adoption
