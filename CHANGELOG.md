@@ -572,6 +572,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overlay-index Type 5 origination as future work after it shipped, and
   `redundancy_mode = "single-active"` now points at the shipped receive-side
   backup-path pre-install behavior.
+- **Kernel route-event degradation is now alertable.** The general-FIB
+  and BLACKHOLE route-notify path still drops wake events on a full
+  bounded channel and falls back to the periodic reconcile on
+  subscription failure, but those degraded modes now increment
+  `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}`
+  and
+  `bgp_kernel_route_notify_subscription_failures_total{actor,group}`.
+  The repair semantics are unchanged; operators no longer need to
+  scrape logs to detect route-event pressure or multicast-subscription
+  loss.
+- **Route-event ID exhaustion no longer panics the RIB manager.** The
+  process-local route-event id now saturates at `u64::MAX` with a
+  one-time warning instead of taking down the manager in the
+  practically unreachable case where one daemon lifetime emits the
+  full 64-bit event space.
 - **Session-identity gating now covers every session-scoped RIB
   message, not just teardowns — a superseded session's queued data
   messages can no longer mutate the replacement session's state.**

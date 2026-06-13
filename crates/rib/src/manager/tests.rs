@@ -3382,6 +3382,42 @@ async fn query_route_event_history(
     reply_rx.await.unwrap()
 }
 
+#[test]
+fn route_event_id_exhaustion_saturates_instead_of_panicking() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.next_route_event_id = u64::MAX;
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    for _ in 0..2 {
+        manager.publish_route_event(crate::event::RouteEvent {
+            event_id: 0,
+            event_type: RouteEventType::Added,
+            prefix,
+            peer: None,
+            previous_peer: None,
+            target_peer: None,
+            timestamp: String::new(),
+            path_id: 0,
+            reason: String::new(),
+        });
+    }
+
+    assert_eq!(manager.route_event_history.len(), 2);
+    assert!(manager.route_event_id_exhausted);
+    assert!(
+        manager
+            .route_event_history
+            .iter()
+            .all(|event| event.event_id == u64::MAX)
+    );
+    assert_eq!(
+        manager.next_route_event_id,
+        u64::MAX,
+        "saturated id should remain stable after exhaustion"
+    );
+}
+
 #[tokio::test]
 async fn route_event_added_on_new_best() {
     let (tx, rx) = mpsc::channel(64);
@@ -11180,6 +11216,40 @@ async fn active_session_messages_flow_after_replacement() {
     assert!(
         !response.refresh_markers.is_empty() || !response.end_of_rib.is_empty(),
         "refresh response must carry the demarcation markers / EoR"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn unregistered_session_message_keeps_legacy_accept_behavior() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 77,
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let received = query_received_routes(&tx, peer).await;
+    assert!(
+        received
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(prefix)),
+        "unregistered data messages intentionally retain the legacy accept behavior"
     );
 
     drop(tx);
