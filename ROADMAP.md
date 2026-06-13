@@ -329,8 +329,9 @@ has it, no broad performance sprints without profile evidence.
   down: re-register, re-dump the initial table, and request an inbound
   ROUTE-REFRESH through the survivor's channel (`OutboundRouteUpdate::
   request_refresh`; the session task enforces RFC 2918 capability) —
-  Adj-RIB-In is per-address and `RoutesReceived` is unstamped, so
-  inbound recovery must come from the peer. A GR-down of the active
+  Adj-RIB-In is per-address and the replacement reset already cleared
+  the survivor's received routes, so inbound recovery must come from
+  the peer. A GR-down of the active
   session with a live survivor fails over instead of entering stale
   retention. New `bgp_rib_outbound_registration_failover_total{peer}`.
   Manager tests pin all interleavings of {PeerUp(W), PeerUp(L),
@@ -339,6 +340,23 @@ has it, no broad performance sprints without profile evidence.
   collision itself was inferred, not observed — the WARN/INFO lines,
   gauge and discard/failover counters make any recurrence
   self-attributing.
+  **Follow-up resolved — the remaining bare-peer-IP `RibUpdate`
+  variants are now stamped and gated too.** A superseded session's
+  queued data messages processed after the winner's `PeerUp` were
+  still attributed by IP only: `RoutesReceived` (stale routes landing
+  in the replacement's Adj-RIB-In), `EndOfRib` (premature GR-sweep
+  completion), `BeginRouteRefresh`/`EndRouteRefresh` (an enhanced-
+  refresh window opened/closed by the wrong session, sweeping
+  refresh-stale routes early), `RouteRefreshRequest` (spurious
+  re-advertisement), and `PeerOrfUpdate` (stale ORF entries installed
+  as the replacement's outbound filter). All six now carry
+  `session_id`; the RIB manager drops any whose id doesn't match the
+  active registration (INFO log + the
+  `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter,
+  `kind` ∈ routes/eor/refresh/orf). A message for a peer with no
+  registration keeps accept-all, mirroring the teardown rule.
+  `SetPeerPolicyContext` stays unstamped (idempotent, config-derived);
+  `PeerDeleted` is config-scoped by design.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent
