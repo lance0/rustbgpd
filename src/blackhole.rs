@@ -29,6 +29,14 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::kernel_route_notify::{
+    KernelRouteEvent, KernelRouteEventKind, KernelRouteType, recv_kernel_route_event,
+};
+
+/// Linux `RT_TABLE_MAIN` — the only table this actor writes (the
+/// ADR-0079 ownership marker is scoped to it).
+const RT_TABLE_MAIN: u32 = 254;
+
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -319,6 +327,7 @@ async fn run_loop<F>(
     let mut route_event_dirty = false;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
+    let mut kernel_route_events = fib.take_kernel_route_events();
     reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
 
     loop {
@@ -353,6 +362,70 @@ async fn run_loop<F>(
                     }
                 }
             }
+            maybe_drift = recv_kernel_route_event(&mut kernel_route_events) => {
+                match maybe_drift {
+                    Some(event) => {
+                        if kernel_route_drift_wakes(&event, &state.owned) {
+                            debug!(
+                                prefix = ?event.prefix,
+                                "kernel route drift on the BLACKHOLE discard surface; \
+                                 coalesced reconcile follows"
+                            );
+                            route_event_dirty = true;
+                            event_debounce
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + ROUTE_EVENT_DEBOUNCE);
+                        }
+                    }
+                    // Notification stream closed (connection teardown);
+                    // retire the arm — the periodic backstop still
+                    // repairs kernel drift, as before eventing.
+                    None => kernel_route_events = None,
+                }
+            }
+        }
+    }
+}
+
+/// Kernel route-event drift classifier — should this
+/// `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` notification wake the
+/// reconciler ahead of the 30 s periodic backstop?
+///
+/// The actor's ownership marker is `RTPROT_BGP` + `RTN_BLACKHOLE` in
+/// the main table (ADR-0079), so:
+///
+/// - **`RTM_DELROUTE`** of a marker row wakes — external interference
+///   (`ip route del` / a flush) swept a discard row, whether owned or
+///   an adopted-but-unclaimed crash leftover; the pass re-diffs both.
+///   Our own withdraw echoes the same message and costs one coalesced
+///   no-op pass.
+/// - **`RTM_NEWROUTE`** wakes only when a *non*-marker row lands on an
+///   owned prefix — an `ip route replace` clobbering a discard row
+///   emits exactly this (the kernel sends no `DELROUTE` for the
+///   replaced row). Marker-row `NEWROUTE`s never wake: every install
+///   echoes one. A foreign row at a different metric does not actually
+///   displace the discard row, but owned prefixes are RTBH host routes
+///   so a colliding foreign add is rare enough that the extra
+///   coalesced pass is cheaper than tracking kernel metrics here.
+///
+/// Everything outside the main table, and all unrelated main-table
+/// churn (connected/static/host routes on non-owned prefixes), must
+/// not wake the actor.
+fn kernel_route_drift_wakes(
+    event: &KernelRouteEvent,
+    owned: &HashMap<Prefix, OwnedBlackhole>,
+) -> bool {
+    if event.table_id != RT_TABLE_MAIN {
+        return false;
+    }
+    let marker = event.protocol_is_bgp && event.route_type == KernelRouteType::BlackHole;
+    match event.kind {
+        KernelRouteEventKind::Del => marker,
+        KernelRouteEventKind::New => {
+            !marker
+                && event
+                    .prefix
+                    .is_some_and(|prefix| owned.contains_key(&prefix))
         }
     }
 }
@@ -920,20 +993,31 @@ trait BlackholeFib {
         &mut self,
         prefix: Prefix,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
+
+    /// Take the kernel route-change notification stream, if the
+    /// backing can surface one. Called once at actor startup; `None`
+    /// (fakes, non-Linux, subscription unavailable) leaves kernel-side
+    /// drift repair to the periodic reconcile backstop.
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
 struct LinuxBlackholeFib {
     handle: rtnetlink::Handle,
+    kernel_route_events: Option<mpsc::Receiver<KernelRouteEvent>>,
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxBlackholeFib {
     fn connect() -> Result<Self, String> {
-        let (connection, handle, _) =
-            rtnetlink::new_connection().map_err(|e| format!("open NETLINK_ROUTE: {e}"))?;
-        tokio::spawn(connection);
-        Ok(Self { handle })
+        let (handle, events) =
+            crate::kernel_route_notify::connect_with_route_notifications("BLACKHOLE discard")?;
+        Ok(Self {
+            handle,
+            kernel_route_events: Some(events),
+        })
     }
 }
 
@@ -978,6 +1062,10 @@ impl BlackholeFib for LinuxBlackholeFib {
                 }
             }
         })
+    }
+
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
+        self.kernel_route_events.take()
     }
 }
 
@@ -1051,8 +1139,6 @@ fn kernel_route_entry(msg: &netlink_packet_route::route::RouteMessage) -> Option
     use netlink_packet_route::AddressFamily;
     use netlink_packet_route::route::{RouteAddress, RouteAttribute};
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
-
-    const RT_TABLE_MAIN: u32 = 254;
 
     let table = msg
         .attributes
@@ -1139,6 +1225,7 @@ mod tests {
         install_calls: Vec<Prefix>,
         remove_calls: Vec<Prefix>,
         dump_calls: usize,
+        kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
     }
 
     impl BlackholeFib for FakeFib {
@@ -1193,6 +1280,10 @@ mod tests {
                 self.installed.remove(&prefix);
                 Ok(())
             })
+        }
+
+        fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
+            self.kernel_events.take()
         }
     }
 
@@ -1645,6 +1736,208 @@ mod tests {
         );
 
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE).await;
+        tokio::task::yield_now().await;
+        assert_eq!(query_count.load(Ordering::SeqCst), 2);
+
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    // --- Kernel route-drift classifier (`kernel_route_drift_wakes`) ---
+
+    fn drift_event(
+        kind: KernelRouteEventKind,
+        table_id: u32,
+        prefix: Option<Prefix>,
+        protocol_is_bgp: bool,
+        route_type: KernelRouteType,
+    ) -> KernelRouteEvent {
+        KernelRouteEvent {
+            kind,
+            table_id,
+            metric: 0,
+            prefix,
+            protocol_is_bgp,
+            route_type,
+        }
+    }
+
+    fn owned_with(prefix: Prefix) -> HashMap<Prefix, OwnedBlackhole> {
+        HashMap::from([(
+            prefix,
+            OwnedBlackhole {
+                peer: "198.51.100.1".parse().unwrap(),
+            },
+        )])
+    }
+
+    #[test]
+    fn drift_del_of_marker_row_in_main_wakes() {
+        let event = drift_event(
+            KernelRouteEventKind::Del,
+            RT_TABLE_MAIN,
+            Some(v4(32)),
+            true,
+            KernelRouteType::BlackHole,
+        );
+        // Marker-based, not owned-based: an adopted-but-unclaimed crash
+        // leftover being swept must wake too.
+        assert!(kernel_route_drift_wakes(&event, &HashMap::new()));
+    }
+
+    #[test]
+    fn drift_del_outside_main_table_does_not_wake() {
+        let event = drift_event(
+            KernelRouteEventKind::Del,
+            1000,
+            Some(v4(32)),
+            true,
+            KernelRouteType::BlackHole,
+        );
+        assert!(!kernel_route_drift_wakes(&event, &owned_with(v4(32))));
+    }
+
+    #[test]
+    fn drift_del_of_non_marker_row_does_not_wake() {
+        // Host churn in main: wrong protocol or wrong route type.
+        for event in [
+            drift_event(
+                KernelRouteEventKind::Del,
+                RT_TABLE_MAIN,
+                Some(v4(32)),
+                false,
+                KernelRouteType::BlackHole,
+            ),
+            drift_event(
+                KernelRouteEventKind::Del,
+                RT_TABLE_MAIN,
+                Some(v4(32)),
+                true,
+                KernelRouteType::Unicast,
+            ),
+        ] {
+            assert!(!kernel_route_drift_wakes(&event, &owned_with(v4(32))));
+        }
+    }
+
+    #[test]
+    fn drift_new_foreign_row_on_owned_prefix_wakes() {
+        // `ip route replace` clobbering a discard row.
+        let event = drift_event(
+            KernelRouteEventKind::New,
+            RT_TABLE_MAIN,
+            Some(v4(32)),
+            false,
+            KernelRouteType::Unicast,
+        );
+        assert!(kernel_route_drift_wakes(&event, &owned_with(v4(32))));
+    }
+
+    #[test]
+    fn drift_new_foreign_row_off_owned_prefix_does_not_wake() {
+        let owned = owned_with(v4(32));
+        for event in [
+            drift_event(
+                KernelRouteEventKind::New,
+                RT_TABLE_MAIN,
+                Some(v4(24)),
+                false,
+                KernelRouteType::Unicast,
+            ),
+            drift_event(
+                KernelRouteEventKind::New,
+                RT_TABLE_MAIN,
+                None,
+                false,
+                KernelRouteType::Unicast,
+            ),
+        ] {
+            assert!(!kernel_route_drift_wakes(&event, &owned));
+        }
+    }
+
+    #[test]
+    fn drift_new_marker_row_does_not_wake() {
+        // Our own install echo.
+        let event = drift_event(
+            KernelRouteEventKind::New,
+            RT_TABLE_MAIN,
+            Some(v4(32)),
+            true,
+            KernelRouteType::BlackHole,
+        );
+        assert!(!kernel_route_drift_wakes(&event, &owned_with(v4(32))));
+    }
+
+    #[tokio::test]
+    async fn kernel_drift_event_wakes_actor_before_periodic_interval() {
+        let prefix = v4(32);
+        let (rib_tx, query_count, _events_tx) = rib_with_events(vec![route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )]);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (drift_tx, drift_rx) = mpsc::channel(64);
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            run_loop(
+                BlackholeConfig {
+                    enabled: true,
+                    allow_broad_prefixes: false,
+                },
+                rib_tx,
+                FakeFib {
+                    kernel_events: Some(drift_rx),
+                    ..FakeFib::default()
+                },
+                metrics,
+                status_tx,
+                task_shutdown,
+            )
+            .await;
+        });
+
+        for _ in 0..20 {
+            if query_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(query_count.load(Ordering::SeqCst), 1);
+
+        // A burst of marker-row deletes coalesces into one reconcile
+        // after the debounce window — no 30 s wait.
+        for _ in 0..5 {
+            drift_tx
+                .send(drift_event(
+                    KernelRouteEventKind::Del,
+                    RT_TABLE_MAIN,
+                    Some(prefix),
+                    true,
+                    KernelRouteType::BlackHole,
+                ))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(query_count.load(Ordering::SeqCst), 2);
+
+        // Unrelated main-table churn does not wake the actor.
+        drift_tx
+            .send(drift_event(
+                KernelRouteEventKind::Del,
+                RT_TABLE_MAIN,
+                Some(prefix),
+                false,
+                KernelRouteType::Unicast,
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
         tokio::task::yield_now().await;
         assert_eq!(query_count.load(Ordering::SeqCst), 2);
 
