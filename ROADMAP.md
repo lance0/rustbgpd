@@ -474,9 +474,10 @@ has it, no broad performance sprints without profile evidence.
   Peer-group field edits now reach live dynamic sessions on the transaction
   path (`[Unreleased]`, ADR-0086): the session reshape executor gracefully
   resets affected dynamic sessions after persist so they re-accept under the
-  committed config. What remains: SIGHUP and the targeted peer-group RPCs
-  still leave live dynamic sessions on their running config until reconnect
-  (deliberate — no plan preview on those paths; see ADR-0086's deferral).
+  committed config. SIGHUP and targeted peer-group RPCs now hot-apply
+  policy-only peer-group edits to live dynamic sessions; session-shaping
+  peer-group edits on those no-preview paths still leave dynamic sessions on
+  their running config until reconnect (deliberate; see ADR-0086's deferral).
   (The per-peer Prometheus series leak listed here previously was fixed —
   deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable

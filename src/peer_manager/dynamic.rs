@@ -2,11 +2,11 @@ use std::net::IpAddr;
 
 use tracing::{info, warn};
 
-use rustbgpd_api::peer_types::DynamicRangeError;
+use rustbgpd_api::peer_types::{DynamicRangeError, PeerKey};
 
 use crate::config::Config;
 
-use super::PeerManager;
+use super::{ManagedPeer, PeerManager};
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
 pub(super) struct DynamicRange {
@@ -258,6 +258,56 @@ impl PeerManager {
                 .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
         });
         Ok(removed)
+    }
+
+    fn dynamic_peer_still_allowed_by_current_ranges(&self, managed: &ManagedPeer) -> bool {
+        let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
+            return false;
+        };
+        self.dynamic_ranges.iter().any(|range| {
+            range.addr == accepted.addr
+                && range.prefix_len == accepted.prefix_len
+                && range.peer_group == accepted.peer_group
+                && (range.remote_asn == 0 || range.remote_asn == managed.remote_asn)
+        })
+    }
+
+    /// Remove dynamic peers whose accepting range is absent from the current
+    /// runtime snapshot. Used after config-transaction rollback: the restored
+    /// snapshot is authoritative, so peers born from the abandoned candidate
+    /// must not survive until a later `BackToIdle`.
+    pub(super) async fn reap_dynamic_peers_not_allowed_by_current_ranges(&mut self) -> usize {
+        let mut stale: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter(|(_, managed)| {
+                managed.is_dynamic && !self.dynamic_peer_still_allowed_by_current_ranges(managed)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        stale.sort();
+
+        let mut removed = 0;
+        for peer_key in stale {
+            let Some(mut managed) = self.peers.remove(&peer_key) else {
+                continue;
+            };
+            self.unregister_session(managed.session_id);
+            if let Some(pending) = managed.pending_inbound.take() {
+                self.unregister_session(pending.session_id);
+                let _ = pending.handle.shutdown().await;
+            }
+            let _ = managed.handle.shutdown().await;
+            self.reap_deleted_peer_metric_series(peer_key.address, &managed.transport_config)
+                .await;
+            self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+            removed += 1;
+            info!(
+                peer = %peer_key,
+                "config rollback: removed dynamic peer whose accepting range is no longer present"
+            );
+        }
+        removed
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

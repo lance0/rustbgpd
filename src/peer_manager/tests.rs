@@ -478,6 +478,120 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
 }
 
 #[tokio::test]
+async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynamic_peer() {
+    let (tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut initial = make_dynamic_manager_config();
+    initial.dynamic_neighbors.clear();
+
+    let mut candidate = initial.clone();
+    candidate.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "127.0.0.0/8".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 0,
+        description: Some("candidate-only".to_string()),
+    }];
+    let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
+
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        initial,
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::StageConfigSnapshot {
+        candidate_toml,
+        reply: stage_tx,
+    })
+    .await
+    .unwrap();
+    let previous_toml = stage_rx.await.unwrap().unwrap();
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    tx.send(PeerManagerCommand::AcceptInbound {
+        stream: server_stream,
+        peer_addr: remote_addr,
+    })
+    .await
+    .unwrap();
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+        .await
+        .unwrap();
+    assert!(
+        list_rx.await.unwrap().is_empty(),
+        "dynamic inbound must not be accepted while a config snapshot is staged but uncommitted"
+    );
+
+    let (commit_tx, commit_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::CommitConfigSnapshotStage { reply: commit_tx })
+        .await
+        .unwrap();
+    commit_rx.await.unwrap();
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream2 = client.await.unwrap();
+    tx.send(PeerManagerCommand::AcceptInbound {
+        stream: server_stream,
+        peer_addr: remote_addr,
+    })
+    .await
+    .unwrap();
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+        .await
+        .unwrap();
+    assert_eq!(
+        list_rx.await.unwrap().len(),
+        1,
+        "dynamic inbound should be accepted once the staged snapshot is committed"
+    );
+
+    let (restore_tx, restore_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::RestoreConfigSnapshot {
+        candidate_toml: previous_toml,
+        reply: restore_tx,
+    })
+    .await
+    .unwrap();
+    restore_rx.await.unwrap().unwrap();
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+        .await
+        .unwrap();
+    assert!(
+        list_rx.await.unwrap().is_empty(),
+        "rollback must reap dynamic peers accepted by ranges absent from the restored snapshot"
+    );
+
+    drop(client_stream);
+    drop(client_stream2);
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn runtime_config_snapshot_returns_current_staged_config() {
     let (tx, rx) = mpsc::channel(16);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
@@ -1246,6 +1360,43 @@ fn insert_test_dynamic_managed_peer(
     );
     mgr.register_session(session_id, &peer_key);
     mgr.dynamic_peer_count += 1;
+}
+
+#[tokio::test]
+async fn rollback_reap_preserves_dynamic_peer_accepted_by_wildcard_asn_range() {
+    let mut mgr = dynamic_test_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 42));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        peer_addr,
+        77,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(192, 0, 2, 42)),
+            counters,
+        ),
+        true,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+
+    assert_eq!(mgr.dynamic_ranges[0].remote_asn, 0);
+    assert_eq!(
+        mgr.peers.get(&key(peer_addr)).unwrap().remote_asn,
+        65030,
+        "fixture simulates a wildcard-accepted peer after the real ASN is known"
+    );
+
+    let removed = mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await;
+    assert_eq!(removed, 0);
+    assert!(
+        mgr.peers.contains_key(&key(peer_addr)),
+        "wildcard dynamic ranges must keep peers whose learned ASN is nonzero"
+    );
+    assert_eq!(mgr.dynamic_peer_count, 1);
 }
 
 #[tokio::test]
@@ -3435,6 +3586,82 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
 
     drop(mgr);
     rib_drainer.await.unwrap();
+}
+
+#[tokio::test]
+async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
+    use crate::config::NamedPolicyConfig;
+
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    let mut config = make_dynamic_manager_config();
+    config.policy.definitions.insert(
+        "deny-import".to_string(),
+        NamedPolicyConfig {
+            default_action: "deny".to_string(),
+            statements: Vec::new(),
+        },
+    );
+    if let Some(group) = config.peer_groups.get_mut("ix-members") {
+        group.import_policy_chain = vec!["ix-import".to_string()];
+    }
+    let mut next_group = crate::policy_admin::config_peer_group_to_api(
+        config.peer_groups.get("ix-members").unwrap(),
+    );
+    next_group.import_policy_chain = vec!["deny-import".to_string()];
+    mgr.current_config = config;
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters.clone());
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.is_dynamic = true;
+    managed.peer_group = Some("ix-members".to_string());
+
+    let manager_task = tokio::spawn(mgr.run());
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::SetPeerGroup {
+        name: "ix-members".to_string(),
+        definition: next_group,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap();
+
+    assert_eq!(
+        counters.query_state.load(Ordering::SeqCst),
+        1,
+        "SetPeerGroup policy-only edits must not skip live dynamic peers"
+    );
+    assert_eq!(
+        counters.route_refresh.load(Ordering::SeqCst),
+        1,
+        "dynamic import policy-chain movement must trigger Route Refresh"
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
+    rib_drainer.abort();
 }
 
 /// A catalog mutation's fan-out is atomic: when applying the resolved

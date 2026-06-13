@@ -50,11 +50,13 @@ static-neighbor peer-group reassignments that require affected sessions to be
 rebuilt; the transaction executor captures prior static peer configs and
 restores them if apply or persistence fails, and after a successful persist it
 gracefully resets the live dynamic sessions accepted by an affected range so
-they re-accept under the committed config (ADR-0086 — unlike SIGHUP and the
-targeted peer-group RPCs, which leave live dynamic sessions on their running
-config until they reconnect). Dynamic-range peer-group reassignments and mixed
-policy/session effective-impact candidates remain rejected even though SIGHUP
-can hot-reconcile some of those shapes best-effort.
+they re-accept under the committed config (ADR-0086). SIGHUP and targeted
+peer-group RPCs hot-apply policy-only peer-group edits to live dynamic
+sessions, but no-preview session-shaping peer-group edits on those paths leave
+dynamic sessions on their running config until reconnect. Dynamic-range
+peer-group reassignments and mixed policy/session effective-impact candidates
+remain rejected even though SIGHUP can hot-reconcile some of those shapes
+best-effort.
 
 ## `[[neighbors]]`
 

@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency, PeerKey,
-    PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
+    PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -14,8 +14,8 @@ use tracing::{info, warn};
 
 use crate::config::{Config, ConfigError};
 use crate::policy_admin::{
-    NEIGHBOR_NOT_FOUND_REASON, apply_config_event, neighbor_set_references, peer_group_references,
-    policy_references,
+    NEIGHBOR_NOT_FOUND_REASON, api_peer_group_to_config, apply_config_event,
+    neighbor_set_references, peer_group_references, policy_references,
 };
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
@@ -113,6 +113,36 @@ fn record_import_validation_refresh_metrics(
 }
 
 impl PeerManager {
+    pub(super) fn peer_group_policy_only_update(
+        &self,
+        name: &str,
+        definition: &PeerGroupDefinition,
+    ) -> bool {
+        let Some(existing) = self.current_config.peer_groups.get(name) else {
+            return false;
+        };
+        let next = api_peer_group_to_config(definition.clone());
+        let policy_changed = existing.import_policy != next.import_policy
+            || existing.export_policy != next.export_policy
+            || existing.import_policy_chain != next.import_policy_chain
+            || existing.export_policy_chain != next.export_policy_chain;
+        if !policy_changed {
+            return false;
+        }
+
+        let mut existing_non_policy = existing.clone();
+        let mut next_non_policy = next;
+        existing_non_policy.import_policy.clear();
+        existing_non_policy.export_policy.clear();
+        existing_non_policy.import_policy_chain.clear();
+        existing_non_policy.export_policy_chain.clear();
+        next_non_policy.import_policy.clear();
+        next_non_policy.export_policy.clear();
+        next_non_policy.import_policy_chain.clear();
+        next_non_policy.export_policy_chain.clear();
+        existing_non_policy == next_non_policy
+    }
+
     #[cfg(test)]
     pub(super) async fn update_runtime_policies(
         &mut self,
