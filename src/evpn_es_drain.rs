@@ -687,4 +687,482 @@ mod tests {
         assert!(outcome.changed);
         assert_eq!(outcome.reasons, reasons(&[EsDrainReason::Link]));
     }
+
+    /// The drain mutation must serialize behind the shared EVPN
+    /// runtime apply lock: while an ADR-0063 apply (or SIGHUP reload)
+    /// holds the lock, the primitive neither validates nor mutates —
+    /// the segment snapshot it validates against cannot be swapped
+    /// mid-flight. Every drain trigger (RPC hook, link coordinator)
+    /// routes through this primitive, so this pins the seam contract
+    /// for future triggers too.
+    #[tokio::test(start_paused = true)]
+    async fn drain_serializes_behind_the_evpn_runtime_apply_lock() {
+        let apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            Arc::new(rustbgpd_evpn::EvpnInstanceTable::new()),
+            Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
+            vec![segment(esi(1))],
+        )));
+        let drain_state = EvpnEsDrainState::default();
+        let probe = crate::evpn_segment::EvpnSegmentControlProbe::new();
+
+        // Simulate an in-flight runtime apply.
+        let guard = apply_lock.lock().await;
+        let task = tokio::spawn({
+            let apply_lock = apply_lock.clone();
+            let coordinator = coordinator.clone();
+            let drain_state = drain_state.clone();
+            let segment = probe.control.clone();
+            async move {
+                apply_ethernet_segment_drain(
+                    esi(1),
+                    EsDrainReason::Operator,
+                    true,
+                    &apply_lock,
+                    &coordinator,
+                    &drain_state,
+                    Some(&segment),
+                    None,
+                )
+                .await
+            }
+        });
+
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !task.is_finished(),
+            "drain must wait for the runtime apply lock"
+        );
+        assert!(
+            drain_state.snapshot().is_empty(),
+            "no mutation while the apply holds the lock"
+        );
+
+        drop(guard);
+        let outcome = task.await.unwrap().unwrap();
+        assert!(outcome.drained && outcome.changed);
+        assert!(drain_state.snapshot().contains(&esi(1)));
+    }
+
+    /// Two-actor rollback consistency: when the originator publish
+    /// fails after the segment actor already received the drained
+    /// set, the primitive must roll the segment fanout AND the shared
+    /// drain state back so both consumers end on the pre-drain set.
+    #[tokio::test]
+    async fn originator_publish_failure_rolls_segment_fanout_and_state_back() {
+        let apply_lock = tokio::sync::Mutex::new(());
+        let coordinator = Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            Arc::new(rustbgpd_evpn::EvpnInstanceTable::new()),
+            Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
+            vec![segment(esi(1))],
+        ));
+        let drain_state = EvpnEsDrainState::default();
+        let mut probe = crate::evpn_segment::EvpnSegmentControlProbe::new();
+        let dead_originator =
+            crate::evpn_originator::EvpnOriginatorRuntimeControl::closed_for_test();
+
+        let err = apply_ethernet_segment_drain(
+            esi(1),
+            EsDrainReason::Operator,
+            true,
+            &apply_lock,
+            &coordinator,
+            &drain_state,
+            Some(&probe.control),
+            Some(&dead_originator),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, EsDrainError::Unavailable(_)));
+        assert!(
+            drain_state.snapshot().is_empty(),
+            "failed originator publish must restore the shared drain state"
+        );
+        assert!(drain_state.reasons_for(esi(1)).is_empty());
+        assert!(
+            probe.drained_rx.borrow_and_update().is_empty(),
+            "segment actor must end on the pre-drain set after the rollback"
+        );
+    }
+
+    // ── cross-actor seam pins: the primitive against BOTH real
+    //    origination actors (segment Type 1/4 + originator Type 2) ──
+
+    mod cross_actor {
+        use std::collections::BTreeMap;
+        use std::time::Duration;
+
+        use rustbgpd_evpn::LocalMacObservation;
+        use rustbgpd_rib::RibUpdate;
+        use rustbgpd_telemetry::BgpMetrics;
+        use rustbgpd_wire::EvpnRouteKey;
+        use tokio::sync::{broadcast, mpsc};
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::test_support::{evpn_instance, mac, vni};
+
+        fn member_segment(id: EthernetSegmentIdentifier) -> rustbgpd_evpn::EthernetSegment {
+            rustbgpd_evpn::EthernetSegment {
+                esi: id,
+                member_vnis: std::collections::BTreeSet::from([vni(100)]),
+                df_preference: 32_768,
+                df_algorithm: rustbgpd_evpn::DfAlgorithm::DefaultModulo,
+                df_dont_preempt: false,
+                redundancy_mode: rustbgpd_evpn::RedundancyMode::AllActive,
+                originator_ip: "10.0.0.1".parse().unwrap(),
+            }
+        }
+
+        fn rib_recorder(
+            mut rib_rx: mpsc::Receiver<RibUpdate>,
+            injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+            withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async move {
+                let (events_tx, _) = broadcast::channel(16);
+                while let Some(update) = rib_rx.recv().await {
+                    match update {
+                        RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                            let _ = reply.send(events_tx.subscribe());
+                        }
+                        RibUpdate::QueryEvpnRoutes { reply } => {
+                            let _ = reply.send(Vec::new());
+                        }
+                        RibUpdate::InjectEvpn { route, reply } => {
+                            injects.lock().await.push(route.key());
+                            let _ = reply.send(Ok(()));
+                        }
+                        RibUpdate::WithdrawEvpn { key, reply } => {
+                            withdraws.lock().await.push(key);
+                            let _ = reply.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        }
+
+        async fn wait_for<F>(
+            keys: &Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+            label: &str,
+            mut pred: F,
+        ) -> Vec<EvpnRouteKey>
+        where
+            F: FnMut(&[EvpnRouteKey]) -> bool,
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let observed = keys.lock().await.clone();
+                if pred(&observed) {
+                    return observed;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {label}; observed {observed:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        fn has_all_es_classes(keys: &[EvpnRouteKey], id: EthernetSegmentIdentifier) -> bool {
+            let mut es = false;
+            let mut ead_es = false;
+            let mut ead_evi = false;
+            for key in keys {
+                match key {
+                    EvpnRouteKey::Es { esi, .. } if *esi == id => es = true,
+                    EvpnRouteKey::EadPerEs { esi, .. } if *esi == id => ead_es = true,
+                    EvpnRouteKey::EadPerEvi { esi, .. } if *esi == id => ead_evi = true,
+                    _ => {}
+                }
+            }
+            es && ead_es && ead_evi
+        }
+
+        fn es_class_count(keys: &[EvpnRouteKey], id: EthernetSegmentIdentifier) -> usize {
+            keys.iter()
+                .filter(|key| {
+                    matches!(
+                        key,
+                        EvpnRouteKey::Es { esi, .. }
+                            | EvpnRouteKey::EadPerEs { esi, .. }
+                            | EvpnRouteKey::EadPerEvi { esi, .. } if *esi == id
+                    )
+                })
+                .count()
+        }
+
+        fn macip_count(keys: &[EvpnRouteKey], target: rustbgpd_evpn::MacAddress) -> usize {
+            keys.iter()
+                .filter(|key| matches!(key, EvpnRouteKey::MacIp { mac, .. } if *mac == target))
+                .count()
+        }
+
+        struct CrossActorRig {
+            apply_lock: tokio::sync::Mutex<()>,
+            coordinator: Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+            drain_state: EvpnEsDrainState,
+            instances: Arc<rustbgpd_evpn::EvpnInstanceTable>,
+            vni_to_esi: Arc<BTreeMap<rustbgpd_evpn::EvpnInstanceId, EthernetSegmentIdentifier>>,
+            segment_control: crate::evpn_segment::EvpnSegmentRuntimeControl,
+            originator_control: crate::evpn_originator::EvpnOriginatorRuntimeControl,
+            segment_handle: crate::evpn_segment::EvpnSegmentHandle,
+            originator_handle: crate::evpn_originator::EvpnOriginatorHandle,
+            local_tx: mpsc::Sender<LocalMacObservation>,
+            injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+            withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        }
+
+        impl CrossActorRig {
+            async fn finish(self) {
+                self.originator_handle.shutdown().await;
+                self.segment_handle.shutdown().await;
+            }
+        }
+
+        /// Spawn BOTH real origination actors over a shared fake RIB:
+        /// VNI 100 is the ES member, VNI 200 is segment-free (its
+        /// observations double as FIFO sentinels for the originator's
+        /// kernel-event channel).
+        async fn spawn_cross_actor_rig(id: EthernetSegmentIdentifier) -> CrossActorRig {
+            let mut table = rustbgpd_evpn::EvpnInstanceTable::new();
+            table
+                .insert(evpn_instance(65000, 100, 100, None, false))
+                .unwrap();
+            table
+                .insert(evpn_instance(65000, 200, 200, None, false))
+                .unwrap();
+            let instances = Arc::new(table);
+            let segments = vec![member_segment(id)];
+            let vni_to_esi = evpn_vni_to_esi_map(&segments);
+
+            let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+            let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+            let (local_tx, local_rx) = mpsc::channel(16);
+            let originator_handle = crate::evpn_originator::spawn(
+                crate::evpn_originator::OriginatorConfig::default(),
+                &instances,
+                rib_tx.clone(),
+                Some(local_rx),
+                BgpMetrics::new(),
+                crate::evpn_originator::OriginatedLocalMacCounts::default(),
+                CancellationToken::new(),
+                vni_to_esi.clone(),
+            )
+            .expect("originator spawns for non-empty instances");
+            let segment_handle = crate::evpn_segment::spawn(
+                &instances,
+                segments.clone(),
+                rib_tx,
+                None,
+                BgpMetrics::new(),
+                CancellationToken::new(),
+            )
+            .expect("segment actor spawns for non-empty ES config");
+
+            // Initial Type 1/4 origination before any test stimulus.
+            wait_for(&injects, "initial segment origination", |keys| {
+                has_all_es_classes(keys, id)
+            })
+            .await;
+
+            CrossActorRig {
+                apply_lock: tokio::sync::Mutex::new(()),
+                coordinator: Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                    instances.clone(),
+                    Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
+                    segments,
+                )),
+                drain_state: EvpnEsDrainState::default(),
+                instances,
+                vni_to_esi,
+                segment_control: segment_handle.runtime_control(),
+                originator_control: originator_handle.runtime_control(),
+                segment_handle,
+                originator_handle,
+                local_tx,
+                injects,
+                withdraws,
+            }
+        }
+
+        /// ADR-0084 decision 1, end-to-end through the primitive with
+        /// both real actors: one drain withdraws the segment's Type
+        /// 1/4 AND the member VNI's local Type 2; kernel events while
+        /// drained keep updating the originator's caches without
+        /// originating; the undrain re-originates Type 1/4 and replays
+        /// exactly the preserved LIVE local state — a MAC that aged
+        /// out during the drain must not come back, a MAC learned
+        /// during the drain must.
+        #[tokio::test]
+        async fn undrain_replays_preserved_live_state_through_both_actors() {
+            let id = esi(0x41);
+            let rig = spawn_cross_actor_rig(id).await;
+
+            // Pre-drain local MAC on the member VNI originates a Type 2.
+            rig.local_tx
+                .send(LocalMacObservation::Learned {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ifindex: 10,
+                })
+                .await
+                .unwrap();
+            wait_for(&rig.injects, "pre-drain Type 2", |keys| {
+                macip_count(keys, mac(0xAA)) >= 1
+            })
+            .await;
+
+            // One drain mutation fans out to both actors.
+            let outcome = apply_ethernet_segment_drain(
+                id,
+                EsDrainReason::Operator,
+                true,
+                &rig.apply_lock,
+                &rig.coordinator,
+                &rig.drain_state,
+                Some(&rig.segment_control),
+                Some(&rig.originator_control),
+            )
+            .await
+            .unwrap();
+            assert!(outcome.drained && outcome.changed);
+            wait_for(
+                &rig.withdraws,
+                "drain withdrawals across both actors",
+                |keys| has_all_es_classes(keys, id) && macip_count(keys, mac(0xAA)) >= 1,
+            )
+            .await;
+
+            // Kernel keeps feeding while drained: 0xAA leaves, 0xBB
+            // arrives. The sentinel learn on segment-free VNI 200
+            // proves the FIFO observation channel has been fully
+            // processed before the undrain below.
+            for obs in [
+                LocalMacObservation::Aged {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                },
+                LocalMacObservation::Learned {
+                    vni: vni(100),
+                    mac: mac(0xBB),
+                    ifindex: 11,
+                },
+                LocalMacObservation::Learned {
+                    vni: vni(200),
+                    mac: mac(0xCC),
+                    ifindex: 12,
+                },
+            ] {
+                rig.local_tx.send(obs).await.unwrap();
+            }
+            wait_for(
+                &rig.injects,
+                "sentinel Type 2 on the undrained VNI",
+                |keys| macip_count(keys, mac(0xCC)) >= 1,
+            )
+            .await;
+            let inject_floor = rig.injects.lock().await.len();
+
+            // Undrain: segment re-originates, originator replays the
+            // preserved live state.
+            let outcome = apply_ethernet_segment_drain(
+                id,
+                EsDrainReason::Operator,
+                false,
+                &rig.apply_lock,
+                &rig.coordinator,
+                &rig.drain_state,
+                Some(&rig.segment_control),
+                Some(&rig.originator_control),
+            )
+            .await
+            .unwrap();
+            assert!(!outcome.drained && outcome.changed);
+            let replayed = wait_for(&rig.injects, "undrain re-origination + replay", |keys| {
+                has_all_es_classes(&keys[inject_floor..], id)
+                    && macip_count(&keys[inject_floor..], mac(0xBB)) >= 1
+            })
+            .await;
+            assert_eq!(
+                macip_count(&replayed[inject_floor..], mac(0xAA)),
+                0,
+                "undrain must not replay a MAC that aged out while drained; got {replayed:?}"
+            );
+
+            rig.finish().await;
+        }
+
+        /// The withdrawal-ordering claim (ROADMAP, assessed
+        /// 2026-06-12): the primitive publishes segment-side first as
+        /// best-effort EAD-before-MAC ordering, but the documented
+        /// contract is that EITHER order converges. Pin the reverse
+        /// order — originator model first, segment drained-set second
+        /// — and assert it converges to the same withdrawn set the
+        /// segment-first order produces.
+        #[tokio::test]
+        async fn reverse_publish_order_converges_to_the_same_withdrawn_state() {
+            let id = esi(0x42);
+            let rig = spawn_cross_actor_rig(id).await;
+
+            rig.local_tx
+                .send(LocalMacObservation::Learned {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ifindex: 10,
+                })
+                .await
+                .unwrap();
+            wait_for(&rig.injects, "pre-drain Type 2", |keys| {
+                macip_count(keys, mac(0xAA)) >= 1
+            })
+            .await;
+            let inject_floor = rig.injects.lock().await.len();
+
+            // Reverse of apply_ethernet_segment_drain's publish order.
+            let transition = rig
+                .drain_state
+                .set_reason(id, EsDrainReason::Operator, true)
+                .expect("fresh drain transitions");
+            assert!(rig.originator_control.replace_runtime_model(
+                rig.instances.clone(),
+                rig.vni_to_esi.clone(),
+                transition.next_flat.clone(),
+            ));
+            assert!(
+                rig.segment_control
+                    .replace_drained_esis(transition.next_flat.clone())
+            );
+
+            wait_for(
+                &rig.withdraws,
+                "converged withdrawals with originator published first",
+                |keys| has_all_es_classes(keys, id) && macip_count(keys, mac(0xAA)) >= 1,
+            )
+            .await;
+            // Convergence must be quiescent: neither actor may
+            // re-originate anything for the drained ES afterwards.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let post = rig.injects.lock().await.clone();
+            assert_eq!(
+                es_class_count(&post[inject_floor..], id),
+                0,
+                "no segment route may re-originate after the drain; got {post:?}"
+            );
+            assert_eq!(
+                macip_count(&post[inject_floor..], mac(0xAA)),
+                0,
+                "no Type 2 may re-originate after the drain; got {post:?}"
+            );
+
+            rig.finish().await;
+        }
+    }
 }

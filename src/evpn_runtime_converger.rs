@@ -8424,4 +8424,198 @@ table_id = 6000
         originator_handle.shutdown().await;
         segment_handle.shutdown().await;
     }
+
+    /// ADR-0084 decision 3 on the originator side, pinned at the
+    /// converger: every runtime-model publish carries the LIVE
+    /// coordinator drained set, so an unrelated runtime apply (here an
+    /// L2VNI add) committed while an Ethernet Segment is
+    /// operator-drained must not undrain it — neither the member
+    /// VNI's local Type 2 nor the segment's Type 1/4 routes may
+    /// re-originate from the apply.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "full two-actor + drain-primitive wiring per the sibling converger proofs"
+    )]
+    async fn runtime_apply_preserves_operator_drain_across_unrelated_l2vni_add() {
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let drained_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (local_tx, local_rx) = mpsc::channel(8);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        // A local MAC on the ES member VNI 100 originates a Type 2.
+        local_tx
+            .send(rustbgpd_evpn::LocalMacObservation::Learned {
+                vni: rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+                mac: rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xab]),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        let mac_inject_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if injects
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < mac_inject_deadline,
+                "originator did not originate the VNI 100 local MAC"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Operator-drain the ES through the shared primitive against
+        // the same drain state the converger will read.
+        let es_drain = crate::evpn_es_drain::EvpnEsDrainState::default();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let coordinator = Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::from_model(&current));
+        let segment_control = segment_handle.runtime_control();
+        let originator_control = originator_handle.runtime_control();
+        let outcome = crate::evpn_es_drain::apply_ethernet_segment_drain(
+            drained_esi,
+            crate::evpn_es_drain::EsDrainReason::Operator,
+            true,
+            &apply_lock,
+            &coordinator,
+            &es_drain,
+            Some(&segment_control),
+            Some(&originator_control),
+        )
+        .await
+        .expect("drain applies against the committed model");
+        assert!(outcome.drained && outcome.changed);
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let drained = withdraws.lock().await.clone();
+            let macip_withdrawn = drained
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }));
+            let es_withdrawn = drained
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Es { .. }));
+            if macip_withdrawn && es_withdrawn {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "drain did not withdraw across both actors; withdrew {drained:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let inject_floor = injects.lock().await.len();
+
+        // Unrelated runtime apply: add L2VNI 200. The converger
+        // publishes the originator model with `es_drain.snapshot()`.
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            es_drain: es_drain.clone(),
+        };
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        // The add's IMET origination round-trips the publish.
+        let imet_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if injects
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < imet_deadline,
+                "L2VNI add did not originate the new VNI's IMET"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            es_drain.snapshot().contains(&drained_esi),
+            "the apply must not GC a still-configured drained ES"
+        );
+        let post = injects.lock().await.clone();
+        assert!(
+            !post[inject_floor..].iter().any(|key| matches!(
+                key,
+                rustbgpd_wire::EvpnRouteKey::MacIp { .. }
+                    | rustbgpd_wire::EvpnRouteKey::Es { .. }
+                    | rustbgpd_wire::EvpnRouteKey::EadPerEs { .. }
+                    | rustbgpd_wire::EvpnRouteKey::EadPerEvi { .. }
+            )),
+            "an unrelated L2VNI add must not undrain the ES (no Type 2 replay, \
+             no Type 1/4 re-origination); injected {post:?}"
+        );
+
+        originator_handle.shutdown().await;
+        segment_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
 }

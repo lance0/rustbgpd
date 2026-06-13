@@ -317,10 +317,18 @@ has it, no broad performance sprints without profile evidence.
   Type 1/4; local originator withdraws Type 2) over independent
   channels, so the EAD-per-ES-before-MAC ordering that maximizes the
   remote receivers' single-active backup-swap window is convergent but
-  not guaranteed. A small cross-actor sequencing step (withdraw EADs,
-  then MACs) would pin the §8.2-style fast-signal ordering and shrink
-  the unknown-unicast gap during a drain handover. Polish on the drain
-  primitive, not correctness — either order converges.
+  not guaranteed. Assessed 2026-06-12: the coordinator already
+  PUBLISHES segment-side first (EADs before the originator's MAC
+  withdrawals — `apply_ethernet_segment_drain`), so the favorable
+  order is best-effort today; guaranteeing it needs a consumption
+  ack/generation-confirm seam in the segment actor before the
+  originator publish. Deferred: M67 measured the link-driven drain
+  blackout at 100-300 ms WITHOUT pinned ordering, so the ack plumbing
+  would buy a narrower transient that measurement says is already
+  acceptable. Revisit only if a soak or scale test shows the
+  unknown-unicast gap mattering. Either order converges — now pinned
+  by `reverse_publish_order_converges_to_the_same_withdrawn_state`
+  (`src/evpn_es_drain.rs`, the cross-actor seam audit).
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
@@ -762,16 +770,40 @@ Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
 
-- [ ] **EVPN origination cross-actor seam audit.** One protocol concept (the
-  Ethernet Segment lifecycle) now spans the segment orchestrator (Type 1/4),
-  the local originator (Type 2), the IMET controller, and the coordinator
-  that fans state out to all of them; cross-actor invariants (drain
-  vs. replay, withdrawal ordering, drained-set GC) are enforced only at the
-  coordinator and documented only in ADR-0084. Audit the seam: enumerate the
-  invariants each actor assumes about the others, pin them with
-  coordinator-level tests, and evaluate whether ES-scoped state wants a single
-  owner. The ES drain implementation is the motivating case — it worked, but
-  every new cross-actor feature currently re-derives the seam contract.
+- [x] **EVPN origination cross-actor seam audit — RESOLVED** (2026-06-12,
+  PR #477). The seam inventory (drain vs. replay, withdrawal ordering,
+  drained-set GC, bias/AC-gate coherence, DF-flip fanout, startup
+  first-probe, apply-lock serialization, two-actor rollback) is enumerated
+  in the PR and each holding invariant is pinned at the coordinator level:
+  `evpn_es_drain.rs` (drain/undrain through the primitive against BOTH real
+  actors with exact-replay assertions, reverse-publish-order convergence,
+  apply-lock serialization, originator-failure rollback),
+  `evpn_segment.rs` (GC'd re-added ESI starts undrained, exhaustive
+  bias-eligibility ⇒ gate-not-Blocked matrix, DF flip republishing bias +
+  AC gate together), `evpn_es_link_drain.rs` (down-at-boot convergence of
+  drain state + bias + gate against a real segment actor), and
+  `evpn_runtime_converger.rs` (an unrelated L2VNI add preserves an
+  operator drain on every actor). Known bounded transients, by design and
+  documented at the seams: the segment actor's first bias/gate publish does
+  not wait for the carrier monitor's first probe (a bound dead-AC ES is
+  bias-eligible for one fanout chain at boot; M67 measured the whole drain
+  chain at 100-300 ms), and the two dataplane snapshots ride separate watch
+  channels (one supervisor wake of skew). Single-ownership consolidation
+  evaluated and not justified — see the PR's proposal section.
+- [ ] **Drain-GC split-state on a failed ES-delete apply (from the seam
+  audit).** `publish_ethernet_segment_runtime_snapshot` /
+  `converge_tenant_teardown` GC the coordinator's drain entries BEFORE the
+  actor publishes; if a publish then fails, the rollback (per ADR-0084,
+  deliberately) does not restore the GC'd entry — but contrary to the
+  ADR's "routes re-advertise" consequence, the segment actor's drained-set
+  mirror was never updated either, so the ES stays withdrawn while the
+  coordinator (gauge, RPC reasons) reports it undrained, and an operator
+  undrain is an idempotent no-op that fans nothing out. Heals on the next
+  drained-set publish of any kind; re-drain + undrain is the manual
+  remedy. Blast radius ≈ nil today (a failed actor publish means the
+  actor exited, i.e. daemon teardown), so tracked rather than fixed;
+  the clean fix is to GC after the last actor publish succeeds, or to
+  push the restored set on rollback. ADR-0084 carries an annotation.
 - [x] **Poll-cadence tail sweep.** The dataplane intent recompute went
   event-driven with the 5 s poll demoted to a backstop, and segment
   re-election subscribes to the EVPN event broadcast with a 10 s backstop

@@ -145,6 +145,16 @@ daemon coordinator and pushed to both origination actors, exposed via
   on rollback. This is deliberate and conservative: a lost drain means
   routes re-advertise (operator re-drains); restoring one could
   silently re-suppress an ES the operator believes undrained.
+  **Annotation (2026-06-12, cross-actor seam audit):** the "routes
+  re-advertise" consequence is imprecise — on this failure path the
+  segment actor's drained-set mirror is not updated either, so the ES
+  actually stays withdrawn while the coordinator reports it undrained
+  (and a bare undrain RPC is an idempotent no-op that fans nothing
+  out). The state heals on the next drained-set publish of any kind;
+  drain-then-undrain is the manual remedy. The window requires an
+  actor publish failure mid-apply (in practice: daemon teardown) on
+  an apply that deleted a drained ES; tracked on the ROADMAP rather
+  than fixed.
 - Duplicate-MAC quarantines and the drain compose: undrain replays are
   quarantine-respecting, and quarantine recovery while drained keeps
   the MAC withdrawn until undrain.

@@ -63,6 +63,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the nonexistent `bgp_routes_received_total` /
   `bgp_routes_installed_total` references were replaced with
   `bgp_rib_prefixes` / `bgp_rib_loc_prefixes`).
+- **Coordinator-level invariant tests for the EVPN cross-actor seams
+  (the ROADMAP seam audit).** The Ethernet Segment lifecycle spans
+  the segment actor (Type 1/4, DF election, bias/AC-gate snapshots),
+  the local Type 2 originator, the drain coordinator, and the
+  link-drain coordinator; the invariants each assumes about the
+  others are now pinned where they are observable: one drain through
+  `apply_ethernet_segment_drain` withdraws across BOTH real actors
+  and the undrain replays exactly the preserved live kernel state (a
+  MAC aged out while drained must not return, one learned while
+  drained must); the reverse actor-publish order converges to the
+  same withdrawn state (the documented either-order-converges
+  contract); drain mutations serialize behind the EVPN runtime apply
+  lock; a failed originator publish rolls the segment fanout and the
+  shared drain state back together; a GC'd, re-added ESI starts
+  undrained inside the segment actor; bias eligibility can never
+  coexist with a Blocked AC gate (exhaustive mode × drain × binding ×
+  DF-role matrix); a DF flip republishes the bias and AC-gate
+  snapshots together; a bound ES whose AC is down at boot converges
+  to drained + bias-ineligible + gate-blocked through the real
+  segment actor; and an unrelated runtime L2VNI add preserves an
+  operator drain on every actor model. The audit also annotated
+  ADR-0084 with a found split-state window on a failed ES-delete
+  apply (tracked on the ROADMAP, not fixed here).
 
 - **RIB distribution-health observability for the wedged
   post-Established advertisement path (ROADMAP, observed in an M66 CI
