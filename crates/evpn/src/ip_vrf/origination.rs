@@ -139,6 +139,15 @@ pub fn select_overlay_gateway(
     if !family_ok {
         return None;
     }
+    // A via qualifies if it is a usable host in *any* connected subnet of this
+    // IP-VRF. With overlapping connected prefixes (e.g. a /24 SVI plus a wider
+    // summary route), a via that is the network/broadcast of the more-specific
+    // subnet but an ordinary host of the wider one still qualifies. We accept
+    // that quantifier: overlapping connected routes in one IP-VRF are unusual,
+    // and the failure direction stays benign — a wrongly-eligible GW IP only
+    // degrades to held-unresolved at receivers (`unresolved_overlay_index_gateway`),
+    // never a blackhole. Longest-match-only eligibility is a possible future
+    // tightening, not a correctness gate.
     connected_subnets
         .iter()
         .any(|subnet| prefix_contains_usable_gateway(*subnet, via))
@@ -553,6 +562,23 @@ mod tests {
             &connected,
         );
         assert_eq!(got, Some("10.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_31_lower_endpoint_is_chosen() {
+        // RFC 3021: in a /31 both addresses are usable hosts. The lower
+        // endpoint (10.1.1.0) would be the network address at any wider mask,
+        // so this is the distinguishing assertion that /31 endpoints are not
+        // mistaken for an ordinary subnet's network address.
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 31)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.0".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("10.1.1.0".parse().unwrap()));
     }
 
     #[test]
