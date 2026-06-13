@@ -166,7 +166,7 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
     }
 }
 
-fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
+pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
     PeerGroupConfig {
         hold_time: definition.hold_time,
         max_prefixes: definition.max_prefixes,
@@ -203,7 +203,7 @@ fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig 
     }
 }
 
-fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
+pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
     PeerGroupDefinition {
         hold_time: definition.hold_time,
         max_prefixes: definition.max_prefixes,

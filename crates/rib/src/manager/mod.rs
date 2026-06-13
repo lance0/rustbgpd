@@ -167,6 +167,12 @@ pub struct RibManager {
     /// Monotonic process-local id assigned before route events are recorded in
     /// history and broadcast to live subscribers.
     next_route_event_id: u64,
+    /// True after the process-local route-event id reaches `u64::MAX`.
+    /// Further events keep publishing with the saturated id instead of
+    /// panicking the RIB manager. This is a defense-in-depth branch: hitting
+    /// it would require exhausting the entire 64-bit event space in one
+    /// daemon lifetime.
+    route_event_id_exhausted: bool,
     /// EVPN best-path change broadcast. Separate from
     /// `route_events_tx` because `RouteEvent` is keyed by `Prefix`
     /// (unicast-only) and EVPN consumers (the daemon's local-MAC
@@ -535,6 +541,7 @@ impl RibManager {
             export_policy_stats: HashMap::new(),
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             next_route_event_id: 1,
+            route_event_id_exhausted: false,
             evpn_events_tx,
             evpn_route_event_history: VecDeque::with_capacity(EVPN_ROUTE_EVENT_HISTORY_CAPACITY),
             event_sink: std::sync::Arc::new(crate::event_sink::NoopRibEventSink),
@@ -1325,10 +1332,16 @@ impl RibManager {
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {
         event.event_id = self.next_route_event_id;
-        self.next_route_event_id = self
-            .next_route_event_id
-            .checked_add(1)
-            .expect("route event id space exhausted");
+        if let Some(next) = self.next_route_event_id.checked_add(1) {
+            self.next_route_event_id = next;
+        } else if !self.route_event_id_exhausted {
+            self.route_event_id_exhausted = true;
+            warn!(
+                event_id = self.next_route_event_id,
+                "route event id space exhausted; publishing future route events with \
+                 the saturated id instead of panicking"
+            );
+        }
         if self.route_event_history.len() == ROUTE_EVENT_HISTORY_CAPACITY {
             self.route_event_history.pop_front();
         }

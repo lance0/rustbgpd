@@ -437,9 +437,9 @@ impl PeerManager {
     /// persisted, so per-peer signaling failures are reported in the outcome
     /// rather than failing the committed transaction. A peer that could not
     /// be signaled keeps its running session config until it reconnects (the
-    /// same documented semantics SIGHUP and the targeted peer-group RPCs
-    /// apply to live dynamic sessions). Admin-disabled dynamic peers are
-    /// skipped: they have no running session to reset, and `BackToIdle`
+    /// same documented semantics that SIGHUP and targeted peer-group RPCs
+    /// keep for session-shaping dynamic peer-group edits). Admin-disabled
+    /// dynamic peers are skipped: they have no running session, and `BackToIdle`
     /// deliberately keeps them un-reaped.
     pub(super) async fn bounce_dynamic_peers_for_ranges(
         &mut self,

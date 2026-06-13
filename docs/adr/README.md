@@ -89,12 +89,13 @@ consequences so future contributors understand *why*, not just *what*.
 | [0078](0078-inbound-rib-backpressure.md) | Inbound transport→RIB backpressure — block, never drop | Accepted | 2026-06-10 |
 | [0079](0079-kernel-state-crash-restart-reconciliation.md) | Kernel-state crash-restart reconciliation via adoption sweeps | Accepted | 2026-06-10 |
 | [0080](0080-cancellation-shielded-runtime-applies.md) | Cancellation-shielded runtime mutation applies | Accepted | 2026-06-10 |
-| [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Proposed | 2026-06-10 |
+| [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Accepted | 2026-06-10 |
 | [0082](0082-nda-protocol-ownership-stamp.md) | NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state | Accepted | 2026-06-10 |
 | [0083](0083-evpn-single-active-backup-path.md) | EVPN single-active backup-path pre-install | Accepted | 2026-06-11 |
 | [0084](0084-evpn-ethernet-segment-drain.md) | Runtime Ethernet Segment drain | Accepted | 2026-06-12 |
 | [0085](0085-evpn-es-interface-binding.md) | Ethernet Segment interface binding — link-driven drain and same-ESI local bias | Accepted | 2026-06-12 |
 | [0086](0086-dynamic-peer-group-reconfigure.md) | Peer-group field edits reach live dynamic sessions via post-persist graceful reset | Accepted | 2026-06-12 |
+| [0087](0087-evpn-type5-gateway-ip-overlay-index-origination.md) | Native GW-IP overlay-index Type 5 origination (RFC 9136) | Accepted | 2026-06-12 |
 
 ## Template
 

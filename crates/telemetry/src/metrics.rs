@@ -80,6 +80,8 @@ pub struct BgpMetrics {
     fib_routes_withdrawn: IntCounter,
     fib_routes_rejected: IntCounterVec,
     fib_kernel_failures: IntCounterVec,
+    kernel_route_notify_dropped: IntCounterVec,
+    kernel_route_notify_subscription_failures: IntCounterVec,
 
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
@@ -538,6 +540,29 @@ impl BgpMetrics {
                 "Kernel failures while applying general unicast FIB routes by action.",
             ),
             &["action"],
+        )
+        .expect("valid metric definition");
+
+        let kernel_route_notify_dropped = IntCounterVec::new(
+            Opts::new(
+                "bgp_kernel_route_notify_dropped_total",
+                "Kernel route-event wake messages dropped before reaching the \
+                 general-FIB or BLACKHOLE reconciler. The periodic reconcile \
+                 backstop still repairs level-triggered drift; non-zero values \
+                 mean event-driven repair is degraded under pressure.",
+            ),
+            &["actor", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let kernel_route_notify_subscription_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_kernel_route_notify_subscription_failures_total",
+                "Failed NETLINK_ROUTE multicast group subscriptions for the \
+                 kernel route-event wake feed. The actor keeps running with \
+                 periodic-only kernel-drift repair.",
+            ),
+            &["actor", "group"],
         )
         .expect("valid metric definition");
 
@@ -1161,6 +1186,12 @@ impl BgpMetrics {
             .register(Box::new(fib_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(kernel_route_notify_dropped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(kernel_route_notify_subscription_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(as_path_loop_detected.clone()))
             .expect("metric not already registered");
         registry
@@ -1377,6 +1408,8 @@ impl BgpMetrics {
             fib_routes_withdrawn,
             fib_routes_rejected,
             fib_kernel_failures,
+            kernel_route_notify_dropped,
+            kernel_route_notify_subscription_failures,
             as_path_loop_detected,
             rr_loop_detected,
             otc_routes_blocked,
@@ -1885,6 +1918,42 @@ impl BgpMetrics {
     /// `replace`, `remove`, or `unsupported_platform`.
     pub fn record_fib_kernel_failure(&self, action: &str) {
         self.fib_kernel_failures.with_label_values(&[action]).inc();
+    }
+
+    /// Record a dropped kernel route-event wake.
+    ///
+    /// `actor` is bounded: `"general_fib"` or `"blackhole_discard"`.
+    /// `reason` is bounded: `"channel_full"`.
+    pub fn record_kernel_route_notify_drop(&self, actor: &str, reason: &str) {
+        debug_assert!(
+            matches!(actor, "general_fib" | "blackhole_discard"),
+            "unbounded kernel route-notify actor label: {actor:?}"
+        );
+        debug_assert!(
+            matches!(reason, "channel_full"),
+            "unbounded kernel route-notify drop reason label: {reason:?}"
+        );
+        self.kernel_route_notify_dropped
+            .with_label_values(&[actor, reason])
+            .inc();
+    }
+
+    /// Record a failed route-notify multicast-group subscription.
+    ///
+    /// `actor` is bounded: `"general_fib"` or `"blackhole_discard"`.
+    /// `group` is bounded: `"ipv4_route"` or `"ipv6_route"`.
+    pub fn record_kernel_route_notify_subscription_failure(&self, actor: &str, group: &str) {
+        debug_assert!(
+            matches!(actor, "general_fib" | "blackhole_discard"),
+            "unbounded kernel route-notify actor label: {actor:?}"
+        );
+        debug_assert!(
+            matches!(group, "ipv4_route" | "ipv6_route"),
+            "unbounded kernel route-notify group label: {group:?}"
+        );
+        self.kernel_route_notify_subscription_failures
+            .with_label_values(&[actor, group])
+            .inc();
     }
 
     /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.
@@ -2543,6 +2612,35 @@ mod tests {
         );
         assert_eq!(m.fib_kernel_failures.with_label_values(&["setup"]).get(), 1);
         assert_eq!(m.fib_kernel_failures.with_label_values(&["dump"]).get(), 1);
+    }
+
+    #[test]
+    fn kernel_route_notify_counters_use_bounded_labels() {
+        let m = BgpMetrics::new();
+
+        m.record_kernel_route_notify_drop("general_fib", "channel_full");
+        m.record_kernel_route_notify_drop("general_fib", "channel_full");
+        m.record_kernel_route_notify_subscription_failure("blackhole_discard", "ipv4_route");
+        m.record_kernel_route_notify_subscription_failure("blackhole_discard", "ipv6_route");
+
+        assert_eq!(
+            m.kernel_route_notify_dropped
+                .with_label_values(&["general_fib", "channel_full"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.kernel_route_notify_subscription_failures
+                .with_label_values(&["blackhole_discard", "ipv4_route"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.kernel_route_notify_subscription_failures
+                .with_label_values(&["blackhole_discard", "ipv6_route"])
+                .get(),
+            1
+        );
     }
 
     #[test]

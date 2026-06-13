@@ -804,14 +804,14 @@ Be honest about where rustbgpd isn't the right tool:
 	  receive-path aliasing-ECMP via FDB nexthop groups (M40
 	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
 	  including non-zero Gateway Address, receive-side RFC 9135
-	  overlay-index recursion, duplicate-MAC remote suppression +
+	  overlay-index recursion, native GW-IP overlay-index Type 5
+	  origination, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
 	  have also shipped. **Still missing for full VTEP parity:**
-	  native overlay-index local origination / recursion-path interop,
-	  optional import-side ES-Import RT filtering, single-active
-	  backup-path pre-install, EVPN over MPLS/PBB, and EVPN route
-	  types 6-11. For a single-homed L2VNI fabric without native
-	  overlay-index origination requirements, rustbgpd is a fit today.
+	  ESI overlay-index origination / broader recursion-path interop,
+	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
+	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
+	  ESI overlay-index or MPLS/PBB requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

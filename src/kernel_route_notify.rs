@@ -26,6 +26,7 @@
 //! with the periodic reconcile as its only kernel-drift repair, which
 //! is exactly the pre-eventing behavior.
 
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
@@ -124,16 +125,18 @@ pub(crate) async fn recv_kernel_route_event(
 #[cfg(target_os = "linux")]
 pub(crate) fn connect_with_route_notifications(
     actor: &'static str,
+    metrics: BgpMetrics,
 ) -> Result<(rtnetlink::Handle, mpsc::Receiver<KernelRouteEvent>), String> {
     use rtnetlink::sys::AsyncSocket;
 
     let (mut connection, handle, messages) =
         rtnetlink::new_connection().map_err(|e| format!("open NETLINK_ROUTE: {e}"))?;
-    for (group, name) in [
-        (RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE"),
-        (RTNLGRP_IPV6_ROUTE, "RTNLGRP_IPV6_ROUTE"),
+    for (group, name, label) in [
+        (RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE", "ipv4_route"),
+        (RTNLGRP_IPV6_ROUTE, "RTNLGRP_IPV6_ROUTE", "ipv6_route"),
     ] {
         if let Err(e) = connection.socket_mut().socket_mut().add_membership(group) {
+            metrics.record_kernel_route_notify_subscription_failure(actor, label);
             tracing::warn!(
                 error = %e,
                 group = name,
@@ -145,7 +148,9 @@ pub(crate) fn connect_with_route_notifications(
     }
     tokio::spawn(connection);
     let (event_tx, event_rx) = mpsc::channel(KERNEL_ROUTE_EVENT_BUFFER);
-    tokio::spawn(forward_route_notifications(messages, event_tx));
+    tokio::spawn(forward_route_notifications(
+        messages, event_tx, actor, metrics,
+    ));
     Ok((handle, event_rx))
 }
 
@@ -160,6 +165,8 @@ async fn forward_route_notifications(
         rtnetlink::sys::SocketAddr,
     )>,
     event_tx: mpsc::Sender<KernelRouteEvent>,
+    actor: &'static str,
+    metrics: BgpMetrics,
 ) {
     use futures::StreamExt;
     use mpsc::error::TrySendError;
@@ -188,6 +195,7 @@ async fn forward_route_notifications(
         match event_tx.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                metrics.record_kernel_route_notify_drop(actor, "channel_full");
                 if !warned_full {
                     warned_full = true;
                     tracing::debug!(

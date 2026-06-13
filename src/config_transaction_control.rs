@@ -1209,6 +1209,7 @@ async fn commit_candidate_snapshot_locked(
     if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
     }
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(())
 }
 
@@ -1299,6 +1300,7 @@ async fn commit_static_neighbors_locked(
     if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
         return Err(rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await);
     }
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(())
 }
 
@@ -1346,6 +1348,7 @@ async fn commit_live_policy_impact_locked(
             rollback_live_policy_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
         );
     }
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(priors.len())
 }
 
@@ -1435,6 +1438,7 @@ async fn commit_peer_session_reshape_locked(
             rollback_peer_reshape_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
         );
     }
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
 
     let dynamic_bounce =
         send_bounce_dynamic_range_peers(peer_mgr_tx, targets.dynamic_bounce_ranges).await;
@@ -1859,14 +1863,46 @@ async fn rollback_config_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     previous: String,
 ) -> Result<(), ConfigTransactionApplyError> {
-    stage_config_snapshot(peer_mgr_tx, previous)
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::RestoreConfigSnapshot {
+            candidate_toml: previous,
+            reply: reply_tx,
+        })
         .await
-        .map(|_| ())
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped config snapshot rollback reply".to_string(),
+            )
+        })?
+        .map_err(stage_config_snapshot_error_to_apply_error)
         .map_err(|error| {
             ConfigTransactionApplyError::Internal(format!(
                 "config snapshot rollback failed: {error}"
             ))
         })
+}
+
+async fn commit_config_snapshot_stage(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+) -> Result<(), ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::CommitConfigSnapshotStage { reply: reply_tx })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx.await.map_err(|_| {
+        ConfigTransactionApplyError::Unavailable(
+            "peer manager dropped config snapshot commit reply".to_string(),
+        )
+    })
 }
 
 async fn rollback_snapshot_after_error(
@@ -2771,6 +2807,16 @@ peer_group = "edge"
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
                 }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                    let _ = reply.send(());
+                }
+                PeerManagerCommand::RestoreConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    *snapshot_toml.lock().await = candidate_toml;
+                    let _ = reply.send(Ok(()));
+                }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                     let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
                 }
@@ -2890,6 +2936,16 @@ peer_group = "edge"
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
                 }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                    let _ = reply.send(());
+                }
+                PeerManagerCommand::RestoreConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    *snapshot_toml.lock().await = candidate_toml;
+                    let _ = reply.send(Ok(()));
+                }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                     let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
                 }
@@ -2928,6 +2984,22 @@ peer_group = "edge"
                     let previous = snapshot.clone();
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                    let _ = reply.send(());
+                }
+                PeerManagerCommand::RestoreConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    if let Some(result) = stage_results.lock().await.pop_front()
+                        && let Err(error) = result
+                    {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                    *snapshot_toml.lock().await = candidate_toml;
+                    let _ = reply.send(Ok(()));
                 }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                     let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
@@ -3195,6 +3267,16 @@ peer_group = "{group}"
                     let previous = snapshot.clone();
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                    let _ = reply.send(());
+                }
+                PeerManagerCommand::RestoreConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    *snapshot_toml.lock().await = candidate_toml;
+                    let _ = reply.send(Ok(()));
                 }
                 PeerManagerCommand::ApplyPolicyImpactSnapshot {
                     static_targets,

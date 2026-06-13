@@ -66,9 +66,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   response, never silently swallowed. Dynamic-range peer-group
   *reassignments* remain outside the reshape family (a
   `[[dynamic_neighbors]]` record edit; sessions accepted under the
-  old group cannot be live-reassigned), and SIGHUP / targeted
-  peer-group RPCs deliberately keep their no-preview skip semantics
-  (see ADR-0086).
+  old group cannot be live-reassigned). SIGHUP / targeted peer-group
+  RPCs now hot-apply policy-only peer-group edits to live dynamic
+  sessions through the resolved-policy fanout; session-shaping edits
+  keep the reconnect/reset semantics described above (see ADR-0086).
 - **Canonical ingress reason-label contract
   (`crates/telemetry/src/reason_labels.rs`).** The reason strings
   that ingress route-rejection mechanisms report are now a single
@@ -572,7 +573,43 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the interface-less Type 5 shape instead of advertising an
   unresolvable Gateway Address. `/31` point-to-point endpoints and
   `/32` host routes remain eligible gateways.
-
+- **Config rollback no longer leaves candidate-born dynamic peers
+  alive, and peer-group policy-only edits now reach live dynamic
+  peers on every mutation path.** The peer manager now treats a
+  transaction snapshot as provisional until the config writer acks
+  persistence: unknown inbound sessions are not accepted from
+  candidate-only `[[dynamic_neighbors]]` ranges during that staged
+  window. Once persistence succeeds, dynamic accepts proceed normally
+  (including commit-confirmed pending configs); if the transaction is
+  later aborted or auto-reverted, restoring the previous snapshot
+  reaps any dynamic peers whose accepted range no longer exists.
+  Separately, targeted `SetPeerGroup` and TOML+SIGHUP peer-group
+  edits that change only resolved import/export policy now use the
+  same dynamic-aware policy fanout as catalog policy mutations, so
+  established dynamic route-server clients no longer keep stale
+  chains until reconnect.
+- Documentation and feature-build freshness for the post-v0.38.0 EVPN/config
+  surface: the RIB fanout bench-internals build now matches the current
+  session registration signature, the ADR index lists ADR-0087 and marks
+  ADR-0081 accepted, overview docs no longer describe native GW-IP
+  overlay-index Type 5 origination as future work after it shipped, and
+  `redundancy_mode = "single-active"` now points at the shipped receive-side
+  backup-path pre-install behavior.
+- **Kernel route-event degradation is now alertable.** The general-FIB
+  and BLACKHOLE route-notify path still drops wake events on a full
+  bounded channel and falls back to the periodic reconcile on
+  subscription failure, but those degraded modes now increment
+  `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}`
+  and
+  `bgp_kernel_route_notify_subscription_failures_total{actor,group}`.
+  The repair semantics are unchanged; operators no longer need to
+  scrape logs to detect route-event pressure or multicast-subscription
+  loss.
+- **Route-event ID exhaustion no longer panics the RIB manager.** The
+  process-local route-event id now saturates at `u64::MAX` with a
+  one-time warning instead of taking down the manager in the
+  practically unreachable case where one daemon lifetime emits the
+  full 64-bit event space.
 - **Session-identity gating now covers every session-scoped RIB
   message, not just teardowns — a superseded session's queued data
   messages can no longer mutate the replacement session's state.**

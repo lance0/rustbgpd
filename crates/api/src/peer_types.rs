@@ -614,6 +614,27 @@ pub enum PeerManagerCommand {
         /// Reply returns the previous normalized runtime snapshot on success.
         reply: oneshot::Sender<Result<String, StageConfigSnapshotError>>,
     },
+    /// Mark the currently staged runtime config snapshot as durably committed.
+    ///
+    /// The transaction controller sends this after the config writer has
+    /// acked persistence. Until then the peer manager treats the snapshot as
+    /// provisional and refuses dynamic inbound accepts that would be born from
+    /// candidate-only ranges.
+    CommitConfigSnapshotStage {
+        /// Reply is sent after the staged marker is cleared.
+        reply: oneshot::Sender<()>,
+    },
+    /// Restore a full runtime config snapshot during transaction rollback.
+    ///
+    /// Unlike [`PeerManagerCommand::StageConfigSnapshot`], this is a terminal
+    /// rollback operation: it clears the staged marker and reaps dynamic peers
+    /// whose accepted range is no longer present in the restored snapshot.
+    RestoreConfigSnapshot {
+        /// Complete rollback TOML content.
+        candidate_toml: String,
+        /// Reply returns success/failure after the restored snapshot is active.
+        reply: oneshot::Sender<Result<(), StageConfigSnapshotError>>,
+    },
     /// Return the current normalized runtime config snapshot as TOML.
     ///
     /// Internal SIGHUP code uses this after taking the shared runtime-config
