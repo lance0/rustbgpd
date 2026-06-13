@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use rustbgpd_evpn::{
     DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
-    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, RedundancyMode, RouteTarget,
+    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode,
+    RedundancyMode, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -981,6 +982,30 @@ impl Config {
                     }
                 })?;
                 table.mark_referenced_by_l2vni(name.clone(), vni);
+            }
+        }
+        // ADR-0087: GW-IP overlay-index origination requires a linked
+        // L2VNI — the receive side scopes the recursive Type 2 lookup
+        // to the tenant's MAC-VRFs through that link, so a gateway_ip
+        // VRF with no L2VNI could never produce a resolvable route.
+        // Reject at load rather than silently originate unresolvable
+        // Type 5s. Checked after references are recorded so the
+        // L2VNI->IP-VRF bindings are complete.
+        for vrf in table.iter() {
+            if vrf.overlay_index_mode == OverlayIndexMode::GatewayIp
+                && table
+                    .referenced_l2vnis(&vrf.name)
+                    .is_none_or(std::collections::BTreeSet::is_empty)
+            {
+                return Err(ConfigError::InvalidEvpnIpVrf {
+                    reason: format!(
+                        "evpn_ip_vrfs[{}]: overlay_index_mode = \"gateway_ip\" requires at least one \
+                         [[evpn_instances]] with ip_vrf = {:?} (the GW-IP receive side scopes its \
+                         recursive Type 2 lookup to the linked L2VNIs); link an L2VNI or use \
+                         \"interface_less\"",
+                        vrf.name, vrf.name
+                    ),
+                });
             }
         }
         Ok(table)
@@ -3747,6 +3772,11 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
             ),
         })?;
 
+    let overlay_index_mode = match cfg.overlay_index_mode {
+        OverlayIndexModeConfig::InterfaceLess => OverlayIndexMode::InterfaceLess,
+        OverlayIndexModeConfig::GatewayIp => OverlayIndexMode::GatewayIp,
+    };
+
     IpVrf::new(
         cfg.name.clone(),
         id,
@@ -3758,6 +3788,7 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
         cfg.l3vxlan_device.clone(),
         cfg.table_id,
     )
+    .map(|vrf| vrf.with_overlay_index_mode(overlay_index_mode))
     .map_err(|e| ConfigError::InvalidEvpnIpVrf {
         reason: e.to_string(),
     })

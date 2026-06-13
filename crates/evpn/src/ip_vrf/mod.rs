@@ -18,6 +18,7 @@ pub mod readiness;
 pub use observation::{IpVrfRouteDump, LocalIpRouteObservation, RouteFilterReason, RouteSource};
 pub use origination::{
     LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
+    select_overlay_gateway,
 };
 pub use projection::{
     ProjectedIpPrefixRoute, ProjectedOverlayIndexRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable,
@@ -70,6 +71,24 @@ pub enum IpVrfIdError {
     OutOfRange { vni: u32 },
 }
 
+/// How outbound Type 5 routes from this IP-VRF name their inner-MAC
+/// resolution (ADR-0087).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OverlayIndexMode {
+    /// RFC 9136 §4.4.2 Interface-less model: Gateway Address zero,
+    /// Router's MAC extended community carries the inner MAC. The
+    /// default — matches every release before ADR-0087.
+    #[default]
+    InterfaceLess,
+    /// RFC 9136 §4.1/§4.2 GW-IP overlay index: a kernel route whose
+    /// via lies on a connected subnet of the VRF originates with that
+    /// via in the Gateway Address (no Router's MAC extcomm); receivers
+    /// resolve it recursively through the gateway host's Type 2
+    /// MAC/IP route. Routes without an eligible via fall back to the
+    /// Interface-less shape.
+    GatewayIp,
+}
+
 /// One local IP-VRF / L3VNI tenant served by this VTEP.
 ///
 /// Shape mirrors `EvpnInstance` for the L2 side. The kernel-side
@@ -105,6 +124,11 @@ pub struct IpVrf {
     /// VRF route table id. Cross-checked against `vrf_device`'s
     /// `IFLA_VRF_TABLE` at readiness.
     pub table_id: u32,
+    /// Outbound Type 5 overlay-index mode (ADR-0087). Defaults to
+    /// [`OverlayIndexMode::InterfaceLess`]; set via
+    /// [`IpVrf::with_overlay_index_mode`] so the long-stable `new`
+    /// signature (and its many call sites) stays put.
+    pub overlay_index_mode: OverlayIndexMode,
 }
 
 impl IpVrf {
@@ -176,7 +200,17 @@ impl IpVrf {
             vrf_device,
             l3vxlan_device,
             table_id,
+            overlay_index_mode: OverlayIndexMode::default(),
         })
+    }
+
+    /// Set the outbound Type 5 overlay-index mode (ADR-0087).
+    /// Builder-style so `new`'s nine-argument signature — and every
+    /// existing call site — stays unchanged for the default mode.
+    #[must_use]
+    pub fn with_overlay_index_mode(mut self, mode: OverlayIndexMode) -> Self {
+        self.overlay_index_mode = mode;
+        self
     }
 }
 

@@ -11,6 +11,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Native GW-IP overlay-index Type 5 origination (RFC 9136 §4.1/§4.2,
+  ADR-0087).** A new per-IP-VRF `overlay_index_mode` knob on
+  `[[evpn_ip_vrfs]]` opts into originating EVPN Type 5 routes with a
+  non-zero Gateway Address. In `"gateway_ip"` mode a local kernel
+  route whose via lands on a connected subnet of the VRF is
+  originated with that via in the Type 5 Gateway Address and **no**
+  Router's MAC extended community (RFC 9136 §3.2 makes it
+  ignored-if-present for the GW-IP overlay index); receivers resolve
+  the gateway recursively through its Type 2 MAC/IP route — the
+  receive-side recursion rustbgpd already shipped. Routes without an
+  eligible via (off-subnet, cross-family, or no via) fall back to the
+  interface-less shape, and the default (`"interface_less"`) is
+  byte-for-byte the pre-ADR-0087 behavior — no change unless opted in.
+  The kernel-route observation layer now carries the via, the L3
+  originator selects the gateway per-pass against the VRF's connected
+  subnets and re-originates in place on a via change (one UPDATE, no
+  withdraw/announce pulse — the route key excludes the gateway), and
+  the L3VNI stays in the label slot in both modes (deviating from the
+  §3.1 SHOULD-zero to match our own receive side and FRR). Config load
+  rejects `"gateway_ip"` on an IP-VRF with no `ip_vrf`-linked L2VNI
+  (the receive side needs the link to scope the recursive lookup). A
+  self-consistency test feeds a natively-originated GW-IP route back
+  through the daemon's own projection with a matching Type 2 present
+  and asserts it resolves end-to-end. ESI overlay-index origination
+  (RFC 9136 §4.3) and the FRR consume-side interop M-job are explicit
+  follow-ups.
 - **`cargo deny` dependency gate.** `deny.toml` enforces a
   permissive-license allowlist, registry-source pinning, wildcard
   bans (with a path-dependency exemption for the deliberately

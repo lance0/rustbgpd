@@ -16,6 +16,7 @@
 //! device is the IP-VRF's own L3VXLAN.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use rustbgpd_wire::EvpnIpPrefixValue;
 
@@ -100,6 +101,13 @@ pub struct LocalIpRouteObservation {
     pub prefix: EvpnIpPrefixValue,
     /// Where the kernel learned this route.
     pub source: RouteSource,
+    /// The route's via (`RTA_GATEWAY`), when it has one. Connected /
+    /// direct routes and multipath (`RTA_MULTIPATH`) routes observe
+    /// as `None`. Feeds ADR-0087 GW-IP overlay-index gateway
+    /// selection in the L3 originator; preserved on every
+    /// observation regardless of the IP-VRF's mode so a runtime mode
+    /// flip needs no re-dump.
+    pub via: Option<IpAddr>,
 }
 
 /// Per-pass IP-VRF route-table dump produced by the dataplane crate.

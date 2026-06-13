@@ -4,15 +4,23 @@
 //! Mirrors `crates/evpn/src/origination.rs` (Type 2) and
 //! `crates/evpn/src/origination_es.rs` (Type 1 / Type 4) for the
 //! Gate 9 IRB case. ADR-0058 pins the symmetric Interface-less
-//! RT-5 shape (RFC 9136 §4.4.2) — the on-wire fields are:
+//! RT-5 shape (RFC 9136 §4.4.2); ADR-0087 adds the opt-in GW-IP
+//! overlay-index shape (RFC 9136 §4.1/§4.2). The on-wire fields are:
 //!
 //! - `prefix`: the kernel route key (IPv4 or IPv6).
-//! - `gateway`: zero (`0.0.0.0` / `::`) — Interface-less model uses
-//!   the Router MAC extcomm for inner-MAC resolution, not the
-//!   gateway field.
-//! - `label`: the IP-VRF's L3VNI in the 24-bit MPLS label slot.
+//! - `gateway`: zero (`0.0.0.0` / `::`) in the Interface-less model
+//!   (inner-MAC resolution via the Router MAC extcomm); the vetted
+//!   kernel-route via in GW-IP mode (receivers resolve recursively
+//!   through the gateway host's Type 2 MAC/IP route).
+//! - `label`: the IP-VRF's L3VNI in the 24-bit MPLS label slot —
+//!   in *both* modes. ADR-0087 decision 4 deliberately deviates from
+//!   the RFC 9136 §3.1 SHOULD-zero for overlay-index routes: our own
+//!   receive side enforces `label == L3VNI` before overlay
+//!   resolution, and FRR's gateway-ip RT-5s keep the VNI too.
 //! - `esi`: all-zero (multihomed-IP-VRF is out of scope for Gate 9;
-//!   validated at config load, asserted by the builder).
+//!   validated at config load, asserted by the builder). Also a hard
+//!   RFC 9136 §3.2 requirement in GW-IP mode — ESI and GW IP must
+//!   not both be non-zero.
 //! - `ethernet_tag`: zero (Type 5 doesn't use the EVI tag concept).
 //!
 //! And the non-MP path attribute list (the only thing this layer
@@ -25,8 +33,11 @@
 //! - `AS_PATH = empty` — iBGP origination puts no ASN; eBGP wrapping
 //!   is the transport's job.
 //! - `ExtendedCommunities`: { Route Target ×N from
-//!   `IpVrf::route_targets`, BGP Encapsulation = 8 (VXLAN), Router
-//!   MAC extcomm = `IpVrf::router_mac` }.
+//!   `IpVrf::route_targets`, BGP Encapsulation = 8 (VXLAN), and —
+//!   only when the gateway is zero — Router MAC extcomm =
+//!   `IpVrf::router_mac`. GW-IP routes omit the Router MAC: RFC 9136
+//!   §3.2 makes it ignored-if-present when the GW IP is the overlay
+//!   index, and the inner MAC comes from the resolved Type 2. }
 //!
 //! Pure: no I/O, no tokio. The daemon-side supervisor calls this once
 //! per local kernel route change and hands the result to the RIB
@@ -42,7 +53,7 @@ use rustbgpd_wire::{
 #[cfg(test)]
 use rustbgpd_wire::MacAddress;
 
-use crate::ip_vrf::IpVrf;
+use crate::ip_vrf::{IpVrf, OverlayIndexMode};
 
 /// Subset of an `[[evpn_ip_vrfs]]` entry plus a local kernel-route
 /// prefix, enough to build one outbound Type 5 advertisement. The
@@ -52,23 +63,107 @@ use crate::ip_vrf::IpVrf;
 pub struct LocalIpRoute {
     /// Prefix to advertise (IPv4 or IPv6).
     pub prefix: EvpnIpPrefixValue,
+    /// Vetted GW-IP overlay-index gateway (ADR-0087). `None`
+    /// originates the Interface-less shape. Callers run the kernel
+    /// via through [`select_overlay_gateway`] first — this field is
+    /// the *output* of that selection, not the raw `RTA_GATEWAY`.
+    pub gateway: Option<IpAddr>,
 }
 
 impl LocalIpRoute {
-    /// Build from an IPv4 prefix.
+    /// Build from an IPv4 prefix (Interface-less — no gateway).
     #[must_use]
     pub fn v4(prefix: Ipv4Prefix) -> Self {
         Self {
             prefix: EvpnIpPrefixValue::V4(prefix),
+            gateway: None,
         }
     }
 
-    /// Build from an IPv6 prefix.
+    /// Build from an IPv6 prefix (Interface-less — no gateway).
     #[must_use]
     pub fn v6(prefix: Ipv6Prefix) -> Self {
         Self {
             prefix: EvpnIpPrefixValue::V6(prefix),
+            gateway: None,
         }
+    }
+
+    /// Attach a vetted GW-IP overlay-index gateway (ADR-0087).
+    #[must_use]
+    pub fn with_gateway(mut self, gateway: Option<IpAddr>) -> Self {
+        self.gateway = gateway;
+        self
+    }
+}
+
+/// Decide whether a kernel route's via becomes the RT-5 Gateway
+/// Address (ADR-0087 decision 1). Returns `Some(via)` only when all
+/// of the following hold; everything else originates Interface-less:
+///
+/// 1. The IP-VRF opted in (`overlay_index_mode = "gateway_ip"`).
+/// 2. The route has a via and it is a specified (non-zero) address.
+/// 3. The via's family matches the prefix's family — the RT-5
+///    Gateway field shares the prefix's wire family, so a
+///    cross-family via is unrepresentable.
+/// 4. The via is contained in one of `connected_subnets` — the
+///    `RouteSource::Connected` prefixes observed in the same IP-VRF
+///    this reconcile pass, excluding /0. A via outside every
+///    connected subnet is not a directly attached overlay host, so
+///    no Type 2 will ever resolve it; advertising it as a GW IP
+///    would strand the route at receivers
+///    (`unresolved_overlay_index_gateway`), while the Interface-less
+///    fallback always forwards correctly through this VTEP's FIB.
+///
+/// Pure; the daemon-side originator feeds the result into
+/// [`LocalIpRoute::with_gateway`].
+#[must_use]
+pub fn select_overlay_gateway(
+    vrf: &IpVrf,
+    prefix: EvpnIpPrefixValue,
+    via: Option<IpAddr>,
+    connected_subnets: &[EvpnIpPrefixValue],
+) -> Option<IpAddr> {
+    if vrf.overlay_index_mode != OverlayIndexMode::GatewayIp {
+        return None;
+    }
+    let via = via?;
+    if via.is_unspecified() {
+        return None;
+    }
+    let family_ok = matches!(
+        (prefix, via),
+        (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
+    );
+    if !family_ok {
+        return None;
+    }
+    connected_subnets
+        .iter()
+        .any(|subnet| prefix_contains(*subnet, via))
+        .then_some(via)
+}
+
+/// Whether `ip` falls inside `subnet`. `/0` never matches — a
+/// (pathological) connected default route must not whitelist every
+/// via (ADR-0087 decision 1).
+fn prefix_contains(subnet: EvpnIpPrefixValue, ip: IpAddr) -> bool {
+    match (subnet, ip) {
+        (EvpnIpPrefixValue::V4(p), IpAddr::V4(v4)) => {
+            if p.len == 0 || p.len > 32 {
+                return false;
+            }
+            let mask = u32::MAX << (32 - u32::from(p.len));
+            (u32::from(v4) & mask) == (u32::from(p.addr) & mask)
+        }
+        (EvpnIpPrefixValue::V6(p), IpAddr::V6(v6)) => {
+            if p.len == 0 || p.len > 128 {
+                return false;
+            }
+            let mask = u128::MAX << (128 - u32::from(p.len));
+            (u128::from(v6) & mask) == (u128::from(p.addr) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -106,9 +201,12 @@ pub struct OriginatedIpPrefixRoute {
 ///
 /// # Errors
 /// Returns [`OriginationError::FamilyMismatch`] when the prefix is
-/// IPv4 but the VRF's `local_vtep_ip` is IPv6 (or vice versa). The
-/// daemon must filter such routes upstream — this is the structural
-/// safety net.
+/// IPv4 but the VRF's `local_vtep_ip` is IPv6 (or vice versa), and
+/// [`OriginationError::GatewayFamilyMismatch`] when a supplied
+/// gateway's family disagrees with the prefix (the RT-5 Gateway
+/// field shares the prefix's wire family). The daemon must filter
+/// both upstream ([`select_overlay_gateway`] never emits a
+/// cross-family gateway) — these are the structural safety nets.
 pub fn originate_ip_prefix_route(
     vrf: &IpVrf,
     route: &LocalIpRoute,
@@ -124,15 +222,29 @@ pub fn originate_ip_prefix_route(
             local_vtep_ip: vrf.local_vtep_ip,
         });
     }
+    if let Some(gw) = route.gateway {
+        let gw_family_ok = matches!(
+            (route.prefix, gw),
+            (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
+        );
+        if !gw_family_ok {
+            return Err(OriginationError::GatewayFamilyMismatch {
+                vrf: vrf.name.clone(),
+                prefix_family: family_of(route.prefix),
+                gateway: gw,
+            });
+        }
+    }
 
-    // Build the Type 5 NLRI. Interface-less model: gateway = 0,
-    // esi = 0, ethernet_tag = 0; label = the L3VNI in the 24-bit
-    // label slot (RFC 8365 maps VXLAN VNI through the MPLS label
-    // field on the wire).
-    let gateway = match route.prefix {
+    // Build the Type 5 NLRI. esi = 0, ethernet_tag = 0; label = the
+    // L3VNI in the 24-bit label slot (RFC 8365 maps VXLAN VNI through
+    // the MPLS label field on the wire — kept in GW-IP mode too, see
+    // ADR-0087 decision 4). Gateway: zero in the Interface-less
+    // model; the vetted via in GW-IP mode.
+    let gateway = route.gateway.unwrap_or(match route.prefix {
         EvpnIpPrefixValue::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         EvpnIpPrefixValue::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-    };
+    });
     let nlri = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
         rd: vrf.rd,
         esi: EthernetSegmentIdentifier::ZERO,
@@ -151,9 +263,15 @@ pub fn originate_ip_prefix_route(
     }
     // BGP Encapsulation = VXLAN (8) — RFC 8365 §6.
     ext_comms.push(ExtendedCommunity::bgp_encapsulation(VXLAN_ENCAP));
-    // Router MAC (RFC 9135 §4.2 / RFC 9136). Subtype 0x03 of opaque
-    // type 0x06; the wire helper handles the byte layout.
-    ext_comms.push(ExtendedCommunity::router_mac(vrf.router_mac.octets()));
+    if route.gateway.is_none() {
+        // Router MAC (RFC 9135 §4.2 / RFC 9136). Subtype 0x03 of
+        // opaque type 0x06; the wire helper handles the byte layout.
+        // Interface-less only: with a GW-IP overlay index the inner
+        // MAC comes from the resolved Type 2 and RFC 9136 §3.2 makes
+        // a Router MAC extcomm ignored-if-present, so we omit it
+        // (ADR-0087 decision 4).
+        ext_comms.push(ExtendedCommunity::router_mac(vrf.router_mac.octets()));
+    }
 
     let attributes = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -183,6 +301,15 @@ pub enum OriginationError {
         vrf: String,
         prefix_family: &'static str,
         local_vtep_ip: IpAddr,
+    },
+    #[error(
+        "evpn_ip_vrfs[{vrf}]: gateway {gateway} family does not match prefix family ({prefix_family}); \
+         the RT-5 Gateway Address shares the prefix's wire family (RFC 9136 §3.1)"
+    )]
+    GatewayFamilyMismatch {
+        vrf: String,
+        prefix_family: &'static str,
+        gateway: IpAddr,
     },
 }
 
@@ -336,5 +463,183 @@ mod tests {
         if let EvpnRoute::IpPrefix(p) = &out.route {
             assert_eq!(p.label.as_vni(), 5000);
         }
+    }
+
+    // --- ADR-0087 GW-IP overlay-index mode ---
+
+    fn gw_vrf(local: &str) -> IpVrf {
+        vrf(local).with_overlay_index_mode(OverlayIndexMode::GatewayIp)
+    }
+
+    fn v4_prefix(addr: [u8; 4], len: u8) -> EvpnIpPrefixValue {
+        EvpnIpPrefixValue::V4(Ipv4Prefix::new(std::net::Ipv4Addr::from(addr), len))
+    }
+
+    #[test]
+    fn select_gateway_via_on_connected_subnet_is_chosen() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("10.1.1.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn select_gateway_via_off_connected_subnet_falls_back() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.9.9.1".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_no_via_falls_back() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(&v, v4_prefix([192, 168, 50, 0], 24), None, &connected);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_mode_off_ignores_via_even_on_subnet() {
+        let v = vrf("10.0.0.1"); // default interface_less
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_cross_family_via_falls_back() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("2001:db8::5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_connected_default_route_does_not_whitelist() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([0, 0, 0, 0], 0)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None, "/0 must not whitelist every via");
+    }
+
+    #[test]
+    fn select_gateway_v6_via_on_connected_subnet_is_chosen() {
+        let v = gw_vrf("2001:db8::1");
+        let connected = [EvpnIpPrefixValue::V6(Ipv6Prefix::new(
+            "2001:db8:1::".parse().unwrap(),
+            64,
+        ))];
+        let prefix = EvpnIpPrefixValue::V6(Ipv6Prefix::new("2001:db8:50::".parse().unwrap(), 48));
+        let got = select_overlay_gateway(
+            &v,
+            prefix,
+            Some("2001:db8:1::5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("2001:db8:1::5".parse().unwrap()));
+    }
+
+    #[test]
+    fn gateway_route_carries_gateway_zero_esi_l3vni_and_no_router_mac() {
+        let v = gw_vrf("10.0.0.1");
+        let r = route_v4([192, 168, 50, 0], 24).with_gateway(Some("10.1.1.5".parse().unwrap()));
+        let out = originate_ip_prefix_route(&v, &r).unwrap();
+        match &out.route {
+            EvpnRoute::IpPrefix(p) => {
+                assert_eq!(p.gateway, "10.1.1.5".parse::<IpAddr>().unwrap());
+                assert_eq!(p.esi, EthernetSegmentIdentifier::ZERO);
+                assert_eq!(p.ethernet_tag.0, 0);
+                assert_eq!(p.label.as_vni(), 5000, "L3VNI stays in the label slot");
+            }
+            other => panic!("expected IpPrefix, got {other:?}"),
+        }
+        let ext_comms = out
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert!(
+            ext_comms.iter().all(|c| c.as_router_mac().is_none()),
+            "GW-IP routes must not carry a Router MAC extcomm (RFC 9136 §3.2)",
+        );
+        // RTs + VXLAN encap stay.
+        assert!(ext_comms.iter().any(|c| c.route_target().is_some()));
+        assert_eq!(
+            ext_comms
+                .iter()
+                .filter_map(|c| c.as_bgp_encapsulation())
+                .collect::<Vec<_>>(),
+            vec![VXLAN_ENCAP],
+        );
+        assert_eq!(out.next_hop, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn no_gateway_route_keeps_interface_less_shape_even_in_gateway_mode() {
+        let v = gw_vrf("10.0.0.1");
+        let r = route_v4([10, 1, 0, 0], 24); // fallback: no vetted gateway
+        let out = originate_ip_prefix_route(&v, &r).unwrap();
+        match &out.route {
+            EvpnRoute::IpPrefix(p) => {
+                assert_eq!(p.gateway, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            }
+            other => panic!("expected IpPrefix, got {other:?}"),
+        }
+        let ext_comms = out
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert_eq!(
+            ext_comms
+                .iter()
+                .filter_map(|c| c.as_router_mac())
+                .collect::<Vec<_>>(),
+            vec![[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]],
+            "fallback routes keep the Router MAC extcomm",
+        );
+    }
+
+    #[test]
+    fn gateway_family_mismatch_is_rejected_structurally() {
+        let v = gw_vrf("10.0.0.1");
+        let r = route_v4([192, 168, 50, 0], 24).with_gateway(Some("2001:db8::5".parse().unwrap()));
+        let err = originate_ip_prefix_route(&v, &r).unwrap_err();
+        assert!(matches!(
+            err,
+            OriginationError::GatewayFamilyMismatch { .. }
+        ));
     }
 }

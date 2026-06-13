@@ -4189,6 +4189,7 @@ table_id = 6000
                 24,
             )),
             source: rustbgpd_evpn::RouteSource::Static,
+            via: None,
         }
     }
 

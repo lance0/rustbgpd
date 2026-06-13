@@ -8710,6 +8710,92 @@ table_id = 5000
     assert_eq!(vrf.vrf_device, "vrf-blue");
     assert_eq!(vrf.l3vxlan_device, "vni5000");
     assert_eq!(vrf.table_id, 5000);
+    assert_eq!(
+        vrf.overlay_index_mode,
+        rustbgpd_evpn::OverlayIndexMode::InterfaceLess,
+        "omitted overlay_index_mode defaults to interface_less"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_gateway_ip_mode_requires_linked_l2vni() {
+    // gateway_ip on an IP-VRF with no [[evpn_instances]].ip_vrf link
+    // is rejected at load (ADR-0087 decision 3).
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "gateway_ip"
+"#,
+    );
+    // `parse` runs full validation, which resolves the IP-VRF table
+    // (validation.rs), so the rejection surfaces here.
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("gateway_ip") && msg.contains("ip_vrf"),
+        "expected gateway_ip-without-linked-L2VNI rejection, got {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_gateway_ip_mode_with_linked_l2vni_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "gateway_ip"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    assert_eq!(
+        table.get("tenant-blue").unwrap().overlay_index_mode,
+        rustbgpd_evpn::OverlayIndexMode::GatewayIp,
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_unknown_overlay_index_mode() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "asymmetric"
+"#,
+    );
+    assert!(parse(&toml).is_err(), "unknown mode must fail to parse");
 }
 
 #[test]
