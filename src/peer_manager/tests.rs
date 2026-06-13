@@ -1400,6 +1400,62 @@ async fn rollback_reap_preserves_dynamic_peer_accepted_by_wildcard_asn_range() {
 }
 
 #[tokio::test]
+async fn rollback_reap_keeps_dynamic_peer_for_host_bit_range_prefix() {
+    // Regression: a `[[dynamic_neighbors]]` prefix configured with host bits
+    // set (`127.0.0.9/24`) parses into a RAW `DynamicRange`, but an accepted
+    // peer's attribution is MASKED (`127.0.0.0/24`, via `accepted_attribution`).
+    // The reap predicate must normalize the range side through `effective_prefix`
+    // or it tears down a live dynamic session on every rollback whose restored
+    // snapshot still contains that unchanged range.
+    let mut mgr = dynamic_test_manager();
+    let mut config = make_dynamic_manager_config();
+    config.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "127.0.0.9/24".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 0,
+        description: Some("host-bit range".to_string()),
+    }];
+    mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&config);
+    assert_eq!(
+        mgr.dynamic_ranges[0].addr,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)),
+        "the range is stored raw/unmasked, with host bits intact"
+    );
+    assert_eq!(mgr.dynamic_ranges[0].prefix_len, 24);
+
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 42));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        peer_addr,
+        88,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(192, 0, 2, 42)),
+            counters,
+        ),
+        true,
+        // The masked attribution, exactly what `accepted_attribution()` stores
+        // when this peer is accepted by the host-bit range above.
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        24,
+        "ix-members",
+    );
+
+    let removed = mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await;
+    assert_eq!(
+        removed, 0,
+        "a host-bit range prefix must not reap the peer whose masked attribution still matches it"
+    );
+    assert!(
+        mgr.peers.contains_key(&key(peer_addr)),
+        "a live dynamic session must survive rollback to a snapshot that still contains its (host-bit) range"
+    );
+    assert_eq!(mgr.dynamic_peer_count, 1);
+}
+
+#[tokio::test]
 async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
     let mut mgr = dynamic_test_manager();
 

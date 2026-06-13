@@ -265,8 +265,16 @@ impl PeerManager {
             return false;
         };
         self.dynamic_ranges.iter().any(|range| {
-            range.addr == accepted.addr
-                && range.prefix_len == accepted.prefix_len
+            // `accepted` is masked via `effective_prefix` (see
+            // `accepted_attribution`), but `DynamicRange` keeps the raw
+            // configured addr/len. Normalize the range side the same way the
+            // live-policy targeter and the dynamic-range matchers do, so a
+            // host-bit-bearing prefix (`192.0.2.5/24`) still matches its masked
+            // attribution (`192.0.2.0/24`) and isn't wrongly reaped on rollback.
+            let (range_addr, range_len) =
+                crate::config::effective_prefix(range.addr, range.prefix_len);
+            range_addr == accepted.addr
+                && range_len == accepted.prefix_len
                 && range.peer_group == accepted.peer_group
                 && (range.remote_asn == 0 || range.remote_asn == managed.remote_asn)
         })
