@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Documentation and feature-build freshness for the post-v0.38.0 EVPN/config
+  surface: the RIB fanout bench-internals build now matches the current
+  session registration signature, the ADR index lists ADR-0087 and marks
+  ADR-0081 accepted, overview docs no longer describe native GW-IP
+  overlay-index Type 5 origination as future work after it shipped, and
+  `redundancy_mode = "single-active"` now points at the shipped receive-side
+  backup-path pre-install behavior.
+
 ### Added
 
 - **Native GW-IP overlay-index Type 5 origination (RFC 9136 §4.1/§4.2,

@@ -53,6 +53,7 @@ impl RibManager {
             let (tx, mut rx) = mpsc::channel(channel_capacity);
             self.handle_peer_up(
                 peer,
+                u64::from(idx) + 1,          // synthetic session id
                 64_512,                      // iBGP — all peers share the local ASN
                 Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
                 tx,
