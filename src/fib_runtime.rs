@@ -209,7 +209,7 @@ pub fn spawn(
 
     #[cfg(target_os = "linux")]
     {
-        match LinuxUnicastFib::connect() {
+        match LinuxUnicastFib::connect(metrics.clone()) {
             Ok(fib) => Some(spawn_with_fib(
                 config,
                 rib_tx,
@@ -1775,9 +1775,9 @@ struct LinuxUnicastFib {
 
 #[cfg(target_os = "linux")]
 impl LinuxUnicastFib {
-    fn connect() -> Result<Self, String> {
+    fn connect(metrics: BgpMetrics) -> Result<Self, String> {
         let (handle, events) =
-            crate::kernel_route_notify::connect_with_route_notifications("general FIB")?;
+            crate::kernel_route_notify::connect_with_route_notifications("general_fib", metrics)?;
         Ok(Self {
             handle,
             kernel_route_events: Some(events),
@@ -4719,7 +4719,8 @@ mod tests {
         let prefix = v4(24);
         let prefix_text = "203.0.113.0/24";
         let foreign_prefix = "198.51.100.0/24";
-        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut fib =
+            LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
         let (status_tx, status_rx) = watch::channel(Vec::new());
@@ -4966,7 +4967,8 @@ mod tests {
         let prefix = v4(24);
         let prefix_text = "203.0.113.0/24";
         let scope_ifindex = ifindex("fib0");
-        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut fib =
+            LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
         let (status_tx, _status_rx) = watch::channel(Vec::new());
@@ -5046,7 +5048,8 @@ mod tests {
 
         let prefix = v4(24);
         let prefix_text = "203.0.113.0/24";
-        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut fib =
+            LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
         let (status_tx, _status_rx) = watch::channel(Vec::new());
@@ -5170,7 +5173,8 @@ mod tests {
 
         let prefix = v4(24);
         let prefix_text = "203.0.113.0/24";
-        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut fib =
+            LinuxUnicastFib::connect(BgpMetrics::new()).expect("LinuxUnicastFib::connect");
         let mut owned = FibOwnedState::default();
         let metrics = metrics();
         let (status_tx, _status_rx) = watch::channel(Vec::new());
