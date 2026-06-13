@@ -566,6 +566,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **GW-IP overlay-index Type 5 origination now rejects ordinary IPv4
+  subnet network and directed-broadcast vias.** In
+  `overlay_index_mode = "gateway_ip"`, a route via such as
+  `10.1.1.0` or `10.1.1.255` inside `10.1.1.0/24` now falls back to
+  the interface-less Type 5 shape instead of advertising an
+  unresolvable Gateway Address. `/31` point-to-point endpoints and
+  `/32` host routes remain eligible gateways.
 - **Config rollback no longer leaves candidate-born dynamic peers
   alive, and peer-group policy-only edits now reach live dynamic
   peers on every mutation path.** The peer manager now treats a

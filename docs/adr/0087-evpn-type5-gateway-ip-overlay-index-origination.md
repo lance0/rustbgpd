@@ -90,7 +90,11 @@ A via becomes the Gateway Address only when **all** hold:
 2. The via's family matches the prefix's family (wire constraint).
 3. The via is contained in a **connected subnet of the same IP-VRF**
    — a `RouteSource::Connected` (RTPROT_KERNEL) observation in the
-   same reconcile snapshot with prefix length > 0.
+   same reconcile snapshot with prefix length > 0 — and, for IPv4,
+   is a usable host address in that subnet. Ordinary IPv4 subnet
+   network and directed-broadcast addresses are not eligible
+   gateways; `/31` point-to-point endpoints (RFC 3021) and `/32` host
+   routes are eligible.
 
 Rationale for (3): a remote PE can only resolve the GW IP through an
 RT-2, and an RT-2 for that IP can only exist if the gateway host
@@ -109,14 +113,17 @@ failure direction of the looser check is benign — a wrongly-GW-IP'd
 route degrades to held-unresolved at receivers with an explicit drop
 signal, while the fallback direction (interface-less) always
 forwards correctly. The /0 exclusion keeps a (pathological) connected
-default route from whitelisting every via.
+default route from whitelisting every via; the IPv4 usable-host check
+keeps a subnet's network or directed-broadcast address from becoming
+an overlay-index gateway that cannot have a companion host RT-2.
 
 Routes that fail any gate — no via (connected/direct routes), wrong
-family, off-subnet via, or mode off — originate **interface-less**,
-exactly as today. Fallback is safe by construction: an interface-less
-RT-5 with the Router's MAC extcomm attracts traffic to this VTEP,
-whose kernel FIB holds the original via and completes delivery; only
-the one-fabric-hop indirection optimization is lost.
+family, off-subnet via, non-usable IPv4 endpoint, or mode off —
+originate **interface-less**, exactly as today. Fallback is safe by
+construction: an interface-less RT-5 with the Router's MAC extcomm
+attracts traffic to this VTEP, whose kernel FIB holds the original
+via and completes delivery; only the one-fabric-hop indirection
+optimization is lost.
 
 ### 2. Companion RT-2: depend on it, do not duplicate it, do not gate on it
 

@@ -43,7 +43,7 @@
 //! per local kernel route change and hands the result to the RIB
 //! injection channel.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue,
@@ -108,10 +108,11 @@ impl LocalIpRoute {
 ///    cross-family via is unrepresentable.
 /// 4. The via is contained in one of `connected_subnets` — the
 ///    `RouteSource::Connected` prefixes observed in the same IP-VRF
-///    this reconcile pass, excluding /0. A via outside every
-///    connected subnet is not a directly attached overlay host, so
-///    no Type 2 will ever resolve it; advertising it as a GW IP
-///    would strand the route at receivers
+///    this reconcile pass, excluding /0 and ordinary IPv4
+///    network/broadcast addresses. A via outside every connected
+///    subnet is not a directly attached overlay host, so no Type 2
+///    will ever resolve it; advertising it as a GW IP would strand
+///    the route at receivers
 ///    (`unresolved_overlay_index_gateway`), while the Interface-less
 ///    fallback always forwards correctly through this VTEP's FIB.
 ///
@@ -138,23 +139,30 @@ pub fn select_overlay_gateway(
     if !family_ok {
         return None;
     }
+    // A via qualifies if it is a usable host in *any* connected subnet of this
+    // IP-VRF. With overlapping connected prefixes (e.g. a /24 SVI plus a wider
+    // summary route), a via that is the network/broadcast of the more-specific
+    // subnet but an ordinary host of the wider one still qualifies. We accept
+    // that quantifier: overlapping connected routes in one IP-VRF are unusual,
+    // and the failure direction stays benign — a wrongly-eligible GW IP only
+    // degrades to held-unresolved at receivers (`unresolved_overlay_index_gateway`),
+    // never a blackhole. Longest-match-only eligibility is a possible future
+    // tightening, not a correctness gate.
     connected_subnets
         .iter()
-        .any(|subnet| prefix_contains(*subnet, via))
+        .any(|subnet| prefix_contains_usable_gateway(*subnet, via))
         .then_some(via)
 }
 
-/// Whether `ip` falls inside `subnet`. `/0` never matches — a
-/// (pathological) connected default route must not whitelist every
-/// via (ADR-0087 decision 1).
-fn prefix_contains(subnet: EvpnIpPrefixValue, ip: IpAddr) -> bool {
+/// Whether `ip` is a usable gateway host inside `subnet`. `/0` never
+/// matches — a (pathological) connected default route must not
+/// whitelist every via (ADR-0087 decision 1). For ordinary IPv4
+/// subnets, the all-zero host and all-ones host addresses are not
+/// gateway hosts; `/31` and `/32` remain usable host routes.
+fn prefix_contains_usable_gateway(subnet: EvpnIpPrefixValue, ip: IpAddr) -> bool {
     match (subnet, ip) {
         (EvpnIpPrefixValue::V4(p), IpAddr::V4(v4)) => {
-            if p.len == 0 || p.len > 32 {
-                return false;
-            }
-            let mask = u32::MAX << (32 - u32::from(p.len));
-            (u32::from(v4) & mask) == (u32::from(p.addr) & mask)
+            ipv4_prefix_contains(p.addr, p.len, v4) && ipv4_usable_gateway_host(p.addr, p.len, v4)
         }
         (EvpnIpPrefixValue::V6(p), IpAddr::V6(v6)) => {
             if p.len == 0 || p.len > 128 {
@@ -165,6 +173,28 @@ fn prefix_contains(subnet: EvpnIpPrefixValue, ip: IpAddr) -> bool {
         }
         _ => false,
     }
+}
+
+fn ipv4_prefix_contains(prefix: Ipv4Addr, len: u8, ip: Ipv4Addr) -> bool {
+    if len == 0 || len > 32 {
+        return false;
+    }
+    let mask = u32::MAX << (32 - u32::from(len));
+    (u32::from(ip) & mask) == (u32::from(prefix) & mask)
+}
+
+fn ipv4_usable_gateway_host(prefix: Ipv4Addr, len: u8, ip: Ipv4Addr) -> bool {
+    if len == 0 || len > 32 {
+        return false;
+    }
+    if len >= 31 {
+        return true;
+    }
+    let mask = u32::MAX << (32 - u32::from(len));
+    let network = u32::from(prefix) & mask;
+    let broadcast = network | !mask;
+    let ip = u32::from(ip);
+    ip != network && ip != broadcast
 }
 
 /// One outbound Type 5 advertisement, ready to hand to the RIB
@@ -486,6 +516,75 @@ mod tests {
     fn select_gateway_via_on_connected_subnet_is_chosen() {
         let v = gw_vrf("10.0.0.1");
         let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.5".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("10.1.1.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_network_address_falls_back() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.0".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_broadcast_address_falls_back() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 24)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.255".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_31_endpoint_is_chosen() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 31)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.1".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("10.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_31_lower_endpoint_is_chosen() {
+        // RFC 3021: in a /31 both addresses are usable hosts. The lower
+        // endpoint (10.1.1.0) would be the network address at any wider mask,
+        // so this is the distinguishing assertion that /31 endpoints are not
+        // mistaken for an ordinary subnet's network address.
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 0], 31)];
+        let got = select_overlay_gateway(
+            &v,
+            v4_prefix([192, 168, 50, 0], 24),
+            Some("10.1.1.0".parse().unwrap()),
+            &connected,
+        );
+        assert_eq!(got, Some("10.1.1.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn select_gateway_via_ipv4_32_host_is_chosen() {
+        let v = gw_vrf("10.0.0.1");
+        let connected = [v4_prefix([10, 1, 1, 5], 32)];
         let got = select_overlay_gateway(
             &v,
             v4_prefix([192, 168, 50, 0], 24),

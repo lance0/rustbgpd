@@ -2258,9 +2258,11 @@ host moves, its Type 2 alone re-converges every prefix that points at
 it.
 
 - The via must land on a `Connected` (kernel) prefix of the same VRF
-  with prefix length > 0; an off-subnet via (no Type 2 will ever name
-  it) falls back to the interface-less shape, as does a route with no
-  via.
+  with prefix length > 0 and be a usable gateway host. Ordinary IPv4
+  subnet network and directed-broadcast addresses fall back to the
+  interface-less shape; `/31` point-to-point endpoints and `/32` host
+  routes are eligible. An off-subnet via (no Type 2 will ever name it)
+  falls back too, as does a route with no via.
 - The companion Type 2 is a dependency, not a precondition: rustbgpd
   originates the Type 5 immediately, and receivers hold it unresolved
   (surfaced via the `unresolved_overlay_index_gateway` drop counter)
