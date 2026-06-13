@@ -37,6 +37,25 @@ pub struct OutboundRouteUpdate {
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
     pub evpn_withdraw: Vec<EvpnRouteKey>,
+    /// Ask the session task to send a ROUTE-REFRESH *request* toward the
+    /// peer (RFC 2918) for **every negotiated family**, so the peer
+    /// re-advertises its routes. Used by the RIB manager's
+    /// outbound-registration failover: the survivor's Adj-RIB-In was
+    /// cleared by the superseded session's replacement reset (inbound
+    /// `RoutesReceived` carries no session identity, so per-session
+    /// attribution is impossible) and must be re-learned from the peer.
+    ///
+    /// Family selection is deliberately delegated to the session task:
+    /// the manager cannot know the receive-side family set, because
+    /// `PeerUp` carries only the *sendable* subset (families with a
+    /// usable local next-hop), while the refresh repopulates inbound
+    /// state — a family negotiated for receive but pruned from the
+    /// sendable set must still be refreshed. The session task iterates
+    /// its authoritative negotiated set and enforces the Route Refresh
+    /// capability; for a peer without the capability the request is
+    /// skipped with a warning and inbound state recovers only on the
+    /// peer's natural re-advertisement.
+    pub request_refresh_all_negotiated: bool,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.
@@ -202,6 +221,15 @@ pub enum RibUpdate {
     PeerDown {
         /// The peer whose session went down.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation) of
+        /// the session that went down. The RIB manager discards a
+        /// `PeerDown` whose id doesn't match the currently registered
+        /// session, so a stale collision-loser teardown (RFC 4271 §6.8)
+        /// processed after the winner's `PeerUp` cannot destroy the
+        /// surviving session's state. `0` = legacy emitters without
+        /// identity tracking (every session of such an emitter shares
+        /// id 0, which degrades to the pre-stamping behavior).
+        session_id: u64,
     },
     /// Peer was *deleted* from the configuration (not a session flap):
     /// after clearing any remaining per-peer state, remove the peer's
@@ -217,6 +245,11 @@ pub enum RibUpdate {
     PeerUp {
         /// The peer whose session came up.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation).
+        /// Recorded by the RIB manager at registration so that later
+        /// `PeerDown`/`PeerGracefulRestart` events can be matched to the
+        /// session that emitted them (see `PeerDown::session_id`).
+        session_id: u64,
         /// Peer's remote ASN (for MRT `PEER_INDEX_TABLE`).
         peer_asn: u32,
         /// Peer's BGP router ID.
@@ -420,6 +453,13 @@ pub enum RibUpdate {
     PeerGracefulRestart {
         /// The restarting peer.
         peer: IpAddr,
+        /// Transport session identity (peer-manager scoped generation) of
+        /// the session that went down with GR. Subject to the same
+        /// stale-teardown discard rule as `PeerDown::session_id` — a GR
+        /// flap from a superseded session must not mark the surviving
+        /// session's routes stale. When the id matches, GR stale-path
+        /// retention behaves exactly as before stamping.
+        session_id: u64,
         /// Peer's advertised restart time (seconds).
         restart_time: u16,
         /// Our configured stale routes time (seconds).

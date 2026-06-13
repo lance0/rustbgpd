@@ -184,7 +184,10 @@ impl PeerSession {
                 if self.fsm.state() == SessionState::Established {
                     let _ = self
                         .rib_tx
-                        .send(RibUpdate::PeerDown { peer: self.peer_ip })
+                        .send(RibUpdate::PeerDown {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                        })
                         .await;
                 }
                 self.close_tcp();

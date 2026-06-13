@@ -312,6 +312,7 @@ impl RibManager {
             flowspec_withdraw,
             evpn_announce,
             evpn_withdraw,
+            request_refresh_all_negotiated: false,
         });
         true
     }

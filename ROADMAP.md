@@ -267,7 +267,8 @@ has it, no broad performance sprints without profile evidence.
   per-VLAN state would need `vlan_filtering` + per-VLAN STP state).
   Distinct from the deferred all-active local-bias item.
 - **Wedged post-Established advertisement path (observed once, CI,
-  2026-06-12 — mechanism identified and reproduced 2026-06-12).**
+  2026-06-12 — mechanism identified and reproduced 2026-06-12;
+  RESOLVED by session-identity stamping, see below).**
   During an M66 CI run, every advertisement pe1 issued AFTER initial
   convergence (fresh Type 2 origination, drain withdrawals) failed to
   reach the peer VTEP for ~10 minutes and across an in-job redeploy,
@@ -295,23 +296,49 @@ has it, no broad performance sprints without profile evidence.
   triggers a loud Cease/8 teardown, TCP backpressure would stall
   keepalives too and trip the remote hold timer in 90s).
   **Reproduced** at the manager level:
-  `stale_peer_down_after_replacement_peer_up_silently_wedges_distribution`
-  (crates/rib/src/manager/tests.rs) pins the silent-wedge end state and
-  is annotated to flip when the fix lands. **Shipped observability:**
+  `stale_peer_down_after_replacement_peer_up_is_discarded`
+  (crates/rib/src/manager/tests.rs), originally a characterization of
+  the silent-wedge end state, now flipped to a delivery assert.
+  **Shipped observability:**
   `bgp_rib_outbound_registered_peers` gauge (Established sessions >
   registered peers = this wedge), `bgp_rib_outbound_registration_replaced_total`
   (the collision-overlap precondition), `bgp_rib_dirty_resync_total`,
   `bgp_rib_ingest_channel_depth`, a WARN on same-peer registration
   replacement, and an INFO on every outbound deregistration.
-  **Remaining fix (deliberately not shipped speculatively):** stamp
-  `PeerUp`/`PeerDown` with the transport session id, have
-  `handle_peer_down` ignore a `PeerDown` whose id doesn't match the
-  registered session, and treat a replacement `PeerUp` as a session
-  reset (clear Adj-RIB-In/Out for the peer before re-registering so
-  state from the dumped session can't linger). Evidence gap to close
-  before/while fixing: the M66 job logs contain no pe1-side daemon
-  logs, so the collision itself is inferred, not observed — the new
-  WARN/INFO lines and gauge make the next occurrence self-attributing.
+  **Resolved (the fix specified here, shipped):**
+  `PeerUp`/`PeerDown`/`PeerGracefulRestart` carry the transport session
+  id (the peer-manager-scoped `SessionIdentity` generation, stamped at
+  every transport emit site including the GR path); the RIB manager
+  records the registered id at `PeerUp`, discards a teardown whose id
+  doesn't match (whole handler — Adj-RIB-In clear, GR/LLGR aborts and
+  outbound deregistration included; INFO log +
+  `bgp_rib_stale_peer_down_ignored_total`), and treats a replacement
+  `PeerUp` as a session reset (clears the prior session's
+  Adj-RIB-In/Out before re-registering, except routes under GR/LLGR
+  stale retention, which stay deadline-bounded).
+  **Completed for the symmetric interleaving (M66 failed on the fix
+  PR's own CI):** with the winner's `PeerUp` processed FIRST, the
+  loser's later `PeerUp` becomes the active registration (the
+  replacement reset clears the winner's Adj-RIB-In) and the loser's
+  `PeerDown` *matches* the registered id — the id gate alone runs the
+  full teardown against a peer that still has an Established session.
+  Session ids cannot arbitrate this (the §6.8 survivor is chosen by
+  BGP-ID comparison, not event order), so the RIB manager now tracks
+  every live session per address (bounded, collision window = 2) and
+  fails the registration over to the survivor on an active-session
+  down: re-register, re-dump the initial table, and request an inbound
+  ROUTE-REFRESH through the survivor's channel (`OutboundRouteUpdate::
+  request_refresh`; the session task enforces RFC 2918 capability) —
+  Adj-RIB-In is per-address and `RoutesReceived` is unstamped, so
+  inbound recovery must come from the peer. A GR-down of the active
+  session with a live survivor fails over instead of entering stale
+  retention. New `bgp_rib_outbound_registration_failover_total{peer}`.
+  Manager tests pin all interleavings of {PeerUp(W), PeerUp(L),
+  PeerDown(L)}. Residual evidence
+  note: the M66 job logs contained no pe1-side daemon logs, so the
+  collision itself was inferred, not observed — the WARN/INFO lines,
+  gauge and discard/failover counters make any recurrence
+  self-attributing.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent
