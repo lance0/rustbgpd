@@ -3748,6 +3748,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     // Seed the RIB with an existing route that will become refresh-stale.
     rib_tx
         .send(RibUpdate::RoutesReceived {
+            session_id: 0,
             peer,
             announced: vec![Route {
                 prefix: Prefix::V4(denied_prefix),
@@ -3784,6 +3785,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     // Start the ERR refresh window for IPv4 unicast.
     rib_tx
         .send(RibUpdate::BeginRouteRefresh {
+            session_id: 0,
             peer,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
@@ -3890,6 +3892,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     // Close the refresh window; the unreplaced stale route should be swept.
     rib_tx
         .send(RibUpdate::EndRouteRefresh {
+            session_id: 0,
             peer,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
@@ -5364,6 +5367,7 @@ fn sample_update_message() -> bytes::BytesMut {
 
 fn placeholder_routes_received() -> RibUpdate {
     RibUpdate::RoutesReceived {
+        session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
         announced: vec![],
         withdrawn: vec![],

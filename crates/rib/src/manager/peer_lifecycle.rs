@@ -110,6 +110,59 @@ impl RibManager {
         }
     }
 
+    /// Session-identity gate for the data-plane-affecting messages a
+    /// session emits while Established (`RoutesReceived`, `EndOfRib`,
+    /// `BeginRouteRefresh`/`EndRouteRefresh`, `RouteRefreshRequest`,
+    /// `PeerOrfUpdate`). Returns `true` when the message must be
+    /// discarded: a registration exists for the peer and the stamped id
+    /// is not the active session — a message from a superseded session
+    /// (RFC 4271 §6.8 collision window) queued behind the replacement's
+    /// `PeerUp`. Without the gate, such a message would mutate the
+    /// REPLACEMENT session's state: stale routes landing in its
+    /// Adj-RIB-In, a stale `EoR` prematurely completing its GR sweep, a
+    /// stale `EoRR` closing its enhanced-refresh window early, or stale
+    /// ORF entries installed as its outbound filter.
+    ///
+    /// A message for a peer with NO registration keeps the pre-stamping
+    /// accept-all behavior, mirroring the teardown rule in
+    /// [`Self::classify_session_teardown`]. Unlike teardowns there is no
+    /// GR-window case to protect here — per-producer FIFO means a
+    /// session's data messages are always delivered between its own
+    /// `PeerUp` (which registers) and its own down event (after which it
+    /// emits nothing), so an unregistered data message can only come
+    /// from a legacy emitter that never registered, and dropping those
+    /// would change behavior for no safety gain.
+    ///
+    /// Discards are logged at INFO (same shape as the stale-teardown
+    /// discard) and counted in
+    /// `bgp_rib_stale_session_message_ignored_total{peer,kind}`.
+    /// `kind` is bounded: `routes`, `eor`, `refresh`, `orf`.
+    pub(super) fn stale_session_message(
+        &self,
+        peer: IpAddr,
+        session_id: u64,
+        event: &'static str,
+        kind: &'static str,
+    ) -> bool {
+        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
+            return false;
+        };
+        if registered == session_id {
+            return false;
+        }
+        info!(
+            %peer,
+            event,
+            stale_session_id = session_id,
+            registered_session_id = registered,
+            "discarding stale session message from a superseded session — \
+             the registered session's state is untouched"
+        );
+        self.metrics
+            .record_rib_stale_session_message_ignored(&peer.to_string(), kind);
+        true
+    }
+
     /// Hand the outbound registration to the most recent surviving live
     /// session after the active session's down event (the symmetric
     /// collision interleaving `PeerUp(winner)` → `PeerUp(loser)` →
@@ -123,8 +176,9 @@ impl RibManager {
     /// initial table dump.
     ///
     /// Inbound: the survivor's Adj-RIB-In cannot be restored locally —
-    /// `RoutesReceived` carries no session identity, so the replacement
-    /// reset already destroyed it irrecoverably. Recovery is delegated to
+    /// the replacement reset already destroyed it, and while superseded
+    /// the survivor's stamped `RoutesReceived` were discarded by the
+    /// session-identity gate. Recovery is delegated to
     /// the peer: a ROUTE-REFRESH request (RFC 2918) is enqueued through
     /// the survivor's outbound channel for its negotiated families. The
     /// session task enforces the negotiated capability; if the peer never
