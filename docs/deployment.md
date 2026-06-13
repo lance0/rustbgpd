@@ -63,7 +63,7 @@ Verify:
 ```sh
 rustbgpd --version
 rbgp --version
-rustbgpctl --version
+rbgp --version
 ```
 
 ### From source
@@ -75,7 +75,7 @@ git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
 cargo build --workspace --release
 sudo install -m 0755 \
-  target/release/rustbgpd target/release/rbgp target/release/rustbgpctl \
+  target/release/rustbgpd target/release/rbgp target/release/rbgp \
   /usr/local/bin/
 ```
 

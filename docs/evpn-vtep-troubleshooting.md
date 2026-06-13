@@ -22,23 +22,23 @@ dataplane reconciler or local-MAC originator.
 Run these first:
 
 ```bash
-rustbgpctl evpn instances
-rustbgpctl evpn --route-type 2
-rustbgpctl evpn --route-type 3
+rbgp evpn instances
+rbgp evpn --route-type 2
+rbgp evpn --route-type 3
 bridge fdb show
 ```
 
 Expected signals:
 
-- `rustbgpctl evpn instances` lists each configured VNI and
+- `rbgp evpn instances` lists each configured VNI and
   `originated-local-macs=N`.
-- `rustbgpctl evpn --route-type 3` lists one IMET for each configured
+- `rbgp evpn --route-type 3` lists one IMET for each configured
   L2VNI after the daemon starts.
 - `bridge fdb show` contains remote MACs as `extern_learn` rows with a
   `dst` pointing at the remote VTEP IP.
 - Prometheus shows flat `evpn_local_origination_errors_total` and
   `evpn_local_observations_dropped_total` counters during steady state.
-- `rustbgpctl evpn diagnose` summarizes instance count, Type 2/3 route
+- `rbgp evpn diagnose` summarizes instance count, Type 2/3 route
   presence, and the key EVPN metrics from one command.
 
 ## Local MAC learned, but no Type 2 appears
@@ -56,7 +56,7 @@ Expected signals:
 2. Confirm the EVI is active:
 
    ```bash
-   rustbgpctl evpn instances
+   rbgp evpn instances
    ```
 
    The bridge must match the configured instance. `originated-local-macs`
@@ -99,7 +99,7 @@ Expected signals:
 1. Confirm the Type 2 is in the EVPN RIB:
 
    ```bash
-   rustbgpctl evpn --route-type 2 --rd 65000:100
+   rbgp evpn --route-type 2 --rd 65000:100
    ```
 
 2. Confirm the Linux readiness shape:
@@ -145,7 +145,7 @@ stopped.
 Check:
 
 ```bash
-rustbgpctl evpn --route-type 3
+rbgp evpn --route-type 3
 ```
 
 On an FRR peer:
@@ -181,7 +181,7 @@ quarantined `(VNI, MAC)` out of the remote-FDB dataplane intent (so Linux
 FDB / NHG state stops programming forwarding for it); Loc-RIB, RR
 reflection, and `ListEvpnRoutes` visibility are preserved. Quarantine
 clears automatically after `recovery_seconds`, or immediately via
-`rustbgpctl evpn clear-duplicate-mac --vni <VNI> --mac <MAC>`.
+`rbgp evpn clear-duplicate-mac --vni <VNI> --mac <MAC>`.
 
 ## Draining an Ethernet Segment for maintenance (ADR-0084)
 
@@ -190,9 +190,9 @@ Ethernet Segment so remote PEs repair around this VTEP first
 (single-active segments swap to the backup PE per ADR-0083):
 
 ```bash
-rustbgpctl evpn es drain 00:11:22:33:44:55:66:77:88:99
+rbgp evpn es drain 00:11:22:33:44:55:66:77:88:99
 # ... do the access-circuit maintenance ...
-rustbgpctl evpn es undrain 00:11:22:33:44:55:66:77:88:99
+rbgp evpn es undrain 00:11:22:33:44:55:66:77:88:99
 ```
 
 Draining withdraws the ES's Type 4 (exiting DF election), EAD-per-ES,
@@ -346,7 +346,7 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    `0x4000_xxxx`, members at `0x3000_xxxx`.
 3. Confirm rustbgpd actually observed both alias VTEPs' Type 1
    EAD-per-EVI routes for the shared ESI — check
-   `rustbgpctl evpn instances` or the gRPC `ListEvpnInstances`,
+   `rbgp evpn instances` or the gRPC `ListEvpnInstances`,
    and verify peer sessions are Established.
 4. If the FDB row has `dst <ip>` (not `nhid`), the entry is in
    the single-dst fallback path. Common causes:
@@ -373,7 +373,7 @@ The slice 4 / M40 smoke
 runs end-to-end against FRR EVPN-MH and is the canonical
 correctness reference if you suspect the daemon path itself.
 
-For live systems, `rustbgpctl evpn nexthops` shows the reconciler's
+For live systems, `rbgp evpn nexthops` shows the reconciler's
 owned FDB-NHG view: per-VNI groups, member nexthop IDs, MAC refs,
 orphan tagged nexthop count, pending-delete count, and drift-recovery
 state. Use it before falling back to raw `ip nexthop show` / `bridge
@@ -444,7 +444,7 @@ state with value 1 is current).
 1. **Drained ES** — any drain reason (operator or link, including
    the post-carrier-return recovery hold-off) blocks the AC; that is
    the maintenance semantic. Check
-   `evpn_es_drained{esi, reason}` / `rustbgpctl evpn es`.
+   `evpn_es_drained{esi, reason}` / `rbgp evpn es`.
 2. **This PE lost DF election** for every member VNI — check
    `evpn_df_role{esi, vni, role}`.
 3. A crash-stopped daemon can leave the port disabled (clean
@@ -459,7 +459,7 @@ same per-port state and will fight.
 
 Gate 9 slice 6 surfaces per-VRF readiness via gRPC
 (`EvpnService.GetIpVrf` / `ListIpVrfs`) and the CLI
-(`rustbgpctl evpn vrfs [NAME]`). The probe checks the seven
+(`rbgp evpn vrfs [NAME]`). The probe checks the seven
 ADR-0058 §3 predicates; `NotReady { reasons }` reports every
 failing predicate at once.
 
@@ -468,7 +468,7 @@ or installs remote prefixes.
 
 **Triage**:
 
-1. `rustbgpctl evpn vrfs <name>` and read the `not_ready_reasons`
+1. `rbgp evpn vrfs <name>` and read the `not_ready_reasons`
    list. Common entries:
    - `vrf_device_missing` / `not_up` — the VRF master device must
      exist and be UP before the probe runs.

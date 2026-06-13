@@ -3,8 +3,10 @@
 Command-line interface for rustbgpd. Thin gRPC wrapper for daemon
 management with human-readable and JSON output modes.
 
-`rbgp` is the preferred short binary name. `rustbgpctl` remains available as a
-compatible long-form spelling with the same command surface.
+The CLI installs under two interchangeable names: `rbgp` (the short,
+preferred spelling used throughout the docs) and `rustbgpctl` (the
+original long form). Both binaries ship in every build and expose the
+identical command surface — use whichever you prefer.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 

@@ -88,10 +88,10 @@ local VTEP IP as needed.
 
 ```bash
 # Human format
-rustbgpctl evpn instances
+rbgp evpn instances
 
 # JSON for scripting
-rustbgpctl evpn instances --json
+rbgp evpn instances --json
 ```
 
 Expected output (human format):
@@ -105,7 +105,7 @@ vni=10300 rd=4200000000:300 vtep=10.0.0.10 rts=[65000:10300,65000:55000]
 The same state plus route/metric presence can be summarized with:
 
 ```bash
-rustbgpctl evpn diagnose
+rbgp evpn diagnose
 ```
 
 ## What this example does NOT do (yet)
@@ -115,7 +115,7 @@ rustbgpctl evpn diagnose
   exposed; quarantine action remains future work.
 - Configure an IP-VRF / L3VNI tenant. Gate 9 Type 5 origination and
   symmetric Interface-less IRB dataplane programming ship in the main daemon
-  (`[[evpn_ip_vrfs]]`, `rustbgpctl evpn vrfs`, M39), but this example is kept
+  (`[[evpn_ip_vrfs]]`, `rbgp evpn vrfs`, M39), but this example is kept
   as a single-homed L2VNI leaf and intentionally omits the L3VNI/VRF pieces.
 
 ## Related

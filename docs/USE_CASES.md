@@ -202,7 +202,7 @@ IXP member C (AS 64503) ──┘
 
 ```bash
 # Add member at runtime (persisted to config automatically)
-rustbgpctl neighbor 198.51.100.10 add --asn 64510 \
+rbgp neighbor 198.51.100.10 add --asn 64510 \
   --description "new-member" \
   --families ipv4_unicast,ipv6_unicast \
   --max-prefixes 10000
@@ -214,7 +214,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 rustbgpd.v1.PeerGroupService/SetNeighborPeerGroup
 
 # Verify the session comes up
-rustbgpctl neighbor 198.51.100.10
+rbgp neighbor 198.51.100.10
 ```
 
 ---
@@ -298,16 +298,16 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 
 ```bash
 # Customer buys 203.0.113.0/24 — announce it
-rustbgpctl rib add 203.0.113.0/24 --nexthop 192.0.2.1
+rbgp rib add 203.0.113.0/24 --nexthop 192.0.2.1
 
 # Customer buys an IPv6 block
-rustbgpctl rib add 2001:db8:1000::/36 --nexthop 2001:db8::1
+rbgp rib add 2001:db8:1000::/36 --nexthop 2001:db8::1
 
 # Customer cancels — withdraw
-rustbgpctl rib delete 203.0.113.0/24
+rbgp rib delete 203.0.113.0/24
 
 # List best routes
-rustbgpctl rib
+rbgp rib
 ```
 
 ---
@@ -402,7 +402,7 @@ IX peer C  ──┘
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
 - **Birdwatcher-compatible REST API** — optional HTTP server for Alice-LG and
   similar looking glass frontends (`[global.telemetry.looking_glass]`)
-- **Best-path explain** — `rustbgpctl rib --prefix X --explain` shows why a
+- **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 
 **Example config** ([`examples/route-collector/config.toml`](../examples/route-collector/config.toml)):
@@ -473,16 +473,16 @@ max_prefixes = 1000000
 
 ```bash
 # Query best routes
-rustbgpctl rib
+rbgp rib
 
 # List all routes received from a specific peer
-rustbgpctl rib received 10.0.0.1
+rbgp rib received 10.0.0.1
 
 # Explain why a route was selected as best
-rustbgpctl rib --prefix 10.0.0.0/24 --explain
+rbgp rib --prefix 10.0.0.0/24 --explain
 
 # Trigger an on-demand MRT dump
-rustbgpctl mrt-dump
+rbgp mrt-dump
 
 # Stream all route changes (pipe to your analysis tool)
 grpcurl -plaintext localhost:50051 rustbgpd.v1.RibService/WatchRoutes
@@ -567,13 +567,13 @@ reflection through controller injection; see
   swept on EoR. Enhanced Route Refresh tracks unreplaced EVPN keys
   in `refresh_stale_evpn` and withdraws them on BoRR/EoRR.
 - **VXLAN encapsulation via RFC 8365** — the BGP Encapsulation extended
-  community is decoded and preserved across reflection; `rustbgpctl evpn`
+  community is decoded and preserved across reflection; `rbgp evpn`
   surfaces `encap=vxlan` for operator visibility.
 - **Controller injection** — `InjectionService::AddEvpnRoute` /
   `DeleteEvpnRoute` cover Type 2 MAC/IP and Type 3 IMET, with display-
   form RDs (`65000:100`, `10.0.0.1:100`, `4200000000:100`); injected
   routes flow through the same reflection pipeline as iBGP-learned
-  ones. CLI: `rustbgpctl evpn add-mac-ip / add-imet / delete-mac-ip /
+  ones. CLI: `rbgp evpn add-mac-ip / add-imet / delete-mac-ip /
   delete-imet`.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
@@ -624,7 +624,7 @@ reflection through controller injection; see
   Type 5 origination via `RibUpdate::InjectEvpn`, remote import +
   L3 FIB programming through the transactional `L3OwnedState` model
   with four-phase apply ordering, sub-second
-  `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI +
+  `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn vrfs` CLI +
   `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.3.1.
   ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
   nexthop groups (M40 FRR-validated). Still ahead:
@@ -637,7 +637,7 @@ reflection through controller injection; see
 - Pipe EVPN route events into your SDN controller or fabric-observability
   tool via `WatchRoutes`. (BMP and MRT export carry unicast / FlowSpec
   today; typed EVPN extraction in those channels is on the roadmap.)
-- Validate policy changes with `rustbgpctl rib --prefix <PREFIX> --explain` before
+- Validate policy changes with `rbgp rib --prefix <PREFIX> --explain` before
   pushing — routable-surface diffs, not CLI scraping.
 
 **Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP
@@ -691,7 +691,7 @@ measurement path.
   schema, IP-VRF readiness probe, Type 5 origination + remote
   import + L3 FIB programming through the transactional
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
-  `rustbgpctl evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
+  `rbgp evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
   (v0.19.0) adds receive-path aliasing-ECMP via FDB nexthop
   groups (M40 FRR-validated). Still ahead: full
   RFC 9135 overlay-index IRB. See
@@ -799,7 +799,7 @@ Be honest about where rustbgpd isn't the right tool:
   shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]`, IP-VRF
   readiness probe, Type 5 origination + remote import + L3 FIB
   programming through the transactional `L3OwnedState` model,
-  sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn
+  sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn
   vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
 	  receive-path aliasing-ECMP via FDB nexthop groups (M40
 	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection

@@ -12,8 +12,8 @@ Two independent readiness surfaces govern this:
 
 | Surface | Covers | Spec | Status via |
 |---------|--------|------|-----------|
-| L2VNI bridge/VXLAN probe | `[[evpn_instances]]` | ADR-0054 §4 | `rustbgpctl evpn instances` |
-| IP-VRF / L3VNI predicates | `[[evpn_ip_vrfs]]` | ADR-0058 §3 | `rustbgpctl evpn vrfs [NAME]` |
+| L2VNI bridge/VXLAN probe | `[[evpn_instances]]` | ADR-0054 §4 | `rbgp evpn instances` |
+| IP-VRF / L3VNI predicates | `[[evpn_ip_vrfs]]` | ADR-0058 §3 | `rbgp evpn vrfs [NAME]` |
 
 Ethernet Segments (`[[ethernet_segments]]`) are **control-plane only**
 (Type 1/4 origination) and do **not** probe a kernel netdev — see
@@ -178,9 +178,9 @@ What you still provide:
 ## Verifying
 
 ```bash
-rustbgpctl evpn instances        # L2VNI view (Ready / NotReady / Unbound)
-rustbgpctl evpn vrfs <name>      # IP-VRF readiness_state + not_ready_reasons
-rustbgpctl evpn vrfs <name>      #   also: remote_prefix_drop_counts
+rbgp evpn instances        # L2VNI view (Ready / NotReady / Unbound)
+rbgp evpn vrfs <name>      # IP-VRF readiness_state + not_ready_reasons
+rbgp evpn vrfs <name>      #   also: remote_prefix_drop_counts
 ```
 
 `NotReady` results name exactly which predicate failed. The reconcile

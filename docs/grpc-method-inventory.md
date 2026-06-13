@@ -206,13 +206,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 44 | 53.0% |
-| `mutating` | 19 | 22.9% |
-| `operator_only` | 20 | 24.1% |
-| **Total** | **83** | **100%** |
+| `sensitive_read` | 45 | 51.7% |
+| `mutating` | 19 | 21.8% |
+| `operator_only` | 23 | 26.4% |
+| **Total** | **87** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 83
-total is 79 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 87
+total is 83 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -231,12 +231,12 @@ specific method if the model warrants it.
    mutating listener for everything else. The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 19
+2. **`operator_only` is small enough to gate by principal role.** 23
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   nineteen `operator_only` methods live here. The simplest model is
+   twenty-three `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
@@ -290,7 +290,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 83-method classification
+`crates/api/src/authz.rs` contains the same 87-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

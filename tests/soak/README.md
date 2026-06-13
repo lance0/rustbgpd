@@ -553,7 +553,7 @@ CSV inspection.
   `docs/evpn-alpha-soak.md`.
 - **After any change to** the local-MAC origination / withdraw
   path (`crates/evpn-linux/src/reconcile.rs`,
-  `src/evpn_originator.rs`,
+  `src/evpn_originator/`,
   `src/evpn_dataplane.rs`) or the ADR-0059 receive-side aliasing
   / drift-recovery path (`crates/evpn-linux/src/diff.rs`,
   `crates/evpn-linux/src/linux/nexthop_raw/`).
