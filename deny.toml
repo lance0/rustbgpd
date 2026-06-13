@@ -1,0 +1,60 @@
+# cargo-deny configuration — license / bans / advisories / sources gate.
+#
+# Run locally: `cargo deny check advisories bans licenses sources`
+# CI: .github/workflows/audit.yml (path-scoped to manifest/lock/deny.toml
+# changes, same scope caveat as cargo-audit had: a release that doesn't
+# touch deps gets no fresh CI scan — the /ship pre-flight runs it locally
+# every release regardless).
+#
+# Advisory ignores broadly mirror .cargo/audit.toml (the local
+# `cargo audit` pre-flight keeps its own copy); every entry MUST carry
+# a tracked follow-up. The two lists are NOT identical by design:
+# cargo-deny treats unsound-class advisories as warnings (they don't
+# fail the check, so no ignore is needed — e.g. the rand RUSTSEC-2026-
+# 0097 entry that audit.toml carries), while unmaintained-class ones
+# fail and need listing here.
+
+[advisories]
+ignore = [
+    # `paste` unmaintained (informational). Transitive:
+    # netlink-packet-utils → rtnetlink → rustbgpd-evpn-linux. Pure
+    # proc-macro (nla_get_*/nla_put_* generators), no runtime
+    # surface. Clears when netlink-packet-utils swaps to `pastey`.
+    # Tracked in ROADMAP.md.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# The workspace itself is MIT OR Apache-2.0; the tree is the standard
+# permissive Rust stack. cargo-deny resolves SPDX OR-expressions by
+# picking an allowed alternative, so copyleft options that appear only
+# as OR-alternatives (e.g. LGPL in `r-efi`) do not need allowing.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "0BSD",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate-version entries are expected churn in a tree this size
+# (hashbrown/getrandom/thiserror majors coexist); warn keeps them
+# visible in CI logs without blocking. Wildcard requirements are a
+# real smell and stay denied.
+multiple-versions = "warn"
+# The workspace's own path deps are deliberately unversioned where the
+# crate never publishes together (rustbgpd-wire is decoupled and pinned
+# only at release time) — allow path wildcards, deny registry ones.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
