@@ -29,7 +29,9 @@ use crate::fib::{
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
-use crate::kernel_route_notify::{KernelRouteEvent, KernelRouteEventKind, recv_kernel_route_event};
+use crate::kernel_route_notify::{
+    KernelRouteEvent, KernelRouteEventKind, KernelRouteType, recv_kernel_route_event,
+};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -502,7 +504,12 @@ fn kernel_route_drift_wakes(
     };
     match event.kind {
         KernelRouteEventKind::Del => {
-            event.protocol_is_bgp
+            // This actor only installs `RTN_UNICAST` rows
+            // (`build_route_message` hardcodes Unicast), so a proto-bgp
+            // delete of any other type (blackhole / unreachable) in the
+            // same owned table is not our drift and must not wake.
+            event.route_type == KernelRouteType::Unicast
+                && event.protocol_is_bgp
                 && (tables
                     .iter()
                     .any(|t| t.table_id == table_key.table_id && t.metric == table_key.metric)
@@ -1755,7 +1762,7 @@ trait UnicastFib {
     /// backing can surface one. Called once at actor startup; `None`
     /// (fakes, non-Linux, subscription unavailable) leaves kernel-side
     /// drift repair to the periodic reconcile backstop.
-    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
         None
     }
 }
@@ -1763,7 +1770,7 @@ trait UnicastFib {
 #[cfg(target_os = "linux")]
 struct LinuxUnicastFib {
     handle: rtnetlink::Handle,
-    kernel_route_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
+    kernel_route_events: Option<mpsc::Receiver<KernelRouteEvent>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1794,7 +1801,7 @@ impl UnicastFib for LinuxUnicastFib {
         Box::pin(async move { apply_linux_op(&self.handle, op).await })
     }
 
-    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
         self.kernel_route_events.take()
     }
 }
@@ -2245,7 +2252,7 @@ mod tests {
         fail_dump: Option<String>,
         fail_apply: Vec<String>,
         applied: Vec<FibOp>,
-        kernel_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
+        kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
     }
 
     impl UnicastFib for FakeFib {
@@ -2299,9 +2306,7 @@ mod tests {
             })
         }
 
-        fn take_kernel_route_events(
-            &mut self,
-        ) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+        fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
             self.kernel_events.take()
         }
     }
@@ -3449,13 +3454,32 @@ mod tests {
         prefix: Option<Prefix>,
         protocol_is_bgp: bool,
     ) -> KernelRouteEvent {
+        drift_event_typed(
+            kind,
+            table_id,
+            metric,
+            prefix,
+            protocol_is_bgp,
+            KernelRouteType::Unicast,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drift_event_typed(
+        kind: KernelRouteEventKind,
+        table_id: u32,
+        metric: u32,
+        prefix: Option<Prefix>,
+        protocol_is_bgp: bool,
+        route_type: KernelRouteType,
+    ) -> KernelRouteEvent {
         KernelRouteEvent {
             kind,
             table_id,
             metric,
             prefix,
             protocol_is_bgp,
-            route_type: crate::kernel_route_notify::KernelRouteType::Unicast,
+            route_type,
         }
     }
 
@@ -3498,6 +3522,28 @@ mod tests {
             &config().tables,
             &owned_with(v4(24)),
         ));
+    }
+
+    #[test]
+    fn drift_del_of_non_unicast_bgp_route_does_not_wake() {
+        // This actor only installs `RTN_UNICAST`. A proto-bgp delete of a
+        // blackhole or unreachable row in an owned/configured table is not
+        // our drift, so neither type may wake the reconciler.
+        for route_type in [KernelRouteType::BlackHole, KernelRouteType::Other] {
+            let event = drift_event_typed(
+                KernelRouteEventKind::Del,
+                1000,
+                200,
+                Some(v4(24)),
+                true,
+                route_type,
+            );
+            assert!(!kernel_route_drift_wakes(
+                &event,
+                &config().tables,
+                &owned_with(v4(24)),
+            ));
+        }
     }
 
     #[test]
@@ -3552,7 +3598,7 @@ mod tests {
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
-        let (drift_tx, drift_rx) = mpsc::unbounded_channel();
+        let (drift_tx, drift_rx) = mpsc::channel(64);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
             config(),
@@ -3588,6 +3634,7 @@ mod tests {
                     Some(v4(24)),
                     true,
                 ))
+                .await
                 .unwrap();
         }
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
@@ -3603,6 +3650,7 @@ mod tests {
                 Some(v4(24)),
                 false,
             ))
+            .await
             .unwrap();
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
         tokio::task::yield_now().await;

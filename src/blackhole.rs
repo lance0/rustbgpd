@@ -998,7 +998,7 @@ trait BlackholeFib {
     /// backing can surface one. Called once at actor startup; `None`
     /// (fakes, non-Linux, subscription unavailable) leaves kernel-side
     /// drift repair to the periodic reconcile backstop.
-    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
         None
     }
 }
@@ -1006,7 +1006,7 @@ trait BlackholeFib {
 #[cfg(target_os = "linux")]
 struct LinuxBlackholeFib {
     handle: rtnetlink::Handle,
-    kernel_route_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
+    kernel_route_events: Option<mpsc::Receiver<KernelRouteEvent>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1064,7 +1064,7 @@ impl BlackholeFib for LinuxBlackholeFib {
         })
     }
 
-    fn take_kernel_route_events(&mut self) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+    fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
         self.kernel_route_events.take()
     }
 }
@@ -1225,7 +1225,7 @@ mod tests {
         install_calls: Vec<Prefix>,
         remove_calls: Vec<Prefix>,
         dump_calls: usize,
-        kernel_events: Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
+        kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
     }
 
     impl BlackholeFib for FakeFib {
@@ -1282,9 +1282,7 @@ mod tests {
             })
         }
 
-        fn take_kernel_route_events(
-            &mut self,
-        ) -> Option<mpsc::UnboundedReceiver<KernelRouteEvent>> {
+        fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
             self.kernel_events.take()
         }
     }
@@ -1881,7 +1879,7 @@ mod tests {
         )]);
         let metrics = BgpMetrics::with_registry(Registry::new());
         let (status_tx, _status_rx) = watch::channel(Vec::new());
-        let (drift_tx, drift_rx) = mpsc::unbounded_channel();
+        let (drift_tx, drift_rx) = mpsc::channel(64);
         let shutdown = CancellationToken::new();
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
@@ -1921,6 +1919,7 @@ mod tests {
                     true,
                     KernelRouteType::BlackHole,
                 ))
+                .await
                 .unwrap();
         }
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
@@ -1936,6 +1935,7 @@ mod tests {
                 false,
                 KernelRouteType::Unicast,
             ))
+            .await
             .unwrap();
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
         tokio::task::yield_now().await;

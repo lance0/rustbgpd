@@ -29,6 +29,12 @@
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
+/// Bound for the kernel-route-event wake feed. Drop-on-full is safe:
+/// the reconcile is level-triggered and a 30 s periodic pass is the
+/// backstop, so a dropped wake under a route-message storm is repaired
+/// on the next pass rather than lost (the #476 evpn-linux pattern).
+const KERNEL_ROUTE_EVENT_BUFFER: usize = 64;
+
 /// Multicast group ID for IPv4 route-table changes — enum value
 /// `RTNLGRP_IPV4_ROUTE` from `<linux/rtnetlink.h>` (value `7`).
 ///
@@ -98,7 +104,7 @@ pub(crate) struct KernelRouteEvent {
 /// after it closed) parks forever, so the actor's `select!` arm simply
 /// never fires and the periodic backstop carries kernel-drift repair.
 pub(crate) async fn recv_kernel_route_event(
-    rx: &mut Option<mpsc::UnboundedReceiver<KernelRouteEvent>>,
+    rx: &mut Option<mpsc::Receiver<KernelRouteEvent>>,
 ) -> Option<KernelRouteEvent> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,
@@ -118,7 +124,7 @@ pub(crate) async fn recv_kernel_route_event(
 #[cfg(target_os = "linux")]
 pub(crate) fn connect_with_route_notifications(
     actor: &'static str,
-) -> Result<(rtnetlink::Handle, mpsc::UnboundedReceiver<KernelRouteEvent>), String> {
+) -> Result<(rtnetlink::Handle, mpsc::Receiver<KernelRouteEvent>), String> {
     use rtnetlink::sys::AsyncSocket;
 
     let (mut connection, handle, messages) =
@@ -138,7 +144,7 @@ pub(crate) fn connect_with_route_notifications(
         }
     }
     tokio::spawn(connection);
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel(KERNEL_ROUTE_EVENT_BUFFER);
     tokio::spawn(forward_route_notifications(messages, event_tx));
     Ok((handle, event_rx))
 }
@@ -153,12 +159,16 @@ async fn forward_route_notifications(
         rtnetlink::packet_core::NetlinkMessage<netlink_packet_route::RouteNetlinkMessage>,
         rtnetlink::sys::SocketAddr,
     )>,
-    event_tx: mpsc::UnboundedSender<KernelRouteEvent>,
+    event_tx: mpsc::Sender<KernelRouteEvent>,
 ) {
     use futures::StreamExt;
+    use mpsc::error::TrySendError;
     use netlink_packet_route::RouteNetlinkMessage;
     use rtnetlink::packet_core::NetlinkPayload;
 
+    // Log the first drop-on-full only, so a sustained storm doesn't
+    // spam the log; the periodic backstop repairs whatever was dropped.
+    let mut warned_full = false;
     while let Some((message, _addr)) = messages.next().await {
         let NetlinkPayload::InnerMessage(inner) = message.payload else {
             continue;
@@ -172,8 +182,22 @@ async fn forward_route_notifications(
             }
             _ => continue,
         };
-        if event_tx.send(event).is_err() {
-            return;
+        // Drop-on-full is the point: never `.await` the send. The
+        // reconcile is level-triggered with a 30 s periodic backstop,
+        // so a dropped wake under a storm is repaired on the next pass.
+        match event_tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                if !warned_full {
+                    warned_full = true;
+                    tracing::debug!(
+                        "kernel route-event wake feed full; dropping events, the \
+                         periodic reconcile backstop will repair the drift"
+                    );
+                }
+            }
+            // The actor dropped its receiver — the stream is retired.
+            Err(TrySendError::Closed(_)) => return,
         }
     }
 }
