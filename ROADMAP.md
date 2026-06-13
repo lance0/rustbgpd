@@ -1016,10 +1016,16 @@ branch is between features.
   codec, intentional after a length check). A CI lint that rejects new
   `#[allow(clippy::*)]` without an explicit `reason` arg; backfill one crate at a
   time.
-- [ ] **`cargo deny` for license / dependency / advisory audit.** Resurrect the
-  stale `chore/dependabot-and-cargo-audit` branch, modernize to `cargo deny check
-  advisories bans licenses sources`, and wire into CI. Pairs with the next
-  dependency audit.
+- [x] **`cargo deny` for license / dependency / advisory audit.** Done: the
+  dependabot + cargo-audit half of the stale branch had already landed;
+  `deny.toml` now gates `cargo deny check advisories bans licenses sources`
+  (permissive-license allowlist, path-wildcard exemption for the deliberately
+  unversioned `rustbgpd-wire` path dep, duplicate-version warnings kept
+  visible but non-blocking) and runs as a second job in
+  `.github/workflows/audit.yml` alongside `cargo audit`. The two ignore lists
+  deliberately differ: cargo-deny warns (not fails) on unsound-class
+  advisories, so only the unmaintained `paste` entry needs a deny.toml
+  ignore while `.cargo/audit.toml` also carries the rand unsoundness entry.
 - [ ] **Workspace `cargo doc` warning posture.** CI runs
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
   as the standing local pre-flight expectation so broken intra-doc links surface
