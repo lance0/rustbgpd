@@ -463,9 +463,11 @@ controller-driven injection for Type 2 / Type 3. What remains:
   (requires `bridge neigh_suppress on`), and EVPN VTEP convergence switches the
   originator from a 5 s poll to a push-notified RIB broadcast for
   sub-second mobility convergence. Later EVPN work added remote
-  duplicate-MAC suppression + manual clear, so the remaining VTEP tail is
-  native overlay-index local origination / recursion-path interop and
-  standards features outside the Linux/VXLAN alpha boundary.
+  duplicate-MAC suppression + manual clear, native GW-IP overlay-index
+  Type 5 origination, and receive-side overlay-index recursion, so the
+  remaining VTEP tail is ESI overlay-index origination, broader
+  recursion-path interop, and standards features outside the Linux/VXLAN
+  alpha boundary.
 - **Multi-homing execution:** EVPN multi-homing (ESI, Type-1/Type-4) plus
   BUM-flood suppression + DF election cover rustbgpd-as-VTEP
   DF election (RFC 7432 §8 + RFC 8584), Type 1/4 origination, opt-in
