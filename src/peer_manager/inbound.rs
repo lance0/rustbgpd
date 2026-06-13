@@ -101,6 +101,13 @@ impl PeerManager {
         let peer_key = self.inbound_peer_key(peer_addr);
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
+            if self.config_snapshot_staged {
+                warn!(
+                    %peer_ip,
+                    "dropping dynamic inbound connection while a config transaction snapshot is staged"
+                );
+                return;
+            }
             // A link-local inbound that did not match a configured scoped peer
             // must not fall through to dynamic acceptance: dynamic peers are
             // keyed by bare address (`PeerKey::new(ip, None)`), so accepting a

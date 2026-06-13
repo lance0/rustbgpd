@@ -66,9 +66,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   response, never silently swallowed. Dynamic-range peer-group
   *reassignments* remain outside the reshape family (a
   `[[dynamic_neighbors]]` record edit; sessions accepted under the
-  old group cannot be live-reassigned), and SIGHUP / targeted
-  peer-group RPCs deliberately keep their no-preview skip semantics
-  (see ADR-0086).
+  old group cannot be live-reassigned). SIGHUP / targeted peer-group
+  RPCs now hot-apply policy-only peer-group edits to live dynamic
+  sessions through the resolved-policy fanout; session-shaping edits
+  keep the reconnect/reset semantics described above (see ADR-0086).
 - **Canonical ingress reason-label contract
   (`crates/telemetry/src/reason_labels.rs`).** The reason strings
   that ingress route-rejection mechanisms report are now a single
@@ -565,6 +566,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Config rollback no longer leaves candidate-born dynamic peers
+  alive, and peer-group policy-only edits now reach live dynamic
+  peers on every mutation path.** The peer manager now treats a
+  transaction snapshot as provisional until the config writer acks
+  persistence: unknown inbound sessions are not accepted from
+  candidate-only `[[dynamic_neighbors]]` ranges during that staged
+  window. Once persistence succeeds, dynamic accepts proceed normally
+  (including commit-confirmed pending configs); if the transaction is
+  later aborted or auto-reverted, restoring the previous snapshot
+  reaps any dynamic peers whose accepted range no longer exists.
+  Separately, targeted `SetPeerGroup` and TOML+SIGHUP peer-group
+  edits that change only resolved import/export policy now use the
+  same dynamic-aware policy fanout as catalog policy mutations, so
+  established dynamic route-server clients no longer keep stale
+  chains until reconnect.
 - Documentation and feature-build freshness for the post-v0.38.0 EVPN/config
   surface: the RIB fanout bench-internals build now matches the current
   session registration signature, the ADR index lists ADR-0087 and marks

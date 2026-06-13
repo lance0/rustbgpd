@@ -192,6 +192,11 @@ pub struct PeerManager {
     policy_events_tx: broadcast::Sender<PolicyEvent>,
     policy_event_history: VecDeque<PolicyEvent>,
     current_config: Config,
+    /// True between `StageConfigSnapshot` and the transaction controller's
+    /// persist/rollback completion signal. Dynamic inbound accepts are refused
+    /// in this window so candidate-only ranges cannot create live peers before
+    /// the candidate is durable.
+    config_snapshot_staged: bool,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
     /// Current number of active dynamic peers (for limit enforcement).
@@ -365,6 +370,7 @@ impl PeerManager {
             session_event_history: VecDeque::with_capacity(SESSION_EVENT_HISTORY_CAPACITY),
             policy_events_tx,
             policy_event_history: VecDeque::with_capacity(POLICY_EVENT_HISTORY_CAPACITY),
+            config_snapshot_staged: false,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
@@ -621,9 +627,38 @@ impl PeerManager {
                                 self.current_config = candidate;
                                 self.dynamic_ranges =
                                     Self::parse_dynamic_ranges(&self.current_config);
+                                self.config_snapshot_staged = true;
                                 Ok(previous)
                             });
                             let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                            self.config_snapshot_staged = false;
+                            let _ = reply.send(());
+                        }
+                        PeerManagerCommand::RestoreConfigSnapshot {
+                            candidate_toml,
+                            reply,
+                        } => {
+                            let result = Config::load_toml_with_diagnostics(
+                                &candidate_toml,
+                                "rollback config transaction",
+                            )
+                            .map_err(StageConfigSnapshotError::InvalidCandidate);
+                            match result {
+                                Ok(candidate) => {
+                                    self.current_config = candidate;
+                                    self.dynamic_ranges =
+                                        Self::parse_dynamic_ranges(&self.current_config);
+                                    self.config_snapshot_staged = false;
+                                    self.reap_dynamic_peers_not_allowed_by_current_ranges()
+                                        .await;
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
                         }
                         PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
                             let result = toml::to_string_pretty(&self.current_config).map_err(
@@ -854,34 +889,43 @@ impl PeerManager {
                             let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
                         }
                         PeerManagerCommand::SetPeerGroup { name, definition, reply } => {
-                            let affected: Vec<IpAddr> = self.current_config
-                                .neighbors
-                                .iter()
-                                .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
-                                .filter_map(|neighbor| neighbor.address.parse().ok())
-                                .collect();
-                            let result = self.apply_peer_group_change(
-                                ConfigEvent::SetPeerGroup { name, definition, ack: None },
-                                affected,
-                            ).await;
+                            let event = ConfigEvent::SetPeerGroup { name: name.clone(), definition: definition.clone(), ack: None };
+                            let result = if self.peer_group_policy_only_update(&name, &definition) {
+                                self.apply_policy_change(event, None).await
+                            } else {
+                                let affected: Vec<IpAddr> = self.current_config
+                                    .neighbors
+                                    .iter()
+                                    .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
+                                    .filter_map(|neighbor| neighbor.address.parse().ok())
+                                    .collect();
+                                self.apply_peer_group_change(event, affected).await
+                            };
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::SetPeerGroupPreserveMd5 { name, mut definition, reply } => {
-                            let affected: Vec<IpAddr> = self.current_config
-                                .neighbors
-                                .iter()
-                                .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
-                                .filter_map(|neighbor| neighbor.address.parse().ok())
-                                .collect();
                             let result = match named_peer_group_from_config(&self.current_config, &name) {
                                 Some(existing) => {
                                     definition.md5_password = existing.md5_password;
                                     let applied_definition = definition.clone();
-                                    self.apply_peer_group_change(
-                                        ConfigEvent::SetPeerGroup { name, definition, ack: None },
-                                        affected,
-                                    )
-                                    .await
+                                    let event = ConfigEvent::SetPeerGroup {
+                                        name: name.clone(),
+                                        definition: definition.clone(),
+                                        ack: None,
+                                    };
+                                    if self.peer_group_policy_only_update(&name, &definition) {
+                                        self.apply_policy_change(event, None).await
+                                    } else {
+                                        let affected: Vec<IpAddr> = self.current_config
+                                            .neighbors
+                                            .iter()
+                                            .filter(|neighbor| {
+                                                neighbor.peer_group.as_deref() == Some(name.as_str())
+                                            })
+                                            .filter_map(|neighbor| neighbor.address.parse().ok())
+                                            .collect();
+                                        self.apply_peer_group_change(event, affected).await
+                                    }
                                     .map(|()| applied_definition)
                                 }
                                 None => Err(rustbgpd_api::peer_types::CatalogMutationError::not_found(
@@ -967,6 +1011,7 @@ impl PeerManager {
                 internal = self.internal_rx.recv() => {
                     if let Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) = internal {
                         self.current_config = *config;
+                        self.config_snapshot_staged = false;
                         // #338: rebuild the live dynamic-neighbor accept-matcher so
                         // [[dynamic_neighbors]] edits applied via SIGHUP take effect
                         // (previously only `current_config` was swapped). The shared

@@ -116,15 +116,17 @@ gracefully resetting the affected live dynamic sessions after persist.**
    re-applies the pre-commit snapshot through the same executor, producing
    the reverse reshape — dynamic sessions are reset again and re-accept
    under the restored config.
-5. **SIGHUP and the targeted peer-group RPCs keep their skip semantics**
-   (live dynamic sessions keep their running config until reconnect;
-   resolved policy chains still hot-apply). Bouncing customers as a side
-   effect of a reload or a single-object RPC — with no plan preview — is an
-   operator surprise; the transaction path is the one with
-   `PlanConfigTransaction`/`rustbgpctl config plan` showing the blast radius
-   first, and gNMI Set inherits it by bridging onto the same controller.
-   Upgrading the targeted path to the same reset is a follow-up decision,
-   not blocked by anything here (the primitive is path-agnostic).
+5. **SIGHUP and the targeted peer-group RPCs split by impact.** Policy-only
+   peer-group edits hot-apply to live dynamic sessions through the same
+   resolved-policy fanout as named-policy catalog changes. Session-shaping
+   peer-group edits keep their skip semantics on these no-preview paths:
+   live dynamic sessions keep their running config until reconnect. Bouncing
+   customers as a side effect of a reload or a single-object RPC — with no
+   plan preview — is an operator surprise; the transaction path is the one
+   with `PlanConfigTransaction`/`rustbgpctl config plan` showing the blast
+   radius first, and gNMI Set inherits it by bridging onto the same
+   controller. Upgrading the targeted path to the same reset is a follow-up
+   decision, not blocked by anything here (the primitive is path-agnostic).
 
 ### Rollback semantics, stated honestly
 
