@@ -779,13 +779,14 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Overlay-index IRB follow-through (RFC 9135 §9.2): receive-side
-  recursive resolution (non-zero Type 5 Gateway Address through matching
-  Type 2 MAC/IP state), bounded drop metrics, aggregated per-VRF /
-  per-reason drop counts in gRPC / CLI status, native GW-IP
-  origination (ADR-0087), and the FRR consume-side M68 proof now ship;
-  add ESI-overlay origination and broader protected interop smokes for
-  overlay-index Type 5 topologies.
+- Overlay-index IRB follow-through: receive-side recursive resolution
+  (non-zero Type 5 Gateway Address through matching Type 2 MAC/IP state),
+  bounded drop metrics, aggregated per-VRF / per-reason drop counts in
+  gRPC / CLI status, native GW-IP origination (ADR-0087), and the FRR
+  consume-side M68 proof now ship. The next standards-tail slice is
+  RFC 9136 ESI overlay-index origination plus a protected-recursion
+  interop proof; broader service-provider EVPN route families remain
+  demand-shaped.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
@@ -802,15 +803,22 @@ M60 / M61 / M65 / M66 / M67 / M68 — #130 closed. Non-EVPN kernel
 dataplane, BFD, and TCP-AO coverage is catalogued in `INTEROP.md` and
 `kernel-dataplane-runner.md`.)
 
-Further out on this track:
+### Standards-tail map
 
-- **RFC 9251 EVPN-MVPN** (Route Types 6/7/8) — multicast integration
-- **RFC 9572 EVPN BUM segmentation** (Route Types 9/10/11)
-- **RFC 7623 PBB-EVPN** — provider-backbone EVPN for carriers
-- **RFC 9574 optimized ingress replication** and **RFC 9573 tunnel
-  aggregation / common labels**
-- **MPLS encapsulation** — SP EVPN deployments beyond VXLAN
-- **Add-Path for EVPN (RFC 9252)** — tables already support it, not negotiated
+This table separates the remaining EVPN work by fit. It is intentionally not a
+promise to chase full service-provider EVPN parity before there is operator
+demand.
+
+| Area | Status | First reviewable slice | Proof gate |
+|------|--------|------------------------|------------|
+| RFC 9136 ESI overlay-index Type 5 origination | Near-term candidate | Originate RT-5 with ESI overlay index from a locally attached multi-homed gateway while preserving the shipped GW-IP / interface-less modes | Self-consistency tests plus one protected-recursion interop smoke |
+| Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion route appears |
+| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability | Replace today's `NotReady` guard with explicit VLAN-filtering ownership and per-VLAN FDB/neighbor attribution | Local kernel dataplane test plus one M-series smoke |
+| rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics | Add opt-in ownership for one netdev class at a time, with crash-restart adoption and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
+| BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |
+| RFC 9251 Route Types 6/7/8 | Out-of-current-lane / service-provider multicast | Typed route-family slice for SMET and IGMP/MLD sync routes; no Linux dataplane change until multicast ownership is designed | Standards codec tests plus real-peer reflect/withdraw interop |
+| RFC 9572 Route Types 9/10/11 | Out-of-current-lane / service-provider BUM segmentation | Typed route-family slice for PMSI/leaf A-D routes | Standards codec tests plus real-peer interop |
+| RFC 7623 PBB-EVPN, EVPN-MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation | Out-of-niche unless operator demand appears | New ADR before code; keep MPLS dataplane out of scope unless explicitly reversed | Separate design and interop plan |
 
 ## Priority Ordering
 
@@ -858,7 +866,7 @@ did not take on:
 - Symmetric Interface-less IRB semantics (Gate 9, v0.18.0 — end-to-end shipped)
 - Auto-derivation of Route Targets
 - PBB-EVPN (RFC 7623)
-- EVPN-MVPN (RFC 9251)
+- Multicast EVPN / MVPN (including RFC 9251 IGMP/MLD proxy routes)
 - MPLS encapsulation
 - `match_evpn_route_type` / `match_vni` / `match_mac` policy clauses
   (Phase 1.5 nicety, not blocking)

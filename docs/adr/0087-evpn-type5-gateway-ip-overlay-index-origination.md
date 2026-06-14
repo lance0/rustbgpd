@@ -231,17 +231,16 @@ withdraw-then-inject path.
 ### 6. Out of scope / follow-ups
 
 - **ESI overlay index (RFC 9136 §4.3) origination** — explicitly
-  deferred pending receipts from the GW-IP origination + interop
-  proof (operator decision 2026-06-12).
-- **M-job interop proof** — a follow-up slice adds an M-series
-  containerlab job proving FRR (with `enable-resolve-overlay-index`)
-  consumes a rustbgpd-originated GW-IP RT-5 and resolves it through
-  the companion RT-2. That job is the planned proof for this ADR;
-  this slice ships the self-consistency proof instead: natively
-  originated GW-IP routes are fed through our own
-  `project_ip_prefix_routes_with_overlay_index` with a matching
-  Type 2 present and must resolve end-to-end, pinning origination
-  and projection to one encoding by construction.
+  deferred after the GW-IP origination + M68 interop receipts
+  (operator decision 2026-06-12). It remains the next
+  standards-tail overlay-index candidate, not part of this ADR's
+  shipped scope.
+- **Additional protected-recursion interop breadth** — M68 proves FRR
+  (with `enable-resolve-overlay-index`) consumes a rustbgpd-originated
+  GW-IP RT-5, holds it unresolved until the companion RT-2 appears,
+  then imports it through the Gateway Address. Broader protected
+  recursion-path smokes can land later without changing this ADR's
+  default `"interface_less"` posture.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped

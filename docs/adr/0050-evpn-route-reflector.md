@@ -20,7 +20,8 @@ Phase 1 scope is deliberately narrowed to **route reflector role**:
 - All VTEPs handle their own DF election, IRB semantics, and kernel FDB
 
 VTEP mode, IRB semantics (RFC 9135), DF election (RFC 8584), PBB-EVPN
-(RFC 7623), and EVPN-MVPN (RFC 9251) are explicit future-phase work.
+(RFC 7623), and multicast EVPN / MVPN work (including RFC 9251 IGMP/MLD
+proxy routes) are explicit future-phase work.
 Controller-injection gRPC was originally listed here as future work but
 shipped inside the Phase 1 RR bundle (Gate 6, 2026-04-24).
 

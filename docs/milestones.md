@@ -739,7 +739,8 @@ for the architectural record.
   targeted overlay-index testing, is exposed.
 - **RFC 9251 Route Types 6-8** (multicast EVPN), **RFC 9572 Route
   Types 9-11** (BUM segmentation), **RFC 7623 PBB-EVPN**, **MPLS
-  encapsulation**, **RFC 9252 Add-Path for EVPN** — still deferred.
+  encapsulation**, **BGP Add-Path (RFC 7911) for L2VPN EVPN** — still
+  deferred.
 
 ### Phase 2 interop scripts (local-only driver scripts)
 
