@@ -127,9 +127,12 @@ has it, no broad performance sprints without profile evidence.
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
   churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
   `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
-  regressions. The next soak shape should exercise the EVPN single-active
-  failover + ES drain/undrain path under sustained churn — the newest
-  differentiator is the surface with the shortest continuous-runtime receipt. **Done:** bounded
+  regressions. **Done:** the EVPN single-active failover + ES
+  drain/undrain soak shape now exists as the M67 link-driven drain churn
+  harness under `tests/soak/`: it repeats the real carrier-loss trigger and
+  analyzes route withdrawal/return, DF-role gauges, drain reasons, AC-gate
+  state, blackout/release timing, restart counters, and RSS. It is a harness,
+  not yet an archived 24 h receipt. **Done:** bounded
   `bgp_config_transaction_lifecycle_total{operation,outcome}` exposes confirmed
   transaction confirm / abort / auto-revert failures without unbounded labels
   (`confirm_id`, candidate content, and error text stay out of Prometheus).

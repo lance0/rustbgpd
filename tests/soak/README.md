@@ -302,6 +302,112 @@ Template: `docs/soak-m37-local-origination-churn-24h.md`.
 
 ---
 
+# M67 Link-Drain Churn Soak
+
+Long-running variant of the M67 ADR-0085 link-driven Ethernet Segment drain
+interop proof. The M67 smoke proves one active-PE attachment-circuit failure:
+pe1 drains because its bound AC loses carrier, pe2 promotes to DF, traffic
+fails over, pe1's recovery is held for `recovery_delay_secs`, and pe1 re-wins
+DF after the hold-off. The soak repeats that down/up cycle for hours while
+sampling route withdrawal/return, DF-role gauges, drain reasons, AC-gate state,
+ping blackout, release timing, container restarts, and RSS.
+
+This is distinct from the Gate 8b soaks: Gate 8b exercises BUM enforcement and
+FDB churn across DF flips; M67 exercises the production ES drain trigger and
+whole-AC gate under repeated real carrier transitions.
+
+## Run
+
+```bash
+docker build -t rustbgpd:dev .
+containerlab deploy -t tests/soak/m67-link-drain-soak.clab.yml
+
+# 5-minute wiring check:
+SOAK_SECONDS=300 bash tests/soak/run-m67-link-drain-churn-soak.sh
+
+# 1-hour smoke:
+SOAK_HOURS=1 bash tests/soak/run-m67-link-drain-churn-soak.sh
+
+# Full 24h run:
+bash tests/soak/run-m67-link-drain-churn-soak.sh
+
+# Destroy the topology on exit:
+CLEANUP=1 bash tests/soak/run-m67-link-drain-churn-soak.sh
+```
+
+The soak deploys `m67-link-drain-soak.clab.yml` rather than the protected
+interop `m67-evpn-link-drain-failover.clab.yml`: both wire the same fixture,
+but the distinct topology name keeps the soak's containers out of the
+`kernel-dataplane` M67 smoke's `containerlab destroy` blast radius.
+
+If your host requires elevated privileges for containerlab, run the
+`containerlab deploy` / `destroy` commands using your normal local setup.
+The harness itself only uses `docker exec`, `docker logs`, `curl`, `jq`,
+Python, and shell tools once the topology is deployed.
+
+## Output
+
+Each run creates `tests/soak/runs/m67-link-drain-<UTC-timestamp>/`
+containing:
+
+| File | Content |
+|------|---------|
+| `samples.csv` | One row per sample or phase: PE/VTEP RSS, session bits, DF role gauges, drain reason gauges, AC-gate states, route counts, CE MAC egress set, measured blackout/release, failure count, and restart counters |
+| `soak.log` | Mirrored stdout/stderr from the runner |
+| `cycles.log` | Per-cycle start/done/failure records |
+| `report.json` | Analyzer verdict and gate details |
+| `run.json` | Run metadata: git SHA, duration, cadence, bounds, topology, container names |
+| `clab-*.docker.log` | `docker logs -f` capture for vtep/pe1/pe2 |
+| `clab-*.rustbgpd.log` | `/var/log/rustbgpd.log` copied from vtep/pe1/pe2 |
+
+`tests/soak/runs/` is gitignored; keep raw runs local and publish a curated
+postmortem under `docs/` only after the long run passes.
+
+## Tunables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SOAK_HOURS` | `24` | Total soak duration when `SOAK_SECONDS` is unset |
+| `SOAK_SECONDS` | unset | Precise duration override for short wiring checks |
+| `SAMPLE_INTERVAL` | `30` | Seconds between idle CSV samples |
+| `CYCLE_INTERVAL_SEC` | `90` | Minimum spacing between link down/up cycles |
+| `RECOVERY_DELAY_SECS` | `5` | Records the expected M67 PE recovery hold-off in `run.json`; change the PE config too if you intentionally alter the scenario |
+| `BLACKOUT_BOUND_MS` | `30000` | Sanity bound for the measured failover blackout |
+| `RELEASE_BOUND_MS` | `30000` | Bound for link-drain release after carrier returns |
+| `CLEANUP` | `0` | Set to `1` to `containerlab destroy` on exit |
+
+The runner calls `tests/soak/analyze-m67-link-drain-soak.py` at the end. Short
+smokes enforce the mechanism gates and peak RSS; RSS slope is reported but only
+enforced once the run reaches `--min-slope-seconds` (30 minutes by default). To
+reanalyze a saved run with tighter bounds:
+
+```bash
+python3 tests/soak/analyze-m67-link-drain-soak.py \
+    tests/soak/runs/m67-link-drain-<UTC>/samples.csv \
+    --min-cycles 50 \
+    --blackout-bound-ms 30000 \
+    --release-bound-ms 30000 \
+    --min-slope-seconds 1800 \
+    --output tests/soak/runs/m67-link-drain-<UTC>/report.json
+```
+
+## Pass Criteria
+
+Publish the 24h postmortem only after checking:
+
+- `report.json` verdict is `pass`.
+- vtep sessions to both PEs stay Established across all samples.
+- Docker restart counters for vtep/pe1/pe2 stay flat.
+- Every cycle observes pe1 link drain, pe2 DF promotion, AC-gate handover,
+  bounded ping blackout, held recovery, pe1 DF restoration, and the CE MAC Type
+  2 returning.
+- `pe1_operator_drain` remains zero; the link stimulus must not leak into the
+  operator reason.
+- Steady-state RSS slope after warmup is flat enough to rule out retained
+  drain/route/kernel-state growth.
+
+---
+
 # Gate 8b 24-Hour Soak
 
 Sibling harness covering the Gate 8b multi-homing enforcement
