@@ -210,6 +210,11 @@ struct ActorState {
     /// the unresolved set, prune when it resolves so a later
     /// re-entry warns afresh.
     warned_unresolved_ac_gates: BTreeSet<String>,
+    /// Bound AC interface names we've already warned about because
+    /// the observed bridge-port state is STP-owned. Pruned when the
+    /// port returns to a rustbgpd-owned state so a later conflict
+    /// warns afresh.
+    warned_stp_ac_gates: BTreeSet<String>,
     /// Retry schedule for ADR-0059 slice 3b `UpdateFdbNhgMembers`
     /// ops, keyed by [`AliasGroupKey`]. Group-level ops have no
     /// natural `(VNI, MAC)` identity, so they need their own key
@@ -402,6 +407,7 @@ impl ActorState {
             ac_gate_permanent_failures: BTreeMap::new(),
             last_ac_gate_managed: BTreeMap::new(),
             warned_unresolved_ac_gates: BTreeSet::new(),
+            warned_stp_ac_gates: BTreeSet::new(),
             nhg_retry: RetrySchedule::new(),
             nhg_permanent_failures: BTreeMap::new(),
             pending_deletes: BTreeSet::new(),
@@ -848,9 +854,22 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 );
             }
         }
+        for name in &ac_resolution.stp_conflicts {
+            if self.state.warned_stp_ac_gates.insert(name.clone()) {
+                tracing::warn!(
+                    interface = name.as_str(),
+                    "single-active AC gate: bound interface is in an STP-owned \
+                     bridge-port state; whole-port blocking NOT enforced by rustbgpd \
+                     until STP releases the port state"
+                );
+            }
+        }
         self.state
             .warned_unresolved_ac_gates
             .retain(|name| ac_resolution.unresolved.contains(name));
+        self.state
+            .warned_stp_ac_gates
+            .retain(|name| ac_resolution.stp_conflicts.contains(name));
         let ac_restore = crate::ac_gate::restore_ops(
             &self.state.last_ac_gate_managed,
             &ac_resolution.managed,

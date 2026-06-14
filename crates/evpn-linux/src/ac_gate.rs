@@ -51,6 +51,12 @@ use crate::snapshot::KernelSnapshot;
 pub const BR_STATE_DISABLED: u8 = 0;
 /// `BR_STATE_FORWARDING` — normal forwarding.
 pub const BR_STATE_FORWARDING: u8 = 3;
+/// `BR_STATE_LISTENING` — STP-owned bridge-port state.
+pub const BR_STATE_LISTENING: u8 = 1;
+/// `BR_STATE_LEARNING` — STP-owned bridge-port state.
+pub const BR_STATE_LEARNING: u8 = 2;
+/// `BR_STATE_BLOCKING` — STP-owned bridge-port state.
+pub const BR_STATE_BLOCKING: u8 = 4;
 
 /// One AC-gate action: a bound AC bridge-port ifindex plus the
 /// desired whole-port state.
@@ -80,6 +86,11 @@ pub struct AcGateResolution {
     /// set — an operator whose bound AC never resolves must not get
     /// silent non-enforcement.
     pub unresolved: Vec<String>,
+    /// Bound interface names whose observed state is STP-owned
+    /// (`listening`, `learning`, or `blocking`). The AC gate manages
+    /// only `disabled` and `forwarding`; when kernel STP owns the
+    /// port state, rustbgpd leaves it untouched and warns.
+    pub stp_conflicts: Vec<String>,
 }
 
 /// Resolve the intent's AC-gate rows against the kernel snapshot.
@@ -93,6 +104,9 @@ pub struct AcGateResolution {
 /// - An op is emitted whenever the observed `IFLA_BRPORT_STATE`
 ///   differs from the desired state (unknown observed state counts
 ///   as differing — fail toward making the kernel state known).
+/// - If a bound port is in an STP-owned state (`listening`,
+///   `learning`, or `blocking`), no op is emitted. Kernel STP and
+///   rustbgpd cannot both own the same whole-port state knob.
 #[must_use]
 pub fn resolve_ac_gate_plan(
     intent: &BumEnforcementTable,
@@ -106,6 +120,10 @@ pub fn resolve_ac_gate_plan(
             resolution.unresolved.push(entry.interface.clone());
             continue;
         };
+        if port.state.is_some_and(is_stp_owned_state) {
+            resolution.stp_conflicts.push(entry.interface.clone());
+            continue;
+        }
         let blocked = entry.state.is_blocked();
         desired_by_ifindex
             .entry(port.ifindex)
@@ -132,6 +150,8 @@ pub fn resolve_ac_gate_plan(
     }
     resolution.unresolved.sort_unstable();
     resolution.unresolved.dedup();
+    resolution.stp_conflicts.sort_unstable();
+    resolution.stp_conflicts.dedup();
     resolution.managed = desired_by_ifindex;
     resolution
 }
@@ -165,7 +185,7 @@ pub fn restore_ops(
             // Only restore ports that still exist as bridge ports and
             // are not already forwarding.
             let observed = observed_by_ifindex.get(&ifindex)?;
-            if *observed == Some(BR_STATE_FORWARDING) {
+            if observed.is_some_and(is_stp_owned_state) || *observed == Some(BR_STATE_FORWARDING) {
                 return None;
             }
             Some(AcGatePortPlan {
@@ -174,6 +194,13 @@ pub fn restore_ops(
             })
         })
         .collect()
+}
+
+fn is_stp_owned_state(state: u8) -> bool {
+    matches!(
+        state,
+        BR_STATE_LISTENING | BR_STATE_LEARNING | BR_STATE_BLOCKING
+    )
 }
 
 #[cfg(test)]
@@ -289,6 +316,27 @@ mod tests {
     }
 
     #[test]
+    fn stp_owned_observed_state_is_reported_not_overridden() {
+        let mut table = BumEnforcementTable::new();
+        table.set_ac_gate(esi(1), "eth2".to_string(), AcGateState::Forwarding);
+
+        for state in [BR_STATE_LISTENING, BR_STATE_LEARNING, BR_STATE_BLOCKING] {
+            let snap = snapshot_with_port("eth2", 10, Some(state));
+            let res = resolve_ac_gate_plan(&table, &snap);
+
+            assert!(
+                res.ops.is_empty(),
+                "STP-owned bridge-port state {state} must not be overwritten"
+            );
+            assert!(
+                res.managed.is_empty(),
+                "a port owned by STP must not enter AC-gate management"
+            );
+            assert_eq!(res.stp_conflicts, vec!["eth2".to_string()]);
+        }
+    }
+
+    #[test]
     fn unresolved_interface_is_reported_not_acted_on() {
         let mut table = BumEnforcementTable::new();
         table.set_ac_gate(esi(1), "eth9".to_string(), AcGateState::Blocked);
@@ -351,6 +399,17 @@ mod tests {
         // 12: was managed-forwarding (never blocked) → nothing to
         // restore.
         assert!(restore_ops(&last, &managed, &snap).is_empty());
+    }
+
+    #[test]
+    fn restore_skips_stp_owned_port() {
+        let last: BTreeMap<u32, bool> = [(10, true)].into();
+        let snap = snapshot_with_port("eth2", 10, Some(BR_STATE_BLOCKING));
+
+        assert!(
+            restore_ops(&last, &BTreeMap::new(), &snap).is_empty(),
+            "leaving management must not override an STP-owned bridge-port state"
+        );
     }
 
     #[test]

@@ -396,14 +396,16 @@ has it, no broad performance sprints without profile evidence.
   unknown-unicast gap mattering. Either order converges — now pinned
   by `reverse_publish_order_converges_to_the_same_withdrawn_state`
   (`src/evpn_es_drain.rs`, the cross-actor seam audit).
-- **EVPN multi-homing hardening follow-ups** *(robustness/test).*
-  (1) ADR-0085 ES↔interface binding: optionally detect kernel STP
-  enabled on a bound access-circuit port and warn/guard at runtime —
-  STP on the AC can blackhole or loop the single-active gate's intent
-  and is silent today. (2) ADR-0083 single-active backup-path: add a
-  backup-PE-unreachable-at-swap negative test — assert the failover
-  behavior when the elected backup PE is unreachable at the moment of
-  the swap, not just the happy-path swap.
+- **EVPN multi-homing hardening follow-ups** *(robustness/test) —
+  resolved.* ADR-0085 ES↔interface binding now detects STP-owned
+  bridge-port states (`listening`, `learning`, `blocking`) on a bound
+  access-circuit port, warns once per conflict, and refuses to
+  overwrite the state until the port returns to `disabled` /
+  `forwarding`. ADR-0083 single-active backup-path now pins the failed
+  backup-swap path: if the group membership `REPLACE` fails, the old
+  active group and MAC row remain intact, the pre-created backup
+  nexthop remains available for retry, and no completed-swap counter is
+  emitted.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
