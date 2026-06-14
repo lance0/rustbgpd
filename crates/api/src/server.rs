@@ -27,8 +27,9 @@ use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{
-    DuplicateMacClearFn, EvpnRuntimeApplyFn, EvpnRuntimeModelFn, EvpnService,
-    OriginatedLocalMacCountFn,
+    BumEnforcementSnapshotFn, DuplicateMacClearFn, EthernetSegmentDrainReasonsFn,
+    EvpnRuntimeApplyFn, EvpnRuntimeModelFn, EvpnService, OriginatedLocalMacCountFn,
+    SameEsiBiasSnapshotFn,
 };
 use crate::global_service::GlobalService;
 use crate::gnmi::g_nmi_server::GNmiServer;
@@ -452,6 +453,15 @@ pub struct ServeConfig {
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
     pub evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    /// Live snapshot reader for current EVPN BUM/AC-gate enforcement
+    /// intent. Returns an empty table when the segment actor has not
+    /// published yet or is absent.
+    pub evpn_bum_enforcement_snapshot: BumEnforcementSnapshotFn,
+    /// Live snapshot reader for ADR-0085 same-ESI local-bias
+    /// eligibility.
+    pub evpn_same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
+    /// Live read of composed Ethernet Segment drain reasons.
+    pub evpn_es_drain_reasons: EthernetSegmentDrainReasonsFn,
     /// Live model reader for the committed ADR-0063 EVPN runtime
     /// generation. Generation 1 is the startup snapshot; later
     /// coordinator slices publish newer committed models here.
@@ -744,7 +754,7 @@ pub async fn serve(
         let config_tx = config_tx.clone();
         let shutdown_rx = listener_shutdown_rx.clone();
         listener_tasks.spawn(async move {
-            run_listener(
+            Box::pin(run_listener(
                 listener,
                 rib_tx,
                 rib_query_tx,
@@ -754,7 +764,7 @@ pub async fn serve(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
-            )
+            ))
             .await
         });
     }
@@ -812,6 +822,9 @@ async fn run_listener(
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
     let evpn_remote_ip_prefix_drop_counts = config.evpn_remote_ip_prefix_drop_counts;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
+    let evpn_bum_enforcement_snapshot = config.evpn_bum_enforcement_snapshot;
+    let evpn_same_esi_bias_snapshot = config.evpn_same_esi_bias_snapshot;
+    let evpn_es_drain_reasons = config.evpn_es_drain_reasons;
     let evpn_runtime_model = config.evpn_runtime_model;
     let evpn_runtime_apply = config.evpn_runtime_apply;
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
@@ -867,6 +880,9 @@ async fn run_listener(
                 evpn_installed_ip_vrf_route_count,
                 evpn_remote_ip_prefix_drop_counts,
                 evpn_fdb_nexthop_snapshot,
+                evpn_bum_enforcement_snapshot,
+                evpn_same_esi_bias_snapshot,
+                evpn_es_drain_reasons,
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
@@ -917,6 +933,9 @@ async fn run_listener(
                 evpn_installed_ip_vrf_route_count,
                 evpn_remote_ip_prefix_drop_counts,
                 evpn_fdb_nexthop_snapshot,
+                evpn_bum_enforcement_snapshot,
+                evpn_same_esi_bias_snapshot,
+                evpn_es_drain_reasons,
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
@@ -974,6 +993,9 @@ async fn run_tcp_listener(
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    evpn_bum_enforcement_snapshot: BumEnforcementSnapshotFn,
+    evpn_same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
+    evpn_es_drain_reasons: EthernetSegmentDrainReasonsFn,
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -1125,6 +1147,11 @@ async fn run_tcp_listener(
             evpn_duplicate_mac_clear,
         )
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_ethernet_segment_state(
+            evpn_bum_enforcement_snapshot,
+            evpn_same_esi_bias_snapshot,
+            evpn_es_drain_reasons,
+        )
         .with_ethernet_segment_drain(evpn_es_drain),
         interceptor.clone(),
     ));
@@ -1184,6 +1211,9 @@ async fn run_uds_listener(
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    evpn_bum_enforcement_snapshot: BumEnforcementSnapshotFn,
+    evpn_same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
+    evpn_es_drain_reasons: EthernetSegmentDrainReasonsFn,
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -1315,6 +1345,11 @@ async fn run_uds_listener(
             evpn_duplicate_mac_clear,
         )
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_ethernet_segment_state(
+            evpn_bum_enforcement_snapshot,
+            evpn_same_esi_bias_snapshot,
+            evpn_es_drain_reasons,
+        )
         .with_ethernet_segment_drain(evpn_es_drain),
         interceptor.clone(),
     ));

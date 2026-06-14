@@ -230,11 +230,12 @@ has it, no broad performance sprints without profile evidence.
   sub-second-sampled recovery hold-off, flap damping, and the
   operator/link composition against a real kernel, with a measured
   100–300 ms failover blackout. ADR-0085 arc done.
-  Still open from the arc: a cross-vendor preference-DF smoke
-  against FRR; generalized runtime mixed-edit composer for broader
-  add+delete/redefine candidates (pure additive build-up and standalone L2VNI
-  swaps now commit live; ES/IP-VRF-linked and redefine-mixed shapes still fail
-  closed today). **Done:** shape-aware EVPN `--diff` classification now
+  The cross-vendor preference-DF smoke against FRR is now covered by
+  M69. Still open from the arc: generalized runtime mixed-edit composer
+  for broader add+delete/redefine candidates (pure additive build-up and
+  standalone L2VNI swaps now commit live; ES/IP-VRF-linked and
+  redefine-mixed shapes still fail closed today). **Done:** shape-aware
+  EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure
   remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
@@ -398,7 +399,11 @@ has it, no broad performance sprints without profile evidence.
   backup-swap path: if the group membership `REPLACE` fails, the old
   active group and MAC row remain intact, the pre-created backup
   nexthop remains available for retry, and no completed-swap counter is
-  emitted.
+  emitted. The operator diagnose seam now has a read-only joined
+  surface (`EvpnService.ListEthernetSegments` / `rbgp evpn es list`)
+  that exposes configured membership, drain reasons, per-member
+  DF/BUM action, same-ESI local-bias eligibility, AC-gate state, and
+  matching FDB-NHG refs in one place.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*

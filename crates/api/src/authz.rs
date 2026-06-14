@@ -613,6 +613,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.EvpnService",
+        "ListEthernetSegments",
+        "/rustbgpd.v1.EvpnService/ListEthernetSegments",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.EvpnService",
         "ListIpVrfs",
         "/rustbgpd.v1.EvpnService/ListIpVrfs",
         AuthTier::SensitiveRead,
@@ -775,7 +781,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 87);
+        assert_eq!(METHODS.len(), 88);
     }
 
     #[test]
@@ -816,7 +822,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 45);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 46);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
