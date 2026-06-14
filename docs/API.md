@@ -159,7 +159,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
 | `EventService` | All RPCs | None |
-| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
+| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
@@ -800,7 +800,7 @@ through one RPC shape.
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rbgp rib blackholes` | Snapshot | Current reconcile snapshot only |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
-| EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
+| EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
 | ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rbgp bfd` | Snapshot | Current BFD actor snapshot |
 | Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rbgp events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
@@ -1613,6 +1613,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
+| `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
@@ -1731,6 +1732,31 @@ An empty `groups` list is normal on RR-only deployments, single-homed
 VTEPs, or multi-homed VNIs with `apply_aliasing_ecmp = false` — the
 top-level `orphan_nexthops_count`, `pending_delete_count`, and
 `drift_recovery_disabled` fields are always populated regardless.
+
+### List Ethernet Segments / multi-homing state
+
+ADR-0083 / ADR-0085 diagnose surface. Returns one row per configured
+`[[ethernet_segments]]` entry, optionally filtered by ESI. Each row
+joins the committed ES config with the latest segment/dataplane
+snapshots: drain reasons (`operator` / `link`), DF role and BUM action
+per member VNI, same-ESI local-bias eligibility, the single-active
+whole-port AC-gate state/interface, and matching owned FDB-NHG group /
+MAC-ref counts. Empty runtime fields mean the segment actor or
+dataplane has not published that snapshot yet; the RPC itself is
+read-only.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"esi":"00:11:22:33:44:55:66:77:88:99"}' \
+  localhost:50051 rustbgpd.v1.EvpnService/ListEthernetSegments
+```
+
+Or via CLI:
+
+```bash
+rbgp evpn es list
+rbgp evpn es list 00:11:22:33:44:55:66:77:88:99 --json
+```
 
 ### List IP-VRFs / L3VNI tenants
 

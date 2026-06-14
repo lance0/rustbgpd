@@ -892,6 +892,186 @@ impl EvpnRuntimeActorConverger {
         restored
     }
 
+    /// Converge a standalone L2VNI swap: one-or-more clean L2VNI adds plus
+    /// one-or-more clean L2VNI deletes in a single candidate. This deliberately
+    /// excludes IP-VRF link changes and Ethernet Segment membership so the
+    /// operation is just the composition of already-supported add/delete
+    /// semantics over the level-triggered L2VNI consumers.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "ordered multi-consumer swap with rollback reads clearest as one sequence"
+    )]
+    async fn converge_l2vni_swap(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        let (added_instances, deleted_instances) = validate_l2vni_swap(current, candidate, plan)?;
+        let candidate_instances = Arc::new(candidate.instances().clone());
+
+        let dataplane = self.require_l2vni_dataplane("swap")?;
+        let originator = self.require_l2vni_originator("swap")?;
+        let svi_required = added_instances
+            .iter()
+            .chain(deleted_instances.iter())
+            .any(|instance| instance.advertise_svi_mac);
+        let svi = self.svi.as_ref();
+        if svi_required && svi.is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+                "L2VNI runtime swap with advertise_svi_mac=true requires an active SVI actor; \
+                 live SVI actor-spawn is not supported yet",
+            ));
+        }
+        if let Some(svi) = svi
+            && !svi.is_open()
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN SVI runtime control is closed",
+            ));
+        }
+        let segment = self.open_segment_runtime_control()?;
+
+        let mut originated_added = Vec::with_capacity(added_instances.len());
+        for instance in &added_instances {
+            let outcome = self
+                .imet_controller
+                .lock()
+                .await
+                .originate_instance(instance.clone(), &self.rib_tx)
+                .await;
+            if !matches!(
+                outcome,
+                evpn_imet::ImetOriginateOutcome::Originated { .. }
+                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
+                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
+            ) {
+                let restored = self
+                    .rollback_l2vni_swap(current, &originated_added, &[])
+                    .await;
+                return Err(l2vni_swap_failure(
+                    restored,
+                    &format!(
+                        "EVPN IMET origination failed for added L2VNI {}: {outcome:?}",
+                        instance.id
+                    ),
+                ));
+            }
+            originated_added.push(instance.clone());
+        }
+
+        if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
+            let restored = self
+                .rollback_l2vni_swap(current, &originated_added, &[])
+                .await;
+            return Err(l2vni_swap_failure(
+                restored,
+                "EVPN dataplane runtime model publish failed",
+            ));
+        }
+        if let Some(svi) = svi
+            && !svi.replace_evpn_instances(candidate_instances.clone())
+        {
+            let restored = self
+                .rollback_l2vni_swap(current, &originated_added, &[])
+                .await;
+            return Err(l2vni_swap_failure(
+                restored,
+                "EVPN SVI runtime model publish failed",
+            ));
+        }
+
+        let mut withdrawn_deleted = Vec::with_capacity(deleted_instances.len());
+        for instance in &deleted_instances {
+            let outcome = self
+                .imet_controller
+                .lock()
+                .await
+                .withdraw_instance(instance.id, &self.rib_tx)
+                .await;
+            if !matches!(
+                outcome,
+                evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                    | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
+            ) {
+                let restored = self
+                    .rollback_l2vni_swap(current, &originated_added, &withdrawn_deleted)
+                    .await;
+                return Err(l2vni_swap_failure(
+                    restored,
+                    &format!(
+                        "EVPN IMET withdrawal failed for deleted L2VNI {}: {outcome:?}",
+                        instance.id
+                    ),
+                ));
+            }
+            withdrawn_deleted.push(instance.clone());
+        }
+
+        if !originator.replace_runtime_model(
+            candidate_instances.clone(),
+            evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            self.es_drain.snapshot(),
+        ) {
+            let restored = self
+                .rollback_l2vni_swap(current, &originated_added, &withdrawn_deleted)
+                .await;
+            return Err(l2vni_swap_failure(
+                restored,
+                "EVPN Type 2 originator runtime model publish failed",
+            ));
+        }
+        if let Err(err) = Self::publish_segment_instances(segment, candidate_instances) {
+            let restored = self
+                .rollback_l2vni_swap(current, &originated_added, &withdrawn_deleted)
+                .await;
+            return Err(l2vni_swap_failure(restored, err.message()));
+        }
+
+        Ok(())
+    }
+
+    async fn rollback_l2vni_swap(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        added_instances: &[rustbgpd_evpn::EvpnInstance],
+        withdrawn_deleted_instances: &[rustbgpd_evpn::EvpnInstance],
+    ) -> bool {
+        let current_instances = Arc::new(current.instances().clone());
+        let mut restored = true;
+        if let Some(dataplane) = self.dataplane.as_ref() {
+            restored &= dataplane.replace_evpn_instances(current_instances.clone());
+        }
+        if let Some(originator) = self.originator.as_ref() {
+            restored &= originator.replace_runtime_model(
+                current_instances.clone(),
+                evpn_vni_to_esi_map(current.ethernet_segments()),
+                self.es_drain.snapshot(),
+            );
+        }
+        if let Some(svi) = self.svi.as_ref() {
+            restored &= svi.replace_evpn_instances(current_instances.clone());
+        }
+        if let Some(segment) = self.segment.as_ref() {
+            restored &= segment.replace_instances(current_instances);
+        }
+        for instance in added_instances {
+            restored &= matches!(
+                self.imet_controller
+                    .lock()
+                    .await
+                    .withdraw_instance(instance.id, &self.rib_tx)
+                    .await,
+                evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                    | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
+            );
+        }
+        for instance in withdrawn_deleted_instances {
+            restored &= self.restore_imet(instance.clone()).await;
+        }
+        restored
+    }
+
     async fn converge_l2vni_delete(
         &self,
         current: &rustbgpd_evpn::EvpnRuntimeModel,
@@ -1792,6 +1972,12 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
                     .converge_additive_build_up(current, candidate, plan)
                     .await;
             }
+            // A standalone L2VNI swap is the conservative mixed-edit slice:
+            // add and delete L2VNIs in one candidate while leaving IP-VRFs,
+            // Ethernet Segments, redefines, and relinks untouched.
+            if is_l2vni_swap_plan(plan) {
+                return self.converge_l2vni_swap(current, candidate, plan).await;
+            }
             // Teardown + pure relink (both routed above) own reference changes.
             // For every other route, reject a relink mixed into the request so it
             // can't diverge the dataplane (ES path) or apply unvalidated.
@@ -1946,6 +2132,88 @@ fn validate_single_l2vni_delete(
     }
 
     Ok(instance)
+}
+
+fn is_l2vni_swap_plan(plan: &rustbgpd_evpn::EvpnRuntimePlan) -> bool {
+    !plan.evpn_instances.added.is_empty()
+        && !plan.evpn_instances.deleted.is_empty()
+        && plan.evpn_instances.redefined.is_empty()
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
+}
+
+fn validate_l2vni_swap(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<
+    (
+        Vec<rustbgpd_evpn::EvpnInstance>,
+        Vec<rustbgpd_evpn::EvpnInstance>,
+    ),
+    DaemonEvpnRuntimeConvergeError,
+> {
+    if !is_l2vni_swap_plan(plan) {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime L2VNI swap requires only L2VNI add/delete changes with no redefines, IP-VRF changes, or Ethernet Segment changes",
+        ));
+    }
+    if plan.ip_vrf_references_changed || current.ip_vrfs() != candidate.ip_vrfs() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime L2VNI swap requires standalone L2VNIs; ip_vrf link changes must be applied separately",
+        ));
+    }
+
+    let mut added_instances = Vec::with_capacity(plan.evpn_instances.added.len());
+    for &raw_vni in &plan.evpn_instances.added {
+        let vni = rustbgpd_evpn::EvpnInstanceId::new(raw_vni).map_err(|err| {
+            DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "invalid planned added L2VNI {raw_vni}: {err}"
+            ))
+        })?;
+        if current.instances().get(vni).is_some() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned added L2VNI {vni} is already committed"
+            )));
+        }
+        let Some(instance) = candidate.instances().get(vni).cloned() else {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate is missing planned added L2VNI {vni}"
+            )));
+        };
+        added_instances.push(instance);
+    }
+
+    let mut deleted_instances = Vec::with_capacity(plan.evpn_instances.deleted.len());
+    for &raw_vni in &plan.evpn_instances.deleted {
+        let vni = rustbgpd_evpn::EvpnInstanceId::new(raw_vni).map_err(|err| {
+            DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "invalid planned deleted L2VNI {raw_vni}: {err}"
+            ))
+        })?;
+        let Some(instance) = current.instances().get(vni).cloned() else {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned deleted L2VNI {vni} is not committed"
+            )));
+        };
+        if candidate.instances().get(vni).is_some() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate still contains planned deleted L2VNI {vni}"
+            )));
+        }
+        if current
+            .ethernet_segments()
+            .iter()
+            .any(|segment| segment.member_vnis.contains(&vni))
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "L2VNI swap cannot delete Ethernet Segment member L2VNI {vni}; use atomic tenant teardown or remove the segment membership first"
+            )));
+        }
+        deleted_instances.push(instance);
+    }
+
+    Ok((added_instances, deleted_instances))
 }
 
 fn validate_single_l2vni_redefine(
@@ -2224,6 +2492,17 @@ fn additive_build_failure(restored: bool, step_message: &str) -> DaemonEvpnRunti
     } else {
         DaemonEvpnRuntimeConvergeError::failed(format!(
             "{step_message}; EVPN additive build-up rollback also failed — \
+             live runtime state may require repair/restart"
+        ))
+    }
+}
+
+fn l2vni_swap_failure(restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
+    if restored {
+        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
+    } else {
+        DaemonEvpnRuntimeConvergeError::failed(format!(
+            "{step_message}; EVPN L2VNI swap rollback also failed — \
              live runtime state may require repair/restart"
         ))
     }
@@ -3462,6 +3741,46 @@ table_id = 5000
 "#
     }
 
+    fn l2vni_swap_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#
+    }
+
     fn l2vni_one_ip_vrf_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -3517,6 +3836,60 @@ local_vtep_ip = "10.0.0.1"
 vni = 200
 rd = "65000:200"
 route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#
+    }
+
+    fn l2vni_swap_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#
+    }
+
+    fn l2vni_swap_delete_vni100_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
 local_vtep_ip = "10.0.0.1"
 "#
     }
@@ -4374,6 +4747,51 @@ table_id = 6000
         assert_eq!(plan.evpn_instances.unwrap().deleted, vec!["200"]);
         let guard = coordinator.lock().unwrap();
         assert_eq!(guard.model().generation().as_u64(), 2);
+        assert!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_l2vni_swap_commits_after_convergence() {
+        let coordinator = two_l2vni_runtime_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_swap_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        let runtime = response.runtime.unwrap();
+        assert_eq!(runtime.generation, 2);
+        let plan = response.plan.unwrap();
+        let instances = plan.evpn_instances.unwrap();
+        assert_eq!(instances.added, vec!["300"]);
+        assert_eq!(instances.deleted, vec!["200"]);
+        let guard = coordinator.lock().unwrap();
+        assert!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(300).unwrap())
+                .is_some()
+        );
         assert!(
             guard
                 .model()
@@ -6276,6 +6694,240 @@ table_id = 6000
     }
 
     #[tokio::test]
+    async fn runtime_actor_converger_l2vni_swap_updates_models_and_imet() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(l2vni_swap_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let added_vni = rustbgpd_evpn::EvpnInstanceId::new(300).unwrap();
+        let deleted_vni = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let added_rd = candidate.instances().get(added_vni).unwrap().rd;
+        let deleted_rd = current.instances().get(deleted_vni).unwrap().rd;
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let imet_keys = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+        assert_eq!(imet_keys.len(), 2);
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        assert!(evpn_instances_rx.borrow().get(added_vni).is_some());
+        assert!(evpn_instances_rx.borrow().get(deleted_vni).is_none());
+
+        let drained = withdraws.lock().await.clone();
+        let injected = injects.lock().await.clone();
+        assert!(
+            drained.iter().any(|key| matches!(
+                key,
+                rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == deleted_rd
+            )),
+            "swap should withdraw the deleted L2VNI's IMET route; drained {drained:?}"
+        );
+        assert!(
+            injected.iter().any(|key| matches!(
+                key,
+                rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == added_rd
+            )),
+            "swap should originate the added L2VNI's IMET route; injected {injected:?}"
+        );
+
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wires the dataplane/originator/IMET actors to prove swap rollback restoration"
+    )]
+    async fn runtime_actor_converger_l2vni_swap_rollback_restores_imet_and_models() {
+        // Drive the swap forward legs up to the rollback point (added IMET
+        // originated, candidate models published, deleted IMET withdrawn),
+        // then call rollback_l2vni_swap directly and prove it restores the
+        // committed model and unwinds the speculative IMET state. This covers
+        // the highest-risk swap path — the IMET withdraw-added / restore-
+        // deleted ordering — which the happy-path test does not exercise.
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(l2vni_swap_runtime_candidate_toml());
+        let current_instances = Arc::new(current.instances().clone());
+        let candidate_instances = Arc::new(candidate.instances().clone());
+        let added_vni = rustbgpd_evpn::EvpnInstanceId::new(300).unwrap();
+        let deleted_vni = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let added_instance = candidate.instances().get(added_vni).unwrap().clone();
+        let deleted_instance = current.instances().get(deleted_vni).unwrap().clone();
+        let added_rd = added_instance.rd;
+        let deleted_rd = deleted_instance.rd;
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let imet_keys = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+        assert_eq!(imet_keys.len(), 2);
+        // Forward leg 1: originate the added L2VNI's IMET.
+        let _ = imet_controller
+            .originate_instance(added_instance.clone(), &rib_tx)
+            .await;
+        let imet_controller = Arc::new(tokio::sync::Mutex::new(imet_controller));
+
+        // Forward leg 2: publish the candidate models to dataplane + originator.
+        let dataplane = dataplane_handle.runtime_control();
+        let originator = originator_handle.runtime_control();
+        assert!(dataplane.replace_evpn_instances(candidate_instances.clone()));
+        assert!(originator.replace_runtime_model(
+            candidate_instances.clone(),
+            evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            Arc::new(std::collections::BTreeSet::new()),
+        ));
+        // Forward leg 3: withdraw the deleted L2VNI's IMET.
+        let _ = imet_controller
+            .lock()
+            .await
+            .withdraw_instance(deleted_vni, &rib_tx)
+            .await;
+
+        // The forward legs above are all awaited (the recorder pushes before
+        // replying), so the mid-swap RIB effects are fully recorded. Clear so
+        // the rollback's effects are unambiguous.
+        injects.lock().await.clear();
+        withdraws.lock().await.clear();
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller,
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        let restored = converger
+            .rollback_l2vni_swap(&current, &[added_instance], &[deleted_instance])
+            .await;
+        assert!(restored, "swap rollback should restore all touched state");
+
+        // Committed model restored: the deleted VNI is back, the added VNI gone.
+        assert!(
+            evpn_instances_rx.borrow().get(deleted_vni).is_some(),
+            "rollback should restore the deleted L2VNI to the committed model"
+        );
+        assert!(
+            evpn_instances_rx.borrow().get(added_vni).is_none(),
+            "rollback should drop the speculatively-added L2VNI"
+        );
+
+        // Speculative added IMET withdrawn; deleted IMET re-originated.
+        wait_for_recorded_evpn_key_matching(
+            &withdraws,
+            "rollback should withdraw the speculatively-added L2VNI IMET",
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == added_rd),
+        )
+        .await;
+        wait_for_recorded_evpn_key_matching(
+            &injects,
+            "rollback should restore the deleted L2VNI IMET",
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == deleted_rd),
+        )
+        .await;
+
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn runtime_actor_converger_l2vni_delete_publishes_ip_vrf_metadata() {
         let current =
             runtime_model_from_candidate_toml(l2vni_linked_ip_vrf_runtime_candidate_toml());
@@ -6409,6 +7061,77 @@ table_id = 6000
                     )
                     .unwrap()])
                 })
+        );
+    }
+
+    #[test]
+    fn validate_l2vni_swap_accepts_standalone_add_delete() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(l2vni_swap_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(is_l2vni_swap_plan(&plan));
+        let (added, deleted) = validate_l2vni_swap(&current, &candidate, &plan).unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .map(|instance| instance.id.as_u32())
+                .collect::<Vec<_>>(),
+            vec![300]
+        );
+        assert_eq!(
+            deleted
+                .iter()
+                .map(|instance| instance.id.as_u32())
+                .collect::<Vec<_>>(),
+            vec![200]
+        );
+    }
+
+    #[test]
+    fn validate_l2vni_swap_rejects_ip_vrf_link_metadata_change() {
+        let current =
+            runtime_model_from_candidate_toml(two_l2vni_linked_ip_vrf_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(l2vni_swap_linked_ip_vrf_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(is_l2vni_swap_plan(&plan));
+        assert!(
+            !plan.ip_vrfs.has_changes(),
+            "IP-VRF row diffing intentionally ignores link metadata"
+        );
+        assert_ne!(current.ip_vrfs(), candidate.ip_vrfs());
+        let error = validate_l2vni_swap(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("standalone L2VNIs"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_l2vni_swap_rejects_es_member_delete() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let base_candidate =
+            runtime_candidate_from_toml(l2vni_swap_delete_vni100_runtime_candidate_toml());
+        let candidate = rustbgpd_evpn::EvpnRuntimeCandidate::new(
+            base_candidate.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        );
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(is_l2vni_swap_plan(&plan));
+        let error = validate_l2vni_swap(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("Ethernet Segment member"),
+            "unexpected error message: {message}"
         );
     }
 
@@ -7685,6 +8408,19 @@ table_id = 6000
         assert!(
             !restored,
             "rollback must report failure when the new IMET key could not be withdrawn"
+        );
+    }
+
+    #[test]
+    fn l2vni_swap_failure_escalates_when_rollback_fails() {
+        let error = l2vni_swap_failure(false, "EVPN dataplane runtime model publish failed");
+        let DaemonEvpnRuntimeConvergeError::Failed(source) = error else {
+            panic!("expected failed error, got {error:?}");
+        };
+        assert!(
+            source.message().contains("rollback also failed"),
+            "unexpected error message: {}",
+            source.message()
         );
     }
 

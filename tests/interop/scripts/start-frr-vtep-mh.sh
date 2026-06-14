@@ -7,6 +7,7 @@
 #   $2 = VNI (24-bit)
 #   $3 = ES-ID (1..16M)
 #   $4 = ES-SYS-MAC (48-bit, colon-separated)
+#   $5 = optional FRR EVPN MH DF preference (1..16777215)
 #
 # Layout built (on top of the plain VTEP layout):
 #   esdummy        : LACP bond device attached to the bridge — the FRR-
@@ -29,7 +30,7 @@
 set -eu
 
 if [ $# -lt 4 ]; then
-    echo "usage: start-frr-vtep-mh.sh <loopback-ip> <vni> <es-id> <es-sys-mac>" >&2
+    echo "usage: start-frr-vtep-mh.sh <loopback-ip> <vni> <es-id> <es-sys-mac> [df-pref]" >&2
     exit 1
 fi
 
@@ -37,6 +38,7 @@ LOCAL_IP="$1"
 VNI="$2"
 ES_ID="$3"
 ES_SYS_MAC="$4"
+DF_PREF="${5:-}"
 BRIDGE="br${VNI}"
 VXLAN="vxlan${VNI}"
 ES_DUMMY="esdummy"
@@ -81,7 +83,7 @@ ip link set dev "${BRIDGE}" up
 # one of the two VTEPs sometimes fails to pick up the per-interface
 # config when esdummy appears later. Issuing the config after the
 # interface exists is reliable.
-echo "start-frr-vtep-mh: local=${LOCAL_IP} vni=${VNI} es-id=${ES_ID} es-sys-mac=${ES_SYS_MAC}" >&2
+echo "start-frr-vtep-mh: local=${LOCAL_IP} vni=${VNI} es-id=${ES_ID} es-sys-mac=${ES_SYS_MAC} df-pref=${DF_PREF:-default}" >&2
 
 # Wait briefly for FRR daemons to be reachable via vtysh.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -103,12 +105,22 @@ apply_evpn_mh_config() {
           -c "interface ${ES_DUMMY}" \
           -c "no evpn mh es-id ${ES_ID}" \
           -c "no evpn mh es-sys-mac ${ES_SYS_MAC}" \
+          -c "no evpn mh es-df-pref" \
           -c "end" >/dev/null 2>&1 || true
-    vtysh -c "configure terminal" \
-          -c "interface ${ES_DUMMY}" \
-          -c "evpn mh es-id ${ES_ID}" \
-          -c "evpn mh es-sys-mac ${ES_SYS_MAC}" \
-          -c "end" >/dev/null 2>&1 || true
+    if [ -n "$DF_PREF" ]; then
+        vtysh -c "configure terminal" \
+              -c "interface ${ES_DUMMY}" \
+              -c "evpn mh es-id ${ES_ID}" \
+              -c "evpn mh es-sys-mac ${ES_SYS_MAC}" \
+              -c "evpn mh es-df-pref ${DF_PREF}" \
+              -c "end" >/dev/null 2>&1 || true
+    else
+        vtysh -c "configure terminal" \
+              -c "interface ${ES_DUMMY}" \
+              -c "evpn mh es-id ${ES_ID}" \
+              -c "evpn mh es-sys-mac ${ES_SYS_MAC}" \
+              -c "end" >/dev/null 2>&1 || true
+    fi
 }
 
 # FRR's per-interface EVPN-MH config has a startup race with esdummy

@@ -2176,6 +2176,13 @@ service EvpnService {
   // are always populated and may be non-zero / `true` even when
   // `groups` is empty.
   rpc ListEvpnNexthops(ListEvpnNexthopsRequest) returns (ListEvpnNexthopsResponse);
+  // ADR-0083/0085 — list configured Ethernet Segments joined with
+  // current multi-homing runtime state: composed drain reasons,
+  // DF/BUM role rows, whole-port AC-gate intent, same-ESI local-bias
+  // eligibility, and the owned FDB-nexthop group summary. Read-only
+  // diagnose surface; mutations stay on SetEthernetSegmentDrain and
+  // ApplyEvpnRuntime.
+  rpc ListEthernetSegments(ListEthernetSegmentsRequest) returns (ListEthernetSegmentsResponse);
   // Gate 9 — list every `[[evpn_ip_vrfs]]` entry the daemon has
   // resolved, with the live readiness verdict from the reconcile
   // actor's most recent `probe_ip_vrfs` pass.
@@ -2290,6 +2297,70 @@ message EvpnFdbNexthopMember {
   string gateway = 1;
   // Kernel per-VTEP nexthop ID (`VTEP_NH_TAG | bitmap_id`).
   uint32 nexthop_id = 2;
+}
+
+message ListEthernetSegmentsRequest {
+  // Optional ESI filter in canonical colon-hex form. Empty lists all
+  // configured Ethernet Segments.
+  string esi = 1;
+}
+
+message ListEthernetSegmentsResponse {
+  repeated EthernetSegmentState segments = 1;
+}
+
+message EthernetSegmentState {
+  // Ethernet Segment Identifier in canonical colon-hex form.
+  string esi = 1;
+  // Configured member VNIs, sorted ascending.
+  repeated uint32 member_vnis = 2;
+  // Configured redundancy mode (`all-active` or `single-active`).
+  string redundancy_mode = 3;
+  // Configured DF algorithm (`default-modulo`, `hrw`,
+  // `highest-preference`, or `lowest-preference`).
+  string df_algorithm = 4;
+  // Configured DF preference value advertised for preference-based
+  // DF election.
+  uint32 df_preference = 5;
+  // RFC 9785 Don't-Preempt bit configured for this segment.
+  bool df_dont_preempt = 6;
+  // Configured local Type 4 originator IP.
+  string originator_ip = 7;
+  // True while any drain reason is held.
+  bool drained = 8;
+  // Composed drain reasons (`operator`, `link`), sorted for stable
+  // output. Empty when not drained.
+  repeated string drain_reasons = 9;
+  // Per-member live BUM/DF/bias state. A member can exist without a
+  // role row during cold start or before the segment actor publishes
+  // its first snapshot.
+  repeated EthernetSegmentMemberState members = 10;
+  // Desired whole-port AC-gate state (`blocked`, `forwarding`,
+  // `mixed-roles`). Empty when the segment is all-active or lacks an
+  // interface binding.
+  string ac_gate_state = 11;
+  // Attachment-circuit interface tied to `ac_gate_state`, when a
+  // gate row exists.
+  string ac_gate_interface = 12;
+  // Owned FDB nexthop groups whose ESI matches this segment.
+  uint32 fdb_nexthop_groups_count = 13;
+  // MAC refs across those owned FDB nexthop groups.
+  uint32 fdb_nexthop_ref_macs_count = 14;
+}
+
+message EthernetSegmentMemberState {
+  uint32 vni = 1;
+  // Local DF role (`df`, `nondf`) or empty when no role row has been
+  // published yet.
+  string df_role = 2;
+  // Desired BUM action (`allow`, `suppress`) or empty when no role row
+  // has been published yet.
+  string bum_forwarding_action = 3;
+  // Configured bridge for this VNI, if known.
+  string bridge = 4;
+  // True when ADR-0085 same-ESI local-bias suppresses remote FDB
+  // programming for this `(ESI, VNI)`.
+  bool same_esi_bias_eligible = 5;
 }
 
 message ListIpVrfsRequest {}

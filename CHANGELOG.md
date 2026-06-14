@@ -11,6 +11,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Ethernet Segment diagnose surface.** `EvpnService.ListEthernetSegments`
+  and `rbgp evpn es list [ESI]` now join configured ES membership with
+  live multi-homing runtime state: composed operator/link drain reasons,
+  per-member DF role and BUM forwarding action, ADR-0085 same-ESI
+  local-bias eligibility, single-active AC-gate state/interface, and
+  matching owned FDB-NHG group / MAC-ref counts. The RPC is read-only
+  (`sensitive_read`) and complements the existing `SetEthernetSegmentDrain`
+  mutator.
+- **M69 FRR interop proof for RFC 9785 preference-DF election.** The
+  hosted kernel-dataplane suite now includes a rustbgpd ↔ FRR
+  Ethernet Segment where rustbgpd advertises Highest-Preference with
+  `df_preference = 100` and FRR advertises `evpn mh es-df-pref 200`.
+  Default modulo carving for VNI 200 would elect rustbgpd, so the test
+  proves the cross-vendor DF Election extended community drives the
+  outcome: rustbgpd decodes FRR's Type 4 DF Election extcomm as
+  Highest-Preference/preference 200, settles NonDF, and FRR reports
+  itself DF with local preference 200 and remote preference 100.
+- **ADR-0063 EVPN runtime convergence — standalone L2VNI swaps.**
+  `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff`
+  now treat a candidate that adds one-or-more standalone L2VNIs and
+  deletes one-or-more standalone L2VNIs in the same request as a
+  coordinator-supported hot-apply shape. The daemon composes the
+  existing add/delete legs: added VNIs originate IMET, deleted VNIs
+  withdraw IMET, and the dataplane/Type 2/SVI/segment consumers receive
+  a single candidate instance snapshot before the runtime generation
+  advances. The slice deliberately excludes ES-member deletes,
+  `ip_vrf` reference/link metadata changes, redefines, and IP-VRF/ES
+  row changes; those broader mixed edits still fail closed.
 - **M68 FRR consume-side interop proof for native GW-IP overlay-index
   Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
   includes a rustbgpd → FRR topology where rustbgpd originates a

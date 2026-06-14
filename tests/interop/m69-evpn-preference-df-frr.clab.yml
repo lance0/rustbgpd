@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd ↔ FRR EVPN preference-DF interop
+# (M69 — RFC 9785 Highest-Preference cross-vendor smoke).
+#
+# rustbgpd PE1 and FRR PE2 share the same Ethernet Segment for VNI
+# 200. PE1 advertises RFC 9785 Highest-Preference with preference 100;
+# FRR is configured with `evpn mh es-df-pref 200`. Default service
+# carving for VNI 200 over two candidates would elect PE1 (`200 mod 2`
+# = slot 0 -> lower IP), so PE2 winning proves the preference-DF wire
+# signal is consumed across implementations rather than silently falling
+# back to modulo.
+#
+# Topology:
+#   PE1 rustbgpd (10.0.0.1, AS 65000) -- iBGP L2VPN/EVPN -- PE2 FRR
+#   (10.0.0.2, AS 65000)
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m69-evpn-preference-df-frr.clab.yml
+#   bash tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
+#   sudo containerlab destroy -t tests/interop/m69-evpn-preference-df-frr.clab.yml --cleanup
+
+name: m69-evpn-preference-df-frr
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m69-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-segment.sh 200
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m69-pe2.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-mh.sh:/usr/local/bin/start-frr-vtep-mh.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-mh.sh 10.0.0.2 200 1 aa:bb:cc:dd:ee:ff 200
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
