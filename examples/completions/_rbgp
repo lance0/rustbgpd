@@ -833,6 +833,101 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(es)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__evpn__subcmd__es_commands" \
+"*::: :->es" \
+&& ret=0
+
+    case $state in
+    (es)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-evpn-es-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::esi -- Optional ESI filter as 10 colon-separated hex octets:_default' \
+&& ret=0
+;;
+(drain)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':esi -- ESI as 10 colon-separated hex octets, e.g. "00\:11\:22\:33\:44\:55\:66\:77\:88\:99":_default' \
+&& ret=0
+;;
+(undrain)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':esi -- ESI as 10 colon-separated hex octets, e.g. "00\:11\:22\:33\:44\:55\:66\:77\:88\:99":_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__evpn__subcmd__es__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-evpn-es-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(drain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(undrain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (runtime)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -937,6 +1032,34 @@ _arguments "${_arguments_options[@]}" : \
 (clear-duplicate-mac)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
+;;
+(es)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands" \
+"*::: :->es" \
+&& ret=0
+
+    case $state in
+    (es)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-evpn-help-es-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(drain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(undrain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (runtime)
 _arguments "${_arguments_options[@]}" : \
@@ -2192,6 +2315,34 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(es)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands" \
+"*::: :->es" \
+&& ret=0
+
+    case $state in
+    (es)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-evpn-es-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(drain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(undrain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (runtime)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2793,6 +2944,7 @@ _rbgp__subcmd__evpn_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
@@ -2842,6 +2994,61 @@ _rbgp__subcmd__evpn__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn diagnose commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es_commands() {
+    local commands; commands=(
+'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
+'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp evpn es commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__drain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__drain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es drain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
+'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp evpn es help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__drain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__drain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es help drain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__list_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es help list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__undrain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__help__subcmd__undrain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es help undrain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__list_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__undrain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn es undrain commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help_commands() {
     local commands; commands=(
@@ -2853,6 +3060,7 @@ _rbgp__subcmd__evpn__subcmd__help_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
@@ -2901,6 +3109,30 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands() {
 _rbgp__subcmd__evpn__subcmd__help__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help diagnose commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands() {
+    local commands; commands=(
+'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
+'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+    )
+    _describe -t commands 'rbgp evpn help es commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__drain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__drain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help es drain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__list_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help es list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__undrain_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__es__subcmd__undrain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help es undrain commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__help_commands() {
@@ -3228,6 +3460,7 @@ _rbgp__subcmd__help__subcmd__evpn_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
@@ -3275,6 +3508,30 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn diagnose commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands() {
+    local commands; commands=(
+'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
+'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+    )
+    _describe -t commands 'rbgp help evpn es commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__drain_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__drain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn es drain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__list_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn es list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn es undrain commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands() {
