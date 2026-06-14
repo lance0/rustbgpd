@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **VPNv4/VPNv6 wire codec substrate.** `rustbgpd-wire` now has pure
+  helpers for RFC 8277 MPLS label-stack entries and RFC 4364 / RFC 4659
+  RD-prefixed VPN NLRI keys. The substrate preserves VPN route identity
+  as Route Distinguisher + family-specific prefix without using the
+  unicast `Prefix` enum, and keeps labels as route data rather than key
+  identity. This does not enable VPNv4/VPNv6 negotiation, UPDATE
+  dispatch, RIB storage, policy, API/CLI exposure, interop, label
+  allocation, next-hop-self label rewrite, or MPLS dataplane behavior.
 - **M67 link-driven Ethernet Segment drain churn soak harness.** New
   `tests/soak/m67-link-drain-soak.clab.yml`,
   `tests/soak/run-m67-link-drain-churn-soak.sh`, and
