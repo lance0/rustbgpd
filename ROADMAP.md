@@ -183,7 +183,7 @@ has it, no broad performance sprints without profile evidence.
   (ADR-0087):** per-IP-VRF `overlay_index_mode = "gateway_ip"` originates
   Type 5 with the kernel via (when it lands on a connected tenant subnet) in
   the Gateway Address and no Router-MAC extcomm, feeding the already-shipped
-  receive-side recursion; default `"interface_less"` is unchanged. Proven by a
+  receive-side recursion; default `"interface_less"` is unchanged. Proven by
   self-consistency tests (own origination → own projection resolves end-to-end,
   fallback interface-less projection, and via appears/disappears in-place
   re-origination) and M68, a hosted FRR consume-side proof that holds the Type 5
