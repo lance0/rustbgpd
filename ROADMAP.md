@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side overlay-index recursion shipped; native GW-IP overlay-index origination shipped (ADR-0087, FRR consume-side M68; ESI overlay index deferred) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped (ADR-0087, FRR consume-side M68 for GW-IP; ESI protected-recursion interop still pending) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -184,8 +184,9 @@ has it, no broad performance sprints without profile evidence.
   hardening is external-vector breadth rather than feature scope: import
   NIST-BRIO ASPA vectors when they are easy to automate.
 - **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
-  intentionally bounded. Near-term standards work is RFC 9136 ESI overlay-index
-  Type 5 origination plus broader protected-recursion interop; demand-shaped
+  intentionally bounded. Native RFC 9136 GW-IP and ESI overlay-index Type 5
+  origination now ship; near-term standards work is broader protected-recursion
+  interop, especially the ESI path; demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
   bridge / VXLAN / VRF netdev creation; service-provider EVPN breadth (route
   types 6-11, PBB-EVPN, multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service
@@ -200,8 +201,12 @@ has it, no broad performance sprints without profile evidence.
   re-origination) and M68, a hosted FRR consume-side proof that holds the Type 5
   unresolved until the companion Type 2 appears, then imports it via
   `enable-resolve-overlay-index`. Path **B (ESI overlay index, RFC 9136
-  §4.3) remains the next standards-tail candidate after the GW-IP receipts
-  landed (operator decision 2026-06-12). The single-active arc below is
+  §4.3) also landed as an explicit origination mode**:
+  `overlay_index_mode = "esi"` emits RT-5 with non-zero ESI, zero Gateway
+  Address, L3VNI label, and the configured virtual/transit Router MAC, with
+  config validation tying the selected ESI to a linked local L2VNI. The
+  remaining ESI tail is receive-side protected recursion / real-peer interop,
+  not outbound encoding. The single-active arc below is
   **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal

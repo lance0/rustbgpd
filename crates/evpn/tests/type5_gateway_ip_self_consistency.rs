@@ -1,4 +1,4 @@
-//! Self-consistency proof for ADR-0087 GW-IP overlay-index Type 5
+//! Self-consistency proof for ADR-0087 overlay-index Type 5
 //! origination.
 //!
 //! The strongest test that origination and projection agree on the
@@ -9,6 +9,12 @@
 //! By construction this pins the two halves to one wire shape — if
 //! origination ever drifts (label, ESI, gateway field, missing-RMAC),
 //! the route stops resolving here.
+//!
+//! ESI overlay-index origination is outbound-only in this slice: the
+//! receive-side projection carries the Type 5 ESI only to drop it
+//! fail-closed until protected EAD recursion is implemented. The ESI
+//! case below therefore pins the standards wire shape directly instead
+//! of pretending it can exercise protected recursion locally.
 
 use std::net::IpAddr;
 
@@ -18,7 +24,9 @@ use rustbgpd_evpn::ip_vrf::{
     project_ip_prefix_routes_with_overlay_index,
 };
 use rustbgpd_evpn::{EvpnInstanceId, RouteTarget};
-use rustbgpd_wire::{EvpnRoute, Ipv4Prefix, MacAddress, PathAttribute, RouteDistinguisher};
+use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EvpnRoute, Ipv4Prefix, MacAddress, PathAttribute, RouteDistinguisher,
+};
 
 fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
@@ -40,6 +48,45 @@ fn gw_vrf_table(l2vni: u32) -> IpVrfTable {
     )
     .unwrap()
     .with_overlay_index_mode(OverlayIndexMode::GatewayIp);
+
+    let mut table = IpVrfTable::new();
+    table.insert(vrf).unwrap();
+    table.mark_referenced_by_l2vni(
+        "tenant-blue".to_string(),
+        EvpnInstanceId::new(l2vni).unwrap(),
+    );
+    table
+}
+
+fn esi() -> EthernetSegmentIdentifier {
+    EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+}
+
+fn overlay_mac() -> MacAddress {
+    MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+}
+
+/// Build an ESI-mode IP-VRF linked to one local EVI. Config
+/// validation proves the EVI belongs to the selected ES; this pure
+/// crate-level test only needs the resolved domain object.
+fn esi_vrf_table(l2vni: u32) -> IpVrfTable {
+    let vrf = IpVrf::new(
+        "tenant-blue".to_string(),
+        IpVrfId::new(5000).unwrap(),
+        "65000:5000".parse::<RouteDistinguisher>().unwrap(),
+        vec!["65000:5000".parse::<RouteTarget>().unwrap()],
+        ip("10.0.0.1"),
+        MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]),
+        "vrf-blue".to_string(),
+        "vni5000".to_string(),
+        5000,
+    )
+    .unwrap()
+    .with_esi_overlay_index(
+        esi(),
+        overlay_mac(),
+        Some(EvpnInstanceId::new(l2vni).unwrap()),
+    );
 
     let mut table = IpVrfTable::new();
     table.insert(vrf).unwrap();
@@ -74,6 +121,7 @@ fn originated_to_projected(
         prefix: p.prefix,
         next_hop,
         gateway: p.gateway,
+        esi: p.esi,
         l3vni: p.label.as_vni(),
         route_targets,
         router_mac,
@@ -143,6 +191,47 @@ fn natively_originated_gateway_ip_type5_resolves_through_own_projection() {
         "resolved inner MAC is the gateway host's Type 2 MAC",
     );
     assert_eq!(entry.l3vni, 5000);
+}
+
+#[test]
+fn natively_originated_esi_type5_has_rfc9136_overlay_index_shape() {
+    let vrfs = esi_vrf_table(100);
+    let vrf = vrfs.get("tenant-blue").unwrap();
+    let local = LocalIpRoute::v4(Ipv4Prefix::new("192.168.50.0".parse().unwrap(), 24))
+        .with_gateway(Some(ip("10.1.1.5")));
+    let originated = originate_ip_prefix_route(vrf, &local).unwrap();
+
+    let EvpnRoute::IpPrefix(prefix) = &originated.route else {
+        panic!("expected Type 5");
+    };
+    assert_eq!(prefix.esi, esi(), "ESI is the overlay index");
+    assert_eq!(
+        prefix.gateway,
+        ip("0.0.0.0"),
+        "Gateway Address stays zero so the route does not carry two overlay indexes"
+    );
+    assert_eq!(
+        prefix.label.as_vni(),
+        5000,
+        "L3VNI remains in the label slot, matching the GW-IP shape"
+    );
+
+    let ext_comms: Vec<_> = originated
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ext_comms
+            .iter()
+            .filter_map(|c| c.as_router_mac())
+            .collect::<Vec<_>>(),
+        vec![overlay_mac().octets()],
+        "ESI overlay-index routes carry the configured virtual/transit Router MAC"
+    );
 }
 
 #[test]

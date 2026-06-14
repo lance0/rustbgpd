@@ -988,9 +988,20 @@ impl Config {
         // L2VNI — the receive side scopes the recursive Type 2 lookup
         // to the tenant's MAC-VRFs through that link, so a gateway_ip
         // VRF with no L2VNI could never produce a resolvable route.
+        // ESI overlay-index mode needs the same IP-VRF<->MAC-VRF link
+        // plus a configured Ethernet Segment member to make EAD-based
+        // recursive resolution possible.
         // Reject at load rather than silently originate unresolvable
         // Type 5s. Checked after references are recorded so the
         // L2VNI->IP-VRF bindings are complete.
+        let es_members_by_esi = if table
+            .iter()
+            .any(|vrf| vrf.overlay_index_mode == OverlayIndexMode::Esi)
+        {
+            Some(self.overlay_index_esi_member_map()?)
+        } else {
+            None
+        };
         for vrf in table.iter() {
             if vrf.overlay_index_mode == OverlayIndexMode::GatewayIp
                 && table
@@ -1007,8 +1018,45 @@ impl Config {
                     ),
                 });
             }
+            if vrf.overlay_index_mode == OverlayIndexMode::Esi {
+                validate_esi_overlay_index_vrf(
+                    vrf,
+                    &table,
+                    es_members_by_esi
+                        .as_ref()
+                        .expect("ES member map exists when any VRF uses ESI mode"),
+                )?;
+            }
         }
         Ok(table)
+    }
+
+    fn overlay_index_esi_member_map(
+        &self,
+    ) -> Result<BTreeMap<EthernetSegmentIdentifier, BTreeSet<EvpnInstanceId>>, ConfigError> {
+        let mut out = BTreeMap::new();
+        for cfg in &self.ethernet_segments {
+            let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "ethernet_segments[esi={:?}]: invalid ESI needed for ESI overlay-index validation: {e}",
+                    cfg.esi
+                ),
+            })?;
+            let mut members = BTreeSet::new();
+            for &raw_vni in &cfg.member_vnis {
+                let vni =
+                    EvpnInstanceId::new(raw_vni).map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                        reason: format!(
+                            "ethernet_segments[esi={:?}]: invalid member VNI {raw_vni} needed for \
+                             ESI overlay-index validation: {e}",
+                            cfg.esi
+                        ),
+                    })?;
+                members.insert(vni);
+            }
+            out.insert(esi, members);
+        }
+        Ok(out)
     }
 
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
@@ -4327,12 +4375,8 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
             ),
         })?;
 
-    let overlay_index_mode = match cfg.overlay_index_mode {
-        OverlayIndexModeConfig::InterfaceLess => OverlayIndexMode::InterfaceLess,
-        OverlayIndexModeConfig::GatewayIp => OverlayIndexMode::GatewayIp,
-    };
-
-    IpVrf::new(
+    let (overlay_index_mode, esi_overlay_index) = parse_evpn_ip_vrf_overlay_index(cfg)?;
+    let vrf = IpVrf::new(
         cfg.name.clone(),
         id,
         rd,
@@ -4343,10 +4387,193 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
         cfg.l3vxlan_device.clone(),
         cfg.table_id,
     )
-    .map(|vrf| vrf.with_overlay_index_mode(overlay_index_mode))
     .map_err(|e| ConfigError::InvalidEvpnIpVrf {
         reason: e.to_string(),
-    })
+    })?;
+
+    if let Some(index) = esi_overlay_index {
+        Ok(vrf.with_esi_overlay_index(index.esi, index.mac, index.l2vni))
+    } else {
+        Ok(vrf.with_overlay_index_mode(overlay_index_mode))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedEsiOverlayIndex {
+    esi: EthernetSegmentIdentifier,
+    mac: MacAddress,
+    l2vni: Option<EvpnInstanceId>,
+}
+
+fn parse_evpn_ip_vrf_overlay_index(
+    cfg: &EvpnIpVrfConfig,
+) -> Result<(OverlayIndexMode, Option<ParsedEsiOverlayIndex>), ConfigError> {
+    let mode = match cfg.overlay_index_mode {
+        OverlayIndexModeConfig::InterfaceLess => OverlayIndexMode::InterfaceLess,
+        OverlayIndexModeConfig::GatewayIp => OverlayIndexMode::GatewayIp,
+        OverlayIndexModeConfig::Esi => OverlayIndexMode::Esi,
+    };
+    let l2vni = cfg
+        .overlay_index_l2vni
+        .map(EvpnInstanceId::new)
+        .transpose()
+        .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "name {:?}: invalid overlay_index_l2vni {:?}: {e}",
+                cfg.name, cfg.overlay_index_l2vni
+            ),
+        })?;
+    let esi = cfg
+        .overlay_index_esi
+        .as_deref()
+        .map(parse_esi)
+        .transpose()
+        .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "name {:?}: invalid overlay_index_esi {:?}: {e}",
+                cfg.name, cfg.overlay_index_esi
+            ),
+        })?;
+    let mac = cfg
+        .overlay_index_mac
+        .as_deref()
+        .map(parse_mac_address)
+        .transpose()
+        .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "name {:?}: invalid overlay_index_mac {:?}: {e}",
+                cfg.name, cfg.overlay_index_mac
+            ),
+        })?;
+
+    if mode != OverlayIndexMode::Esi {
+        if esi.is_some() || mac.is_some() || l2vni.is_some() {
+            return Err(ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: overlay_index_esi, overlay_index_mac, and \
+                     overlay_index_l2vni are only valid when overlay_index_mode = \"esi\"",
+                    cfg.name
+                ),
+            });
+        }
+        return Ok((mode, None));
+    }
+
+    let Some(esi) = esi else {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" requires overlay_index_esi",
+                cfg.name
+            ),
+        });
+    };
+    if esi == EthernetSegmentIdentifier::ZERO {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_esi must be non-zero for ESI overlay-index Type 5",
+                cfg.name
+            ),
+        });
+    }
+    let Some(mac) = mac else {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" requires overlay_index_mac",
+                cfg.name
+            ),
+        });
+    };
+    if !is_unicast_nonzero_mac(mac) {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mac must be a unicast non-zero MAC",
+                cfg.name
+            ),
+        });
+    }
+    Ok((mode, Some(ParsedEsiOverlayIndex { esi, mac, l2vni })))
+}
+
+fn validate_esi_overlay_index_vrf(
+    vrf: &IpVrf,
+    table: &IpVrfTable,
+    es_members_by_esi: &BTreeMap<EthernetSegmentIdentifier, BTreeSet<EvpnInstanceId>>,
+) -> Result<(), ConfigError> {
+    let esi = vrf
+        .overlay_index_esi
+        .ok_or_else(|| ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" requires overlay_index_esi",
+                vrf.name
+            ),
+        })?;
+    let Some(segment_members) = es_members_by_esi.get(&esi) else {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_esi {:02x?} does not match any configured \
+                 [[ethernet_segments]].esi",
+                vrf.name,
+                esi.octets()
+            ),
+        });
+    };
+    let linked =
+        table
+            .referenced_l2vnis(&vrf.name)
+            .ok_or_else(|| ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" requires at least one \
+                 [[evpn_instances]] with ip_vrf = {:?}",
+                    vrf.name, vrf.name
+                ),
+            })?;
+    if linked.is_empty() {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" requires at least one \
+                 [[evpn_instances]] with ip_vrf = {:?}",
+                vrf.name, vrf.name
+            ),
+        });
+    }
+    let selected = if let Some(vni) = vrf.overlay_index_l2vni {
+        if !linked.contains(&vni) {
+            return Err(ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: overlay_index_l2vni {} is not linked to this IP-VRF",
+                    vrf.name,
+                    vni.as_u32()
+                ),
+            });
+        }
+        vni
+    } else if linked.len() == 1 {
+        *linked.iter().next().expect("len checked")
+    } else {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_mode = \"esi\" with multiple linked L2VNIs \
+                 requires overlay_index_l2vni",
+                vrf.name
+            ),
+        });
+    };
+    if !segment_members.contains(&selected) {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "evpn_ip_vrfs[{}]: overlay_index_l2vni {} is not a member of overlay_index_esi {:02x?}",
+                vrf.name,
+                selected.as_u32(),
+                esi.octets()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn is_unicast_nonzero_mac(mac: MacAddress) -> bool {
+    let octets = mac.octets();
+    octets != [0; 6] && (octets[0] & 1) == 0
 }
 
 /// Parse a 10-byte ESI from operator text form

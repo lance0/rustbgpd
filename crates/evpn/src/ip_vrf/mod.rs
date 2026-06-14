@@ -31,7 +31,7 @@ pub use readiness::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_wire::{MacAddress, RouteDistinguisher};
+use rustbgpd_wire::{EthernetSegmentIdentifier, MacAddress, RouteDistinguisher};
 
 use crate::instance::EvpnInstanceId;
 use crate::route_target::RouteTarget;
@@ -87,6 +87,12 @@ pub enum OverlayIndexMode {
     /// MAC/IP route. Routes without an eligible via fall back to the
     /// Interface-less shape.
     GatewayIp,
+    /// RFC 9136 §4.3 ESI overlay index: the Type 5 carries a non-zero
+    /// ESI, a zero Gateway Address, and a Router's MAC extended
+    /// community naming the virtual appliance / transit-switch MAC.
+    /// Receivers resolve reachability through Ethernet A-D state for
+    /// the ESI.
+    Esi,
 }
 
 /// One local IP-VRF / L3VNI tenant served by this VTEP.
@@ -129,6 +135,19 @@ pub struct IpVrf {
     /// [`IpVrf::with_overlay_index_mode`] so the long-stable `new`
     /// signature (and its many call sites) stays put.
     pub overlay_index_mode: OverlayIndexMode,
+    /// ESI used when [`Self::overlay_index_mode`] is
+    /// [`OverlayIndexMode::Esi`]. `None` in all other modes.
+    pub overlay_index_esi: Option<EthernetSegmentIdentifier>,
+    /// Router's MAC extended community value used when
+    /// [`Self::overlay_index_mode`] is [`OverlayIndexMode::Esi`].
+    /// Distinct from [`Self::router_mac`], which remains the
+    /// interface-less PE/NVE router MAC.
+    pub overlay_index_mac: Option<MacAddress>,
+    /// Optional operator-selected L2VNI that disambiguates which local
+    /// EVI backs the ESI overlay when the IP-VRF links multiple L2VNIs.
+    /// The config layer validates that it is both linked to this IP-VRF
+    /// and a member of the configured ESI.
+    pub overlay_index_l2vni: Option<EvpnInstanceId>,
 }
 
 impl IpVrf {
@@ -201,6 +220,9 @@ impl IpVrf {
             l3vxlan_device,
             table_id,
             overlay_index_mode: OverlayIndexMode::default(),
+            overlay_index_esi: None,
+            overlay_index_mac: None,
+            overlay_index_l2vni: None,
         })
     }
 
@@ -210,6 +232,26 @@ impl IpVrf {
     #[must_use]
     pub fn with_overlay_index_mode(mut self, mode: OverlayIndexMode) -> Self {
         self.overlay_index_mode = mode;
+        if mode != OverlayIndexMode::Esi {
+            self.overlay_index_esi = None;
+            self.overlay_index_mac = None;
+            self.overlay_index_l2vni = None;
+        }
+        self
+    }
+
+    /// Set RFC 9136 §4.3 ESI overlay-index origination fields.
+    #[must_use]
+    pub fn with_esi_overlay_index(
+        mut self,
+        esi: EthernetSegmentIdentifier,
+        mac: MacAddress,
+        l2vni: Option<EvpnInstanceId>,
+    ) -> Self {
+        self.overlay_index_mode = OverlayIndexMode::Esi;
+        self.overlay_index_esi = Some(esi);
+        self.overlay_index_mac = Some(mac);
+        self.overlay_index_l2vni = l2vni;
         self
     }
 }

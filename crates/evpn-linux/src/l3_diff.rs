@@ -729,8 +729,8 @@ fn family_matches(prefix: EvpnIpPrefixValue, addr: IpAddr) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use rustbgpd_evpn::Ipv4Prefix;
     use rustbgpd_evpn::ip_vrf::{IpVrf, ProjectedIpPrefixRoute, project_ip_prefix_routes};
+    use rustbgpd_evpn::{EthernetSegmentIdentifier, Ipv4Prefix};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn mac(b: u8) -> MacAddress {
@@ -799,6 +799,7 @@ mod tests {
             prefix,
             next_hop,
             gateway,
+            esi: EthernetSegmentIdentifier::ZERO,
             l3vni: vni,
             route_targets: vec![format!("65000:{vni}").parse().unwrap()],
             router_mac: Some(rmac),

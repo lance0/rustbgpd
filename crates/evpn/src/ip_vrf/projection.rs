@@ -51,11 +51,14 @@
 //!
 //! ## Router MAC
 //!
-//! Interface-less Type 5 routes (Gateway Address zero) must carry a
-//! Router MAC extcomm — the inner destination MAC for symmetric IRB
-//! recursive lookup. Overlay-index Type 5 routes (non-zero Gateway
-//! Address) resolve that inner MAC recursively from a matching Type 2
-//! MAC/IP route in an L2VNI linked to the target IP-VRF.
+//! Interface-less Type 5 routes (Gateway Address zero, ESI zero) must
+//! carry a Router MAC extcomm — the inner destination MAC for symmetric
+//! IRB recursive lookup. GW-IP overlay-index Type 5 routes (non-zero
+//! Gateway Address, ESI zero) resolve that inner MAC recursively from a
+//! matching Type 2 MAC/IP route in an L2VNI linked to the target
+//! IP-VRF. ESI overlay-index Type 5 routes (non-zero ESI) are observed
+//! and dropped fail-closed until receive-side EAD protected recursion is
+//! implemented.
 //!
 //! ## Self-origination filter
 //!
@@ -67,7 +70,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EvpnIpPrefixValue, ExtendedCommunity, MacAddress, RouteDistinguisher};
+use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EvpnIpPrefixValue, ExtendedCommunity, MacAddress, RouteDistinguisher,
+};
 
 use crate::instance::EvpnInstanceId;
 use crate::ip_vrf::IpVrfId;
@@ -95,6 +100,11 @@ pub struct ProjectedIpPrefixRoute {
     /// non-zero values use RFC 9135 §9.2 overlay-index recursion
     /// through Type 2 MAC/IP state.
     pub gateway: IpAddr,
+    /// Type 5 Ethernet Segment Identifier. Non-zero values are RFC
+    /// 9136 §4.3 ESI overlay-index routes; receive-side EAD protected
+    /// recursion is not implemented yet, so projection drops them
+    /// fail-closed instead of treating them as Interface-less.
+    pub esi: EthernetSegmentIdentifier,
     /// L3VNI from the route's MPLS label slot (RFC 8365: VXLAN VNI
     /// carried in the MPLS label field).
     pub l3vni: u32,
@@ -290,6 +300,15 @@ pub enum DropReason {
         vrf: String,
         candidates: usize,
     },
+    /// The route uses RFC 9136 §4.3 ESI overlay-index semantics. The
+    /// outbound encoder can originate that shape, but receive-side
+    /// EAD protected recursion is not implemented yet; importing it as
+    /// Interface-less would program the wrong recursive path.
+    UnsupportedEsiOverlayIndex {
+        prefix: EvpnIpPrefixValue,
+        next_hop: IpAddr,
+        vrf: String,
+    },
     /// The route's `NEXT_HOP` matched one of our own IP-VRFs' VTEP IPs
     /// — reflected from a route reflector. The daemon would otherwise
     /// program a kernel route pointing at itself.
@@ -325,6 +344,7 @@ impl DropReason {
             Self::OverlayIndexNoLinkedL2Vni { .. } => "overlay_index_no_linked_l2vni",
             Self::UnresolvedOverlayIndexGateway { .. } => "unresolved_overlay_index_gateway",
             Self::AmbiguousOverlayIndexGateway { .. } => "ambiguous_overlay_index_gateway",
+            Self::UnsupportedEsiOverlayIndex { .. } => "unsupported_esi_overlay_index",
             Self::SelfOriginated { .. } => "self_originated",
             Self::L3VniMismatch { .. } => "l3vni_mismatch",
         }
@@ -338,6 +358,7 @@ impl DropReason {
             Self::OverlayIndexNoLinkedL2Vni { vrf, .. }
             | Self::UnresolvedOverlayIndexGateway { vrf, .. }
             | Self::AmbiguousOverlayIndexGateway { vrf, .. }
+            | Self::UnsupportedEsiOverlayIndex { vrf, .. }
             | Self::SelfOriginated { vrf, .. }
             | Self::L3VniMismatch { vrf, .. } => vrf,
             Self::NoMatchingIpVrf { .. } | Self::MissingRouterMac { .. } => UNSCOPED_DROP_VRF_LABEL,
@@ -388,6 +409,7 @@ where
 {
     enum PrefixResolution {
         OverlayIndex,
+        UnsupportedEsiOverlayIndex,
         InterfaceLess(MacAddress),
     }
 
@@ -416,7 +438,9 @@ where
 
         // Interface-less Type 5 still requires a Router MAC. Overlay-index
         // routes get their inner MAC from the resolved Type 2 MAC/IP route.
-        let resolution = if overlay_gateway {
+        let resolution = if route.esi != EthernetSegmentIdentifier::ZERO {
+            PrefixResolution::UnsupportedEsiOverlayIndex
+        } else if overlay_gateway {
             PrefixResolution::OverlayIndex
         } else if let Some(router_mac) = route.router_mac {
             PrefixResolution::InterfaceLess(router_mac)
@@ -453,6 +477,14 @@ where
                 continue;
             }
             let (next_hop, router_mac) = match resolution {
+                PrefixResolution::UnsupportedEsiOverlayIndex => {
+                    table.drops.push(DropReason::UnsupportedEsiOverlayIndex {
+                        prefix: route.prefix,
+                        next_hop: route.next_hop,
+                        vrf: vrf.name.clone(),
+                    });
+                    continue;
+                }
                 PrefixResolution::OverlayIndex => {
                     match resolve_overlay_index_gateway(vrfs, vrf, &route, &overlay_index) {
                         Ok(resolved) => (resolved.next_hop, resolved.mac),
@@ -654,6 +686,7 @@ mod tests {
             prefix,
             next_hop: nh.parse().unwrap(),
             gateway,
+            esi: EthernetSegmentIdentifier::ZERO,
             l3vni: 5000,
             route_targets: rts.iter().map(|s| rt(s)).collect(),
             router_mac: Some(mac()),
@@ -744,6 +777,26 @@ mod tests {
             table.drops()[0],
             DropReason::MissingRouterMac { .. }
         ));
+    }
+
+    #[test]
+    fn non_zero_esi_type5_drops_until_esi_recursion_is_supported() {
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        r.esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let table = project_ip_prefix_routes(&vrfs, vec![r]);
+        assert!(
+            table.is_empty(),
+            "ESI overlay-index Type 5 must not fall through as interface-less"
+        );
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::UnsupportedEsiOverlayIndex { .. }
+        ));
+        assert_eq!(
+            table.drops()[0].reason_label(),
+            "unsupported_esi_overlay_index"
+        );
     }
 
     #[test]

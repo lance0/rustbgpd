@@ -63,6 +63,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unit suite now pins GW-IP fallback plus via appears/disappears
   re-origination without a withdraw pulse. The test also withdraws
   the static route and asserts FRR drops the imported VRF route.
+- **RFC 9136 §4.3 ESI overlay-index Type 5 origination.**
+  `[[evpn_ip_vrfs]] overlay_index_mode = "esi"` now originates local
+  Type 5 routes with a configured non-zero ESI, zero Gateway Address,
+  L3VNI in the label slot, and a Router's MAC extended community naming
+  the configured virtual/transit MAC. The default remains
+  `"interface_less"` and the shipped `"gateway_ip"` mode is unchanged.
+  Config load fails closed unless the selected ESI exists in
+  `[[ethernet_segments]]`, the IP-VRF has at least one linked L2VNI,
+  ambiguous multi-L2VNI links specify `overlay_index_l2vni`, and that
+  L2VNI is a member of the selected ESI. This is an origination slice:
+  receive-side projection now preserves Type 5 ESI metadata and drops
+  non-zero-ESI routes fail-closed with `unsupported_esi_overlay_index`
+  until protected EAD recursion and a real-peer interop proof ship.
 
 ### Changed
 
@@ -74,8 +87,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the receipt wording and failure points remain transparent.
 - **Documented the EVPN standards-tail boundary.** The README, roadmap,
   comparison matrix, EVPN enablement guide, and ADR-0087 now distinguish the
-  near-term VXLAN/Linux alpha gaps (notably RFC 9136 ESI overlay-index
-  origination and protected-recursion interop) from demand-shaped
+  near-term VXLAN/Linux alpha gaps (notably overlay-index protected-recursion
+  interop beyond the shipped GW-IP proof and ESI origination) from demand-shaped
   service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
   The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:
