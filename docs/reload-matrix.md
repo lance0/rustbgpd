@@ -230,9 +230,11 @@ teardown, and `ip_vrf` relink. The runtime snapshot advances only after the
 coordinator and daemon actor converger accept the candidate. Unsupported
 shapes, missing EVPN actors, or actor convergence failure are pinned back to
 the committed runtime model and logged at `ERROR`, so repeated SIGHUPs keep
-surfacing the drift. Static `rustbgpd --diff` remains conservative for EVPN
-table edits because acceptance depends on the candidate shape and runtime actor
-availability.
+surfacing the drift. Static `rustbgpd --diff` is shape-aware: it lists
+coordinator-supported EVPN edits under reload-applied and keeps unsupported
+mixed edits or restart-only identity changes in restart-required. The static
+diff still cannot predict live actor availability or a later convergence
+failure; those remain runtime SIGHUP outcomes.
 
 | Section | Class | Notes |
 |---|---|---|

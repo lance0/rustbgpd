@@ -233,11 +233,11 @@ has it, no broad performance sprints without profile evidence.
   Still open from the arc: a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
-  fail closed today); shape-aware EVPN `--diff` classification so the static diff
-  can distinguish coordinator-supported
-  SIGHUP applies from restart-required identity changes (today it stays
-  conservative because actor availability and candidate shape are runtime
-  checks). Demand-shaped; keep as follow-up inventory.
+  fail closed today). **Done:** shape-aware EVPN `--diff` classification now
+  distinguishes coordinator-supported SIGHUP shapes from restart-required
+  identity/generic mixed changes; actor availability and convergence failure
+  remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
+  follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support; rustbgpd-managed
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
