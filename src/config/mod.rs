@@ -2643,11 +2643,15 @@ fn evpn_runtime_validate_additive_build_up_shape(
 }
 
 fn evpn_runtime_is_l2vni_swap_plan(plan: &EvpnRuntimePlan) -> bool {
-    !plan.evpn_instances.added.is_empty()
-        && !plan.evpn_instances.deleted.is_empty()
-        && plan.evpn_instances.redefined.is_empty()
-        && !plan.ip_vrfs.has_changes()
-        && !plan.ethernet_segments.has_changes()
+    let l2_change_classes = [
+        !plan.evpn_instances.added.is_empty(),
+        !plan.evpn_instances.deleted.is_empty(),
+        !plan.evpn_instances.redefined.is_empty(),
+    ]
+    .into_iter()
+    .filter(|changed| *changed)
+    .count();
+    l2_change_classes >= 2 && !plan.ip_vrfs.has_changes() && !plan.ethernet_segments.has_changes()
 }
 
 fn evpn_runtime_validate_l2vni_swap_shape(
@@ -2670,6 +2674,10 @@ fn evpn_runtime_validate_l2vni_swap_shape(
                     .ethernet_segments()
                     .iter()
                     .all(|segment| !segment.member_vnis.contains(&vni))
+        })
+    }) && plan.evpn_instances.redefined.iter().all(|&raw_vni| {
+        EvpnInstanceId::new(raw_vni).is_ok_and(|vni| {
+            current.instances().get(vni).is_some() && candidate.instances().get(vni).is_some()
         })
     })
 }
