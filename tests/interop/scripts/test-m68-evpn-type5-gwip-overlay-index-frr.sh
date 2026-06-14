@@ -60,7 +60,25 @@ frr_has_type5() {
 frr_type5_detail_has_gateway() {
     local detail
     detail=$(frr_vtysh "show bgp l2vpn evpn route detail")
-    echo "$detail" | grep -q "$TARGET_HOST" && echo "$detail" | grep -q "$GATEWAY_IP"
+    echo "$detail" | awk -v host="$TARGET_HOST" -v gw="$GATEWAY_IP" '
+        /^BGP routing table entry/ {
+            if (in_block && block ~ gw) {
+                found = 1
+            }
+            in_block = ($0 ~ host)
+            block = $0
+            next
+        }
+        in_block {
+            block = block "\n" $0
+        }
+        END {
+            if (in_block && block ~ gw) {
+                found = 1
+            }
+            exit(found ? 0 : 1)
+        }
+    '
 }
 
 frr_has_gateway_type2() {
@@ -69,17 +87,23 @@ frr_has_gateway_type2() {
 }
 
 frr_vrf_route_installed() {
-    local route_dump line
-    route_dump=$(frr_vtysh "show ip route vrf $TENANT_VRF")
-    line=$(echo "$route_dump" | grep -E "${TARGET_PREFIX//./\\.}" | head -1)
-    [ -n "$line" ] && echo "$line" | grep -qE "\\b$GATEWAY_IP\\b"
+    local route_json
+    route_json=$(frr_vtysh "show ip route vrf $TENANT_VRF $TARGET_PREFIX json")
+    echo "$route_json" | jq -e --arg prefix "$TARGET_PREFIX" --arg gw "$GATEWAY_IP" '
+        (($prefix as $p | .[$p] // []) | arrays) as $routes
+        | any($routes[]?;
+            ((.protocol // .proto // "") | tostring | test("bgp"; "i"))
+            and ([.. | objects | .ip? // empty] | any(. == $gw))
+        )
+    ' >/dev/null 2>&1
 }
 
 frr_kernel_route_installed() {
-    local line
-    line=$(docker exec "$PE2" ip route show vrf "$TENANT_VRF" "$TARGET_PREFIX" 2>/dev/null \
-        | head -1 || true)
-    [ -n "$line" ] && echo "$line" | grep -qE "\\bvia $GATEWAY_IP\\b"
+    local route_json
+    route_json=$(docker exec "$PE2" ip -j route show vrf "$TENANT_VRF" "$TARGET_PREFIX" 2>/dev/null || true)
+    echo "$route_json" | jq -e --arg prefix "$TARGET_PREFIX" --arg gw "$GATEWAY_IP" '
+        any(.[]?; (.dst == $prefix or (.dst == null and $prefix == "default")) and .gateway == $gw)
+    ' >/dev/null 2>&1
 }
 
 pe1_add_target_route() {

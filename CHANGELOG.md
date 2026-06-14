@@ -45,8 +45,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Gateway-IP Type 5 from a static VRF route, FRR receives it with
   `enable-resolve-overlay-index`, holds it unresolved until the
   companion Type 2 MAC/IP route appears, then imports the prefix into
-  the tenant VRF via the Gateway Address. The test also withdraws the
-  static route and asserts FRR drops the imported VRF route.
+  the tenant VRF via the Gateway Address. The protected-recursion
+  checks are target-scoped through FRR/kernel route JSON, and the
+  unit suite now pins GW-IP fallback plus via appears/disappears
+  re-origination without a withdraw pulse. The test also withdraws
+  the static route and asserts FRR drops the imported VRF route.
 
 ### Fixed
 

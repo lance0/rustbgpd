@@ -1905,4 +1905,119 @@ mod tests {
         // 3 — the in-place re-inject must not double count.
         assert_eq!(h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()), 2);
     }
+
+    /// A route whose via appears after first origination re-originates
+    /// in place: interface-less -> GW-IP, same key, no withdraw pulse.
+    #[tokio::test]
+    async fn gateway_mode_via_appears_reoriginates_in_place() {
+        let v = gw_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation(100, [192, 168, 50, 0], 24),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        log.lock().unwrap().clear(); // drop the cold-start injects
+
+        let target = (
+            IpVrfId::new(100).unwrap(),
+            EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 50, 0), 24)),
+        );
+        let key_before = originated.get(&target).unwrap().key;
+        assert_eq!(
+            originated.get(&target).unwrap().gateway,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+
+        let mut with_via = HashMap::new();
+        with_via.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.1.1.5"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(with_via));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        let entry = originated.get(&target).unwrap();
+        assert_eq!(
+            entry.key, key_before,
+            "adding a via must not change the Type 5 route identity",
+        );
+        assert_eq!(entry.gateway, "10.1.1.5".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            inject_gateway_for(&log, [192, 168, 50, 0]),
+            vec!["10.1.1.5".parse::<IpAddr>().unwrap()],
+            "exactly one in-place re-inject should advertise the new gateway",
+        );
+        assert_eq!(withdraw_count(&log), 0, "no withdraw when a via appears");
+        assert_eq!(h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()), 2);
+    }
+
+    /// A route whose via disappears after first origination
+    /// re-originates in place: GW-IP -> interface-less, same key, no
+    /// withdraw pulse.
+    #[tokio::test]
+    async fn gateway_mode_via_disappears_reoriginates_interface_less_in_place() {
+        let v = gw_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation_via(100, [192, 168, 50, 0], 24, "10.1.1.5"),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        log.lock().unwrap().clear(); // drop the cold-start injects
+
+        let target = (
+            IpVrfId::new(100).unwrap(),
+            EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 50, 0), 24)),
+        );
+        let key_before = originated.get(&target).unwrap().key;
+        assert_eq!(
+            originated.get(&target).unwrap().gateway,
+            "10.1.1.5".parse::<IpAddr>().unwrap()
+        );
+
+        let mut no_via = HashMap::new();
+        no_via.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![
+                connected(100, [10, 1, 1, 0], 24),
+                observation(100, [192, 168, 50, 0], 24),
+            ],
+        );
+        h.obs_tx.send_replace(Arc::new(no_via));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        let entry = originated.get(&target).unwrap();
+        assert_eq!(
+            entry.key, key_before,
+            "removing a via must not change the Type 5 route identity",
+        );
+        assert_eq!(entry.gateway, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            inject_gateway_for(&log, [192, 168, 50, 0]),
+            vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)],
+            "exactly one in-place re-inject should restore interface-less shape",
+        );
+        assert_eq!(withdraw_count(&log), 0, "no withdraw when a via disappears");
+        assert_eq!(h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()), 2);
+    }
 }

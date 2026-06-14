@@ -167,3 +167,53 @@ fn gateway_ip_type5_holds_unresolved_when_companion_type2_absent() {
         "unresolved_overlay_index_gateway",
     );
 }
+
+#[test]
+fn gateway_ip_mode_fallback_type5_resolves_through_interface_less_projection() {
+    // ADR-0087 decision 1: a route in gateway_ip mode whose via was
+    // not eligible falls back to the interface-less wire shape. This
+    // pins the fallback to the receive-side projection too: Gateway
+    // Address zero + Router MAC extcomm must still import exactly like
+    // the pre-ADR-0087 Type 5 shape.
+    let vrfs = gw_vrf_table(100);
+    let vrf = vrfs.get("tenant-blue").unwrap();
+    let local = LocalIpRoute::v4(Ipv4Prefix::new("192.168.50.0".parse().unwrap(), 24));
+    let originated = originate_ip_prefix_route(vrf, &local).unwrap();
+
+    if let EvpnRoute::IpPrefix(p) = &originated.route {
+        assert_eq!(
+            p.gateway,
+            ip("0.0.0.0"),
+            "fallback route uses the interface-less Gateway Address",
+        );
+    } else {
+        panic!("expected Type 5");
+    }
+    let has_rmac = originated.attributes.iter().any(|a| {
+        matches!(a, PathAttribute::ExtendedCommunities(c)
+            if c.iter().any(|x| x.as_router_mac().is_some()))
+    });
+    assert!(
+        has_rmac,
+        "fallback route must keep the Router MAC extcomm for interface-less projection",
+    );
+
+    let projected =
+        originated_to_projected(&originated.route, &originated.attributes, ip("10.0.0.9"));
+    let table = project_ip_prefix_routes_with_overlay_index(&vrfs, vec![projected], Vec::new());
+
+    assert!(
+        table.drops().is_empty(),
+        "fallback interface-less route must resolve, got drops: {:?}",
+        table.drops(),
+    );
+    let entries: Vec<_> = table.for_vrf(IpVrfId::new(5000).unwrap()).collect();
+    assert_eq!(entries.len(), 1, "exactly one resolved fallback prefix");
+    let entry = entries[0].1;
+    assert_eq!(entry.next_hop, ip("10.0.0.9"));
+    assert_eq!(
+        entry.router_mac,
+        MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]),
+    );
+    assert_eq!(entry.l3vni, 5000);
+}
