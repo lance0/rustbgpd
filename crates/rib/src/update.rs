@@ -313,6 +313,8 @@ pub enum RibUpdate {
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.
         peer: IpAddr,
+        /// Transport session identity that emitted the update.
+        session_id: u64,
         /// Optional peer-group membership.
         peer_group: Option<String>,
     },

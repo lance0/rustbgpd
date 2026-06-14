@@ -1135,6 +1135,7 @@ async fn query_peer_groups_returns_current_policy_context() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::SetPeerPolicyContext {
         peer,
+        session_id: 0,
         peer_group: Some("transit".to_string()),
     })
     .await
@@ -6443,6 +6444,46 @@ fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
 }
 
 #[tokio::test]
+async fn stale_peer_policy_context_from_superseded_session_is_discarded() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let _out_rx = establish_peer(&mut manager, peer);
+
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: Some("active".to_string()),
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("active")
+    );
+
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 7,
+        peer_group: Some("stale".to_string()),
+    });
+    assert_eq!(
+        manager.peer_group.get(&peer).map(String::as_str),
+        Some("active"),
+        "stale policy context from a superseded session must not overwrite the active registration"
+    );
+
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: None,
+    });
+    assert!(
+        !manager.peer_group.contains_key(&peer),
+        "matching session id must still be able to clear policy context"
+    );
+}
+
+#[tokio::test]
 async fn llgr_reestablish_uses_captured_stale_routes_time() {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -6525,6 +6566,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
     let _out_rx = establish_peer(&mut manager, peer);
     manager.handle_update(RibUpdate::SetPeerPolicyContext {
         peer,
+        session_id: 0,
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {
@@ -6582,6 +6624,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
     let _out_rx = establish_peer(&mut manager, peer);
     manager.handle_update(RibUpdate::SetPeerPolicyContext {
         peer,
+        session_id: 0,
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {
@@ -6645,6 +6688,7 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
     let _out_rx = establish_peer(&mut manager, peer);
     manager.handle_update(RibUpdate::SetPeerPolicyContext {
         peer,
+        session_id: 0,
         peer_group: Some("edge".to_string()),
     });
     manager.handle_update(RibUpdate::RoutesReceived {

@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Completed the RIB session-identity gate for policy-context updates.**
+  `SetPeerPolicyContext` is now stamped with the transport `session_id`
+  and discarded when it comes from a superseded session, matching the
+  existing stale-message contract for routes, EoR, route-refresh, and
+  ORF updates. The
+  `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter now
+  includes the bounded `policy_context` kind. Matching-session and
+  unregistered legacy behavior are unchanged.
+
 ## [0.39.0] — 2026-06-13
 
 ### Added
