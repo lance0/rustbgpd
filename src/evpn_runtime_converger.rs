@@ -973,14 +973,32 @@ impl EvpnRuntimeActorConverger {
         let mut redefined_old_instances = Vec::with_capacity(changes.redefined.len());
         for (old_instance, new_instance) in &changes.redefined {
             let redefined_vni = old_instance.id;
-            let originate_outcome = {
+            // Re-key the redefined VNI's IMET under one guard (withdraw old,
+            // originate new), but never call rollback while the guard is held:
+            // rollback_l2vni_mixed re-locks imet_controller, and tokio's Mutex
+            // is not reentrant, so an in-guard rollback would deadlock the
+            // converge task. Capture the outcome, drop the guard, then handle.
+            let rekey = {
                 let mut imet = self.imet_controller.lock().await;
                 let withdraw_outcome = imet.withdraw_instance(redefined_vni, &self.rib_tx).await;
-                if !matches!(
+                if matches!(
                     withdraw_outcome,
                     evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
                         | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
                 ) {
+                    Ok(imet
+                        .originate_instance(new_instance.clone(), &self.rib_tx)
+                        .await)
+                } else {
+                    Err(withdraw_outcome)
+                }
+            };
+            // Track the in-flight old instance before any rollback so a partial
+            // withdraw (e.g. ReplyDropped) is force-restored rather than left
+            // withdrawn while the rollback reports success.
+            redefined_old_instances.push(old_instance.clone());
+            match rekey {
+                Err(withdraw_outcome) => {
                     let restored = self
                         .rollback_l2vni_mixed(
                             current,
@@ -997,31 +1015,30 @@ impl EvpnRuntimeActorConverger {
                         ),
                     ));
                 }
-                imet.originate_instance(new_instance.clone(), &self.rib_tx)
-                    .await
-            };
-            redefined_old_instances.push(old_instance.clone());
-            if !matches!(
-                originate_outcome,
-                evpn_imet::ImetOriginateOutcome::Originated { .. }
-                    | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
-                    | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
-            ) {
-                let restored = self
-                    .rollback_l2vni_mixed(
-                        current,
-                        &originated_added,
-                        &[],
-                        &redefined_old_instances,
-                        ip_vrf_metadata_changed,
-                    )
-                    .await;
-                return Err(l2vni_swap_failure(
-                    restored,
-                    &format!(
-                        "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
-                    ),
-                ));
+                Ok(originate_outcome) => {
+                    if !matches!(
+                        originate_outcome,
+                        evpn_imet::ImetOriginateOutcome::Originated { .. }
+                            | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
+                            | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
+                    ) {
+                        let restored = self
+                            .rollback_l2vni_mixed(
+                                current,
+                                &originated_added,
+                                &[],
+                                &redefined_old_instances,
+                                ip_vrf_metadata_changed,
+                            )
+                            .await;
+                        return Err(l2vni_swap_failure(
+                            restored,
+                            &format!(
+                                "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
+                            ),
+                        ));
+                    }
+                }
             }
         }
 
@@ -7308,6 +7325,117 @@ table_id = 6000
                 rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == added_rd
             )),
             "mixed composer should originate the added L2VNI's IMET route; injected {injected:?}"
+        );
+
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_l2vni_mixed_redefine_withdraw_failure_rolls_back_without_deadlock()
+     {
+        // Regression: the redefine withdraw-failure path used to call
+        // rollback_l2vni_mixed while still holding the imet_controller guard.
+        // rollback re-locks the (non-reentrant) Mutex, so the converge task
+        // deadlocked. Drive a mixed compose (add 300 + redefine 100 + delete
+        // 200) where the redefined VNI's old-RD IMET withdraw is rejected while
+        // an added VNI is already originated, and assert converge RETURNS an
+        // error within a bound rather than hanging.
+        let current =
+            runtime_model_from_candidate_toml(two_l2vni_linked_ip_vrf_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(
+            l2vni_mixed_redefine_linked_ip_vrf_runtime_candidate_toml(),
+        );
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let redefined_vni = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let old_redefined_rd = current.instances().get(redefined_vni).unwrap().rd;
+
+        // RIB responder: accept injects and all withdraws EXCEPT the redefined
+        // VNI's committed old-RD IMET, whose withdraw is rejected to force the
+        // redefine rollback leg (with an already-originated added VNI present).
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let _rib = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        let reject = matches!(
+                            key,
+                            rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if rd == old_redefined_rd
+                        );
+                        let _ = reply.send(if reject {
+                            Err(RibCommandError::internal("withdraw rejected"))
+                        } else {
+                            Ok(())
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let _ = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            converger.converge(&current, &candidate, &plan),
+        )
+        .await
+        .expect("converge must return rather than deadlock on the redefine rollback leg");
+        assert!(
+            result.is_err(),
+            "a rejected redefine IMET withdraw must surface as a converge error"
         );
 
         originator_handle.shutdown().await;
