@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shape-aware EVPN runtime `--diff` classification.** Static config
+  diffs now put ADR-0063/ADR-0085 coordinator-supported EVPN shapes
+  (single L2VNI/IP-VRF/ES edits, additive build-up, tenant teardown,
+  `ip_vrf` relink, and ES binding-only edits) in the reload-applied
+  bucket instead of blanket restart-required. Unsupported mixed edits
+  and restart-only IP-VRF identity changes remain restart-required,
+  matching SIGHUP's runtime behavior more closely while still leaving
+  actor availability/convergence failures as runtime outcomes.
+
 ## [0.39.0] — 2026-06-13
 
 ### Added

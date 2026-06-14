@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use rustbgpd_evpn::{
     DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
-    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode,
-    RedundancyMode, RouteTarget,
+    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeCandidate, EvpnRuntimeModel, EvpnRuntimePlan,
+    IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -1475,6 +1475,39 @@ pub struct ConfigDiff {
     /// peer only on its next session establishment). Diagnostic
     /// retention only; never affects which routes are accepted.
     pub policy_explain_changed: bool,
+    /// Shape-aware ADR-0063 / ADR-0085 classification for EVPN runtime
+    /// table changes. The raw `evpn_*_changed` booleans above still say
+    /// which TOML tables moved; this field says whether SIGHUP can route
+    /// that specific shape through the EVPN runtime coordinator or must
+    /// leave it restart-required.
+    pub evpn_runtime_change_class: EvpnRuntimeChangeClass,
+}
+
+/// Static SIGHUP classification for EVPN runtime table edits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvpnRuntimeChangeClass {
+    /// No `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, or
+    /// `[[ethernet_segments]]` TOML changed.
+    Unchanged,
+    /// The edit is in an ADR-0063/0085 shape the runtime coordinator
+    /// can hot-apply on SIGHUP, subject to the live actor being
+    /// present and accepting the candidate.
+    ReloadApplied,
+    /// The edit is a generic/mixed/identity shape the current
+    /// runtime coordinator rejects, or the diff could not resolve a
+    /// typed EVPN model defensively. A restart is required.
+    RestartRequired,
+}
+
+impl EvpnRuntimeChangeClass {
+    const fn is_reload_applied(self) -> bool {
+        matches!(self, Self::ReloadApplied)
+    }
+
+    const fn is_restart_required(self) -> bool {
+        matches!(self, Self::RestartRequired)
+    }
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1602,6 +1635,7 @@ impl ConfigDiff {
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
+            || self.evpn_runtime_change_class.is_reload_applied()
     }
 
     /// Changes that require a full daemon restart.
@@ -1612,9 +1646,7 @@ impl ConfigDiff {
             || self.mrt_changed
             || self.policy.import_changed
             || self.policy.export_changed
-            || self.evpn_instances_changed
-            || self.evpn_ip_vrfs_changed
-            || self.ethernet_segments_changed
+            || self.evpn_runtime_change_class.is_restart_required()
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
@@ -1851,6 +1883,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .unsupported_sections
             .push("[global].honor_blackhole".to_string());
     }
+    if diff.evpn_runtime_change_class.is_reload_applied() {
+        class
+            .unsupported_sections
+            .push("EVPN runtime coordinator".to_string());
+    }
 
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
@@ -1864,17 +1901,17 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if diff.mrt_changed {
         class.restart_required_sections.push("[mrt]".to_string());
     }
-    if diff.evpn_instances_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed {
         class
             .restart_required_sections
             .push("[[evpn_instances]]".to_string());
     }
-    if diff.evpn_ip_vrfs_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed {
         class
             .restart_required_sections
             .push("[[evpn_ip_vrfs]]".to_string());
     }
-    if diff.ethernet_segments_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed {
         class
             .restart_required_sections
             .push("[[ethernet_segments]]".to_string());
@@ -2024,6 +2061,11 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
+            "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
+            "evpn_runtime_change_class": diff.evpn_runtime_change_class,
+            "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
+            "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_ip_vrfs_changed,
+            "ethernet_segments_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.ethernet_segments_changed,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -2031,9 +2073,10 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "rpki_changed": diff.rpki_changed,
             "bmp_changed": diff.bmp_changed,
             "mrt_changed": diff.mrt_changed,
-            "evpn_instances_changed": diff.evpn_instances_changed,
-            "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
-            "ethernet_segments_changed": diff.ethernet_segments_changed,
+            "evpn_runtime_change_class": diff.evpn_runtime_change_class,
+            "evpn_instances_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed,
+            "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed,
+            "ethernet_segments_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed,
             "fib_tables_requires_restart": diff.fib_tables_requires_restart,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
@@ -2228,6 +2271,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
+        if diff.evpn_runtime_change_class.is_reload_applied() {
+            let _ = writeln!(
+                out,
+                "  {} EVPN runtime model hot-applied through the ADR-0063 coordinator",
+                style.change_marker
+            );
+        }
     }
 
     let mut restart_sections = Vec::new();
@@ -2243,13 +2293,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.mrt_changed {
         restart_sections.push("[mrt]");
     }
-    if diff.evpn_instances_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed {
         restart_sections.push("[[evpn_instances]]");
     }
-    if diff.evpn_ip_vrfs_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed {
         restart_sections.push("[[evpn_ip_vrfs]]");
     }
-    if diff.ethernet_segments_changed {
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
     if diff.fib_tables_requires_restart {
@@ -2363,6 +2413,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         || old.global.allow_blackhole_broad_prefixes != new.global.allow_blackhole_broad_prefixes
         || ((old.global.install_blackhole_discard || new.global.install_blackhole_discard)
             && old.global.honor_blackhole != new.global.honor_blackhole);
+    let evpn_runtime_change_class = classify_evpn_runtime_change(old, new);
 
     ConfigDiff {
         neighbors,
@@ -2389,7 +2440,477 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         neighbor_tcp_ao_changed,
         bfd_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
+        evpn_runtime_change_class,
     }
+}
+
+fn evpn_runtime_config_changed(old: &Config, new: &Config) -> bool {
+    old.evpn_instances != new.evpn_instances
+        || old.evpn_ip_vrfs != new.evpn_ip_vrfs
+        || old.ethernet_segments != new.ethernet_segments
+}
+
+fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChangeClass {
+    if !evpn_runtime_config_changed(old, new) {
+        return EvpnRuntimeChangeClass::Unchanged;
+    }
+    let Ok(current) = evpn_runtime_model_from_config(old) else {
+        return EvpnRuntimeChangeClass::RestartRequired;
+    };
+    let Ok(candidate) = evpn_runtime_candidate_from_config(new) else {
+        return EvpnRuntimeChangeClass::RestartRequired;
+    };
+    let plan = current.plan_candidate(&candidate);
+    if evpn_runtime_plan_is_reload_applied(&current, &candidate, &plan) {
+        EvpnRuntimeChangeClass::ReloadApplied
+    } else {
+        EvpnRuntimeChangeClass::RestartRequired
+    }
+}
+
+fn evpn_runtime_model_from_config(config: &Config) -> Result<EvpnRuntimeModel, ConfigError> {
+    let instances = config.resolve_evpn_instances()?;
+    let ip_vrfs = config.resolve_evpn_ip_vrfs()?;
+    let ethernet_segments = config.resolve_ethernet_segments()?;
+    Ok(EvpnRuntimeModel::startup(
+        instances,
+        ip_vrfs,
+        ethernet_segments,
+    ))
+}
+
+fn evpn_runtime_candidate_from_config(
+    config: &Config,
+) -> Result<EvpnRuntimeCandidate, ConfigError> {
+    Ok(EvpnRuntimeCandidate::new(
+        config.resolve_evpn_instances()?,
+        config.resolve_evpn_ip_vrfs()?,
+        config.resolve_ethernet_segments()?,
+    ))
+}
+
+fn evpn_runtime_plan_is_reload_applied(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if plan.is_noop() {
+        // ADR-0085 binding-only edits change the TOML
+        // `[[ethernet_segments]]` row but not the EVPN domain model.
+        // SIGHUP still commits them so the binding watcher republishes.
+        return true;
+    }
+    if evpn_runtime_is_tenant_teardown_plan(plan, current) {
+        return evpn_runtime_validate_tenant_teardown_shape(current, candidate, plan);
+    }
+    if evpn_runtime_is_ip_vrf_relink_plan(plan) {
+        return true;
+    }
+    if evpn_runtime_is_additive_build_up_plan(plan) {
+        return evpn_runtime_validate_additive_build_up_shape(current, candidate, plan);
+    }
+    if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
+        return false;
+    }
+
+    if plan.evpn_instances.has_changes() {
+        return evpn_runtime_l2vni_shape_is_reload_applied(current, candidate, plan);
+    }
+    if plan.ip_vrfs.has_changes() {
+        return evpn_runtime_ip_vrf_shape_is_reload_applied(current, candidate, plan);
+    }
+    if plan.ethernet_segments.has_changes() {
+        return evpn_runtime_es_shape_is_reload_applied(current, candidate, plan);
+    }
+    false
+}
+
+fn evpn_runtime_is_ip_vrf_relink_plan(plan: &EvpnRuntimePlan) -> bool {
+    plan.ip_vrf_references_changed
+        && !plan.evpn_instances.has_changes()
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
+}
+
+fn evpn_runtime_is_additive_build_up_plan(plan: &EvpnRuntimePlan) -> bool {
+    let no_deletes_or_redefines = plan.evpn_instances.deleted.is_empty()
+        && plan.evpn_instances.redefined.is_empty()
+        && plan.ip_vrfs.deleted.is_empty()
+        && plan.ip_vrfs.redefined.is_empty()
+        && plan.ethernet_segments.deleted.is_empty()
+        && plan.ethernet_segments.redefined.is_empty();
+    let has_add = !plan.evpn_instances.added.is_empty()
+        || !plan.ip_vrfs.added.is_empty()
+        || !plan.ethernet_segments.added.is_empty();
+    if !(no_deletes_or_redefines && has_add) {
+        return false;
+    }
+    let resource_types_added = [
+        !plan.evpn_instances.added.is_empty(),
+        !plan.ip_vrfs.added.is_empty(),
+        !plan.ethernet_segments.added.is_empty(),
+    ]
+    .into_iter()
+    .filter(|changed| *changed)
+    .count();
+    resource_types_added > 1
+        || plan.evpn_instances.added.len() > 1
+        || plan.ip_vrfs.added.len() > 1
+        || plan.ethernet_segments.added.len() > 1
+}
+
+fn evpn_runtime_validate_additive_build_up_shape(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
+        return false;
+    }
+    plan.evpn_instances.added.iter().all(|&raw_vni| {
+        EvpnInstanceId::new(raw_vni).is_ok_and(|vni| {
+            current.instances().get(vni).is_none() && candidate.instances().get(vni).is_some()
+        })
+    }) && plan.ip_vrfs.added.iter().all(|name| {
+        current.ip_vrfs().get(name).is_none() && candidate.ip_vrfs().get(name).is_some()
+    }) && plan.ethernet_segments.added.iter().all(|esi| {
+        current
+            .ethernet_segments()
+            .iter()
+            .all(|segment| segment.esi != *esi)
+            && candidate
+                .ethernet_segments()
+                .iter()
+                .find(|segment| segment.esi == *esi)
+                .is_some_and(|segment| {
+                    !segment.member_vnis.is_empty()
+                        && segment
+                            .member_vnis
+                            .iter()
+                            .all(|&vni| candidate.instances().get(vni).is_some())
+                })
+    })
+}
+
+fn evpn_runtime_is_tenant_teardown_plan(
+    plan: &EvpnRuntimePlan,
+    current: &EvpnRuntimeModel,
+) -> bool {
+    let no_adds = plan.evpn_instances.added.is_empty()
+        && plan.ip_vrfs.added.is_empty()
+        && plan.ethernet_segments.added.is_empty();
+    let no_l2_ipvrf_redefine =
+        plan.evpn_instances.redefined.is_empty() && plan.ip_vrfs.redefined.is_empty();
+    let has_deletion = !plan.evpn_instances.deleted.is_empty()
+        || !plan.ip_vrfs.deleted.is_empty()
+        || !plan.ethernet_segments.deleted.is_empty();
+    if !(no_adds && no_l2_ipvrf_redefine && has_deletion) {
+        return false;
+    }
+    let resource_types_changed = [
+        plan.evpn_instances.has_changes(),
+        plan.ip_vrfs.has_changes(),
+        plan.ethernet_segments.has_changes(),
+    ]
+    .into_iter()
+    .filter(|changed| *changed)
+    .count();
+    let multi_resource = resource_types_changed > 1;
+    let multi_element = plan.evpn_instances.deleted.len() > 1
+        || plan.ip_vrfs.deleted.len() > 1
+        || plan.ethernet_segments.deleted.len() > 1;
+    let es_member_l2vni_deleted = plan.evpn_instances.deleted.iter().any(|&raw| {
+        EvpnInstanceId::new(raw).is_ok_and(|vni| {
+            current
+                .ethernet_segments()
+                .iter()
+                .any(|segment| segment.member_vnis.contains(&vni))
+        })
+    });
+    let referenced_ip_vrf_deleted = plan
+        .ip_vrfs
+        .deleted
+        .iter()
+        .any(|name| current.ip_vrfs().is_referenced(name));
+
+    multi_resource || multi_element || es_member_l2vni_deleted || referenced_ip_vrf_deleted
+}
+
+fn evpn_runtime_validate_tenant_teardown_shape(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if !plan.evpn_instances.added.is_empty()
+        || !plan.ip_vrfs.added.is_empty()
+        || !plan.ethernet_segments.added.is_empty()
+        || !plan.evpn_instances.redefined.is_empty()
+        || !plan.ip_vrfs.redefined.is_empty()
+    {
+        return false;
+    }
+    if plan.evpn_instances.deleted.is_empty()
+        && plan.ip_vrfs.deleted.is_empty()
+        && plan.ethernet_segments.deleted.is_empty()
+    {
+        return false;
+    }
+
+    let mut deleted_vnis = BTreeSet::new();
+    for &raw_vni in &plan.evpn_instances.deleted {
+        let Ok(vni) = EvpnInstanceId::new(raw_vni) else {
+            return false;
+        };
+        if current.instances().get(vni).is_none() || candidate.instances().get(vni).is_some() {
+            return false;
+        }
+        deleted_vnis.insert(vni);
+    }
+
+    for name in &plan.ip_vrfs.deleted {
+        if current.ip_vrfs().get(name).is_none() || candidate.ip_vrfs().get(name).is_some() {
+            return false;
+        }
+        let refs = current
+            .ip_vrfs()
+            .referenced_l2vnis(name)
+            .cloned()
+            .unwrap_or_default();
+        if refs.iter().any(|vni| !deleted_vnis.contains(vni)) {
+            return false;
+        }
+    }
+
+    for esi in &plan.ethernet_segments.deleted {
+        if !current
+            .ethernet_segments()
+            .iter()
+            .any(|segment| segment.esi == *esi)
+            || candidate
+                .ethernet_segments()
+                .iter()
+                .any(|segment| segment.esi == *esi)
+        {
+            return false;
+        }
+    }
+
+    for esi in &plan.ethernet_segments.redefined {
+        let Some(cur) = current
+            .ethernet_segments()
+            .iter()
+            .find(|segment| segment.esi == *esi)
+        else {
+            return false;
+        };
+        let Some(cand) = candidate
+            .ethernet_segments()
+            .iter()
+            .find(|segment| segment.esi == *esi)
+        else {
+            return false;
+        };
+        let member_shrink_only = cand.member_vnis.len() < cur.member_vnis.len()
+            && cand
+                .member_vnis
+                .iter()
+                .all(|vni| cur.member_vnis.contains(vni))
+            && {
+                let mut probe = cur.clone();
+                probe.member_vnis.clone_from(&cand.member_vnis);
+                &probe == cand
+            };
+        if !member_shrink_only {
+            return false;
+        }
+    }
+
+    candidate.ethernet_segments().iter().all(|segment| {
+        segment
+            .member_vnis
+            .iter()
+            .all(|vni| !deleted_vnis.contains(vni))
+    })
+}
+
+fn evpn_runtime_no_unexpected_relink(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if !plan.ip_vrf_references_changed {
+        return true;
+    }
+    let touched: BTreeSet<EvpnInstanceId> = plan
+        .evpn_instances
+        .added
+        .iter()
+        .chain(plan.evpn_instances.deleted.iter())
+        .filter_map(|raw| EvpnInstanceId::new(*raw).ok())
+        .collect();
+    let current_links = current.ip_vrfs().l2vni_link_map();
+    let candidate_links = candidate.ip_vrfs().l2vni_link_map();
+    let mut vnis: BTreeSet<EvpnInstanceId> = current_links.keys().copied().collect();
+    vnis.extend(candidate_links.keys().copied());
+    vnis.into_iter()
+        .all(|vni| current_links.get(&vni) == candidate_links.get(&vni) || touched.contains(&vni))
+}
+
+fn evpn_runtime_l2vni_shape_is_reload_applied(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if plan.ip_vrfs.has_changes() || plan.ethernet_segments.has_changes() {
+        return false;
+    }
+    if !plan.evpn_instances.added.is_empty() {
+        return plan.evpn_instances.added.len() == 1
+            && plan.evpn_instances.deleted.is_empty()
+            && plan.evpn_instances.redefined.is_empty()
+            && EvpnInstanceId::new(plan.evpn_instances.added[0]).is_ok_and(|vni| {
+                current.instances().get(vni).is_none() && candidate.instances().get(vni).is_some()
+            });
+    }
+    if !plan.evpn_instances.deleted.is_empty() {
+        return plan.evpn_instances.deleted.len() == 1
+            && plan.evpn_instances.redefined.is_empty()
+            && EvpnInstanceId::new(plan.evpn_instances.deleted[0]).is_ok_and(|vni| {
+                current.instances().get(vni).is_some()
+                    && candidate.instances().get(vni).is_none()
+                    && !current
+                        .ethernet_segments()
+                        .iter()
+                        .any(|segment| segment.member_vnis.contains(&vni))
+            });
+    }
+    plan.evpn_instances.redefined.len() == 1
+        && plan.evpn_instances.added.is_empty()
+        && plan.evpn_instances.deleted.is_empty()
+        && EvpnInstanceId::new(plan.evpn_instances.redefined[0]).is_ok_and(|vni| {
+            current.instances().get(vni).is_some()
+                && candidate.instances().get(vni).is_some()
+                && current.ip_vrfs() == candidate.ip_vrfs()
+        })
+}
+
+fn evpn_runtime_ip_vrf_shape_is_reload_applied(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if plan.evpn_instances.has_changes() || plan.ethernet_segments.has_changes() {
+        return false;
+    }
+    if !plan.ip_vrfs.added.is_empty() {
+        return plan.ip_vrfs.added.len() == 1
+            && plan.ip_vrfs.deleted.is_empty()
+            && plan.ip_vrfs.redefined.is_empty()
+            && current.ip_vrfs().get(&plan.ip_vrfs.added[0]).is_none()
+            && candidate.ip_vrfs().get(&plan.ip_vrfs.added[0]).is_some();
+    }
+    if !plan.ip_vrfs.deleted.is_empty() {
+        let name = &plan.ip_vrfs.deleted[0];
+        return plan.ip_vrfs.deleted.len() == 1
+            && plan.ip_vrfs.redefined.is_empty()
+            && current.ip_vrfs().get(name).is_some()
+            && candidate.ip_vrfs().get(name).is_none()
+            && !current.ip_vrfs().is_referenced(name);
+    }
+    if plan.ip_vrfs.redefined.len() != 1
+        || !plan.ip_vrfs.added.is_empty()
+        || !plan.ip_vrfs.deleted.is_empty()
+    {
+        return false;
+    }
+    let name = &plan.ip_vrfs.redefined[0];
+    let Some(old) = current.ip_vrfs().get(name) else {
+        return false;
+    };
+    let Some(new) = candidate.ip_vrfs().get(name) else {
+        return false;
+    };
+    let current_refs = current
+        .ip_vrfs()
+        .referenced_l2vnis(name)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_refs = candidate
+        .ip_vrfs()
+        .referenced_l2vnis(name)
+        .cloned()
+        .unwrap_or_default();
+    old.id == new.id
+        && old.vrf_device == new.vrf_device
+        && old.l3vxlan_device == new.l3vxlan_device
+        && old.table_id == new.table_id
+        && current_refs == candidate_refs
+        && current.ip_vrfs().is_referenced(name) == candidate.ip_vrfs().is_referenced(name)
+}
+
+fn evpn_runtime_es_shape_is_reload_applied(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if plan.evpn_instances.has_changes() || plan.ip_vrfs.has_changes() {
+        return false;
+    }
+    if !plan.ethernet_segments.added.is_empty() {
+        let esi = plan.ethernet_segments.added[0];
+        return plan.ethernet_segments.added.len() == 1
+            && plan.ethernet_segments.deleted.is_empty()
+            && plan.ethernet_segments.redefined.is_empty()
+            && current
+                .ethernet_segments()
+                .iter()
+                .all(|segment| segment.esi != esi)
+            && candidate
+                .ethernet_segments()
+                .iter()
+                .find(|segment| segment.esi == esi)
+                .is_some_and(|segment| {
+                    !segment.member_vnis.is_empty()
+                        && segment
+                            .member_vnis
+                            .iter()
+                            .all(|&vni| candidate.instances().get(vni).is_some())
+                });
+    }
+    if !plan.ethernet_segments.deleted.is_empty() {
+        let esi = plan.ethernet_segments.deleted[0];
+        return plan.ethernet_segments.deleted.len() == 1
+            && plan.ethernet_segments.redefined.is_empty()
+            && current
+                .ethernet_segments()
+                .iter()
+                .any(|segment| segment.esi == esi)
+            && candidate
+                .ethernet_segments()
+                .iter()
+                .all(|segment| segment.esi != esi);
+    }
+    let Some(&esi) = plan.ethernet_segments.redefined.first() else {
+        return false;
+    };
+    plan.ethernet_segments.redefined.len() == 1
+        && plan.ethernet_segments.added.is_empty()
+        && plan.ethernet_segments.deleted.is_empty()
+        && current
+            .ethernet_segments()
+            .iter()
+            .any(|segment| segment.esi == esi)
+        && candidate
+            .ethernet_segments()
+            .iter()
+            .find(|segment| segment.esi == esi)
+            .is_some_and(|segment| {
+                !segment.member_vnis.is_empty()
+                    && segment
+                        .member_vnis
+                        .iter()
+                        .all(|&vni| candidate.instances().get(vni).is_some())
+            })
 }
 
 /// Effective BFD config for a neighbor: its own `bfd`, else its peer-group's.

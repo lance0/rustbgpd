@@ -5498,7 +5498,8 @@ advertise_svi_mac = true
 }
 
 #[test]
-fn evpn_instance_diff_flags_changes_as_restart_required() {
+fn evpn_instance_single_add_diff_marks_reload_applied() {
+    let without_evi = parse(&evpn_toml_with("")).unwrap();
     let with_evi = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -5509,21 +5510,82 @@ local_vtep_ip = "10.0.0.100"
 "#,
     ))
     .unwrap();
-    let without_evi = parse(valid_toml()).unwrap();
 
-    // Add: empty → one EVI ⇒ restart-required.
     let added = diff_config(&without_evi, &with_evi);
     assert!(added.evpn_instances_changed);
-    assert!(added.has_restart_required_changes());
+    assert_eq!(
+        added.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(added.has_reload_applied_changes());
+    assert!(!added.has_restart_required_changes());
 
-    // Remove: one EVI → empty ⇒ restart-required.
     let removed = diff_config(&with_evi, &without_evi);
     assert!(removed.evpn_instances_changed);
-    assert!(removed.has_restart_required_changes());
+    assert_eq!(
+        removed.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(removed.has_reload_applied_changes());
+    assert!(!removed.has_restart_required_changes());
+
+    let json = config_diff_json_value(&added);
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["reload_applied"]["evpn_instances_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
+    let text = format_config_diff(&added);
+    assert!(
+        text.contains("EVPN runtime model hot-applied through the ADR-0063 coordinator"),
+        "expected EVPN runtime reload-applied text, got:\n{text}"
+    );
+    assert!(
+        !text.contains("[[evpn_instances]] changed"),
+        "supported EVPN runtime shape must not be listed as restart-required:\n{text}"
+    );
 
     // No-op: same config on both sides ⇒ not flagged.
     let same = diff_config(&with_evi, &with_evi);
     assert!(!same.evpn_instances_changed);
+    assert_eq!(
+        same.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::Unchanged
+    );
+}
+
+#[test]
+fn evpn_instance_mixed_add_delete_diff_stays_restart_required() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.evpn_instances_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::RestartRequired
+    );
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
 }
 
 // -----------------------------------------------------------------------
@@ -6041,9 +6103,11 @@ sticky_macs = ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:01"]
 }
 
 #[test]
-fn evpn_sticky_macs_diff_marks_restart_required() {
-    // Adding sticky_macs to an existing instance must flip
-    // evpn_instances_changed (restart-required bucket per ADR-0056).
+fn evpn_sticky_macs_diff_marks_reload_applied() {
+    // Adding sticky_macs to an existing instance is a single L2VNI
+    // redefine. The ADR-0063 runtime coordinator can reconfigure that
+    // shape live, so `--diff` must not leave it in the old
+    // restart-required bucket.
     let base = evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6070,10 +6134,12 @@ sticky_macs = ["aa:bb:cc:dd:ee:01"]
         diff.evpn_instances_changed,
         "adding sticky_macs must flip evpn_instances_changed"
     );
-    assert!(
-        diff.has_restart_required_changes(),
-        "evpn_instances_changed must surface as restart-required"
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
     );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 // ---------------------------------------------------------------------------
@@ -6166,7 +6232,7 @@ duplicate_mac_detection = {{ {field} = {value} }}
 }
 
 #[test]
-fn evpn_duplicate_mac_detection_diff_marks_restart_required() {
+fn evpn_duplicate_mac_detection_diff_marks_reload_applied() {
     let base = evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6190,12 +6256,26 @@ duplicate_mac_detection = { action = "suppress_local" }
     let new = parse(&suppress).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.evpn_instances_changed);
-    assert!(diff.has_restart_required_changes());
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]
-fn ethernet_segments_diff_marks_restart_required() {
-    let old = parse(valid_toml()).unwrap();
+fn ethernet_segment_add_diff_marks_reload_applied() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
     let new_toml = evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6213,12 +6293,62 @@ originator_ip = "10.0.0.100"
     let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.ethernet_segments_changed);
-    assert!(diff.has_restart_required_changes());
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]
-fn evpn_ip_vrfs_diff_marks_restart_required() {
-    let old = parse(valid_toml()).unwrap();
+fn ethernet_segment_binding_only_diff_marks_reload_applied() {
+    let old_toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let new_toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "eth2"
+recovery_delay_secs = 7
+"#,
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.ethernet_segments_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+}
+
+#[test]
+fn evpn_ip_vrf_add_diff_marks_reload_applied() {
+    let old = parse(&evpn_toml_with("")).unwrap();
     let new_toml = evpn_toml_with(
         r#"
 [[evpn_ip_vrfs]]
@@ -6236,6 +6366,54 @@ table_id = 5000
     let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.evpn_ip_vrfs_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+}
+
+#[test]
+fn evpn_ip_vrf_identity_redefine_diff_marks_restart_required() {
+    let old_toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let new_toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5001
+"#,
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.evpn_ip_vrfs_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::RestartRequired
+    );
+    assert!(!diff.has_reload_applied_changes());
     assert!(diff.has_restart_required_changes());
 }
 
@@ -6877,6 +7055,32 @@ peer_group = "ix-members"
         vec!["mixed transaction families"]
     );
     assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_classifies_evpn_runtime_shape_as_unsupported_coordinator() {
+    let old = parse(&evpn_toml_with("")).unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(!class.is_committable());
+    assert!(class.supported_sections.is_empty(), "{class:?}");
+    assert_eq!(class.unsupported_sections, vec!["EVPN runtime coordinator"]);
+    assert!(class.restart_required_sections.is_empty(), "{class:?}");
 }
 
 #[test]
