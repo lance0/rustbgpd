@@ -176,6 +176,13 @@ an operator can configure the family, the CLI/API/docs must make the same
 support boundary explicit and the implementation must reject unsupported
 runtime effects predictably.
 
+The first implementation guard for this boundary is the wire codec's MP-NLRI
+family classifier. `MP_REACH_NLRI` / `MP_UNREACH_NLRI` may only dispatch to
+the current complete verticals: IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, and
+L2VPN EVPN. Other recognized AFI/SAFI combinations reject before NLRI parsing,
+so adding a future SAFI cannot accidentally reinterpret VPN, RTC, BGP-LS, or
+labeled payloads as ordinary unicast `Prefix` data.
+
 ### 4. Preserve opaque data where the standard requires extensibility
 
 Unknown path attributes are already preserved in rustbgpd. The same principle

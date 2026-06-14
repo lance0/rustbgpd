@@ -209,6 +209,40 @@ pub struct MpUnreachNlri {
     pub evpn_withdrawn: Vec<crate::evpn::EvpnRoute>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MpNlriFamily {
+    Unicast,
+    FlowSpec,
+    Evpn,
+}
+
+fn classify_mp_nlri_family(
+    afi: Afi,
+    safi: Safi,
+    attribute: &'static str,
+) -> Result<MpNlriFamily, DecodeError> {
+    match (afi, safi) {
+        (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => Ok(MpNlriFamily::Unicast),
+        (Afi::Ipv4 | Afi::Ipv6, Safi::FlowSpec) => Ok(MpNlriFamily::FlowSpec),
+        (Afi::L2Vpn, Safi::Evpn) => Ok(MpNlriFamily::Evpn),
+        (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::Multicast)
+        | (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
+        | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec) => {
+            Err(unsupported_mp_nlri_family(attribute, afi, safi))
+        }
+    }
+}
+
+fn unsupported_mp_nlri_family(attribute: &'static str, afi: Afi, safi: Safi) -> DecodeError {
+    DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: format!(
+            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, and L2VPN EVPN",
+            afi as u16, safi as u8
+        ),
+    }
+}
+
 /// RFC 4360 Extended Community — 8-byte value stored as `u64`.
 ///
 /// Wire layout: type (1) + sub-type (1) + value (6).
@@ -1035,6 +1069,7 @@ fn decode_mp_reach_nlri(
         message_type: "UPDATE",
         detail: format!("MP_REACH_NLRI unsupported SAFI {safi_raw}"),
     })?;
+    let family = classify_mp_nlri_family(afi, safi, "MP_REACH_NLRI")?;
 
     // 4 bytes for AFI+SAFI+NH-Len, then nh_len bytes, then 1 reserved byte
     if value.len() < 4 + nh_len + 1 {
@@ -1050,16 +1085,17 @@ fn decode_mp_reach_nlri(
     let nh_bytes = &value[4..4 + nh_len];
     // FlowSpec (SAFI 133): NH length is 0 — no next-hop for filter rules
     let mut link_local_next_hop: Option<Ipv6Addr> = None;
-    let next_hop = if safi == Safi::FlowSpec {
-        if nh_len != 0 {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!("MP_REACH_NLRI FlowSpec next-hop length {nh_len} (expected 0)"),
-            });
+    let next_hop = match family {
+        MpNlriFamily::FlowSpec => {
+            if nh_len != 0 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("MP_REACH_NLRI FlowSpec next-hop length {nh_len} (expected 0)"),
+                });
+            }
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         }
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    } else {
-        match afi {
+        MpNlriFamily::Unicast | MpNlriFamily::Evpn => match afi {
             Afi::Ipv4 => match nh_len {
                 4 => IpAddr::V4(Ipv4Addr::new(
                     nh_bytes[0],
@@ -1125,7 +1161,7 @@ fn decode_mp_reach_nlri(
                     });
                 }
             },
-        }
+        },
     };
 
     // Skip reserved byte
@@ -1133,7 +1169,7 @@ fn decode_mp_reach_nlri(
     let nlri_bytes = &value[nlri_start..];
 
     // FlowSpec (SAFI 133): NLRI is FlowSpec rules, not prefixes
-    if safi == Safi::FlowSpec {
+    if family == MpNlriFamily::FlowSpec {
         let flowspec_rules = crate::flowspec::decode_flowspec_nlri(nlri_bytes, afi)?;
         return Ok(PathAttribute::MpReachNlri(MpReachNlri {
             afi,
@@ -1147,7 +1183,7 @@ fn decode_mp_reach_nlri(
     }
 
     // EVPN (AFI 25 / SAFI 70): NLRI is typed EVPN routes, not prefixes
-    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+    if family == MpNlriFamily::Evpn {
         let routes = crate::evpn::decode_evpn_nlri(nlri_bytes)?;
         return Ok(PathAttribute::MpReachNlri(MpReachNlri {
             afi,
@@ -1158,19 +1194,6 @@ fn decode_mp_reach_nlri(
             flowspec_announced: vec![],
             evpn_announced: routes,
         }));
-    }
-
-    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
-    // AFI explicitly so the unicast NLRI fallthrough below cannot
-    // misinterpret the typed EVPN payload as a prefix list.
-    if safi == Safi::Evpn {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: format!(
-                "MP_REACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
-                afi as u16
-            ),
-        });
     }
 
     let add_path = add_path_families.contains(&(afi, safi));
@@ -1197,15 +1220,7 @@ fn decode_mp_reach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(nlri_bytes)?,
-        (Afi::L2Vpn, _) => {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!(
-                    "MP_REACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
-                    safi as u8
-                ),
-            });
-        }
+        (Afi::L2Vpn, _) => return Err(unsupported_mp_nlri_family("MP_REACH_NLRI", afi, safi)),
     };
 
     Ok(PathAttribute::MpReachNlri(MpReachNlri {
@@ -1245,11 +1260,12 @@ fn decode_mp_unreach_nlri(
         message_type: "UPDATE",
         detail: format!("MP_UNREACH_NLRI unsupported SAFI {safi_raw}"),
     })?;
+    let family = classify_mp_nlri_family(afi, safi, "MP_UNREACH_NLRI")?;
 
     let withdrawn_bytes = &value[3..];
 
     // FlowSpec (SAFI 133): withdrawn is FlowSpec rules
-    if safi == Safi::FlowSpec {
+    if family == MpNlriFamily::FlowSpec {
         let flowspec_rules = crate::flowspec::decode_flowspec_nlri(withdrawn_bytes, afi)?;
         return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi,
@@ -1261,7 +1277,7 @@ fn decode_mp_unreach_nlri(
     }
 
     // EVPN (AFI 25 / SAFI 70): withdrawn is typed EVPN routes, not prefixes
-    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+    if family == MpNlriFamily::Evpn {
         let routes = crate::evpn::decode_evpn_nlri(withdrawn_bytes)?;
         return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi,
@@ -1270,19 +1286,6 @@ fn decode_mp_unreach_nlri(
             flowspec_withdrawn: vec![],
             evpn_withdrawn: routes,
         }));
-    }
-
-    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
-    // AFI explicitly so the unicast NLRI fallthrough below cannot
-    // misinterpret the typed EVPN payload as a prefix list.
-    if safi == Safi::Evpn {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: format!(
-                "MP_UNREACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
-                afi as u16
-            ),
-        });
     }
 
     let add_path = add_path_families.contains(&(afi, safi));
@@ -1309,15 +1312,7 @@ fn decode_mp_unreach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(withdrawn_bytes)?,
-        (Afi::L2Vpn, _) => {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!(
-                    "MP_UNREACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
-                    safi as u8
-                ),
-            });
-        }
+        (Afi::L2Vpn, _) => return Err(unsupported_mp_nlri_family("MP_UNREACH_NLRI", afi, safi)),
     };
 
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -3372,7 +3367,10 @@ mod tests {
         let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
-                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 1/70"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected MalformedField, got {other:?}"),
         }
@@ -3388,7 +3386,104 @@ mod tests {
         let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
-                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 2/70"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_reach_nlri_rejects_multicast_before_prefix_decode() {
+        // AFI=Ipv4 (1), SAFI=Multicast (2). The NLRI carries prefix_len=40,
+        // which would be an IPv4 prefix-decode error if the unsupported family
+        // fell through to unicast `Prefix` parsing. The expected error is the
+        // family classifier instead.
+        let bytes = vec![
+            0x00, 0x01, // AFI = Ipv4
+            2,    // SAFI = Multicast
+            4, 192, 0, 2, 1,  // NH len + NH
+            0,  // reserved
+            40, // invalid IPv4 prefix length if parsed as unicast
+            10, 0, 0, 0, 0,
+        ];
+        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 1/2"),
+                    "unexpected detail: {detail}"
+                );
+                assert!(
+                    !detail.contains("prefix length"),
+                    "unsupported family must reject before prefix decode: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_unreach_nlri_rejects_multicast_before_prefix_decode() {
+        // AFI=Ipv6 (2), SAFI=Multicast (2), followed by prefix_len=129.
+        // The family guard must reject before the IPv6 unicast decoder runs.
+        let bytes = vec![
+            0x00, 0x02, // AFI = Ipv6
+            2,    // SAFI = Multicast
+            129,  // invalid IPv6 prefix length if parsed as unicast
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 2/2"),
+                    "unexpected detail: {detail}"
+                );
+                assert!(
+                    !detail.contains("prefix length"),
+                    "unsupported family must reject before prefix decode: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_reach_nlri_rejects_l2vpn_flowspec_at_family_gate() {
+        let bytes = vec![
+            0x00, 0x19, // AFI = L2VPN
+            133,  // SAFI = FlowSpec
+            0,    // NH-Len = 0
+            0,    // reserved
+        ];
+        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 25/133"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_unreach_nlri_rejects_l2vpn_flowspec_at_family_gate() {
+        let bytes = vec![
+            0x00, 0x19, // AFI = L2VPN
+            133,  // SAFI = FlowSpec
+        ];
+        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 25/133"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected MalformedField, got {other:?}"),
         }

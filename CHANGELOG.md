@@ -104,6 +104,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Fail-closed MP-BGP family dispatch for future route-family substrate.**
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI` decoding now runs through one
+  explicit supported-family classifier before any NLRI parser is called.
+  Only the currently complete verticals are accepted — IPv4/IPv6 unicast,
+  IPv4/IPv6 FlowSpec, and L2VPN EVPN. Recognized but unsupported
+  combinations such as IPv4/IPv6 multicast, non-L2VPN EVPN, or L2VPN
+  FlowSpec now reject at the family gate instead of falling through to
+  unicast `Prefix` decoding. No BGP-LS, VPN, RTC, or labeled-unicast
+  support is enabled by this guard.
 - **Completed the RIB session-identity gate for policy-context updates.**
   `SetPeerPolicyContext` is now stamped with the transport `session_id`
   and discarded when it comes from a superseded session, matching the
