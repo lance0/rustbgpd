@@ -397,7 +397,11 @@ has it, no broad performance sprints without profile evidence.
   backup-swap path: if the group membership `REPLACE` fails, the old
   active group and MAC row remain intact, the pre-created backup
   nexthop remains available for retry, and no completed-swap counter is
-  emitted.
+  emitted. The operator diagnose seam now has a read-only joined
+  surface (`EvpnService.ListEthernetSegments` / `rbgp evpn es list`)
+  that exposes configured membership, drain reasons, per-member
+  DF/BUM action, same-ESI local-bias eligibility, AC-gate state, and
+  matching FDB-NHG refs in one place.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*

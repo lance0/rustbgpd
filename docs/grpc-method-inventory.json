@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 87,
+  "method_count": 88,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 45,
+    "sensitive_read": 46,
     "mutating": 19,
     "operator_only": 23
   },
@@ -96,6 +96,7 @@
     { "service": "rustbgpd.v1.EvpnService", "method": "GetEvpnRuntime", "path": "/rustbgpd.v1.EvpnService/GetEvpnRuntime", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListEvpnInstances", "path": "/rustbgpd.v1.EvpnService/ListEvpnInstances", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListEvpnNexthops", "path": "/rustbgpd.v1.EvpnService/ListEvpnNexthops", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.EvpnService", "method": "ListEthernetSegments", "path": "/rustbgpd.v1.EvpnService/ListEthernetSegments", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListIpVrfs", "path": "/rustbgpd.v1.EvpnService/ListIpVrfs", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "GetIpVrf", "path": "/rustbgpd.v1.EvpnService/GetIpVrf", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ClearDuplicateMacQuarantine", "path": "/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine", "tier": "mutating" },

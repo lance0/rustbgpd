@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Ethernet Segment diagnose surface.** `EvpnService.ListEthernetSegments`
+  and `rbgp evpn es list [ESI]` now join configured ES membership with
+  live multi-homing runtime state: composed operator/link drain reasons,
+  per-member DF role and BUM forwarding action, ADR-0085 same-ESI
+  local-bias eligibility, single-active AC-gate state/interface, and
+  matching owned FDB-NHG group / MAC-ref counts. The RPC is read-only
+  (`sensitive_read`) and complements the existing `SetEthernetSegmentDrain`
+  mutator.
 - **M69 FRR interop proof for RFC 9785 preference-DF election.** The
   hosted kernel-dataplane suite now includes a rustbgpd ↔ FRR
   Ethernet Segment where rustbgpd advertises Highest-Preference with

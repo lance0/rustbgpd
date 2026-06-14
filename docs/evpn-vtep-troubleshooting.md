@@ -195,6 +195,11 @@ rbgp evpn es drain 00:11:22:33:44:55:66:77:88:99
 rbgp evpn es undrain 00:11:22:33:44:55:66:77:88:99
 ```
 
+Use `rbgp evpn es list [ESI]` to inspect the composed runtime state:
+operator/link drain reasons, per-member DF/BUM role, same-ESI local
+bias, whole-port AC-gate intent, and owned FDB-NHG refs. The matching
+gRPC surface is `EvpnService.ListEthernetSegments`.
+
 Draining withdraws the ES's Type 4 (exiting DF election), EAD-per-ES,
 and EAD-per-EVI routes plus the member VNIs' locally-originated Type 2
 MAC/MAC+IP routes, and suppresses new local-MAC origination while
@@ -409,10 +414,11 @@ non-DF for **every** member VNI of the ES or the ES is drained, and
 `forwarding` when it is the DF. This rides the same
 `apply_bum_enforcement` knob as the BUM flood flags.
 
-**Fast check**: `bridge -d link show dev <ac-port>` — look at the
-`state` field — and the `evpn_es_ac_gate{esi, state}` gauge on the
-Prometheus endpoint (`blocked` / `forwarding` / `mixed-roles`; the
-state with value 1 is current).
+**Fast check**: `rbgp evpn es list <esi>` for the daemon's joined
+view, `bridge -d link show dev <ac-port>` for the kernel `state`
+field, and the `evpn_es_ac_gate{esi, state}` gauge on the Prometheus
+endpoint (`blocked` / `forwarding` / `mixed-roles`; the state with
+value 1 is current).
 
 **The AC is not blocked but the PE is non-DF**:
 
@@ -449,7 +455,7 @@ state with value 1 is current).
 1. **Drained ES** — any drain reason (operator or link, including
    the post-carrier-return recovery hold-off) blocks the AC; that is
    the maintenance semantic. Check
-   `evpn_es_drained{esi, reason}` / `rbgp evpn es`.
+   `evpn_es_drained{esi, reason}` / `rbgp evpn es list <esi>`.
 2. **This PE lost DF election** for every member VNI — check
    `evpn_df_role{esi, vni, role}`.
 3. A crash-stopped daemon can leave the port disabled (clean

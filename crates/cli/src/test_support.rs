@@ -711,6 +711,43 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         }))
     }
 
+    async fn list_ethernet_segments(
+        &self,
+        request: Request<server_proto::ListEthernetSegmentsRequest>,
+    ) -> Result<Response<server_proto::ListEthernetSegmentsResponse>, Status> {
+        let filter = request.into_inner().esi;
+        let esi = "03:00:00:00:00:00:00:00:00:07";
+        let segments = if filter.is_empty() || filter == esi {
+            vec![server_proto::EthernetSegmentState {
+                esi: esi.to_string(),
+                member_vnis: vec![100],
+                redundancy_mode: "single-active".to_string(),
+                df_algorithm: "highest-preference".to_string(),
+                df_preference: 500,
+                df_dont_preempt: true,
+                originator_ip: "10.0.0.1".to_string(),
+                drained: true,
+                drain_reasons: vec!["operator".to_string()],
+                members: vec![server_proto::EthernetSegmentMemberState {
+                    vni: 100,
+                    df_role: "nondf".to_string(),
+                    bum_forwarding_action: "suppress".to_string(),
+                    bridge: "br100".to_string(),
+                    same_esi_bias_eligible: false,
+                }],
+                ac_gate_state: "blocked".to_string(),
+                ac_gate_interface: "eth1".to_string(),
+                fdb_nexthop_groups_count: 1,
+                fdb_nexthop_ref_macs_count: 1,
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(server_proto::ListEthernetSegmentsResponse {
+            segments,
+        }))
+    }
+
     async fn list_ip_vrfs(
         &self,
         _request: Request<server_proto::ListIpVrfsRequest>,

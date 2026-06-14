@@ -7,8 +7,9 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
-    EvpnRuntimeLifecycle, EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest,
-    GetIpVrfRequest, IpVrfReadinessState, IpVrfState, ListEvpnInstancesRequest,
+    EthernetSegmentState, EvpnRuntimeLifecycle, EvpnRuntimeMutationState, EvpnRuntimeState,
+    GetEvpnRuntimeRequest, GetIpVrfRequest, IpVrfReadinessState, IpVrfState,
+    ListEthernetSegmentsRequest, ListEthernetSegmentsResponse, ListEvpnInstancesRequest,
     ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
     SetEthernetSegmentDrainRequest,
 };
@@ -426,6 +427,38 @@ pub async fn set_es_drain(
     Ok(())
 }
 
+/// List configured Ethernet Segments joined with live multi-homing state.
+pub async fn list_ethernet_segments(
+    connection: Connection,
+    esi: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let filter = esi.unwrap_or_default();
+    let resp = client
+        .list_ethernet_segments(ListEthernetSegmentsRequest {
+            esi: filter.clone(),
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        output::print_json_pretty(&ethernet_segments_to_json(&resp))?;
+    } else if resp.segments.is_empty() {
+        if filter.is_empty() {
+            println!("No Ethernet Segments configured");
+        } else {
+            println!("No Ethernet Segment matching {filter}");
+        }
+    } else {
+        for segment in &resp.segments {
+            println!("{}", format_ethernet_segment_human(segment));
+        }
+    }
+    Ok(())
+}
+
 /// Read the committed ADR-0063 EVPN runtime generation.
 pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
@@ -595,6 +628,95 @@ fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_
         "pending_delete_count": resp.pending_delete_count,
         "drift_recovery_disabled": resp.drift_recovery_disabled,
     })
+}
+
+fn ethernet_segments_to_json(resp: &ListEthernetSegmentsResponse) -> serde_json::Value {
+    let segments: Vec<serde_json::Value> = resp
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "esi": segment.esi,
+                "member_vnis": segment.member_vnis,
+                "redundancy_mode": segment.redundancy_mode,
+                "df_algorithm": segment.df_algorithm,
+                "df_preference": segment.df_preference,
+                "df_dont_preempt": segment.df_dont_preempt,
+                "originator_ip": segment.originator_ip,
+                "drained": segment.drained,
+                "drain_reasons": segment.drain_reasons,
+                "members": segment.members.iter().map(|member| {
+                    serde_json::json!({
+                        "vni": member.vni,
+                        "df_role": member.df_role,
+                        "bum_forwarding_action": member.bum_forwarding_action,
+                        "bridge": member.bridge,
+                        "same_esi_bias_eligible": member.same_esi_bias_eligible,
+                    })
+                }).collect::<Vec<_>>(),
+                "ac_gate_state": segment.ac_gate_state,
+                "ac_gate_interface": segment.ac_gate_interface,
+                "fdb_nexthop_groups_count": segment.fdb_nexthop_groups_count,
+                "fdb_nexthop_ref_macs_count": segment.fdb_nexthop_ref_macs_count,
+            })
+        })
+        .collect();
+    serde_json::json!({ "segments": segments })
+}
+
+fn format_ethernet_segment_human(segment: &EthernetSegmentState) -> String {
+    let reasons = if segment.drain_reasons.is_empty() {
+        "none".to_string()
+    } else {
+        segment.drain_reasons.join(",")
+    };
+    let ac_gate = if segment.ac_gate_state.is_empty() {
+        "none".to_string()
+    } else if segment.ac_gate_interface.is_empty() {
+        segment.ac_gate_state.clone()
+    } else {
+        format!("{}:{}", segment.ac_gate_state, segment.ac_gate_interface)
+    };
+    let members = segment
+        .members
+        .iter()
+        .map(format_ethernet_segment_member_human)
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "esi={} mode={} df-alg={} df-pref={} dont-preempt={} originator={} drained={} reasons=[{}] ac-gate={} fdb-groups={} fdb-mac-refs={} members=[{}]",
+        segment.esi,
+        segment.redundancy_mode,
+        segment.df_algorithm,
+        segment.df_preference,
+        segment.df_dont_preempt,
+        segment.originator_ip,
+        segment.drained,
+        reasons,
+        ac_gate,
+        segment.fdb_nexthop_groups_count,
+        segment.fdb_nexthop_ref_macs_count,
+        members,
+    )
+}
+
+fn format_ethernet_segment_member_human(
+    member: &crate::proto::EthernetSegmentMemberState,
+) -> String {
+    let mut parts = vec![format!("vni={}", member.vni)];
+    if !member.df_role.is_empty() {
+        parts.push(format!("role={}", member.df_role));
+    }
+    if !member.bum_forwarding_action.is_empty() {
+        parts.push(format!("bum={}", member.bum_forwarding_action));
+    }
+    if !member.bridge.is_empty() {
+        parts.push(format!("bridge={}", member.bridge));
+    }
+    if member.same_esi_bias_eligible {
+        parts.push("same-esi-bias".to_string());
+    }
+    parts.join("/")
 }
 
 fn runtime_to_json(state: &EvpnRuntimeState) -> serde_json::Value {
@@ -1202,6 +1324,28 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn es_list_command_runs_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_ethernet_segments(connection, None, false)
+            .await
+            .unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_ethernet_segments(
+            connection,
+            Some("03:00:00:00:00:00:00:00:00:07".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn fdb_nexthops_json_shape_is_stable() {
         let value = super::fdb_nexthops_to_json(&crate::proto::ListEvpnNexthopsResponse {
@@ -1231,6 +1375,45 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["groups"][0]["members"][0]["gateway"], "10.0.0.2");
         assert_eq!(value["groups"][0]["members"][0]["nexthop_id"], 0x3000_0001);
         assert_eq!(value["groups"][0]["ref_macs"][0], "02:aa:bb:cc:dd:01");
+    }
+
+    #[test]
+    fn ethernet_segments_json_shape_is_stable() {
+        let value = super::ethernet_segments_to_json(&crate::proto::ListEthernetSegmentsResponse {
+            segments: vec![crate::proto::EthernetSegmentState {
+                esi: "03:00:00:00:00:00:00:00:00:07".to_string(),
+                member_vnis: vec![100],
+                redundancy_mode: "single-active".to_string(),
+                df_algorithm: "highest-preference".to_string(),
+                df_preference: 500,
+                df_dont_preempt: true,
+                originator_ip: "10.0.0.1".to_string(),
+                drained: true,
+                drain_reasons: vec!["operator".to_string(), "link".to_string()],
+                members: vec![crate::proto::EthernetSegmentMemberState {
+                    vni: 100,
+                    df_role: "nondf".to_string(),
+                    bum_forwarding_action: "suppress".to_string(),
+                    bridge: "br100".to_string(),
+                    same_esi_bias_eligible: false,
+                }],
+                ac_gate_state: "blocked".to_string(),
+                ac_gate_interface: "eth1".to_string(),
+                fdb_nexthop_groups_count: 1,
+                fdb_nexthop_ref_macs_count: 2,
+            }],
+        });
+
+        assert_eq!(value["segments"][0]["esi"], "03:00:00:00:00:00:00:00:00:07");
+        assert_eq!(value["segments"][0]["member_vnis"][0], 100);
+        assert_eq!(value["segments"][0]["redundancy_mode"], "single-active");
+        assert_eq!(value["segments"][0]["df_algorithm"], "highest-preference");
+        assert_eq!(value["segments"][0]["drained"], true);
+        assert_eq!(value["segments"][0]["drain_reasons"][0], "operator");
+        assert_eq!(value["segments"][0]["members"][0]["df_role"], "nondf");
+        assert_eq!(value["segments"][0]["members"][0]["bridge"], "br100");
+        assert_eq!(value["segments"][0]["ac_gate_state"], "blocked");
+        assert_eq!(value["segments"][0]["fdb_nexthop_ref_macs_count"], 2);
     }
 
     #[test]

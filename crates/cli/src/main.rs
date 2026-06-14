@@ -931,7 +931,7 @@ enum EvpnAction {
         #[arg(long)]
         mac: String,
     },
-    /// Ethernet Segment runtime controls (ADR-0084 drain/undrain).
+    /// Ethernet Segment runtime controls and diagnose state.
     Es {
         #[command(subcommand)]
         action: EsAction,
@@ -957,6 +957,12 @@ enum EvpnAction {
 
 #[derive(Subcommand)]
 enum EsAction {
+    /// List configured Ethernet Segments joined with live drain,
+    /// DF/AC-gate, same-ESI bias, and FDB-NHG state.
+    List {
+        /// Optional ESI filter as 10 colon-separated hex octets.
+        esi: Option<String>,
+    },
     /// Drain an Ethernet Segment before access-circuit maintenance:
     /// withdraw its Type 4 + EAD routes (exiting DF election) and the
     /// member VNIs' local Type 2 routes, and suppress new local-MAC
@@ -1689,6 +1695,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 commands::evpn::clear_duplicate_mac(connection, vni, mac, json).await
             }
             Some(EvpnAction::Es { action }) => match action {
+                EsAction::List { esi } => {
+                    commands::evpn::list_ethernet_segments(connection, esi, json).await
+                }
                 EsAction::Drain { esi } => {
                     commands::evpn::set_es_drain(connection, esi, true, json).await
                 }
@@ -2455,6 +2464,27 @@ mod tests {
 
     #[test]
     fn test_parse_evpn_es_drain_and_undrain() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "es",
+            "list",
+            "00:11:22:33:44:55:66:77:88:99",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action:
+                Some(EvpnAction::Es {
+                    action: EsAction::List { esi },
+                }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(esi.as_deref(), Some("00:11:22:33:44:55:66:77:88:99"));
+        } else {
+            panic!("expected Evpn Es List command");
+        }
+
         let cli = Cli::try_parse_from([
             "rustbgpctl",
             "evpn",

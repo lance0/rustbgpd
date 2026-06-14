@@ -10,16 +10,17 @@
 //! TOML through the coordinator while non-noop mutations fail closed
 //! until actor convergence commands exist.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
-    EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
-    IpVrfDataplaneStatus, MacAddress,
+    BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstanceId, EvpnInstanceTable,
+    EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState, EvpnRuntimePlan,
+    EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
+    SameEsiBiasTable,
 };
 use tonic::{Request, Response, Status};
 
@@ -70,6 +71,20 @@ pub type IpVrfStatusSnapshotFn = Arc<dyn Fn() -> Vec<IpVrfDataplaneStatus> + Sen
 /// snapshot. The daemon backs it with `DataplaneReport.fdb_nexthops`;
 /// tests can inject a deterministic value.
 pub type FdbNexthopSnapshotFn = Arc<dyn Fn() -> FdbNexthopDataplaneStatus + Send + Sync + 'static>;
+
+/// Read-side hook for the current BUM/AC-gate enforcement snapshot.
+/// The daemon backs it with the segment actor's watch-published table;
+/// empty means the segment actor has not published yet or is absent.
+pub type BumEnforcementSnapshotFn =
+    Arc<dyn Fn() -> Arc<BumEnforcementTable> + Send + Sync + 'static>;
+
+/// Read-side hook for the current same-ESI local-bias eligibility
+/// snapshot.
+pub type SameEsiBiasSnapshotFn = Arc<dyn Fn() -> Arc<SameEsiBiasTable> + Send + Sync + 'static>;
+
+/// Read-side hook for composed Ethernet Segment drain reasons.
+pub type EthernetSegmentDrainReasonsFn =
+    Arc<dyn Fn(EthernetSegmentIdentifier) -> Vec<String> + Send + Sync + 'static>;
 
 /// Read-side hook for the current ADR-0063 EVPN runtime model.
 pub type EvpnRuntimeModelFn = Arc<dyn Fn() -> EvpnRuntimeModel + Send + Sync + 'static>;
@@ -162,6 +177,9 @@ pub struct EvpnService {
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
+    bum_enforcement_snapshot: BumEnforcementSnapshotFn,
+    same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
+    ethernet_segment_drain_reasons: EthernetSegmentDrainReasonsFn,
     runtime_model: EvpnRuntimeModelFn,
     runtime_apply: Option<EvpnRuntimeApplyFn>,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -184,6 +202,9 @@ impl EvpnService {
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
+            same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
+            ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
@@ -210,6 +231,9 @@ impl EvpnService {
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
+            same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
+            ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
@@ -302,6 +326,9 @@ impl EvpnService {
             installed_ip_vrf_route_count,
             remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot,
+            bum_enforcement_snapshot: Arc::new(|| Arc::new(BumEnforcementTable::new())),
+            same_esi_bias_snapshot: Arc::new(|| Arc::new(SameEsiBiasTable::new())),
+            ethernet_segment_drain_reasons: Arc::new(|_| Vec::new()),
             runtime_model,
             runtime_apply,
             duplicate_mac_clear,
@@ -318,6 +345,24 @@ impl EvpnService {
         remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
     ) -> Self {
         self.remote_ip_prefix_drop_counts_snapshot = remote_ip_prefix_drop_counts_snapshot;
+        self
+    }
+
+    /// Attach live Ethernet Segment diagnose state providers. These
+    /// are read-only snapshots consumed by `ListEthernetSegments`;
+    /// absent providers default to empty runtime state so RR-only and
+    /// unit-test surfaces still return configured ES rows without
+    /// requiring dataplane actors.
+    #[must_use]
+    pub fn with_ethernet_segment_state(
+        mut self,
+        bum_enforcement_snapshot: BumEnforcementSnapshotFn,
+        same_esi_bias_snapshot: SameEsiBiasSnapshotFn,
+        ethernet_segment_drain_reasons: EthernetSegmentDrainReasonsFn,
+    ) -> Self {
+        self.bum_enforcement_snapshot = bum_enforcement_snapshot;
+        self.same_esi_bias_snapshot = same_esi_bias_snapshot;
+        self.ethernet_segment_drain_reasons = ethernet_segment_drain_reasons;
         self
     }
 
@@ -398,6 +443,90 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             orphan_nexthops_count: snapshot.orphan_nexthops_count,
             pending_delete_count: snapshot.pending_delete_count,
             drift_recovery_disabled: snapshot.drift_recovery_disabled,
+        }))
+    }
+
+    async fn list_ethernet_segments(
+        &self,
+        request: Request<proto::ListEthernetSegmentsRequest>,
+    ) -> Result<Response<proto::ListEthernetSegmentsResponse>, Status> {
+        let req = request.into_inner();
+        let filter = if req.esi.trim().is_empty() {
+            None
+        } else {
+            Some(parse_esi(&req.esi).map_err(|err| {
+                Status::invalid_argument(format!("invalid ESI {}: {err}", req.esi))
+            })?)
+        };
+        let model = (self.runtime_model)();
+        let bum = (self.bum_enforcement_snapshot)();
+        let bias = (self.same_esi_bias_snapshot)();
+        let fdb = (self.fdb_nexthop_snapshot)();
+        let fdb_counts = fdb_nexthop_counts_by_esi(&fdb);
+        let mut segments: Vec<&rustbgpd_evpn::EthernetSegment> =
+            model.ethernet_segments().iter().collect();
+        segments.sort_by_key(|segment| segment.esi);
+
+        let segments = segments
+            .into_iter()
+            .filter(|segment| filter.is_none_or(|target| segment.esi == target))
+            .map(|segment| {
+                let mut drain_reasons = (self.ethernet_segment_drain_reasons)(segment.esi);
+                drain_reasons.sort();
+                drain_reasons.dedup();
+                let ac_gate = bum.ac_gate(segment.esi);
+                let members = segment
+                    .member_vnis
+                    .iter()
+                    .map(|vni| {
+                        let row = bum.get(segment.esi, *vni);
+                        proto::EthernetSegmentMemberState {
+                            vni: vni.as_u32(),
+                            df_role: row
+                                .map(|entry| entry.role.as_str().to_string())
+                                .unwrap_or_default(),
+                            bum_forwarding_action: row
+                                .map(|entry| entry.action.as_str().to_string())
+                                .unwrap_or_default(),
+                            bridge: row
+                                .map(|entry| entry.bridge.clone())
+                                .or_else(|| {
+                                    model
+                                        .instances()
+                                        .get(*vni)
+                                        .and_then(|inst| inst.bridge.clone())
+                                })
+                                .unwrap_or_default(),
+                            same_esi_bias_eligible: bias.is_eligible(segment.esi, *vni),
+                        }
+                    })
+                    .collect();
+                let (fdb_groups, fdb_refs) =
+                    fdb_counts.get(&segment.esi).copied().unwrap_or_default();
+                proto::EthernetSegmentState {
+                    esi: segment.esi.to_string(),
+                    member_vnis: segment.member_vnis.iter().map(|vni| vni.as_u32()).collect(),
+                    redundancy_mode: segment.redundancy_mode.as_str().to_string(),
+                    df_algorithm: df_algorithm_label(segment.df_algorithm).to_string(),
+                    df_preference: segment.df_preference,
+                    df_dont_preempt: segment.df_dont_preempt,
+                    originator_ip: segment.originator_ip.to_string(),
+                    drained: !drain_reasons.is_empty(),
+                    drain_reasons,
+                    members,
+                    ac_gate_state: ac_gate
+                        .map(|entry| entry.state.as_str().to_string())
+                        .unwrap_or_default(),
+                    ac_gate_interface: ac_gate
+                        .map(|entry| entry.interface.clone())
+                        .unwrap_or_default(),
+                    fdb_nexthop_groups_count: fdb_groups,
+                    fdb_nexthop_ref_macs_count: fdb_refs,
+                }
+            })
+            .collect();
+        Ok(Response::new(proto::ListEthernetSegmentsResponse {
+            segments,
         }))
     }
 
@@ -603,6 +732,27 @@ fn ethernet_segment_drain_message(
         ),
         (false, false) => format!("Ethernet Segment {esi} is not drained"),
     }
+}
+
+fn df_algorithm_label(algorithm: DfAlgorithm) -> &'static str {
+    match algorithm {
+        DfAlgorithm::DefaultModulo => "default-modulo",
+        DfAlgorithm::HighestRandomWeight => "hrw",
+        DfAlgorithm::HighestPreference => "highest-preference",
+        DfAlgorithm::LowestPreference => "lowest-preference",
+    }
+}
+
+fn fdb_nexthop_counts_by_esi(
+    snapshot: &FdbNexthopDataplaneStatus,
+) -> BTreeMap<EthernetSegmentIdentifier, (u32, u32)> {
+    let mut counts = BTreeMap::new();
+    for group in &snapshot.groups {
+        let (groups, refs) = counts.entry(group.esi).or_insert((0u32, 0u32));
+        *groups = groups.saturating_add(1);
+        *refs = refs.saturating_add(u32::try_from(group.ref_macs.len()).unwrap_or(u32::MAX));
+    }
+    counts
 }
 
 fn startup_runtime_model_fn(
@@ -1114,6 +1264,111 @@ mod tests {
         assert_eq!(resp.orphan_nexthops_count, 2);
         assert_eq!(resp.pending_delete_count, 1);
         assert!(resp.drift_recovery_disabled);
+    }
+
+    #[tokio::test]
+    async fn list_ethernet_segments_joins_runtime_state() {
+        let esi = rustbgpd_evpn::EthernetSegmentIdentifier::new([3, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let mut instances = EvpnInstanceTable::new();
+        instances
+            .insert(
+                EvpnInstance::new(
+                    vni,
+                    rd("65000:100"),
+                    vec![rt("65000:100")],
+                    ip("10.0.0.1"),
+                    Some("br100".to_string()),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let model = EvpnRuntimeModel::startup(
+            instances,
+            IpVrfTable::new(),
+            vec![rustbgpd_evpn::EthernetSegment {
+                esi,
+                member_vnis: std::collections::BTreeSet::from([vni]),
+                df_preference: 500,
+                df_algorithm: rustbgpd_evpn::DfAlgorithm::HighestPreference,
+                df_dont_preempt: true,
+                redundancy_mode: rustbgpd_evpn::RedundancyMode::SingleActive,
+                originator_ip: ip("10.0.0.1"),
+            }],
+        );
+        let mut bum = BumEnforcementTable::new();
+        bum.insert(esi, vni, rustbgpd_evpn::DfRole::NonDf, "br100".to_string());
+        bum.set_ac_gate(esi, "eth1".to_string(), rustbgpd_evpn::AcGateState::Blocked);
+        let mut bias = SameEsiBiasTable::new();
+        bias.insert(esi, vni);
+        let fdb = rustbgpd_evpn::FdbNexthopDataplaneStatus {
+            groups: vec![rustbgpd_evpn::FdbNexthopGroupStatus {
+                vni,
+                esi,
+                ethernet_tag: rustbgpd_evpn::EthernetTagId(0),
+                group_id: 0x4000_0001,
+                members: Vec::new(),
+                ref_macs: vec![
+                    MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]),
+                    MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02]),
+                ],
+            }],
+            orphan_nexthops_count: 0,
+            pending_delete_count: 0,
+            drift_recovery_disabled: false,
+        };
+        let bum_snapshot = bum.clone();
+        let bias_snapshot = bias.clone();
+        let svc = EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(move || fdb.clone()),
+            Arc::new(move || model.clone()),
+            None,
+            crate::server::AccessMode::ReadWrite,
+            None,
+        )
+        .with_ethernet_segment_state(
+            Arc::new(move || Arc::new(bum_snapshot.clone())),
+            Arc::new(move || Arc::new(bias_snapshot.clone())),
+            Arc::new(move |target| {
+                if target == esi {
+                    vec!["operator".to_string(), "link".to_string()]
+                } else {
+                    Vec::new()
+                }
+            }),
+        );
+
+        let resp = svc
+            .list_ethernet_segments(Request::new(proto::ListEthernetSegmentsRequest {
+                esi: esi.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.segments.len(), 1);
+        let segment = &resp.segments[0];
+        assert_eq!(segment.esi, esi.to_string());
+        assert_eq!(segment.member_vnis, vec![100]);
+        assert_eq!(segment.redundancy_mode, "single-active");
+        assert_eq!(segment.df_algorithm, "highest-preference");
+        assert_eq!(segment.df_preference, 500);
+        assert!(segment.df_dont_preempt);
+        assert!(segment.drained);
+        assert_eq!(segment.drain_reasons, vec!["link", "operator"]);
+        assert_eq!(segment.ac_gate_state, "blocked");
+        assert_eq!(segment.ac_gate_interface, "eth1");
+        assert_eq!(segment.fdb_nexthop_groups_count, 1);
+        assert_eq!(segment.fdb_nexthop_ref_macs_count, 2);
+        assert_eq!(segment.members.len(), 1);
+        assert_eq!(segment.members[0].df_role, "nondf");
+        assert_eq!(segment.members[0].bum_forwarding_action, "suppress");
+        assert_eq!(segment.members[0].bridge, "br100");
+        assert!(segment.members[0].same_esi_bias_eligible);
     }
 
     #[tokio::test]
