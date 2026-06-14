@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **M68 FRR consume-side interop proof for native GW-IP overlay-index
+  Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
+  includes a rustbgpd → FRR topology where rustbgpd originates a
+  Gateway-IP Type 5 from a static VRF route, FRR receives it with
+  `enable-resolve-overlay-index`, holds it unresolved until the
+  companion Type 2 MAC/IP route appears, then imports the prefix into
+  the tenant VRF via the Gateway Address. The test also withdraws the
+  static route and asserts FRR drops the imported VRF route.
+
 ## [0.39.0] — 2026-06-13
 
 ### Added

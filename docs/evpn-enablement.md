@@ -52,8 +52,8 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
   Remaining big investments are the remaining ADR-0063 runtime
-  convergence shapes, ESI overlay-index origination / broader protected
-  recursion-path interop, and lower-priority VTEP operability gaps
+  convergence shapes, ESI overlay-index origination / broader recursion-path
+  interop, and lower-priority VTEP operability gaps
   such as VLAN-aware bridges and rustbgpd-managed netdev creation.
 
 ## Current Position
@@ -755,6 +755,15 @@ Shipped pieces (v0.18.0):
   labels and the `IpVrfState.remote_prefix_drop_counts` API / CLI field, so
   recursive failures are visible without prefix/MAC cardinality in metrics or
   status output.
+- ADR-0087 native GW-IP overlay-index origination: per-IP-VRF
+  `overlay_index_mode = "gateway_ip"` originates local Type 5 routes
+  with an eligible kernel via in the Gateway Address and no Router-MAC
+  extcomm, while routes without an eligible via fall back to the
+  interface-less shape. The default stays `"interface_less"`. M68 proves
+  FRR consumes this native shape with `enable-resolve-overlay-index`: it
+  holds the Type 5 unresolved before the companion Type 2 exists, then
+  imports the prefix into the tenant VRF through the Gateway Address
+  once the MAC/IP route arrives.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -770,9 +779,10 @@ Still ahead:
 - Overlay-index IRB follow-through (RFC 9135 §9.2): receive-side
   recursive resolution (non-zero Type 5 Gateway Address through matching
   Type 2 MAC/IP state), bounded drop metrics, aggregated per-VRF /
-  per-reason drop counts in gRPC / CLI status, and native GW-IP
-  origination (ADR-0087) now ship; add ESI-overlay origination and broader
-  protected interop smokes for overlay-index Type 5 topologies.
+  per-reason drop counts in gRPC / CLI status, native GW-IP
+  origination (ADR-0087), and the FRR consume-side M68 proof now ship;
+  add ESI-overlay origination and broader protected interop smokes for
+  overlay-index Type 5 topologies.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
@@ -784,9 +794,10 @@ Still ahead:
   add/delete/redefine edits fail closed with a "split the request" error.
 
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
-M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 — #130
-closed. Non-EVPN kernel dataplane, BFD, and TCP-AO coverage is catalogued in
-`INTEROP.md` and `kernel-dataplane-runner.md`.)
+M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 /
+M60 / M61 / M65 / M66 / M67 / M68 — #130 closed. Non-EVPN kernel
+dataplane, BFD, and TCP-AO coverage is catalogued in `INTEROP.md` and
+`kernel-dataplane-runner.md`.)
 
 Further out on this track:
 
