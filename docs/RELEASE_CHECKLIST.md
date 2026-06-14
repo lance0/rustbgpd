@@ -351,10 +351,11 @@ in `crates/evpn/src/origination_es.rs`, DF election in
 aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
 `crates/evpn/src/mass_withdraw.rs`, or BUM-port enforcement), run M38
 to validate DF election + Type 1/4 origination against a peer running
-the same code. If the release touches **Gate 9 / ADR-0059** (IP-VRF,
-Type 5, L3 FIB programming, aliasing ECMP, or FDB nexthop groups), run
-the hosted `Kernel Dataplane` workflow for M39 and/or M40 as
-appropriate. They can still be reproduced manually with:
+the same code. If the release touches **Gate 9 / ADR-0059 / ADR-0087**
+(IP-VRF, Type 5, L3 FIB programming, overlay-index recursion/origination,
+aliasing ECMP, or FDB nexthop groups), run the hosted `Kernel Dataplane`
+workflow for M39, M40, and/or M68 as appropriate. They can still be
+reproduced manually with:
 
 ```bash
 # M37+IP — Gate 7b+2 MAC-with-IP Type 2 via ARP/ND suppression
@@ -376,6 +377,11 @@ containerlab destroy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
 containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
 bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+
+# M68 — ADR-0087 GW-IP overlay-index Type 5 consumed by FRR
+containerlab deploy -t tests/interop/m68-evpn-type5-gwip-overlay-index-frr.clab.yml
+bash tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
+containerlab destroy -t tests/interop/m68-evpn-type5-gwip-overlay-index-frr.clab.yml
 ```
 
 If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**

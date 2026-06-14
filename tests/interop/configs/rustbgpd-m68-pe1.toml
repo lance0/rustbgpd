@@ -1,0 +1,56 @@
+# M68 PE1 (rustbgpd) — native GW-IP overlay-index Type 5 origination.
+#
+# Topology:
+#   - L3VNI 100 / IP-VRF vrf1 originates a static prefix via the
+#     gateway host 10.1.1.5.
+#   - L2VNI 10 is linked to vrf1 and originates the companion Type 2
+#     MAC/IP route for 10.1.1.5.
+#   - `overlay_index_mode = "gateway_ip"` makes the static Type 5 carry
+#     Gateway Address 10.1.1.5 and omit the Router-MAC extcomm.
+#
+# The M68 driver proves FRR holds the Type 5 unresolved until the Type 2
+# exists, then imports the prefix into vrf1 through its
+# `enable-resolve-overlay-index` path.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[evpn_instances]]
+vni = 10
+rd = "65000:10"
+route_targets = ["65000:10"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br10"
+advertise_svi_mac = false
+ip_vrf = "vrf1"
+
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100
+overlay_index_mode = "gateway_ip"
+
+[security.grpc]
+enforcement = "legacy"

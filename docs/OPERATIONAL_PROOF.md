@@ -22,7 +22,7 @@ operator-facing index that answers "what has actually been proved?"
 | Receipt | Status | Notes |
 |---------|--------|-------|
 | Foundation M-series interop | CI-gated on every PR | `interop.yml` covers the core protocol and management surfaces listed in [`INTEROP.md`](INTEROP.md#ci-coverage). |
-| Hosted kernel dataplane | CI-gated on PRs, pushes to `main`, nightly, and manual dispatch | Uses GitHub-hosted `ubuntu-latest` runners with privileged containerlab/netns setup. TCP-AO topologies are probed and skipped only if the runner kernel lacks support. |
+| Hosted kernel dataplane | CI-gated on PRs, pushes to `main`, nightly, and manual dispatch | Uses GitHub-hosted `ubuntu-latest` runners with privileged containerlab/netns setup. EVPN receipts now include M68, proving FRR consumes rustbgpd's native GW-IP overlay-index Type 5 by holding it unresolved until the companion Type 2 arrives, then importing it through `enable-resolve-overlay-index`. TCP-AO topologies are probed and skipped only if the runner kernel lacks support. |
 | BIRD / GoBGP / StayRTR diversity | Mixed CI/manual | BIRD TCP-AO and GoBGP coverage are documented; RTR-dependent RPKI/ASPA cases and broader platform-diversity runs remain local/manual where extra fixtures are required. |
 | Long-wall-clock gates | Manual/local | GR/LLGR soak-style gates and M33 scale churn are intentionally not PR-CI jobs because they consume substantial wall-clock. |
 
