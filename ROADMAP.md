@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side overlay-index recursion shipped; native GW-IP overlay-index origination shipped (ADR-0087, FRR interop M-job pending; ESI overlay index deferred) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side overlay-index recursion shipped; native GW-IP overlay-index origination shipped (ADR-0087, FRR consume-side M68; ESI overlay index deferred) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -184,10 +184,12 @@ has it, no broad performance sprints without profile evidence.
   Type 5 with the kernel via (when it lands on a connected tenant subnet) in
   the Gateway Address and no Router-MAC extcomm, feeding the already-shipped
   receive-side recursion; default `"interface_less"` is unchanged. Proven by a
-  self-consistency test (own origination → own projection resolves end-to-end);
-  the FRR consume-side interop M-job is the planned follow-up proof. Path
-  **B (ESI overlay index, RFC 9136 §4.3) explicitly deferred** pending A/C
-  receipts (operator decision 2026-06-12). The single-active arc below is
+  self-consistency test (own origination → own projection resolves end-to-end)
+  and M68, a hosted FRR consume-side proof that holds the Type 5 unresolved
+  until the companion Type 2 appears, then imports it via
+  `enable-resolve-overlay-index`. Path **B (ESI overlay index, RFC 9136
+  §4.3) explicitly deferred** pending A/C receipts (operator decision
+  2026-06-12). The single-active arc below is
   **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal

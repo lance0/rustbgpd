@@ -54,6 +54,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M38: EVPN DF election + Type 1/4 origination (rustbgpd ×2).
 - M39: EVPN Type 5 symmetric Interface-less IRB against FRR (uses `vrf`).
 - M39b: EVPN auto-derived Route Targets, cross-vendor against FRR (uses `vrf`).
+- M68: EVPN GW-IP overlay-index Type 5 consumed by FRR
+  `enable-resolve-overlay-index` (uses `vrf`).
 - M46: EVPN HRW DF election (rustbgpd ×2).
 - M47: EVPN runtime tenant teardown against FRR.
 - M48: EVPN runtime tenant teardown over the kernel L3 datapath (uses `vrf`).
