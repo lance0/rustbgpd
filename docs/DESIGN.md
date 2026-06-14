@@ -502,7 +502,7 @@ controller-driven injection for Type 2 / Type 3. What remains:
   origination exists via `[[ethernet_segments]]`.
 - **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 9572 Route Types
   9-11** (BUM segmentation), **RFC 7623 PBB-EVPN**, **MPLS encap**,
-  **Add-Path for EVPN (RFC 9252)** (Phase 5).
+  **BGP Add-Path (RFC 7911) for L2VPN EVPN** (Phase 5).
 
 ---
 

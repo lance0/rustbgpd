@@ -180,9 +180,14 @@ has it, no broad performance sprints without profile evidence.
   now pins all ASPA verdicts plus combined RPKI+ASPA predicates. Remaining
   hardening is external-vector breadth rather than feature scope: import
   NIST-BRIO ASPA vectors when they are easy to automate.
-- **EVPN standards tail.** Native overlay-index Type-5 local origination +
-  protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
-  backup-path pre-install. **Native GW-IP overlay-index origination landed
+- **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
+  intentionally bounded. Near-term standards work is RFC 9136 ESI overlay-index
+  Type 5 origination plus broader protected-recursion interop; demand-shaped
+  VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
+  bridge / VXLAN / VRF netdev creation; service-provider EVPN breadth (route
+  types 6-11, PBB-EVPN, multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service
+  encapsulation) stays out of the current lane until operator demand justifies
+  a new ADR. **Native GW-IP overlay-index origination landed
   (ADR-0087):** per-IP-VRF `overlay_index_mode = "gateway_ip"` originates
   Type 5 with the kernel via (when it lands on a connected tenant subnet) in
   the Gateway Address and no Router-MAC extcomm, feeding the already-shipped
@@ -192,8 +197,8 @@ has it, no broad performance sprints without profile evidence.
   re-origination) and M68, a hosted FRR consume-side proof that holds the Type 5
   unresolved until the companion Type 2 appears, then imports it via
   `enable-resolve-overlay-index`. Path **B (ESI overlay index, RFC 9136
-  §4.3) explicitly deferred** pending A/C receipts (operator decision
-  2026-06-12). The single-active arc below is
+  §4.3) remains the next standards-tail candidate after the GW-IP receipts
+  landed (operator decision 2026-06-12). The single-active arc below is
   **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
@@ -729,12 +734,14 @@ has it, no broad performance sprints without profile evidence.
   polling becomes expensive; subscription-side indexing or a dedicated event bus
   if subscriber count / event rate makes post-broadcast filtering expensive; a
   TUI live event view.
-- **EVPN adjacent standards.** PBB-EVPN (RFC 7623), EVPN-MVPN integration
-  (RFC 9251, route types 6/7/8), RFC 9572 BUM segmentation (types 9/10/11), EVPN
-  optimized ingress replication (RFC 9574), tunnel aggregation / common labels
+- **EVPN adjacent standards.** PBB-EVPN (RFC 7623), RFC 9251 IGMP/MLD proxy
+  multicast EVPN routes (types 6/7/8), RFC 9572 BUM segmentation
+  (types 9/10/11), EVPN optimized ingress replication (RFC 9574),
+  tunnel aggregation / common labels
   (RFC 9573), multihoming split-horizon for non-VXLAN tunnel families (RFC 9746),
   Proxy ARP/ND extended-community behavior (RFC 9161 / RFC 9047), MPLS/SRv6
-  encapsulation, EVPN VPWS / E-Tree service models, Add-Path for EVPN (RFC 9252).
+  service encapsulation (including RFC 9252 SRv6 BGP overlay services), EVPN
+  VPWS / E-Tree service models, and BGP Add-Path (RFC 7911) for L2VPN EVPN.
   Service-provider EVPN use cases.
 - **Evaluate buffa for protobuf codegen.** Anthropic's
   [buffa](https://github.com/anthropics/buffa) is a pure-Rust protobuf

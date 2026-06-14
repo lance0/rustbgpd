@@ -70,6 +70,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gauge reads, FDB/NHG parsing, ping probing, and AC-gate/drain-gauge
   checks. Scenario-specific phase assertions stay in the M scripts, so
   the receipt wording and failure points remain transparent.
+- **Documented the EVPN standards-tail boundary.** The README, roadmap,
+  comparison matrix, EVPN enablement guide, and ADR-0087 now distinguish the
+  near-term VXLAN/Linux alpha gaps (notably RFC 9136 ESI overlay-index
+  origination and protected-recursion interop) from demand-shaped
+  service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
+  multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
+  The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:
+  RFC 9252 is SRv6 BGP overlay services; future EVPN Add-Path work would use
+  the general RFC 7911 Add-Path capability for AFI 25 / SAFI 70.
 
 ### Fixed
 

@@ -65,10 +65,11 @@ architecture diagrams, example configs, and API workflows.
   surface — VXLAN EVPN is functional and FRR-interop-tested but still
   **alpha**. VXLAN local-bias split-horizon remains the one open
   all-active correctness gate (ASIC/offload-dependent on the Linux
-  softswitch — see ADR-0065), and MPLS / PBB / MVPN encapsulations are
-  not implemented. See [Current limitations](#current-limitations) for
-  the alpha boundary and [docs/evpn-enablement.md](docs/evpn-enablement.md)
-  for the shipped feature ladder
+  softswitch — see ADR-0065); service-provider EVPN families such as
+  MPLS / PBB / MVPN are deliberately out of the current VXLAN/Linux
+  lane. See [Current limitations](#current-limitations) for the alpha
+  boundary and [docs/evpn-enablement.md](docs/evpn-enablement.md) for
+  the shipped feature ladder and standards-tail map
 - VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
@@ -345,9 +346,11 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   IP-VRF identity changes (restart-required) and non-teardown mixed edits
   fail closed ([#210](https://github.com/lance0/rustbgpd/issues/210));
   ESI overlay-index origination and broader protected recursion-path
-  interop remain ahead, VLAN-aware bridges and bridge / VXLAN netdev
-  creation are operator-provisioned, and EVPN over MPLS / PBB / MVPN
-  plus route types 6-11 are not implemented
+  interop remain the nearest standards-tail items, VLAN-aware bridges
+  and bridge / VXLAN netdev creation are operator-provisioned, and
+  service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
+  EVPN, MPLS/SRv6 encapsulation, VPWS/E-Tree) is demand-shaped rather than
+  part of the current VXLAN/Linux alpha lane
 - No VPNv4 / VPNv6 or Confederation support
 - TCP-AO (RFC 5925) static-neighbor startup keys are supported on Linux;
   dynamic-neighbor TCP-AO, runtime key rotation, and multi-key rollover remain
@@ -390,7 +393,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9136 ESI overlay-index origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9136 ESI overlay-index origination, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
