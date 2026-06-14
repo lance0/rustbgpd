@@ -121,7 +121,8 @@ impl RibManager {
     /// REPLACEMENT session's state: stale routes landing in its
     /// Adj-RIB-In, a stale `EoR` prematurely completing its GR sweep, a
     /// stale `EoRR` closing its enhanced-refresh window early, or stale
-    /// ORF entries installed as its outbound filter.
+    /// ORF entries installed as its outbound filter, or stale peer-group
+    /// policy context being assigned to the replacement session.
     ///
     /// A message for a peer with NO registration keeps the pre-stamping
     /// accept-all behavior, mirroring the teardown rule in
@@ -136,7 +137,8 @@ impl RibManager {
     /// Discards are logged at INFO (same shape as the stale-teardown
     /// discard) and counted in
     /// `bgp_rib_stale_session_message_ignored_total{peer,kind}`.
-    /// `kind` is bounded: `routes`, `eor`, `refresh`, `orf`.
+    /// `kind` is bounded: `routes`, `eor`, `refresh`, `orf`,
+    /// `policy_context`.
     pub(super) fn stale_session_message(
         &self,
         peer: IpAddr,
