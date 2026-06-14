@@ -29,6 +29,8 @@
 
 /// Path attribute types and codec (`ORIGIN`, `AS_PATH`, `NEXT_HOP`, etc.).
 pub mod attribute;
+/// BGP-LS NLRI codec substrate (RFC 9552).
+pub mod bgpls;
 /// BGP capability negotiation types and codec (RFC 5492).
 pub mod capability;
 /// Wire-format constants: markers, lengths, type codes.
@@ -186,6 +188,11 @@ impl std::str::FromStr for AspaValidation {
 pub use attribute::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
     PathAttribute, RawAttribute, is_private_asn,
+};
+pub use bgpls::{
+    BGP_LS_AFI, BGP_LS_ROUTE_DISTINGUISHER_LEN, BGP_LS_SAFI, BGP_LS_VPN_SAFI, BgpLsNlri,
+    BgpLsNlriKey, BgpLsNlriType, BgpLsTlv, decode_bgpls_nlri, decode_bgpls_tlvs,
+    decode_bgpls_vpn_nlri, encode_bgpls_nlri, encode_bgpls_tlvs,
 };
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use orf::{

@@ -183,6 +183,12 @@ L2VPN EVPN. Other recognized AFI/SAFI combinations reject before NLRI parsing,
 so adding a future SAFI cannot accidentally reinterpret VPN, RTC, BGP-LS, or
 labeled payloads as ordinary unicast `Prefix` data.
 
+The first BGP-LS implementation step follows this rule deliberately: the wire
+crate may expose a standalone RFC 9552 NLRI/TLV codec for raw test fixtures and
+future storage work, but that codec remains unreachable from MP-BGP dispatch
+until the BGP-LS vertical slice also includes family negotiation, RIB storage,
+policy/export behavior, object caps, API/CLI exposure, docs, and interop.
+
 ### 4. Preserve opaque data where the standard requires extensibility
 
 Unknown path attributes are already preserved in rustbgpd. The same principle
