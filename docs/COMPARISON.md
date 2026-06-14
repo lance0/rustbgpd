@@ -39,6 +39,12 @@ suite implementation.
 | BGP-LS (RFC 9552) | No | Yes | No | Yes | No |
 | SR Policy | No | No | No | Yes | No |
 
+`No` for rustbgpd VPN/MPLS/BGP-LS families is intentional today: ADR-0077 keeps
+those families out of OPEN negotiation, config, and route APIs until either
+private substrate remains unreachable or a complete typed family slice lands.
+The boundary avoids treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
+IPv4/IPv6 `Prefix` routes.
+
 [^evpn]: rustbgpd EVPN is **alpha** and Linux/VXLAN-only. Shipped and
     FRR-interop-tested: the Route Reflector role (Types 1-5 reflection);
     a bidirectional single-homed VTEP (Type 2 local-MAC / MAC+IP

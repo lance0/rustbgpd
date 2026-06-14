@@ -153,6 +153,29 @@ Adding an `(Afi, Safi)` enum value without the matching decoder and RIB slice is
 not safe: peers can negotiate the family and then send UPDATEs that rustbgpd
 cannot parse or store.
 
+### 3a. Substrate-only work must stay unreachable
+
+It is acceptable to prepare internal route-family substrate before a full
+family ships, but that substrate must be deliberately unreachable from peers and
+operators until a complete vertical slice exists.
+
+A substrate-only PR may add private or crate-local types such as
+`RouteFamilyKey`, family-specific key structs, parser test fixtures, or
+conversion helpers. It must not:
+
+- advertise a new AFI/SAFI in OPEN;
+- accept new config or gNMI family names;
+- add CLI/API commands that imply operational support;
+- route non-unicast families through unicast `Prefix`, unicast policy context,
+  unicast route-refresh state, or unicast FIB/EVPN dataplane paths;
+- make unknown MP_REACH/MP_UNREACH payloads look successfully supported.
+
+The review test is simple: if a real peer can negotiate the family, the PR is no
+longer substrate-only and must satisfy the full typed-slice checklist above. If
+an operator can configure the family, the CLI/API/docs must make the same
+support boundary explicit and the implementation must reject unsupported
+runtime effects predictably.
+
 ### 4. Preserve opaque data where the standard requires extensibility
 
 Unknown path attributes are already preserved in rustbgpd. The same principle
@@ -233,6 +256,12 @@ without inventing a parallel vocabulary. It does not mean the first
 implementation must cover full OpenConfig MPLS, network-instance, VRF leaking,
 or BGP-LS configuration models.
 
+OpenConfig naming is therefore a translation boundary, not a shortcut. The
+native candidate config, transaction planner, and route APIs still need typed
+rustbgpd semantics before the gNMI bridge can expose a family. A future gNMI Set
+path must not be the first place where a non-unicast family becomes
+operationally reachable.
+
 ### 9. Interop is a release gate for every family
 
 Each family needs at least one real-peer interop before it leaves alpha:
@@ -269,6 +298,9 @@ These are out of scope for this ADR and for any first implementation slice:
   rustbgpd's current route-server / fabric / API-first niche.
 - Future code should prepare a family-specific route-key substrate before
   adding new AFI/SAFI config strings.
+- Reviewers have a hard boundary for future work: either substrate remains
+  unreachable, or the PR implements a complete typed family slice with codec,
+  RIB, policy, API, refresh/GR, metrics, caps, docs, and interop.
 - `Prefix` stays a unicast type. The compiler remains useful: new families
   should require explicit match arms rather than silently entering unicast code.
 - The ORF raw-preservation behavior from ADR-0075 remains intentional and

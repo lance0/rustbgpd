@@ -79,6 +79,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:
   RFC 9252 is SRv6 BGP overlay services; future EVPN Add-Path work would use
   the general RFC 7911 Add-Path capability for AFI 25 / SAFI 70.
+- **Tightened the ADR-0077 route-family substrate boundary.** Future
+  BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
+  review rule: substrate-only PRs must remain unreachable from peers and
+  operators, while anything negotiable/configurable must ship as a
+  complete typed family slice with codec, RIB, policy, API, refresh/GR,
+  metrics/caps, docs, and interop. This is documentation-only; rustbgpd
+  still does not negotiate those families.
 
 ### Fixed
 

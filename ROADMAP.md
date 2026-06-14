@@ -158,7 +158,10 @@ has it, no broad performance sprints without profile evidence.
   router (see Non-goals). The ADR also preserves the ORF Address-Prefix guard:
   only IPv4/IPv6 unicast entries are parsed today, and future VPN/MPLS-family
   ORF support must be family-specific. Implementation stays demand-shaped (see
-  *Out-of-niche address families* under Maybe).
+  *Out-of-niche address families* under Maybe). Follow-up substrate work must
+  either remain unreachable from peers/operators or ship a complete typed family
+  slice; constant-only negotiation or config-only "support" is explicitly out
+  of scope.
 
 ### Later
 
@@ -722,6 +725,10 @@ has it, no broad performance sprints without profile evidence.
   support, extend the ORF Address-Prefix decoder deliberately: it currently
   parses only IPv4/IPv6 unicast and preserves L2VPN / unknown SAFIs as raw ORF
   groups to avoid silently applying plain-IP prefix semantics to future families.
+  The first acceptable implementation step is either private typed substrate that
+  cannot be negotiated/configured, or a complete vertical slice with codec, RIB,
+  policy context, route-refresh/GR behavior, API/CLI surfaces, caps, docs, and
+  interop receipts.
 - **Route dampening (RFC 2439).** Suppress flapping routes with penalty/decay.
 - **Scriptable policy engine.** User-defined attribute-transformation functions
   (Lua, Starlark, or WASM) beyond static match/action rules. Policy evaluation

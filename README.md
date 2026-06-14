@@ -54,6 +54,11 @@ diversity scripts remain local / manual gates. See
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
+Future BGP-LS, VPNv4/v6, RTC, and labeled-unicast work is scoped by
+[ADR-0077](docs/adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
+families must land as typed route-family slices or unreachable substrate, not as
+unicast `Prefix` shortcuts or MPLS dataplane creep.
+
 See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
 architecture diagrams, example configs, and API workflows.
 
@@ -393,7 +398,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9136 ESI overlay-index origination, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9136 ESI overlay-index origination, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
