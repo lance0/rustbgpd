@@ -11,16 +11,17 @@
 //! - `gateway`: zero (`0.0.0.0` / `::`) in the Interface-less model
 //!   (inner-MAC resolution via the Router MAC extcomm); the vetted
 //!   kernel-route via in GW-IP mode (receivers resolve recursively
-//!   through the gateway host's Type 2 MAC/IP route).
+//!   through the gateway host's Type 2 MAC/IP route); zero in ESI
+//!   overlay-index mode.
 //! - `label`: the IP-VRF's L3VNI in the 24-bit MPLS label slot —
 //!   in *both* modes. ADR-0087 decision 4 deliberately deviates from
 //!   the RFC 9136 §3.1 SHOULD-zero for overlay-index routes: our own
 //!   receive side enforces `label == L3VNI` before overlay
 //!   resolution, and FRR's gateway-ip RT-5s keep the VNI too.
-//! - `esi`: all-zero (multihomed-IP-VRF is out of scope for Gate 9;
-//!   validated at config load, asserted by the builder). Also a hard
-//!   RFC 9136 §3.2 requirement in GW-IP mode — ESI and GW IP must
-//!   not both be non-zero.
+//! - `esi`: all-zero in Interface-less / GW-IP mode; the configured
+//!   non-zero ESI in RFC 9136 §4.3 ESI overlay-index mode. GW-IP mode
+//!   always keeps ESI zero because RFC 9136 §3.2 allows at most one
+//!   overlay index.
 //! - `ethernet_tag`: zero (Type 5 doesn't use the EVI tag concept).
 //!
 //! And the non-MP path attribute list (the only thing this layer
@@ -34,10 +35,12 @@
 //!   is the transport's job.
 //! - `ExtendedCommunities`: { Route Target ×N from
 //!   `IpVrf::route_targets`, BGP Encapsulation = 8 (VXLAN), and —
-//!   only when the gateway is zero — Router MAC extcomm =
-//!   `IpVrf::router_mac`. GW-IP routes omit the Router MAC: RFC 9136
-//!   §3.2 makes it ignored-if-present when the GW IP is the overlay
-//!   index, and the inner MAC comes from the resolved Type 2. }
+//!   only when the GW-IP gateway is absent — Router MAC extcomm =
+//!   `IpVrf::router_mac` for Interface-less, or
+//!   `IpVrf::overlay_index_mac` for ESI overlay-index. GW-IP routes
+//!   omit the Router MAC: RFC 9136 §3.2 makes it ignored-if-present
+//!   when the GW IP is the overlay index, and the inner MAC comes from
+//!   the resolved Type 2. }
 //!
 //! Pure: no I/O, no tokio. The daemon-side supervisor calls this once
 //! per local kernel route change and hands the result to the RIB
@@ -253,12 +256,16 @@ pub fn originate_ip_prefix_route(
         });
     }
     // Normalize an unspecified gateway (0.0.0.0 / ::) to None. All-zeros
-    // IS the interface-less wire shape, so it must also keep the Router
-    // MAC extcomm — otherwise the route is gateway-zero AND RMAC-less,
-    // valid as neither model and unresolvable on the receive side.
-    // `select_overlay_gateway` already screens these out; this keeps the
-    // public origination boundary self-consistent for any other caller.
-    let overlay_gateway = route.gateway.filter(|gw| !gw.is_unspecified());
+    // IS the interface-less / ESI wire shape, so it must also keep the
+    // Router MAC extcomm — otherwise the route is gateway-zero AND
+    // RMAC-less, valid as neither model and unresolvable on the receive
+    // side. `select_overlay_gateway` already screens these out; this keeps
+    // the public origination boundary self-consistent for any other caller.
+    let overlay_gateway = if vrf.overlay_index_mode == OverlayIndexMode::GatewayIp {
+        route.gateway.filter(|gw| !gw.is_unspecified())
+    } else {
+        None
+    };
     if let Some(gw) = overlay_gateway {
         let gw_family_ok = matches!(
             (route.prefix, gw),
@@ -273,18 +280,38 @@ pub fn originate_ip_prefix_route(
         }
     }
 
-    // Build the Type 5 NLRI. esi = 0, ethernet_tag = 0; label = the
+    let (esi, router_mac) = match vrf.overlay_index_mode {
+        OverlayIndexMode::Esi => (
+            vrf.overlay_index_esi
+                .ok_or_else(|| OriginationError::MissingEsiOverlayIndex {
+                    vrf: vrf.name.clone(),
+                })?,
+            Some(vrf.overlay_index_mac.ok_or_else(|| {
+                OriginationError::MissingEsiOverlayIndex {
+                    vrf: vrf.name.clone(),
+                }
+            })?),
+        ),
+        OverlayIndexMode::GatewayIp if overlay_gateway.is_some() => {
+            (EthernetSegmentIdentifier::ZERO, None)
+        }
+        OverlayIndexMode::GatewayIp | OverlayIndexMode::InterfaceLess => {
+            (EthernetSegmentIdentifier::ZERO, Some(vrf.router_mac))
+        }
+    };
+
+    // Build the Type 5 NLRI. ethernet_tag = 0; label = the
     // L3VNI in the 24-bit label slot (RFC 8365 maps VXLAN VNI through
     // the MPLS label field on the wire — kept in GW-IP mode too, see
-    // ADR-0087 decision 4). Gateway: zero in the Interface-less
-    // model; the vetted via in GW-IP mode.
+    // ADR-0087 decision 4). Gateway: zero in Interface-less and ESI
+    // modes; the vetted via in GW-IP mode.
     let gateway = overlay_gateway.unwrap_or(match route.prefix {
         EvpnIpPrefixValue::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         EvpnIpPrefixValue::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
     });
     let nlri = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
         rd: vrf.rd,
-        esi: EthernetSegmentIdentifier::ZERO,
+        esi,
         ethernet_tag: EthernetTagId(0),
         prefix: route.prefix,
         gateway,
@@ -300,14 +327,15 @@ pub fn originate_ip_prefix_route(
     }
     // BGP Encapsulation = VXLAN (8) — RFC 8365 §6.
     ext_comms.push(ExtendedCommunity::bgp_encapsulation(VXLAN_ENCAP));
-    if overlay_gateway.is_none() {
+    if let Some(mac) = router_mac {
         // Router MAC (RFC 9135 §4.2 / RFC 9136). Subtype 0x03 of
         // opaque type 0x06; the wire helper handles the byte layout.
-        // Interface-less only: with a GW-IP overlay index the inner
-        // MAC comes from the resolved Type 2 and RFC 9136 §3.2 makes
-        // a Router MAC extcomm ignored-if-present, so we omit it
-        // (ADR-0087 decision 4).
-        ext_comms.push(ExtendedCommunity::router_mac(vrf.router_mac.octets()));
+        // Interface-less uses the PE/NVE Router MAC. ESI overlay-index
+        // uses the configured virtual-appliance / transit-switch MAC.
+        // GW-IP overlay-index omits it because the inner MAC comes from
+        // the resolved Type 2 and RFC 9136 §3.2 makes a Router MAC
+        // extcomm ignored-if-present (ADR-0087 decision 4).
+        ext_comms.push(ExtendedCommunity::router_mac(mac.octets()));
     }
 
     let attributes = vec![
@@ -348,6 +376,10 @@ pub enum OriginationError {
         prefix_family: &'static str,
         gateway: IpAddr,
     },
+    #[error(
+        "evpn_ip_vrfs[{vrf}]: overlay_index_mode = \"esi\" requires overlay_index_esi and overlay_index_mac"
+    )]
+    MissingEsiOverlayIndex { vrf: String },
 }
 
 fn family_of(p: EvpnIpPrefixValue) -> &'static str {
@@ -360,6 +392,7 @@ fn family_of(p: EvpnIpPrefixValue) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::EvpnInstanceId;
     use crate::ip_vrf::IpVrfId;
     use rustbgpd_wire::RouteDistinguisher;
 
@@ -506,6 +539,22 @@ mod tests {
 
     fn gw_vrf(local: &str) -> IpVrf {
         vrf(local).with_overlay_index_mode(OverlayIndexMode::GatewayIp)
+    }
+
+    fn esi() -> EthernetSegmentIdentifier {
+        EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    }
+
+    fn overlay_mac() -> MacAddress {
+        MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+    }
+
+    fn esi_vrf(local: &str) -> IpVrf {
+        vrf(local).with_esi_overlay_index(
+            esi(),
+            overlay_mac(),
+            Some(EvpnInstanceId::new(100).unwrap()),
+        )
     }
 
     fn v4_prefix(addr: [u8; 4], len: u8) -> EvpnIpPrefixValue {
@@ -707,6 +756,75 @@ mod tests {
             vec![VXLAN_ENCAP],
         );
         assert_eq!(out.next_hop, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn esi_overlay_route_carries_esi_zero_gateway_l3vni_and_overlay_router_mac() {
+        let v = esi_vrf("10.0.0.1");
+        let r = route_v4([192, 168, 50, 0], 24);
+        let out = originate_ip_prefix_route(&v, &r).unwrap();
+        match &out.route {
+            EvpnRoute::IpPrefix(p) => {
+                assert_eq!(p.esi, esi());
+                assert_eq!(p.gateway, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                assert_eq!(p.ethernet_tag.0, 0);
+                assert_eq!(p.label.as_vni(), 5000, "L3VNI stays in the label slot");
+            }
+            other => panic!("expected IpPrefix, got {other:?}"),
+        }
+        let ext_comms = out
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert_eq!(
+            ext_comms
+                .iter()
+                .filter_map(|c| c.as_router_mac())
+                .collect::<Vec<_>>(),
+            vec![overlay_mac().octets()],
+            "ESI overlay-index routes carry the configured overlay-index Router MAC",
+        );
+        assert!(ext_comms.iter().any(|c| c.route_target().is_some()));
+        assert_eq!(
+            ext_comms
+                .iter()
+                .filter_map(|c| c.as_bgp_encapsulation())
+                .collect::<Vec<_>>(),
+            vec![VXLAN_ENCAP],
+        );
+    }
+
+    #[test]
+    fn esi_overlay_route_ignores_supplied_gateway_to_avoid_dual_overlay_index() {
+        let v = esi_vrf("10.0.0.1");
+        let r = route_v4([192, 168, 50, 0], 24).with_gateway(Some("10.1.1.5".parse().unwrap()));
+        let out = originate_ip_prefix_route(&v, &r).unwrap();
+        match &out.route {
+            EvpnRoute::IpPrefix(p) => {
+                assert_eq!(p.esi, esi());
+                assert_eq!(
+                    p.gateway,
+                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    "RFC 9136 §3.2 permits at most one overlay index"
+                );
+            }
+            other => panic!("expected IpPrefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esi_mode_without_payload_is_rejected_structurally() {
+        let v = vrf("10.0.0.1").with_overlay_index_mode(OverlayIndexMode::Esi);
+        let r = route_v4([192, 168, 50, 0], 24);
+        let err = originate_ip_prefix_route(&v, &r).unwrap_err();
+        assert!(matches!(
+            err,
+            OriginationError::MissingEsiOverlayIndex { .. }
+        ));
     }
 
     #[test]

@@ -1182,11 +1182,25 @@ pub struct EvpnIpVrfConfig {
     /// §4.1/§4.2 GW-IP overlay index: a kernel route whose via lands on a
     /// connected subnet of this VRF originates with that via in the
     /// Gateway Address and no Router's MAC extcomm; routes without an
-    /// eligible via fall back to the interface-less shape. `"gateway_ip"`
-    /// requires at least one `[[evpn_instances]].ip_vrf`-linked L2VNI
-    /// (the receive side needs it to scope the recursive Type 2 lookup).
+    /// eligible via fall back to the interface-less shape. `"esi"` opts
+    /// into RFC 9136 §4.3 ESI overlay index and requires
+    /// `overlay_index_esi` + `overlay_index_mac`. `"gateway_ip"` and
+    /// `"esi"` both require at least one `[[evpn_instances]].ip_vrf`-linked L2VNI
+    /// (the receive side needs it to scope recursive resolution).
     #[serde(default)]
     pub overlay_index_mode: OverlayIndexModeConfig,
+    /// Non-zero ESI used when `overlay_index_mode = "esi"`.
+    #[serde(default)]
+    pub overlay_index_esi: Option<String>,
+    /// Router's MAC extended community used when
+    /// `overlay_index_mode = "esi"`. This names the virtual appliance /
+    /// transit-switch MAC, not the PE/NVE router MAC.
+    #[serde(default)]
+    pub overlay_index_mac: Option<String>,
+    /// Optional L2VNI disambiguator for ESI mode when this IP-VRF links
+    /// more than one L2VNI.
+    #[serde(default)]
+    pub overlay_index_l2vni: Option<u32>,
 }
 
 /// Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).
@@ -1199,6 +1213,8 @@ pub enum OverlayIndexModeConfig {
     InterfaceLess,
     /// RFC 9136 §4.1/§4.2 GW-IP overlay index.
     GatewayIp,
+    /// RFC 9136 §4.3 ESI overlay index.
+    Esi,
 }
 
 /// Explicit opt-in for ordinary unicast kernel FIB export.

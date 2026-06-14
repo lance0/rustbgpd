@@ -9111,6 +9111,252 @@ overlay_index_mode = "gateway_ip"
 }
 
 #[test]
+fn evpn_ip_vrf_esi_mode_with_single_linked_segment_member_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "esi"
+overlay_index_esi = "00:00:00:00:00:00:00:00:00:01"
+overlay_index_mac = "02:aa:bb:cc:dd:ee"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    let vrf = table.get("tenant-blue").unwrap();
+    assert_eq!(vrf.overlay_index_mode, rustbgpd_evpn::OverlayIndexMode::Esi);
+    assert_eq!(
+        vrf.overlay_index_esi.unwrap().octets(),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    );
+    assert_eq!(
+        vrf.overlay_index_mac.unwrap().octets(),
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]
+    );
+    assert_eq!(vrf.overlay_index_l2vni, None);
+}
+
+#[test]
+fn evpn_ip_vrf_esi_mode_requires_payload_fields() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "esi"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("overlay_index_esi"),
+        "expected missing ESI rejection, got {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_esi_fields_are_only_valid_in_esi_mode() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_esi = "00:00:00:00:00:00:00:00:00:01"
+overlay_index_mac = "02:aa:bb:cc:dd:ee"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("only valid when overlay_index_mode = \"esi\""),
+        "expected mode-gated field rejection, got {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_esi_mode_rejects_unknown_esi() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "esi"
+overlay_index_esi = "00:00:00:00:00:00:00:00:00:01"
+overlay_index_mac = "02:aa:bb:cc:dd:ee"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("does not match any configured") && msg.contains("ethernet_segments"),
+        "expected unknown ESI rejection, got {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_esi_mode_requires_l2vni_when_multiple_linked() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100, 200]
+originator_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "esi"
+overlay_index_esi = "00:00:00:00:00:00:00:00:00:01"
+overlay_index_mac = "02:aa:bb:cc:dd:ee"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("multiple linked L2VNIs") && msg.contains("overlay_index_l2vni"),
+        "expected ambiguous linked-L2VNI rejection, got {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_esi_mode_rejects_l2vni_outside_segment() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [200]
+originator_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+overlay_index_mode = "esi"
+overlay_index_esi = "00:00:00:00:00:00:00:00:00:01"
+overlay_index_mac = "02:aa:bb:cc:dd:ee"
+overlay_index_l2vni = 200
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not a member of overlay_index_esi"),
+        "expected selected-L2VNI segment-membership rejection, got {msg}"
+    );
+}
+
+#[test]
 fn evpn_ip_vrf_rejects_unknown_overlay_index_mode() {
     let toml = evpn_toml_with(
         r#"

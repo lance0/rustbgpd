@@ -1405,6 +1405,7 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
         prefix: prefix_route.prefix,
         next_hop: route.next_hop,
         gateway: prefix_route.gateway,
+        esi: prefix_route.esi,
         l3vni: prefix_route.label.as_vni(),
         route_targets,
         router_mac,

@@ -81,6 +81,7 @@ use crate::evpn_originator::LOCAL_PEER;
 /// `evpn_ip_vrf_origination_suppressed_total{reason=…}` counter.
 const SUPPRESS_NOT_READY: &str = "not_ready";
 const SUPPRESS_FAMILY_MISMATCH: &str = "family_mismatch";
+const SUPPRESS_INVALID_OVERLAY_INDEX: &str = "invalid_overlay_index";
 
 /// Live read-side count of currently-originated Type 5 routes per
 /// IP-VRF. Mirrors `OriginatedLocalMacCounts` for the L3 case so the
@@ -260,22 +261,25 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
 
 /// What the originator recorded for one currently-originated
 /// `(IpVrfId, prefix)`. The `key` is the RIB withdraw handle; the
-/// `gateway` is the Type 5 Gateway Address we last advertised. The
-/// gateway is tracked separately because `EvpnRouteKey::IpPrefix` is
-/// `{rd, ethernet_tag, prefix}` and deliberately excludes the
-/// gateway (RFC 7432/9136 route identity), so a GW-IP via change
-/// keeps the same key — the originator must compare the gateway to
+/// `gateway`/`esi`/`router_mac` are the Type 5 payload fields we last
+/// advertised. They are tracked separately because
+/// `EvpnRouteKey::IpPrefix` is `{rd, ethernet_tag, prefix}` and
+/// deliberately excludes the Gateway Address, ESI, and Router MAC
+/// (RFC 7432/9136 route identity), so an overlay-index payload change
+/// keeps the same key — the originator must compare these fields to
 /// notice it and re-originate in place (ADR-0087 decision 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OriginatedEntry {
     key: EvpnRouteKey,
     gateway: std::net::IpAddr,
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    router_mac: Option<[u8; 6]>,
 }
 
 async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrf_model: EffectiveIpVrfModelWatch) {
-    // (IpVrfId, prefix) -> the route we injected (key + gateway), so a
-    // matching withdraw uses the same key and a via change is
-    // detectable even though it leaves the key unchanged.
+    // (IpVrfId, prefix) -> the route we injected (key + overlay-index
+    // payload), so a matching withdraw uses the same key and a payload
+    // change is detectable even though it leaves the key unchanged.
     let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry> = BTreeMap::new();
     let mut ip_vrfs = ip_vrf_model.rx.borrow().clone();
     let mut vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
@@ -452,7 +456,7 @@ async fn reconcile(
         }
     }
 
-    // Phase 2: injections — `want - have`, plus stale-key/gateway repair
+    // Phase 2: injections — `want - have`, plus stale-key/payload repair
     // for same-(VRF,prefix) changes. The per-prefix body lives in
     // `originate_one` so this loop stays small.
     for ((vrf_id, prefix), obs) in &want {
@@ -468,9 +472,9 @@ async fn reconcile(
 /// Originate (or re-originate) one `(VRF, prefix)`. Records the entry
 /// in `originated` only after the RIB acks the inject — a failed inject
 /// leaves the "want, not yet originated" state so the next pass retries.
-/// Handles three sub-cases: fresh inject, in-place gateway repair (same
-/// route key, new GW-IP payload — ADR-0087 decision 5, no intermediate
-/// withdraw), and key change (withdraw-then-inject).
+/// Handles three sub-cases: fresh inject, in-place overlay-index payload
+/// repair (same route key, new GW-IP/ESI/RMAC payload — ADR-0087 decision 5,
+/// no intermediate withdraw), and key change (withdraw-then-inject).
 async fn originate_one(
     originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), OriginatedEntry>,
     cfg: &SpawnConfig,
@@ -503,21 +507,38 @@ async fn originate_one(
             }
             return;
         }
+        Err(OriginationError::MissingEsiOverlayIndex { .. }) => {
+            cfg.metrics.add_evpn_ip_vrf_origination_suppressed(
+                &vrf.name,
+                SUPPRESS_INVALID_OVERLAY_INDEX,
+                1,
+            );
+            if let Some(stale) = originated.get(&(vrf_id, prefix)).copied()
+                && withdraw_one(&cfg.rib_tx, vrf_id, stale.key, &cfg.originated_counts).await
+            {
+                originated.remove(&(vrf_id, prefix));
+                publish_originated_gauge(cfg, vrf_id, &vrf.name);
+            }
+            return;
+        }
     };
     let key = route.key();
     let desired = OriginatedEntry {
         key,
         gateway: route_gateway(&route),
+        esi: route_esi(&route),
+        router_mac: route_router_mac(&route),
     };
     if let Some(existing) = originated.get(&(vrf_id, prefix)).copied() {
         if existing == desired {
             return; // already originated with this key + gateway
         }
         if existing.key == key {
-            // Same route identity, different gateway payload (a GW-IP
-            // via change): re-inject in place. `insert_evpn` replaces
-            // last-write-wins on the key and re-distributes, so peers
-            // see one UPDATE rather than a withdraw/announce pulse.
+            // Same route identity, different overlay-index payload
+            // (GW-IP via or ESI/RMAC change): re-inject in place.
+            // `insert_evpn` replaces last-write-wins on the key and
+            // re-distributes, so peers see one UPDATE rather than a
+            // withdraw/announce pulse.
         } else if withdraw_one(&cfg.rib_tx, vrf_id, existing.key, &cfg.originated_counts).await {
             originated.remove(&(vrf_id, prefix));
             publish_originated_gauge(cfg, vrf_id, &vrf.name);
@@ -527,7 +548,7 @@ async fn originate_one(
     }
     if inject_one(&cfg.rib_tx, vrf_id, key, route, &cfg.originated_counts).await {
         // `inject_one` increments the count on every ack. For an
-        // in-place gateway change the key was already counted, so step
+        // in-place payload change the key was already counted, so step
         // the count back down to avoid double counting the same prefix.
         if originated
             .insert((vrf_id, prefix), desired)
@@ -611,6 +632,27 @@ fn route_gateway(route: &EvpnRibRoute) -> std::net::IpAddr {
         rustbgpd_wire::EvpnRoute::IpPrefix(p) => p.gateway,
         _ => std::net::Ipv4Addr::UNSPECIFIED.into(),
     }
+}
+
+/// The Type 5 ESI carried by an originated route. Same route-key payload
+/// tracking as [`route_gateway`].
+fn route_esi(route: &EvpnRibRoute) -> rustbgpd_wire::EthernetSegmentIdentifier {
+    match &route.route {
+        rustbgpd_wire::EvpnRoute::IpPrefix(p) => p.esi,
+        _ => rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+    }
+}
+
+/// The Router's MAC extended community carried by an originated route, if any.
+/// Same route-key payload tracking as [`route_gateway`].
+fn route_router_mac(route: &EvpnRibRoute) -> Option<[u8; 6]> {
+    route.attributes.iter().find_map(|attr| {
+        if let rustbgpd_wire::PathAttribute::ExtendedCommunities(comms) = attr {
+            comms.iter().find_map(|comm| comm.as_router_mac())
+        } else {
+            None
+        }
+    })
 }
 
 /// Issue an `InjectEvpn` over the RIB channel and wait for the
@@ -778,10 +820,10 @@ fn predicted_key(vrf: &IpVrf, prefix: EvpnIpPrefixValue) -> EvpnRouteKey {
 mod tests {
     use super::*;
     use rustbgpd_evpn::ip_vrf::IpVrfNotReady;
-    use rustbgpd_evpn::{IpVrf, IpVrfId, MacAddress, RouteSource, RouteTarget};
+    use rustbgpd_evpn::{EvpnInstanceId, IpVrf, IpVrfId, MacAddress, RouteSource, RouteTarget};
     use rustbgpd_rib::RibCommandError;
     use rustbgpd_telemetry::BgpMetrics;
-    use rustbgpd_wire::{Ipv4Prefix, RouteDistinguisher};
+    use rustbgpd_wire::{EthernetSegmentIdentifier, Ipv4Prefix, RouteDistinguisher};
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use tokio::sync::mpsc::error::TryRecvError;
@@ -867,6 +909,22 @@ mod tests {
 
     fn gw_vrf(id: u32, vtep: IpAddr) -> IpVrf {
         vrf(id, vtep).with_overlay_index_mode(rustbgpd_evpn::OverlayIndexMode::GatewayIp)
+    }
+
+    fn esi() -> EthernetSegmentIdentifier {
+        EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    }
+
+    fn overlay_mac() -> MacAddress {
+        MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+    }
+
+    fn esi_vrf(id: u32, vtep: IpAddr) -> IpVrf {
+        vrf(id, vtep).with_esi_overlay_index(
+            esi(),
+            overlay_mac(),
+            Some(EvpnInstanceId::new(100).unwrap()),
+        )
     }
 
     fn ready_status(vrf_id: u32) -> IpVrfDataplaneStatus {
@@ -1769,6 +1827,27 @@ mod tests {
             .collect()
     }
 
+    fn inject_esi_payload_for(
+        log: &GwResponderLog,
+        octets: [u8; 4],
+    ) -> Vec<(EthernetSegmentIdentifier, IpAddr, Option<[u8; 6]>)> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                RibUpdate::InjectEvpn { route, .. } => match &route.route {
+                    rustbgpd_wire::EvpnRoute::IpPrefix(p)
+                        if matches!(p.prefix, EvpnIpPrefixValue::V4(pre) if pre.addr == Ipv4Addr::from(octets)) =>
+                    {
+                        Some((p.esi, p.gateway, route_router_mac(route)))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
     fn withdraw_count(log: &GwResponderLog) -> usize {
         log.lock()
             .unwrap()
@@ -1836,6 +1915,47 @@ mod tests {
             inject_gateway_for(&log, [192, 168, 50, 0]),
             vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)],
             "off-subnet via must fall back to interface-less",
+        );
+    }
+
+    /// ESI overlay-index mode originates the same local kernel route as
+    /// RT-5 with a non-zero ESI, zero Gateway Address, and the
+    /// configured overlay Router MAC. The route set is still driven by
+    /// ordinary local route observations; only the overlay-index payload
+    /// changes.
+    #[tokio::test]
+    async fn esi_mode_originates_with_esi_and_overlay_router_mac() {
+        let v = esi_vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+        let (log, _resp) = recording_rib_responder(&mut h.cfg);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation_via(100, [192, 168, 50, 0], 24, "10.1.1.5")],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+
+        let target = (
+            IpVrfId::new(100).unwrap(),
+            EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 50, 0), 24)),
+        );
+        let entry = originated.get(&target).unwrap();
+        assert_eq!(entry.gateway, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(entry.esi, esi());
+        assert_eq!(entry.router_mac, Some(overlay_mac().octets()));
+        assert_eq!(
+            inject_esi_payload_for(&log, [192, 168, 50, 0]),
+            vec![(
+                esi(),
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                Some(overlay_mac().octets())
+            )],
+            "ESI overlay-index must ignore the kernel via and use the configured ESI/RMAC payload",
         );
     }
 

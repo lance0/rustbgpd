@@ -350,8 +350,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   tenant teardown, and `ip_vrf` relink live, while L3VNI/device/table
   IP-VRF identity changes (restart-required) and non-teardown mixed edits
   fail closed ([#210](https://github.com/lance0/rustbgpd/issues/210));
-  ESI overlay-index origination and broader protected recursion-path
-  interop remain the nearest standards-tail items, VLAN-aware bridges
+  ESI overlay-index origination now ships; broader protected recursion-path
+  interop remains the nearest standards-tail item, VLAN-aware bridges
   and bridge / VXLAN netdev creation are operator-provisioned, and
   service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
   EVPN, MPLS/SRv6 encapsulation, VPWS/E-Tree) is demand-shaped rather than
@@ -398,7 +398,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9136 ESI overlay-index origination, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, ESI overlay-index protected-recursion interop / receive-side recursion, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation

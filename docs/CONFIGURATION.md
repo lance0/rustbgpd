@@ -2162,7 +2162,10 @@ router_mac = "02:00:00:00:00:01"   # Router MAC ext-community value
 vrf_device = "vrf-blue"            # Linux VRF device (observe-only)
 l3vxlan_device = "vni5000"         # Linux L3 VXLAN device (observe-only)
 table_id = 5000                    # VRF route table id
-overlay_index_mode = "interface_less" # or "gateway_ip" (ADR-0087); default interface_less
+overlay_index_mode = "interface_less" # "interface_less", "gateway_ip", or "esi" (ADR-0087)
+# overlay_index_esi = "00:00:00:00:00:00:00:00:00:01" # required when mode = "esi"
+# overlay_index_mac = "02:aa:bb:cc:dd:ee"             # required when mode = "esi"
+# overlay_index_l2vni = 100                            # required for ESI mode only when multiple L2VNIs link here
 
 # An `[[evpn_instances]]` entry binds to this IP-VRF by name.
 [[evpn_instances]]
@@ -2187,7 +2190,10 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
 | `l3vxlan_device` | string    | yes      | --      | Linux L3 VXLAN device name (operator-managed, observe-only) |
 | `table_id`       | u32       | yes      | --      | VRF route table id (> 0); cross-checked against `vrf_device`'s `IFLA_VRF_TABLE` |
-| `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.2) keeps the Gateway Address zero + Router's MAC extcomm. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"gateway_ip"` requires at least one `ip_vrf`-linked L2VNI |
+| `overlay_index_mode` | string | no      | `"interface_less"` | Outbound Type 5 overlay-index shape (ADR-0087). `"interface_less"` (RFC 9136 §4.4.2) keeps the Gateway Address zero + Router's MAC extcomm. `"gateway_ip"` (RFC 9136 §4.1/§4.2) originates a route whose kernel via lands on a connected subnet of this VRF with that via in the Gateway Address and no Router's MAC extcomm; routes without an eligible via fall back to interface-less. `"esi"` (RFC 9136 §4.3) originates with a configured non-zero ESI, zero Gateway Address, and `overlay_index_mac` as the Router MAC extcomm. `"gateway_ip"` and `"esi"` require at least one `ip_vrf`-linked L2VNI |
+| `overlay_index_esi` | string | `esi` only | -- | Non-zero ESI (`xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`) used as the Type 5 overlay index when `overlay_index_mode = "esi"`; must match a configured `[[ethernet_segments]].esi` |
+| `overlay_index_mac` | string | `esi` only | -- | Unicast non-zero virtual/transit MAC advertised as the Router MAC extcomm when `overlay_index_mode = "esi"` |
+| `overlay_index_l2vni` | u32 | conditional | -- | L2VNI disambiguator for `overlay_index_mode = "esi"` when multiple `[[evpn_instances]]` entries link to this IP-VRF; the selected L2VNI must be linked to this IP-VRF and be a member of `overlay_index_esi` |
 
 ### L2VNI binding
 
@@ -2228,12 +2234,20 @@ the transition once per state change rather than every pass.
 - `router_mac` is a unicast non-zero MAC.
 - `vrf_device` and `l3vxlan_device` are non-blank.
 - `table_id` is `> 0`.
-- `overlay_index_mode` is `"interface_less"` (default) or `"gateway_ip"`.
-  `"gateway_ip"` is rejected at load unless at least one
+- `overlay_index_mode` is `"interface_less"` (default), `"gateway_ip"`, or
+  `"esi"`. `"gateway_ip"` is rejected at load unless at least one
   `[[evpn_instances]]` links to this IP-VRF via `ip_vrf` — the GW-IP
   receive side scopes its recursive Type 2 lookup to the linked
   L2VNIs, so a `gateway_ip` VRF with no L2VNI link could never
-  originate a resolvable route (ADR-0087).
+  originate a resolvable route (ADR-0087). `"esi"` also requires at least one
+  linked L2VNI plus `overlay_index_esi` and `overlay_index_mac`.
+- `overlay_index_esi`, `overlay_index_mac`, and `overlay_index_l2vni` are valid
+  only when `overlay_index_mode = "esi"`. The ESI must be non-zero and match a
+  configured `[[ethernet_segments]].esi`; the MAC must be unicast and non-zero.
+  If exactly one L2VNI links to the IP-VRF, that L2VNI is selected
+  automatically. If multiple L2VNIs link to the IP-VRF, `overlay_index_l2vni`
+  is required and must both link to the IP-VRF and appear in the selected
+  Ethernet Segment's `member_vnis`.
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
 - `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
   snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
@@ -2271,7 +2285,25 @@ it.
   receive side and FRR both keep it).
 - A via change re-originates in place (same route key, new Gateway
   Address) — one UPDATE, no withdraw/announce pulse.
-- ESI overlay-index origination (RFC 9136 §4.3) is not yet supported.
+
+### ESI overlay-index origination (`overlay_index_mode = "esi"`)
+
+With `"esi"` (RFC 9136 §4.3), every locally originated Type 5 for that
+IP-VRF carries:
+
+- the configured non-zero `overlay_index_esi` as the Type 5 ESI;
+- Gateway Address zero, so the route carries exactly one overlay index;
+- the IP-VRF's L3VNI in the label slot, matching the shipped
+  interface-less and GW-IP shapes;
+- Router MAC extcomm set to `overlay_index_mac`, which names the virtual
+  appliance / transit-switch MAC rather than the PE/NVE `router_mac`.
+
+This mode is for locally attached multi-homed gateway designs where receivers
+resolve the ESI through Ethernet A-D state. rustbgpd currently ships the
+origination side. Inbound remote Type 5s with a non-zero ESI are observed but
+dropped fail-closed with the bounded `unsupported_esi_overlay_index` reason
+until receive-side ESI protected recursion / real-peer interop ships. Existing
+receive-side GW-IP protected recursion is unchanged.
 
 See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) and
 [ADR-0087](adr/0087-evpn-type5-gateway-ip-overlay-index-origination.md)

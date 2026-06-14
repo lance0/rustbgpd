@@ -2338,6 +2338,7 @@ fn l3_desired_prefixes(ip_vrfs: &IpVrfTable) -> RemoteIpPrefixTable {
             prefix: l3_prefix(),
             next_hop: ipa("10.0.0.2"),
             gateway: ipa("0.0.0.0"),
+            esi: EthernetSegmentIdentifier::ZERO,
             l3vni: 101,
             route_targets: vec!["65000:101".parse().unwrap()],
             router_mac: Some(l3_router_mac()),

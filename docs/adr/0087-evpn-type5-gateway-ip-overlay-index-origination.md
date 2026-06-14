@@ -228,19 +228,46 @@ gateway changes (possibly to zero/fallback), and the level-triggered
 pass re-injects. Key changes (VRF redefine) keep the existing
 withdraw-then-inject path.
 
-### 6. Out of scope / follow-ups
+### 6. ESI overlay-index follow-up
 
-- **ESI overlay index (RFC 9136 §4.3) origination** — explicitly
-  deferred after the GW-IP origination + M68 interop receipts
-  (operator decision 2026-06-12). It remains the next
-  standards-tail overlay-index candidate, not part of this ADR's
-  shipped scope.
+The RFC 9136 §4.3 ESI overlay-index origination follow-up is now
+implemented as the second explicit `overlay_index_mode`:
+`overlay_index_mode = "esi"`. It preserves the default
+`"interface_less"` behavior and the shipped `"gateway_ip"` path, but
+originates Type 5 routes with:
+
+- `esi` = the configured non-zero `overlay_index_esi`;
+- `gateway` = zero, so the route carries exactly one overlay index;
+- `label` = the IP-VRF's L3VNI, matching the GW-IP decision above;
+- Router MAC extcomm = configured `overlay_index_mac`, naming the
+  virtual appliance / transit-switch MAC rather than the PE/NVE
+  `router_mac`.
+
+Config validation is deliberately fail-closed: the ESI must name a
+configured `[[ethernet_segments]]` entry, the IP-VRF must have at
+least one linked L2VNI, multiple linked L2VNIs require
+`overlay_index_l2vni`, and the selected L2VNI must be a member of
+the selected ESI. The pure origination and daemon-originator tests pin
+the wire shape. Receive-side ESI protected recursion and a real-peer
+interop proof are still separate standards-tail follow-ups. The
+receive-side projection DTO carries Type 5 ESI now, but non-zero-ESI
+RT-5s are dropped fail-closed until the EAD protected-recursion
+dependency exists.
+
+### 7. Out of scope / follow-ups
+
 - **Additional protected-recursion interop breadth** — M68 proves FRR
   (with `enable-resolve-overlay-index`) consumes a rustbgpd-originated
   GW-IP RT-5, holds it unresolved until the companion RT-2 appears,
   then imports it through the Gateway Address. Broader protected
   recursion-path smokes can land later without changing this ADR's
   default `"interface_less"` posture.
+- **ESI receive-side protected recursion** — originated ESI RT-5s are
+  standards-shaped, but rustbgpd's receive-side Type 5 projection still
+  imports only interface-less and GW-IP recursion. Non-zero-ESI Type 5s
+  are carried far enough to drop with `unsupported_esi_overlay_index`;
+  resolve them through EAD state before claiming receive-side ESI
+  recursion.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped
@@ -258,6 +285,11 @@ withdraw-then-inject path.
   (small, already-in-hand data — no extra netlink walks).
 - A via change converges as a single in-place UPDATE; receivers
   re-resolve without route identity churn.
+- ESI overlay-index origination adds three optional IP-VRF config
+  fields (`overlay_index_esi`, `overlay_index_mac`, and
+  `overlay_index_l2vni`) that are rejected unless
+  `overlay_index_mode = "esi"` and the selected ESI/L2VNI are
+  configured consistently.
 - The label deviation from §3.1's SHOULD is pinned here; if a future
   peer rejects non-zero labels on overlay-index routes, this ADR is
   the decision to revisit.

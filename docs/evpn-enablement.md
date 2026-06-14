@@ -52,7 +52,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
   Remaining big investments are the remaining ADR-0063 runtime
-  convergence shapes, ESI overlay-index origination / broader recursion-path
+  convergence shapes, ESI protected-recursion / broader recursion-path
   interop, and lower-priority VTEP operability gaps
   such as VLAN-aware bridges and rustbgpd-managed netdev creation.
 
@@ -705,7 +705,8 @@ Status: end-to-end shipped in v0.18.0 · auto-derived RTs are now
 available as an explicit config opt-in · receive-side overlay-index
 Type 5 recursion now resolves non-zero Gateway Address routes through
 linked Type 2 MAC/IP state, with unresolved or ambiguous gateways
-still fail-closed and counted by Prometheus
+still fail-closed and counted by Prometheus · native GW-IP and ESI
+overlay-index Type 5 origination now ship as explicit opt-in modes
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
@@ -767,6 +768,17 @@ Shipped pieces (v0.18.0):
   holds the Type 5 unresolved before the companion Type 2 exists, then
   imports the prefix into the tenant VRF through the Gateway Address
   once the MAC/IP route arrives.
+- RFC 9136 §4.3 ESI overlay-index origination: per-IP-VRF
+  `overlay_index_mode = "esi"` originates local Type 5 routes with a
+  configured non-zero ESI, zero Gateway Address, L3VNI in the label
+  slot, and Router MAC extcomm set to `overlay_index_mac`. Config load
+  fails closed unless `overlay_index_esi` names a configured
+  `[[ethernet_segments]]` ESI, the IP-VRF has at least one linked
+  `[[evpn_instances]].ip_vrf` L2VNI, and the selected/implicit
+  `overlay_index_l2vni` is a member of that ES. This is an origination
+  slice: receive-side projection preserves non-zero Type 5 ESI metadata
+  and drops those routes fail-closed with `unsupported_esi_overlay_index`
+  until protected recursion and real-peer interop ship.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -779,14 +791,13 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Overlay-index IRB follow-through: receive-side recursive resolution
+- Overlay-index IRB follow-through: GW-IP receive-side recursive resolution
   (non-zero Type 5 Gateway Address through matching Type 2 MAC/IP state),
   bounded drop metrics, aggregated per-VRF / per-reason drop counts in
-  gRPC / CLI status, native GW-IP origination (ADR-0087), and the FRR
-  consume-side M68 proof now ship. The next standards-tail slice is
-  RFC 9136 ESI overlay-index origination plus a protected-recursion
-  interop proof; broader service-provider EVPN route families remain
-  demand-shaped.
+  gRPC / CLI status, native GW-IP origination (ADR-0087), ESI origination,
+  and the FRR consume-side M68 GW-IP proof now ship. The next standards-tail
+  slice is ESI protected-recursion interop / receive-side recursion; broader
+  service-provider EVPN route families remain demand-shaped.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
@@ -811,8 +822,8 @@ demand.
 
 | Area | Status | First reviewable slice | Proof gate |
 |------|--------|------------------------|------------|
-| RFC 9136 ESI overlay-index Type 5 origination | Near-term candidate | Originate RT-5 with ESI overlay index from a locally attached multi-homed gateway while preserving the shipped GW-IP / interface-less modes | Self-consistency tests plus one protected-recursion interop smoke |
-| Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion route appears |
+| RFC 9136 ESI overlay-index Type 5 origination | Shipped (origination) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC while preserving the shipped GW-IP / interface-less modes | Pure origination + daemon tests; inbound non-zero-ESI RT-5s drop fail-closed until protected-recursion interop ships |
+| Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path, especially ESI recursion, without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion EAD / Type 2 state appears |
 | VLAN-aware bridges | Demand-shaped Linux/VXLAN operability | Replace today's `NotReady` guard with explicit VLAN-filtering ownership and per-VLAN FDB/neighbor attribution | Local kernel dataplane test plus one M-series smoke |
 | rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics | Add opt-in ownership for one netdev class at a time, with crash-restart adoption and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
 | BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |
