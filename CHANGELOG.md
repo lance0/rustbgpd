@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M67 link-driven Ethernet Segment drain churn soak harness.** New
+  `tests/soak/m67-link-drain-soak.clab.yml`,
+  `tests/soak/run-m67-link-drain-churn-soak.sh`, and
+  `tests/soak/analyze-m67-link-drain-soak.py` repeat the ADR-0085
+  production failure trigger for hours: pe1's bound AC loses carrier,
+  the link drain withdraws its segment routes, pe2 promotes, traffic
+  fails over, pe1 recovery is held, and pe1 re-wins DF. The analyzer
+  gates sessions, restart counters, drain/DF transitions, bounded
+  blackout/release timing, and RSS slope/peak. This adds the repeatable
+  soak machine; it does not claim a new 24 h receipt until one is run
+  and archived.
 - **EVPN Ethernet Segment diagnose surface.** `EvpnService.ListEthernetSegments`
   and `rbgp evpn es list [ESI]` now join configured ES membership with
   live multi-homing runtime state: composed operator/link drain reasons,
@@ -53,6 +64,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Shared EVPN multi-homing interop helpers.** The M66 and M67
+  rustbgpd-on-both-sides scripts now use common `test-lib.sh`
+  helpers for rustbgpctl wrappers, EVPN route polling, Prometheus
+  gauge reads, FDB/NHG parsing, ping probing, and AC-gate/drain-gauge
+  checks. Scenario-specific phase assertions stay in the M scripts, so
+  the receipt wording and failure points remain transparent.
 - **Documented the EVPN standards-tail boundary.** The README, roadmap,
   comparison matrix, EVPN enablement guide, and ADR-0087 now distinguish the
   near-term VXLAN/Linux alpha gaps (notably RFC 9136 ESI overlay-index
