@@ -422,6 +422,24 @@ jobs:
           topology: tests/interop/m67-evpn-link-drain-failover.clab.yml
           script: tests/interop/scripts/test-m67-evpn-link-drain-failover.sh
 
+  m68:
+    name: M68 — ADR-0087 GW-IP overlay-index Type 5 (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # Cross-vendor consume-side proof for native GW-IP overlay-index
+      # Type 5 origination: FRR holds the Type 5 unresolved until the
+      # companion Type 2 exists, then imports the prefix via the Gateway
+      # Address using enable-resolve-overlay-index.
+      - name: Run M68 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M68
+          topology: tests/interop/m68-evpn-type5-gwip-overlay-index-frr.clab.yml
+          script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
+
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: ubuntu-latest

@@ -433,7 +433,12 @@ state with value 1 is current).
    bridge port (enslaved to a bridge). The daemon warns
    `bound interface is not a bridge port` when it cannot resolve the
    handle.
-5. **Kernel carrier reset window** — the kernel itself re-enables a
+5. **Kernel STP owns the port state** — `listening`, `learning`, and
+   `blocking` are STP-owned bridge-port states. rustbgpd will warn and
+   leave the port untouched rather than force it to `disabled` or
+   `forwarding`; disable STP on the bound AC before relying on the
+   single-active gate.
+6. **Kernel carrier reset window** — the kernel itself re-enables a
    disabled port when carrier returns (`br_port_carrier_check`), so
    immediately after a carrier flap the port can briefly read
    `forwarding` until the next reconcile pass re-blocks it (kernel
@@ -453,7 +458,10 @@ state with value 1 is current).
    carrier flap re-enables it kernel-side regardless.
 
 **Do not run kernel STP on a bound AC** — STP and the gate write the
-same per-port state and will fight.
+same per-port state. rustbgpd now guards this by warning and skipping
+the gate while the kernel reports an STP-owned state, which prevents
+the daemon from fighting STP but also means whole-port single-active
+blocking is not enforced until STP is disabled or releases the port.
 
 ## IP-VRF stuck in `NotReady`
 

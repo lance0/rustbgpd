@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **M68 FRR consume-side interop proof for native GW-IP overlay-index
+  Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
+  includes a rustbgpd → FRR topology where rustbgpd originates a
+  Gateway-IP Type 5 from a static VRF route, FRR receives it with
+  `enable-resolve-overlay-index`, holds it unresolved until the
+  companion Type 2 MAC/IP route appears, then imports the prefix into
+  the tenant VRF via the Gateway Address. The test also withdraws the
+  static route and asserts FRR drops the imported VRF route.
+
 ### Fixed
 
 - **Completed the RIB session-identity gate for policy-context updates.**
@@ -19,6 +30,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter now
   includes the bounded `policy_context` kind. Matching-session and
   unregistered legacy behavior are unchanged.
+- **Hardened EVPN single-active multi-homing edge cases.** The
+  single-active AC gate now refuses to overwrite STP-owned bridge-port
+  states (`listening`, `learning`, `blocking`) on a bound access
+  circuit: it warns and leaves the port untouched until the kernel
+  reports a rustbgpd-owned `disabled` / `forwarding` state. The
+  ADR-0083 backup-swap path also has a regression test for a failed
+  group membership `REPLACE`: the old active group remains intact, the
+  MAC row keeps pointing at it, the pre-created backup nexthop stays
+  available for retry, and the failure is reported instead of counted
+  as a completed swap.
 - **Shape-aware EVPN runtime `--diff` classification.** Static config
   diffs now put ADR-0063/ADR-0085 coordinator-supported EVPN shapes
   (single L2VNI/IP-VRF/ES edits, additive build-up, tenant teardown,
