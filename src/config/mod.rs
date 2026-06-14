@@ -2508,6 +2508,9 @@ fn evpn_runtime_plan_is_reload_applied(
     if evpn_runtime_is_additive_build_up_plan(plan) {
         return evpn_runtime_validate_additive_build_up_shape(current, candidate, plan);
     }
+    if evpn_runtime_is_l2vni_swap_plan(plan) {
+        return evpn_runtime_validate_l2vni_swap_shape(current, candidate, plan);
+    }
     if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
         return false;
     }
@@ -2588,6 +2591,38 @@ fn evpn_runtime_validate_additive_build_up_shape(
                             .iter()
                             .all(|&vni| candidate.instances().get(vni).is_some())
                 })
+    })
+}
+
+fn evpn_runtime_is_l2vni_swap_plan(plan: &EvpnRuntimePlan) -> bool {
+    !plan.evpn_instances.added.is_empty()
+        && !plan.evpn_instances.deleted.is_empty()
+        && plan.evpn_instances.redefined.is_empty()
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
+}
+
+fn evpn_runtime_validate_l2vni_swap_shape(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    plan: &EvpnRuntimePlan,
+) -> bool {
+    if plan.ip_vrf_references_changed || current.ip_vrfs() != candidate.ip_vrfs() {
+        return false;
+    }
+    plan.evpn_instances.added.iter().all(|&raw_vni| {
+        EvpnInstanceId::new(raw_vni).is_ok_and(|vni| {
+            current.instances().get(vni).is_none() && candidate.instances().get(vni).is_some()
+        })
+    }) && plan.evpn_instances.deleted.iter().all(|&raw_vni| {
+        EvpnInstanceId::new(raw_vni).is_ok_and(|vni| {
+            current.instances().get(vni).is_some()
+                && candidate.instances().get(vni).is_none()
+                && current
+                    .ethernet_segments()
+                    .iter()
+                    .all(|segment| !segment.member_vnis.contains(&vni))
+        })
     })
 }
 

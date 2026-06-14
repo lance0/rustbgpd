@@ -231,9 +231,10 @@ has it, no broad performance sprints without profile evidence.
   operator/link composition against a real kernel, with a measured
   100–300 ms failover blackout. ADR-0085 arc done.
   Still open from the arc: a cross-vendor preference-DF smoke
-  against FRR; generalized runtime mixed-edit composer for add+delete/redefine
-  candidates (pure additive build-up now commits live; generic mixed shapes still
-  fail closed today). **Done:** shape-aware EVPN `--diff` classification now
+  against FRR; generalized runtime mixed-edit composer for broader
+  add+delete/redefine candidates (pure additive build-up and standalone L2VNI
+  swaps now commit live; ES/IP-VRF-linked and redefine-mixed shapes still fail
+  closed today). **Done:** shape-aware EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure
   remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
