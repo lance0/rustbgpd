@@ -731,8 +731,19 @@ impl RibManager {
                     self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply);
                 }
             }
-            RibUpdate::SetPeerPolicyContext { peer, peer_group } => {
-                self.handle_set_peer_policy_context(peer, peer_group);
+            RibUpdate::SetPeerPolicyContext {
+                peer,
+                session_id,
+                peer_group,
+            } => {
+                if !self.stale_session_message(
+                    peer,
+                    session_id,
+                    "SetPeerPolicyContext",
+                    "policy_context",
+                ) {
+                    self.handle_set_peer_policy_context(peer, peer_group);
+                }
             }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {

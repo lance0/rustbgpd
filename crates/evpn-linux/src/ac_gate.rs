@@ -182,8 +182,9 @@ pub fn restore_ops(
         .iter()
         .filter(|&(ifindex, &blocked)| blocked && !managed.contains_key(ifindex))
         .filter_map(|(&ifindex, _)| {
-            // Only restore ports that still exist as bridge ports and
-            // are not already forwarding.
+            // Only restore ports that still exist as bridge ports, are
+            // not already forwarding, and are not in an STP-owned state
+            // (STP and the AC gate cannot both own the whole-port knob).
             let observed = observed_by_ifindex.get(&ifindex)?;
             if observed.is_some_and(is_stp_owned_state) || *observed == Some(BR_STATE_FORWARDING) {
                 return None;

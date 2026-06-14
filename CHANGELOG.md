@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Completed the RIB session-identity gate for policy-context updates.**
+  `SetPeerPolicyContext` is now stamped with the transport `session_id`
+  and discarded when it comes from a superseded session, matching the
+  existing stale-message contract for routes, EoR, route-refresh, and
+  ORF updates. The
+  `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter now
+  includes the bounded `policy_context` kind. Matching-session and
+  unregistered legacy behavior are unchanged.
 - **Hardened EVPN single-active multi-homing edge cases.** The
   single-active AC gate now refuses to overwrite STP-owned bridge-port
   states (`listening`, `learning`, `blocking`) on a bound access
