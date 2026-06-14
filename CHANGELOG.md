@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Completed the RIB session-identity gate for policy-context updates.**
+  `SetPeerPolicyContext` is now stamped with the transport `session_id`
+  and discarded when it comes from a superseded session, matching the
+  existing stale-message contract for routes, EoR, route-refresh, and
+  ORF updates. The
+  `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter now
+  includes the bounded `policy_context` kind. Matching-session and
+  unregistered legacy behavior are unchanged.
 - **Shape-aware EVPN runtime `--diff` classification.** Static config
   diffs now put ADR-0063/ADR-0085 coordinator-supported EVPN shapes
   (single L2VNI/IP-VRF/ES edits, additive build-up, tenant teardown,

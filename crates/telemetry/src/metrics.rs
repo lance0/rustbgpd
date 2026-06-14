@@ -426,12 +426,13 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_rib_stale_session_message_ignored_total",
                 "Session-scoped RIB messages (RoutesReceived, End-of-RIB, \
-                 route-refresh begin/end/request, ORF updates) discarded \
+                 route-refresh begin/end/request, ORF updates, or policy \
+                 context updates) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
                  (collision loser) queued behind the replacement's PeerUp. \
                  The registered session's state is untouched. `kind` is one \
-                 of: routes, eor, refresh, orf.",
+                 of: routes, eor, refresh, orf, policy_context.",
             ),
             &["peer", "kind"],
         )
@@ -1814,14 +1815,19 @@ impl BgpMetrics {
     }
 
     /// Record a session-scoped RIB message (routes, End-of-RIB,
-    /// route-refresh begin/end/request, ORF update) discarded because
-    /// its session id did not match the registered session for the peer
-    /// (a message from a superseded session).
+    /// route-refresh begin/end/request, ORF update, or policy context
+    /// update) discarded because its session id did not match the
+    /// registered session for the peer (a message from a superseded
+    /// session).
     ///
-    /// `kind` is bounded: `"routes"`, `"eor"`, `"refresh"`, or `"orf"`.
+    /// `kind` is bounded: `"routes"`, `"eor"`, `"refresh"`, `"orf"`,
+    /// or `"policy_context"`.
     pub fn record_rib_stale_session_message_ignored(&self, peer: &str, kind: &str) {
         debug_assert!(
-            matches!(kind, "routes" | "eor" | "refresh" | "orf"),
+            matches!(
+                kind,
+                "routes" | "eor" | "refresh" | "orf" | "policy_context"
+            ),
             "unbounded stale-session-message kind label: {kind:?}"
         );
         self.rib_stale_session_message_ignored
@@ -3421,6 +3427,7 @@ mod tests {
         m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
         m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
         m.record_rib_stale_session_message_ignored("10.0.0.1", "eor");
+        m.record_rib_stale_session_message_ignored("10.0.0.1", "policy_context");
         m.record_rib_outbound_registration_failover("10.0.0.1");
         m.record_rib_dirty_resync("still_dirty");
         m.record_rib_dirty_resync("cleared");
@@ -3448,6 +3455,12 @@ mod tests {
         assert_eq!(
             m.rib_stale_session_message_ignored
                 .with_label_values(&["10.0.0.1", "eor"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.rib_stale_session_message_ignored
+                .with_label_values(&["10.0.0.1", "policy_context"])
                 .get(),
             1
         );

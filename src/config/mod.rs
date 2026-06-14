@@ -2045,6 +2045,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         "has_actionable_changes": diff.has_actionable_changes(),
         "has_informational_changes": diff.has_informational_changes(),
         "has_any_changes": diff.has_any_changes(),
+        "evpn_runtime_change_class": diff.evpn_runtime_change_class,
         "reload_applied": {
             "neighbors": &diff.neighbors,
             "peer_groups": &diff.peer_groups,
@@ -2062,7 +2063,6 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "dynamic_neighbors_changed": diff.dynamic_neighbors_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
-            "evpn_runtime_change_class": diff.evpn_runtime_change_class,
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.ethernet_segments_changed,
@@ -2073,7 +2073,6 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "rpki_changed": diff.rpki_changed,
             "bmp_changed": diff.bmp_changed,
             "mrt_changed": diff.mrt_changed,
-            "evpn_runtime_change_class": diff.evpn_runtime_change_class,
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed,
