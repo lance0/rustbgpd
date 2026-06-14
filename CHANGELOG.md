@@ -51,6 +51,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-origination without a withdraw pulse. The test also withdraws
   the static route and asserts FRR drops the imported VRF route.
 
+### Changed
+
+- **Shared EVPN multi-homing interop helpers.** The M66 and M67
+  rustbgpd-on-both-sides scripts now use common `test-lib.sh`
+  helpers for rustbgpctl wrappers, EVPN route polling, Prometheus
+  gauge reads, FDB/NHG parsing, ping probing, and AC-gate/drain-gauge
+  checks. Scenario-specific phase assertions stay in the M scripts, so
+  the receipt wording and failure points remain transparent.
+
 ### Fixed
 
 - **Completed the RIB session-identity gate for policy-context updates.**
