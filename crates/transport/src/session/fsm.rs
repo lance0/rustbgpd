@@ -453,6 +453,7 @@ impl PeerSession {
                         .rib_tx
                         .send(RibUpdate::SetPeerPolicyContext {
                             peer: self.peer_ip,
+                            session_id: self.session_identity.id,
                             peer_group: self.config.peer_group.clone(),
                         })
                         .await;

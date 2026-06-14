@@ -364,23 +364,13 @@ has it, no broad performance sprints without profile evidence.
   `session_id`; the RIB manager drops any whose id doesn't match the
   active registration (INFO log + the
   `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter,
-  `kind` ∈ routes/eor/refresh/orf). A message for a peer with no
-  registration keeps accept-all, mirroring the teardown rule.
-  `PeerDeleted` is config-scoped by design and stays unstamped.
-- **Close the session-identity contract on `SetPeerPolicyContext` + a
-  failover delivery assert** *(completeness; benign today).* One
-  session-scoped RIB mutation is still outside the
-  stamp-and-gate contract: `SetPeerPolicyContext` is emitted by the
-  session FSM (`crates/transport/src/session/fsm.rs:454`), keyed by bare
-  peer IP with no `session_id`, and applied at
-  `crates/rib/src/manager/mod.rs:734`. It is benign today — the payload
-  is the peer's group membership, idempotent across the collision
-  window's same-peer sessions — but an incomplete invariant is a seam:
-  stamp it with `session_id` and drop a non-matching id like the other
-  six gated variants. Paired test gap: the symmetric-failover manager
-  tests assert the inbound ROUTE-REFRESH recovery but not that a
-  *subsequent outbound advertisement* actually reaches the survivor —
-  add that delivery assert.
+  `kind` ∈ routes/eor/refresh/orf/policy_context). A message for a peer
+  with no registration keeps accept-all, mirroring the teardown rule.
+  `SetPeerPolicyContext` now carries the same transport `session_id` and
+  is dropped on a non-matching id; the pre-existing symmetric-failover
+  manager tests already pin that subsequent outbound advertisements
+  reach the survivor. `PeerDeleted` is config-scoped by design and stays
+  unstamped.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent

@@ -755,7 +755,7 @@ Shipped pieces (v0.18.0):
   labels and the `IpVrfState.remote_prefix_drop_counts` API / CLI field, so
   recursive failures are visible without prefix/MAC cardinality in metrics or
   status output.
-- ADR-0087 native GW-IP overlay-index origination: per-IP-VRF
+- ADR-0087 native GW-IP overlay-index origination (v0.39.0): per-IP-VRF
   `overlay_index_mode = "gateway_ip"` originates local Type 5 routes
   with an eligible kernel via in the Gateway Address and no Router-MAC
   extcomm, while routes without an eligible via fall back to the
