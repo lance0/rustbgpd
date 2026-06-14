@@ -5642,7 +5642,7 @@ local_vtep_ip = "10.0.0.100"
 }
 
 #[test]
-fn evpn_instance_swap_with_ip_vrf_link_stays_restart_required() {
+fn evpn_instance_swap_with_ip_vrf_link_marks_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -5706,14 +5706,14 @@ table_id = 5000
     assert!(diff.evpn_instances_changed);
     assert_eq!(
         diff.evpn_runtime_change_class,
-        EvpnRuntimeChangeClass::RestartRequired
+        EvpnRuntimeChangeClass::ReloadApplied
     );
-    assert!(!diff.has_reload_applied_changes());
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
     let json = config_diff_json_value(&diff);
-    assert_eq!(json["evpn_runtime_change_class"], "restart_required");
-    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
-    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
+    assert_eq!(json["evpn_runtime_change_class"], "reload_applied");
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
 }
 
 // -----------------------------------------------------------------------

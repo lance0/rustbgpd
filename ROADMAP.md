@@ -244,9 +244,10 @@ has it, no broad performance sprints without profile evidence.
   100–300 ms failover blackout. ADR-0085 arc done.
   The cross-vendor preference-DF smoke against FRR is now covered by
   M69. Still open from the arc: generalized runtime mixed-edit composer
-  for broader add+delete/redefine candidates (pure additive build-up and
-  standalone L2VNI swaps now commit live; ES/IP-VRF-linked and
-  redefine-mixed shapes still fail closed today). **Done:** shape-aware
+  for broader add+delete/redefine candidates (pure additive build-up,
+  standalone L2VNI swaps, and IP-VRF-linked L2VNI add/delete swaps now
+  commit live; ES-member deletes, arbitrary relinks, and redefine-mixed
+  shapes still fail closed today). **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure

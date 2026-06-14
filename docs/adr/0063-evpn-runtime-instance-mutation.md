@@ -9,9 +9,10 @@ add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
 ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
 and/or a linked IP-VRF in one pass), additive multi-domain build-up (pure
 add-only L2VNI/IP-VRF/ES candidates), and `ip_vrf` relink (an L2VNI re-homed to
-a different IP-VRF), and standalone L2VNI swaps (one-or-more clean L2VNI adds
-plus one-or-more clean standalone L2VNI deletes, with no ES membership,
-IP-VRF reference, redefine, or row-shape changes) commit live via
+a different IP-VRF), and L2VNI swaps (one-or-more clean L2VNI adds plus
+one-or-more clean L2VNI deletes, with any IP-VRF link metadata changes limited
+to those added/deleted VNIs and no ES membership, redefine, or row-shape
+changes) commit live via
 `EvpnService.ApplyEvpnRuntime` and SIGHUP file-driven reload; ES add/redefine
 can bind member VNIs added by a prior live L2VNI add when the segment actor
 already exists. Two shapes remain non-live, by design: **L3VNI/device/table
@@ -244,21 +245,23 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   IP-VRF metadata, Type 2 originator, SVI, segment instances and segments, and
   Type 5 originator. Rollback republishes the committed snapshots and withdraws
   speculative IMET on any failed publish.
-- Standalone L2VNI swaps commit a conservative add+delete composition live:
+- L2VNI swaps commit a conservative add+delete composition live:
   one-or-more newly added L2VNIs plus one-or-more deleted L2VNIs, provided the
-  deleted VNIs are not Ethernet Segment members, no `ip_vrf` reference/link
-  metadata changes, and no IP-VRF/ES rows or L2VNI redefines are mixed into the
-  same candidate. The converger originates IMET for added VNIs, publishes the
-  candidate L2VNI table to level-triggered consumers, withdraws IMET for deleted
-  VNIs, and rolls back by republishing the committed table, withdrawing
-  speculative IMET, and restoring deleted IMET if any step fails.
+  deleted VNIs are not Ethernet Segment members, any `ip_vrf` reference/link
+  metadata delta belongs only to the added/deleted VNIs, and no IP-VRF/ES rows
+  or L2VNI redefines are mixed into the same candidate. The converger originates
+  IMET for added VNIs, republishes IP-VRF reference metadata when it changes,
+  publishes the candidate L2VNI table to level-triggered consumers, withdraws
+  IMET for deleted VNIs, and rolls back by republishing the committed IP-VRF /
+  L2VNI tables, withdrawing speculative IMET, and restoring deleted IMET if any
+  step fails.
 - `ip_vrf` relink now commits live (dataplane-only, see above). The two shapes
   that remain non-live are by design: **L3VNI/device/table IP-VRF identity
   changes** stay restart-required (a kernel VRF lifecycle operation — a runtime
   drain/recreate would risk a dual-state window; `router_mac` is still
   live-redefinable), and **broader generic mixed add/delete/redefine edits**
   fail closed with an operator-actionable "split the request or apply the
-  standalone L2VNI swap separately" error, pending a generalized
+  L2VNI swap separately" error, pending a generalized
   converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #268.
@@ -269,7 +272,7 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
 - No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
   L3VNI/device/table IP-VRF identity changes, broader generic mixed
-  add/delete/redefine edits beyond standalone L2VNI swaps, and runtime applies
+  add/delete/redefine edits beyond supported L2VNI swaps, and runtime applies
   on daemons without the required EVPN actors remain fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.
