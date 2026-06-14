@@ -184,9 +184,10 @@ has it, no broad performance sprints without profile evidence.
   Type 5 with the kernel via (when it lands on a connected tenant subnet) in
   the Gateway Address and no Router-MAC extcomm, feeding the already-shipped
   receive-side recursion; default `"interface_less"` is unchanged. Proven by a
-  self-consistency test (own origination → own projection resolves end-to-end)
-  and M68, a hosted FRR consume-side proof that holds the Type 5 unresolved
-  until the companion Type 2 appears, then imports it via
+  self-consistency tests (own origination → own projection resolves end-to-end,
+  fallback interface-less projection, and via appears/disappears in-place
+  re-origination) and M68, a hosted FRR consume-side proof that holds the Type 5
+  unresolved until the companion Type 2 appears, then imports it via
   `enable-resolve-overlay-index`. Path **B (ESI overlay index, RFC 9136
   §4.3) explicitly deferred** pending A/C receipts (operator decision
   2026-06-12). The single-active arc below is
