@@ -16,6 +16,7 @@ operator-facing index that answers "what has actually been proved?"
 | Performance and scale | Criterion, bgperf2, distribution fanout, EVPN load, and RIB memory measurements are documented with hardware, noise floor, and measurement state. | [`BENCHMARKS.md`](BENCHMARKS.md) |
 | High-N memory regression tracking | Ignored RIB memory profile covers Adj-RIB-In, Full-RIB, and RR/route-server fanout at 100k/500k/900k prefixes; A/B summaries come from `bench/compare-rib-memory.sh`. | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md#rib-memory-compare) |
 | Long-running soak evidence | Archived 24-hour EVPN and local-origination soaks include run metadata, pass/fail gates, RSS slopes, and git-tracked artifacts. | [Soak receipts](#soak-receipts) |
+| EVPN link-drain churn harness | Repeatable M67 soak machinery exists for the newest single-active ES drain surface, with a local analyzer for route/session/gauge/timing/RSS gates. No archived 24-hour receipt is claimed yet. | [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
 
 ## Interop and dataplane receipts
 
@@ -49,7 +50,9 @@ operator-facing index that answers "what has actually been proved?"
 
 - Continuous or multi-day soak automation beyond the archived 24-hour receipts
   remains future work. The harnesses exist, but a standing soak runner is not
-  currently part of normal CI.
+  currently part of normal CI. The M67 link-driven ES drain churn harness is
+  ready for a local 1h/24h run; this page should gain a receipt row only after
+  that run is archived.
 - bgperf2 end-to-end comparison is a documented same-host receipt, not a PR-CI
   gate. Criterion comparison is easy to dispatch on the bench runner, but its
   output is reviewer input until a lower-noise host is available.

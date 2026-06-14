@@ -70,7 +70,7 @@ TOPO="m66-evpn-es-drain-handover"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUSTBGPD="clab-${TOPO}-vtep"
 export RUSTBGPD
-# shellcheck source=test-lib.sh
+# shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
 VTEP="clab-${TOPO}-vtep"
@@ -98,264 +98,20 @@ PROBE_INTERVAL_MS="100"
 # observed gap to near zero anyway. Mechanism asserts are strict; the
 # bound only catches a hang.
 BLACKOUT_BOUND_MS="30000"
+PROBER_PREFIX="m66"
+VTEP_ROUTE_WAIT_ATTEMPTS="60"
+ROLE_WAIT_ATTEMPTS="60"
+PE_GRPC_ATTEMPTS="20"
+VTEP_ESTABLISHED_ATTEMPTS="45"
+WAIT_PING_ATTEMPTS="60"
 
 OPERATOR_TOKEN_FILE="/etc/rustbgpd/grpc-operator.token"
 OBSERVER_SOCK="unix:///var/lib/rustbgpd/grpc-observer.sock"
 SIGHUP_MARKER="m66-sighup-while-drained"
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Shared helpers live in test-lib.sh; M66-specific assertions stay below.
 # ---------------------------------------------------------------------------
-
-# rustbgpctl as the OPERATOR principal against a PE's bearer-token TCP
-# listener. $1 = container, rest = CLI args.
-pe_ctl() {
-    local pe=${1:?}
-    shift
-    docker exec "$pe" rustbgpctl -s http://127.0.0.1:50051 \
-        --token-file "$OPERATOR_TOKEN_FILE" "$@"
-}
-
-# rustbgpctl as the OBSERVER principal against a PE's UDS listener.
-pe_ctl_observer() {
-    local pe=${1:?}
-    shift
-    docker exec "$pe" rustbgpctl -s "$OBSERVER_SOCK" "$@"
-}
-
-# rustbgpctl against the vtep (legacy enforcement, plaintext TCP).
-vtep_ctl() {
-    docker exec "$VTEP" rustbgpctl -s http://127.0.0.1:50051 "$@"
-}
-
-# JSON array of the vtep's EVPN routes of one type from one peer.
-vtep_routes() {
-    local route_type=${1:?}
-    local peer=${2:?}
-    vtep_ctl evpn --route-type "$route_type" --peer "$peer" -j 2>/dev/null || echo "[]"
-}
-
-# Count routes of a type from a peer, optionally filtered by a jq
-# row predicate (e.g. '.ethernet_tag == "MAX_ET"').
-vtep_route_count() {
-    local route_type=${1:?}
-    local peer=${2:?}
-    local predicate=${3:-true}
-    vtep_routes "$route_type" "$peer" \
-        | jq "[.[] | select(${predicate})] | length" 2>/dev/null || echo 0
-}
-
-# Poll until at least $4 routes of a type/peer/predicate are present.
-# Echoes the final count; exit 0 on success. 1s grain, $5 attempts.
-wait_vtep_routes_at_least() {
-    local route_type=${1:?} peer=${2:?} predicate=${3:?} want=${4:?}
-    local attempts=${5:-60}
-    local got=0
-    for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-0}" -ge "$want" ] 2>/dev/null; then
-            echo "$got"
-            return 0
-        fi
-        sleep 1
-    done
-    echo "${got:-0}"
-    return 1
-}
-
-# Poll until NO routes of a type/peer/predicate remain. Echoes the
-# final count; exit 0 on success. 1s grain, $4 attempts.
-wait_vtep_routes_gone() {
-    local route_type=${1:?} peer=${2:?} predicate=${3:?}
-    local attempts=${4:-60}
-    local got=1
-    for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-1}" -eq 0 ] 2>/dev/null; then
-            echo 0
-            return 0
-        fi
-        sleep 1
-    done
-    echo "${got:-1}"
-    return 1
-}
-
-rb_fdb() {
-    docker exec "$VTEP" bridge fdb show dev "$VXLAN" 2>/dev/null || true
-}
-
-rb_nh() {
-    docker exec "$VTEP" ip nexthop show 2>/dev/null || true
-}
-
-ce_mac_row() {
-    rb_fdb | grep -i "$CE_MAC" || true
-}
-
-# Per-VTEP fdb nexthop id for a gateway IP (`id <nid> via <ip> fdb`).
-nh_id_for_via() {
-    local ip=${1:?}
-    rb_nh | grep -E "^id [0-9]+ via ${ip} " | grep -E ' fdb' \
-        | awk '{print $2}' | head -1 || true
-}
-
-# Member ids of a group line (`id <gid> group <mid>[/<mid>...] ... fdb`).
-group_members_of() {
-    local gid=${1:?}
-    rb_nh | grep -E "^id ${gid} group " \
-        | grep -oE 'group [0-9/]+' | awk '{print $2}' | tr '/' ' ' || true
-}
-
-# Resolve the CE MAC row's egress VTEP IP(s): either a plain
-# `dst <ip>` row (single eligible PE, no backup) or an `nhid <gid>`
-# row whose group members' `via` IPs are the egress set.
-ce_mac_egress_ips() {
-    local row gid dst members mid via
-    row=$(ce_mac_row)
-    [ -z "$row" ] && return 0
-    dst=$(echo "$row" | grep -oE ' dst [0-9.]+' | awk '{print $2}' | head -1 || true)
-    if [ -n "$dst" ]; then
-        echo "$dst"
-        return 0
-    fi
-    gid=$(echo "$row" | grep -oE ' nhid [0-9]+' | awk '{print $2}' | head -1 || true)
-    [ -z "$gid" ] && return 0
-    members=$(group_members_of "$gid")
-    for mid in $members; do
-        via=$(rb_nh | grep -E "^id ${mid} via " | awk '{print $4}' || true)
-        [ -n "$via" ] && echo "$via"
-    done
-}
-
-# Scrape Prometheus via a container's management IP (M38/M49 pattern —
-# the rustbgpd:dev runtime image intentionally stays small and does
-# not carry curl/wget, so the HTTP request runs from the host).
-prom_scrape() {
-    local container=${1:?}
-    local ip
-    ip=$(resolve_ip "$container")
-    [ -z "$ip" ] && return 0
-    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null \
-        || wget -qO- -T 5 "http://${ip}:9179/metrics" 2>/dev/null \
-        || true
-}
-
-# evpn_df_role{esi=...,vni="100",role=$2} value on $1 (empty if absent).
-prom_df_role() {
-    local container=${1:?}
-    local role=${2:?}
-    prom_scrape "$container" \
-        | awk -v r="role=\"${role}\"" -v v="vni=\"${VNI}\"" -v e="esi=\"${ESI}\"" \
-            '$0 ~ /^evpn_df_role\{/ && index($0, r) && index($0, v) && index($0, e) { print $2; exit }'
-}
-
-wait_for_role() {
-    local container=${1:?} role=${2:?} want=${3:?} attempts=${4:-60}
-    for _ in $(seq 1 "$attempts"); do
-        [ "$(prom_df_role "$container" "$role")" = "$want" ] && return 0
-        sleep 1
-    done
-    return 1
-}
-
-prom_value() {
-    local container=${1:?}
-    local name=${2:?}
-    prom_scrape "$container" | awk -v n="$name" '$1 == n { print $2; exit }'
-}
-
-# Wait until a node's gRPC surface answers an operator rustbgpctl call.
-wait_pe_grpc() {
-    local pe=${1:?}
-    local label=${2:?}
-    for i in $(seq 1 20); do
-        if pe_ctl "$pe" global >/dev/null 2>&1; then
-            ok "$label gRPC ready (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "$label gRPC not reachable within 40s"
-    docker exec "$pe" tail -40 /var/log/rustbgpd.log >&2 || true
-    return 1
-}
-
-# Wait for the vtep's session to a peer to reach Established (vtep
-# neighbor surface; both ends are rustbgpd).
-wait_vtep_established() {
-    local peer=${1:?}
-    local label=${2:-BGP}
-    log "Waiting for $label session to reach Established..."
-    for i in $(seq 1 45); do
-        if vtep_ctl neighbor "$peer" 2>/dev/null | grep -qi "establ"; then
-            ok "$label session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "$label session did not reach Established within 90s"
-    return 1
-}
-
-# Ping from hr to the CE: require >= 9 of 10 replies (veth fabric;
-# anything lower is a real forwarding problem, one straggler is CI
-# scheduler noise).
-ping_burst_ok() {
-    local label=${1:?}
-    local out received
-    out=$(docker exec "$HR" ping -c 10 -i 0.2 -W 1 "$CE_HOST_IP" 2>/dev/null || true)
-    received=$(echo "$out" | grep -oE '[0-9]+ received' | awk '{print $1}' || true)
-    if [ "${received:-0}" -ge 9 ] 2>/dev/null; then
-        ok "$label (${received:-0}/10 replies)"
-        return 0
-    fi
-    fail "$label (${received:-0}/10 replies)"
-    echo "$out" | tail -5 >&2
-    return 1
-}
-
-# Bounded wait for the first successful ping (convergence gate before
-# the strict burst).
-wait_ping() {
-    local label=${1:?}
-    local attempts=${2:-60}
-    for i in $(seq 1 "$attempts"); do
-        if docker exec "$HR" ping -c 1 -W 1 "$CE_HOST_IP" >/dev/null 2>&1; then
-            ok "$label (attempt $i)"
-            return 0
-        fi
-        sleep 1
-    done
-    fail "$label not reached within ${attempts}s"
-    return 1
-}
-
-# Start/stop the 100ms prober on hr with an explicitly captured PID
-# (never a name-based kill). $1 = log suffix.
-start_prober() {
-    local tag=${1:?}
-    docker exec "$HR" sh -c "rm -f /tmp/m66-prober-${tag}.log /tmp/m66-prober-${tag}.pid" || true
-    docker exec -d "$HR" sh -c "ping -i 0.1 -O $CE_HOST_IP >/tmp/m66-prober-${tag}.log 2>&1 & echo \$! >/tmp/m66-prober-${tag}.pid"
-}
-
-stop_prober() {
-    local tag=${1:?}
-    docker exec "$HR" sh -c "kill -TERM \"\$(cat /tmp/m66-prober-${tag}.pid)\" 2>/dev/null" || true
-    sleep 1
-}
-
-# Max consecutive missed-probe run (in ms) from a prober log's reply
-# sequence numbers. At a 100 ms grain the measurable floor is one probe.
-prober_max_gap_ms() {
-    local tag=${1:?}
-    local max_gap
-    max_gap=$(docker exec "$HR" cat "/tmp/m66-prober-${tag}.log" 2>/dev/null \
-        | grep 'bytes from' \
-        | grep -oE 'icmp_seq=[0-9]+' | cut -d= -f2 \
-        | awk 'NR>1 && $1>prev+1 { g=$1-prev-1; if (g>max) max=g } { prev=$1 } END { print max+0 }' || true)
-    echo $(( ${max_gap:-0} * PROBE_INTERVAL_MS ))
-}
 
 # Assert all four pe1 route classes are ABSENT from the vtep RIB
 # right now (used post-drain and post-SIGHUP). $1 = phase label.
