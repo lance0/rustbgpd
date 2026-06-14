@@ -28,6 +28,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outcome: rustbgpd decodes FRR's Type 4 DF Election extcomm as
   Highest-Preference/preference 200, settles NonDF, and FRR reports
   itself DF with local preference 200 and remote preference 100.
+- **ADR-0063 EVPN runtime convergence — standalone L2VNI swaps.**
+  `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff`
+  now treat a candidate that adds one-or-more standalone L2VNIs and
+  deletes one-or-more standalone L2VNIs in the same request as a
+  coordinator-supported hot-apply shape. The daemon composes the
+  existing add/delete legs: added VNIs originate IMET, deleted VNIs
+  withdraw IMET, and the dataplane/Type 2/SVI/segment consumers receive
+  a single candidate instance snapshot before the runtime generation
+  advances. The slice deliberately excludes ES-member deletes,
+  `ip_vrf` reference/link metadata changes, redefines, and IP-VRF/ES
+  row changes; those broader mixed edits still fail closed.
 - **M68 FRR consume-side interop proof for native GW-IP overlay-index
   Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
   includes a rustbgpd → FRR topology where rustbgpd originates a
