@@ -6789,6 +6789,145 @@ table_id = 6000
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wires the dataplane/originator/IMET actors to prove swap rollback restoration"
+    )]
+    async fn runtime_actor_converger_l2vni_swap_rollback_restores_imet_and_models() {
+        // Drive the swap forward legs up to the rollback point (added IMET
+        // originated, candidate models published, deleted IMET withdrawn),
+        // then call rollback_l2vni_swap directly and prove it restores the
+        // committed model and unwinds the speculative IMET state. This covers
+        // the highest-risk swap path — the IMET withdraw-added / restore-
+        // deleted ordering — which the happy-path test does not exercise.
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(l2vni_swap_runtime_candidate_toml());
+        let current_instances = Arc::new(current.instances().clone());
+        let candidate_instances = Arc::new(candidate.instances().clone());
+        let added_vni = rustbgpd_evpn::EvpnInstanceId::new(300).unwrap();
+        let deleted_vni = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let added_instance = candidate.instances().get(added_vni).unwrap().clone();
+        let deleted_instance = current.instances().get(deleted_vni).unwrap().clone();
+        let added_rd = added_instance.rd;
+        let deleted_rd = deleted_instance.rd;
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let imet_keys = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+        assert_eq!(imet_keys.len(), 2);
+        // Forward leg 1: originate the added L2VNI's IMET.
+        let _ = imet_controller
+            .originate_instance(added_instance.clone(), &rib_tx)
+            .await;
+        let imet_controller = Arc::new(tokio::sync::Mutex::new(imet_controller));
+
+        // Forward leg 2: publish the candidate models to dataplane + originator.
+        let dataplane = dataplane_handle.runtime_control();
+        let originator = originator_handle.runtime_control();
+        assert!(dataplane.replace_evpn_instances(candidate_instances.clone()));
+        assert!(originator.replace_runtime_model(
+            candidate_instances.clone(),
+            evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            Arc::new(std::collections::BTreeSet::new()),
+        ));
+        // Forward leg 3: withdraw the deleted L2VNI's IMET.
+        let _ = imet_controller
+            .lock()
+            .await
+            .withdraw_instance(deleted_vni, &rib_tx)
+            .await;
+
+        // The forward legs above are all awaited (the recorder pushes before
+        // replying), so the mid-swap RIB effects are fully recorded. Clear so
+        // the rollback's effects are unambiguous.
+        injects.lock().await.clear();
+        withdraws.lock().await.clear();
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller,
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        let restored = converger
+            .rollback_l2vni_swap(&current, &[added_instance], &[deleted_instance])
+            .await;
+        assert!(restored, "swap rollback should restore all touched state");
+
+        // Committed model restored: the deleted VNI is back, the added VNI gone.
+        assert!(
+            evpn_instances_rx.borrow().get(deleted_vni).is_some(),
+            "rollback should restore the deleted L2VNI to the committed model"
+        );
+        assert!(
+            evpn_instances_rx.borrow().get(added_vni).is_none(),
+            "rollback should drop the speculatively-added L2VNI"
+        );
+
+        // Speculative added IMET withdrawn; deleted IMET re-originated.
+        wait_for_recorded_evpn_key_matching(
+            &withdraws,
+            "rollback should withdraw the speculatively-added L2VNI IMET",
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == added_rd),
+        )
+        .await;
+        wait_for_recorded_evpn_key_matching(
+            &injects,
+            "rollback should restore the deleted L2VNI IMET",
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == deleted_rd),
+        )
+        .await;
+
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn runtime_actor_converger_l2vni_delete_publishes_ip_vrf_metadata() {
         let current =
             runtime_model_from_candidate_toml(l2vni_linked_ip_vrf_runtime_candidate_toml());

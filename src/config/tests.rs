@@ -5710,6 +5710,10 @@ table_id = 5000
     );
     assert!(!diff.has_reload_applied_changes());
     assert!(diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["evpn_runtime_change_class"], "restart_required");
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
 }
 
 // -----------------------------------------------------------------------
