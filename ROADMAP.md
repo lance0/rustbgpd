@@ -364,8 +364,21 @@ has it, no broad performance sprints without profile evidence.
   `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter,
   `kind` ∈ routes/eor/refresh/orf). A message for a peer with no
   registration keeps accept-all, mirroring the teardown rule.
-  `SetPeerPolicyContext` stays unstamped (idempotent, config-derived);
-  `PeerDeleted` is config-scoped by design.
+  `PeerDeleted` is config-scoped by design and stays unstamped.
+- **Close the session-identity contract on `SetPeerPolicyContext` + a
+  failover delivery assert** *(completeness; benign today).* One
+  session-scoped RIB mutation is still outside the
+  stamp-and-gate contract: `SetPeerPolicyContext` is emitted by the
+  session FSM (`crates/transport/src/session/fsm.rs:454`), keyed by bare
+  peer IP with no `session_id`, and applied at
+  `crates/rib/src/manager/mod.rs:734`. It is benign today — the payload
+  is the peer's group membership, idempotent across the collision
+  window's same-peer sessions — but an incomplete invariant is a seam:
+  stamp it with `session_id` and drop a non-matching id like the other
+  six gated variants. Paired test gap: the symmetric-failover manager
+  tests assert the inbound ROUTE-REFRESH recovery but not that a
+  *subsequent outbound advertisement* actually reaches the survivor —
+  add that delivery assert.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent
@@ -383,6 +396,14 @@ has it, no broad performance sprints without profile evidence.
   unknown-unicast gap mattering. Either order converges — now pinned
   by `reverse_publish_order_converges_to_the_same_withdrawn_state`
   (`src/evpn_es_drain.rs`, the cross-actor seam audit).
+- **EVPN multi-homing hardening follow-ups** *(robustness/test).*
+  (1) ADR-0085 ES↔interface binding: optionally detect kernel STP
+  enabled on a bound access-circuit port and warn/guard at runtime —
+  STP on the AC can blackhole or loop the single-active gate's intent
+  and is silent today. (2) ADR-0083 single-active backup-path: add a
+  backup-PE-unreachable-at-swap negative test — assert the failover
+  behavior when the elected backup PE is unreachable at the moment of
+  the swap, not just the happy-path swap.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
