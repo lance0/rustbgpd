@@ -531,7 +531,7 @@ async fn originate_one(
     };
     if let Some(existing) = originated.get(&(vrf_id, prefix)).copied() {
         if existing == desired {
-            return; // already originated with this key + gateway
+            return; // already originated with this key + overlay-index payload
         }
         if existing.key == key {
             // Same route identity, different overlay-index payload
