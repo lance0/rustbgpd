@@ -366,6 +366,20 @@ jobs:
           topology: tests/interop/m49-evpn-preference-df.clab.yml
           script: tests/interop/scripts/test-m49-evpn-preference-df.sh
 
+  m69:
+    name: M69 — EVPN preference-DF election (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M69 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M69
+          topology: tests/interop/m69-evpn-preference-df-frr.clab.yml
+          script: tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
+
   m65:
     name: M65 — ADR-0083 single-active failover blackout measurement (GoBGP 3.x)
     runs-on: ubuntu-latest

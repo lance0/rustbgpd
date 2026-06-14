@@ -1,0 +1,40 @@
+# M69 PE1: rustbgpd lower-preference side of a cross-vendor
+# preference-DF smoke against FRR. The shared ES uses the Type-3 ESI
+# FRR derives from es-sys-mac aa:bb:cc:dd:ee:ff and es-id 1:
+# 03:aa:bb:cc:dd:ee:ff:00:00:01.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.1:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br200"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "03:aa:bb:cc:dd:ee:ff:00:00:01"
+member_vnis = [200]
+df_preference = 100
+df_algorithm = "highest-preference"
+originator_ip = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "frr-pe2"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

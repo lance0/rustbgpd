@@ -230,8 +230,8 @@ has it, no broad performance sprints without profile evidence.
   sub-second-sampled recovery hold-off, flap damping, and the
   operator/link composition against a real kernel, with a measured
   100–300 ms failover blackout. ADR-0085 arc done.
-  Still open from the arc: a cross-vendor preference-DF smoke
-  against FRR; generalized runtime mixed-edit composer for add+delete/redefine
+  The cross-vendor preference-DF smoke against FRR is now covered by
+  M69. Still open from the arc: generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today). **Done:** shape-aware EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
