@@ -14,8 +14,8 @@
 # DF Election extcomm, including the Don't-Preempt bit, is pinned by the
 # `preference_df_election_extcomm_*` unit test.
 #
-# NOT cross-vendor: both PEs are rustbgpd (FRR cross-vendor preference-DF
-# is a separate follow-up).
+# NOT cross-vendor: both PEs are rustbgpd. M69 covers FRR
+# preference-DF interop separately.
 #
 # Asserts:
 #   1. Both PEs exchange both Type 4 ES candidates.

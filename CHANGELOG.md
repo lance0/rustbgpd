@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M69 FRR interop proof for RFC 9785 preference-DF election.** The
+  hosted kernel-dataplane suite now includes a rustbgpd ↔ FRR
+  Ethernet Segment where rustbgpd advertises Highest-Preference with
+  `df_preference = 100` and FRR advertises `evpn mh es-df-pref 200`.
+  Default modulo carving for VNI 200 would elect rustbgpd, so the test
+  proves the cross-vendor DF Election extended community drives the
+  outcome: rustbgpd decodes FRR's Type 4 DF Election extcomm as
+  Highest-Preference/preference 200, settles NonDF, and FRR reports
+  itself DF with local preference 200 and remote preference 100.
 - **M68 FRR consume-side interop proof for native GW-IP overlay-index
   Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
   includes a rustbgpd → FRR topology where rustbgpd originates a

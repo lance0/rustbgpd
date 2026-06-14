@@ -13,9 +13,8 @@
 # pinned separately by the `preference_df_election_extcomm_*` unit test;
 # this smoke proves the algorithm drives the cross-PE election outcome.)
 #
-# NOT cross-vendor: both PEs are rustbgpd. FRR also implements
-# preference-DF, but its on-the-wire DP/extcomm behavior is unverified,
-# so a cross-vendor preference-DF smoke is a separate follow-up.
+# NOT cross-vendor: both PEs are rustbgpd. M69 covers FRR
+# preference-DF interop separately.
 #
 # Asserts (see scripts/test-m49-evpn-preference-df.sh):
 #   1. Both peers reach Established and exchange both Type 4 ES candidates.
