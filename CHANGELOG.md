@@ -51,6 +51,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-origination without a withdraw pulse. The test also withdraws
   the static route and asserts FRR drops the imported VRF route.
 
+### Changed
+
+- **Tightened the ADR-0077 route-family substrate boundary.** Future
+  BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
+  review rule: substrate-only PRs must remain unreachable from peers and
+  operators, while anything negotiable/configurable must ship as a
+  complete typed family slice with codec, RIB, policy, API, refresh/GR,
+  metrics/caps, docs, and interop. This is documentation-only; rustbgpd
+  still does not negotiate those families.
+
 ### Fixed
 
 - **Completed the RIB session-identity gate for policy-context updates.**
