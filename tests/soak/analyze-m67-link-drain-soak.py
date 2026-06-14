@@ -9,6 +9,7 @@ verdict for the soak-specific gates:
   - container restart counters stay flat,
   - the run observes both drained and recovered phases,
   - pe1/pe2 DF role and link-drain gauges transition through the expected states,
+  - every blackout sample was actually measured (no -1 unmeasured sentinel),
   - measured blackout and recovery-release samples remain under their bounds,
   - PE/VTEP RSS peak and post-warmup slope stay below configured caps.
 
@@ -193,10 +194,17 @@ def main() -> None:
     gate("operator_reason_never_set",
          all(row.get("pe1_operator_drain") in ("0", "") for row in rows),
          "link churn did not accidentally hold the operator drain reason")
+    valid_blackouts = [sample for sample in blackout_samples if sample >= 0]
+    unmeasured_blackouts = len(blackout_samples) - len(valid_blackouts)
+    gate("blackout_measured",
+         bool(blackout_samples) and unmeasured_blackouts == 0,
+         f"{unmeasured_blackouts} unmeasured blackout sample(s) of "
+         f"{len(blackout_samples)} (a -1 sentinel means the prober produced "
+         f"<2 replies, so the blackout could not be measured)")
     gate("blackout_bounded",
-         bool(blackout_samples)
-         and max(blackout_samples) < args.blackout_bound_ms,
-         f"max blackout={max(blackout_samples) if blackout_samples else None}ms cap={args.blackout_bound_ms}ms")
+         bool(valid_blackouts)
+         and max(valid_blackouts) < args.blackout_bound_ms,
+         f"max blackout={max(valid_blackouts) if valid_blackouts else None}ms cap={args.blackout_bound_ms}ms")
     gate("release_bounded",
          bool(release_samples)
          and max(release_samples) < args.release_bound_ms,
@@ -226,7 +234,8 @@ def main() -> None:
         "max_cycle": max_cycle,
         "phases": sorted(phases),
         "blackout_ms": {
-            "max": max(blackout_samples) if blackout_samples else None,
+            "max": max(valid_blackouts) if valid_blackouts else None,
+            "unmeasured": unmeasured_blackouts,
             "samples": blackout_samples,
         },
         "release_ms": {

@@ -342,11 +342,21 @@ stop_prober() {
 
 prober_max_gap_ms() {
     local tag=${1:?}
-    local max_gap
-    max_gap=$(docker exec "$HR" cat "/tmp/m67-soak-${tag}.log" 2>/dev/null \
+    local seqs reply_count max_gap
+    seqs=$(docker exec "$HR" cat "/tmp/m67-soak-${tag}.log" 2>/dev/null \
         | grep 'bytes from' \
-        | grep -oE 'icmp_seq=[0-9]+' | cut -d= -f2 \
-        | awk 'NR>1 && $1>prev+1 { g=$1-prev-1; if (g>max) max=g } { prev=$1 } END { print max+0 }' || true)
+        | grep -oE 'icmp_seq=[0-9]+' | cut -d= -f2 || true)
+    reply_count=$(printf '%s\n' "$seqs" | grep -c '[0-9]' || true)
+    if [ "${reply_count:-0}" -lt 2 ]; then
+        # Fewer than two replies means no gap can be measured (a missing or
+        # truncated prober log, e.g. the prober never started). Emit a sentinel
+        # so the gate fails loudly instead of reading a vacuous 0 ms "perfect"
+        # blackout. A genuine 0 (prober ran, no dropped sequences) is distinct.
+        echo -1
+        return
+    fi
+    max_gap=$(printf '%s\n' "$seqs" \
+        | awk 'NR>1 && $1>prev+1 { g=$1-prev-1; if (g>max) max=g } { prev=$1 } END { print max+0 }')
     echo $(( ${max_gap:-0} * PROBE_INTERVAL_MS ))
 }
 
@@ -483,7 +493,9 @@ run_cycle() {
     sleep 2
     stop_prober "$tag"
     blackout_ms=$(prober_max_gap_ms "$tag")
-    if [ "$blackout_ms" -ge "$BLACKOUT_BOUND_MS" ]; then
+    if [ "$blackout_ms" -lt 0 ]; then
+        mark_failure "cycle $cycle: blackout unmeasured (prober produced <2 replies)"
+    elif [ "$blackout_ms" -ge "$BLACKOUT_BOUND_MS" ]; then
         mark_failure "cycle $cycle: blackout ${blackout_ms}ms >= ${BLACKOUT_BOUND_MS}ms"
     fi
     sample drained "$blackout_ms"

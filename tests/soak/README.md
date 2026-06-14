@@ -400,7 +400,9 @@ Publish the 24h postmortem only after checking:
 - Docker restart counters for vtep/pe1/pe2 stay flat.
 - Every cycle observes pe1 link drain, pe2 DF promotion, AC-gate handover,
   bounded ping blackout, held recovery, pe1 DF restoration, and the CE MAC Type
-  2 returning.
+  2 returning. The blackout is recorded as a `-1` sentinel (and the cycle fails
+  as unmeasured) if the prober produced fewer than two replies, so a missing
+  prober log can never read as a vacuous `0 ms` "perfect" failover.
 - `pe1_operator_drain` remains zero; the link stimulus must not leak into the
   operator reason.
 - Steady-state RSS slope after warmup is flat enough to rule out retained
