@@ -2655,7 +2655,7 @@ fn evpn_runtime_validate_l2vni_swap_shape(
     candidate: &EvpnRuntimeCandidate,
     plan: &EvpnRuntimePlan,
 ) -> bool {
-    if plan.ip_vrf_references_changed || current.ip_vrfs() != candidate.ip_vrfs() {
+    if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
         return false;
     }
     plan.evpn_instances.added.iter().all(|&raw_vni| {

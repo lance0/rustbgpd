@@ -392,7 +392,7 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Runtime mutation surface for the EVPN model (ADR-0063) — coordinator core + commit gate, with `EvpnService.ApplyEvpnRuntime` and SIGHUP reload wired to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only/no-op behavior, and ordered convergence + rollback. ADR-0063 deliberately rejects a direct `ArcSwap` / `RwLock` table swap. **See the "ADR-0063 runtime convergence contract" subsection below the table for the full shape-by-shape breakdown.** | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_runtime_converger.rs`, `src/reload.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI add/delete/redefine + IP-VRF add/delete/redefine + ES add/delete/redefine + additive build-up + atomic tenant teardown + `ip_vrf` relink convergence landed for RPC and SIGHUP (M47/M48 teardown + M49 preference-DF smokes); L3VNI/device/table IP-VRF identity redefine (restart-required by design) + generic mixed add/delete/redefine edits remain tracked in [#268](https://github.com/lance0/rustbgpd/issues/268) |
+| Runtime mutation surface for the EVPN model (ADR-0063) — coordinator core + commit gate, with `EvpnService.ApplyEvpnRuntime` and SIGHUP reload wired to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only/no-op behavior, and ordered convergence + rollback. ADR-0063 deliberately rejects a direct `ArcSwap` / `RwLock` table swap. **See the "ADR-0063 runtime convergence contract" subsection below the table for the full shape-by-shape breakdown.** | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_runtime_converger.rs`, `src/reload.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI add/delete/redefine + IP-VRF add/delete/redefine + ES add/delete/redefine + additive build-up + atomic tenant teardown + `ip_vrf` relink + L2VNI add/delete swaps, including intrinsic IP-VRF link metadata for swapped VNIs, landed for RPC and SIGHUP (M47/M48 teardown + M49 preference-DF smokes); L3VNI/device/table IP-VRF identity redefine (restart-required by design) + generic mixed add/delete/redefine edits remain tracked in [#268](https://github.com/lance0/rustbgpd/issues/268) |
 
 **ADR-0063 runtime convergence contract.** The foundation exposes the
 committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`
@@ -438,6 +438,13 @@ file-driven reload:
   any `ip_vrf` reference delta belongs only to newly added L2VNIs, then
   originates Type 3 IMET and republishes candidate snapshots to the dataplane,
   Type 2 originator, SVI, segment, and Type 5 originator with rollback.
+- **L2VNI add/delete swap** — one-or-more L2VNIs added plus one-or-more
+  L2VNIs deleted in the same candidate. The deleted VNIs cannot be Ethernet
+  Segment members, redefines and IP-VRF/ES row edits remain rejected, and any
+  `ip_vrf` reference delta must belong only to the swapped VNIs. The converger
+  originates added IMET, republishes changed IP-VRF reference metadata,
+  publishes the candidate L2VNI snapshot, withdraws deleted IMET, and rolls
+  back all touched snapshots/IMET state on failure.
 - **`ip_vrf` relink** — a dataplane-only republish of the moved link
   reference (the link drives only RFC 9135 overlay-index recursion; RD is
   unchanged, so no Type 3 re-origination).
@@ -502,7 +509,7 @@ flow that Gate 7b's foundation left as a stub.
 |------|----------------|
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — ✅ complete (#139): detect-only defaults, opt-in local-origin `suppress_local` action, remote-route processing suppression, receive-side intent filtering, and a manual clear API (`ClearDuplicateMacQuarantine`). Only explicit kernel drop/filter primitives remain optional follow-up. | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`, `crates/api/src/evpn_service.rs` |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
-| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` plus SIGHUP reload (ADR-0063); single L2VNI add/delete/redefine, single IP-VRF add/delete/redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, additive build-up, atomic tenant teardown (delete-only ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass), and `ip_vrf` relink commit live; L3VNI/device/table identity changes are restart-required by design and generic mixed add/delete/redefine edits fail closed (#268) | `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/reload.rs`, `src/evpn_runtime_converger.rs`, `src/evpn_segment.rs` |
+| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` plus SIGHUP reload (ADR-0063); single L2VNI add/delete/redefine, single IP-VRF add/delete/redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, additive build-up, atomic tenant teardown (delete-only ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass), `ip_vrf` relink, and L2VNI add/delete swaps with intrinsic IP-VRF link metadata commit live; L3VNI/device/table identity changes are restart-required by design and generic mixed add/delete/redefine edits fail closed (#268) | `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/reload.rs`, `src/evpn_runtime_converger.rs`, `src/evpn_segment.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 **Closed in v0.17.0 (post-v0.16.0 follow-ups):**
@@ -803,10 +810,11 @@ Still ahead:
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
   L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, and
   additive build-up, atomic tenant teardown (delete-only ES-member L2VNI +
-  Ethernet Segment and/or linked IP-VRF in one pass), and `ip_vrf` relink commit
-  live via `ApplyEvpnRuntime` and SIGHUP reload; L3VNI/device/table IP-VRF
-  identity changes are restart-required by design and generic mixed
-  add/delete/redefine edits fail closed with a "split the request" error.
+  Ethernet Segment and/or linked IP-VRF in one pass), `ip_vrf` relink, and
+  L2VNI add/delete swaps with intrinsic IP-VRF link metadata commit live via
+  `ApplyEvpnRuntime` and SIGHUP reload; L3VNI/device/table IP-VRF identity
+  changes are restart-required by design and generic mixed add/delete/redefine
+  edits fail closed with a "split the request" error.
 
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 /
