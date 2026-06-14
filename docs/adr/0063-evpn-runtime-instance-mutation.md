@@ -8,17 +8,17 @@ unchanged L3VNI/device/table identity, single Ethernet Segment
 add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
 ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
 and/or a linked IP-VRF in one pass), additive multi-domain build-up (pure
-add-only L2VNI/IP-VRF/ES candidates), and `ip_vrf` relink (an L2VNI re-homed to
-a different IP-VRF), and L2VNI swaps (one-or-more clean L2VNI adds plus
-one-or-more clean L2VNI deletes, with any IP-VRF link metadata changes limited
-to those added/deleted VNIs and no ES membership, redefine, or row-shape
+add-only L2VNI/IP-VRF/ES candidates), `ip_vrf` relink (an L2VNI re-homed to
+a different IP-VRF), and L2VNI-only mixed compositions (one-or-more L2VNI
+add/delete/redefine change classes, with any IP-VRF link metadata changes
+limited to added/deleted VNIs and no ES-member deletes or IP-VRF/ES row-shape
 changes) commit live via
 `EvpnService.ApplyEvpnRuntime` and SIGHUP file-driven reload; ES add/redefine
 can bind member VNIs added by a prior live L2VNI add when the segment actor
 already exists. Two shapes remain non-live, by design: **L3VNI/device/table
 IP-VRF identity changes** are restart-required (kernel VRF lifecycle —
-`router_mac` is still live-redefinable), and **broader generic mixed
-add/delete/redefine edits** fail closed with a "split the request" error
+`router_mac` is still live-redefinable), and **broader ES/IP-VRF mixed edits**
+fail closed with a "split the request" error
 pending a generalized converge-to-candidate follow-up
 ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 **Date:** 2026-05-17 (implementation completed through v0.27.0)
@@ -245,23 +245,24 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   IP-VRF metadata, Type 2 originator, SVI, segment instances and segments, and
   Type 5 originator. Rollback republishes the committed snapshots and withdraws
   speculative IMET on any failed publish.
-- L2VNI swaps commit a conservative add+delete composition live:
-  one-or-more newly added L2VNIs plus one-or-more deleted L2VNIs, provided the
-  deleted VNIs are not Ethernet Segment members, any `ip_vrf` reference/link
-  metadata delta belongs only to the added/deleted VNIs, and no IP-VRF/ES rows
-  or L2VNI redefines are mixed into the same candidate. The converger originates
-  IMET for added VNIs, republishes IP-VRF reference metadata when it changes,
-  publishes the candidate L2VNI table to level-triggered consumers, withdraws
-  IMET for deleted VNIs, and rolls back by republishing the committed IP-VRF /
-  L2VNI tables, withdrawing speculative IMET, and restoring deleted IMET if any
-  step fails.
+- L2VNI mixed compositions commit a conservative L2VNI-only candidate live:
+  one-or-more L2VNI add/delete/redefine change classes, provided deleted VNIs
+  are not Ethernet Segment members, any `ip_vrf` reference/link metadata delta
+  belongs only to added/deleted VNIs, and no IP-VRF/ES rows are mixed into the
+  same candidate. The converger originates IMET for added VNIs, withdraws the
+  old Type 3 key and originates the new key for redefined VNIs, republishes
+  IP-VRF reference metadata when it changes, publishes the candidate L2VNI
+  table to level-triggered consumers, withdraws IMET for deleted VNIs, and rolls
+  back by republishing the committed IP-VRF / L2VNI tables, withdrawing
+  speculative IMET, restoring deleted IMET, and restoring the committed Type 3
+  keys for redefined VNIs if any step fails.
 - `ip_vrf` relink now commits live (dataplane-only, see above). The two shapes
   that remain non-live are by design: **L3VNI/device/table IP-VRF identity
   changes** stay restart-required (a kernel VRF lifecycle operation — a runtime
   drain/recreate would risk a dual-state window; `router_mac` is still
-  live-redefinable), and **broader generic mixed add/delete/redefine edits**
+  live-redefinable), and **broader ES/IP-VRF mixed edits**
   fail closed with an operator-actionable "split the request or apply the
-  L2VNI swap separately" error, pending a generalized
+  L2VNI-only change separately" error, pending a generalized
   converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #268.
@@ -271,9 +272,9 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
 - No per-instance `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface;
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
 - No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
-  L3VNI/device/table IP-VRF identity changes, broader generic mixed
-  add/delete/redefine edits beyond supported L2VNI swaps, and runtime applies
-  on daemons without the required EVPN actors remain fail-closed.
+  L3VNI/device/table IP-VRF identity changes, ES/IP-VRF row mixed edits beyond
+  the supported L2VNI-only composer, and runtime applies on daemons without the
+  required EVPN actors remain fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.
 - No change to EVPN dataplane defaults such as `apply_bum_enforcement` or

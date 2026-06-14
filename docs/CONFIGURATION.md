@@ -2056,10 +2056,11 @@ coordinator live-commits single L2VNI/IP-VRF/Ethernet-Segment
 add/delete/redefine (a redefine, including field flips such as
 `apply_aliasing_ecmp`, re-derives the per-VNI state via the
 `FdbNhg → SingleDst` dataplane transition), additive build-up, atomic
-tenant teardown, and `ip_vrf` relink through both gRPC and SIGHUP reload.
-L3VNI/device/table IP-VRF identity changes are restart-required by design,
-and generic mixed add/delete/redefine edits fail closed — apply each as a
-separate request (<https://github.com/lance0/rustbgpd/issues/268>).
+tenant teardown, `ip_vrf` relink, and L2VNI-only add/delete/redefine
+compositions through both gRPC and SIGHUP reload. L3VNI/device/table IP-VRF
+identity changes are restart-required by design, and ES/IP-VRF row mixed edits
+fail closed — split those changes into supported requests
+(<https://github.com/lance0/rustbgpd/issues/268>).
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -2254,8 +2255,9 @@ the transition once per state change rather than every pass.
   `EvpnService.ApplyEvpnRuntime` can live-commit a single IP-VRF add,
   standalone delete, or redefine with unchanged L3VNI/device/table identity, and
   an atomic tenant teardown that drops a linked IP-VRF together with its L2VNI
-  (and any Ethernet Segment) in one pass; `ip_vrf` relink and L3VNI/device/table
-  IP-VRF redefine remain fail-closed #210 shapes.
+  (and any Ethernet Segment) in one pass. `ip_vrf` relink and L2VNI-only
+  add/delete/redefine compositions commit live; L3VNI/device/table IP-VRF
+  identity changes and ES/IP-VRF row mixed edits remain fail-closed #268 shapes.
 
 ### GW-IP overlay-index origination (`overlay_index_mode = "gateway_ip"`)
 
