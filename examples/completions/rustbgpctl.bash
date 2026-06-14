@@ -220,6 +220,9 @@ _rustbgpctl() {
             rustbgpctl__subcmd__evpn,diagnose)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__diagnose"
                 ;;
+            rustbgpctl__subcmd__evpn,es)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es"
+                ;;
             rustbgpctl__subcmd__evpn,help)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__help"
                 ;;
@@ -237,6 +240,30 @@ _rustbgpctl() {
                 ;;
             rustbgpctl__subcmd__evpn,vrfs)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__vrfs"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es,drain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__drain"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es,help)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es,list)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__list"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es,undrain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__undrain"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help,drain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__drain"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help,help)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__help"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help,list)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__list"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help,undrain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__undrain"
                 ;;
             rustbgpctl__subcmd__evpn__subcmd__help,add-imet)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add__subcmd__imet"
@@ -262,6 +289,9 @@ _rustbgpctl() {
             rustbgpctl__subcmd__evpn__subcmd__help,diagnose)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__diagnose"
                 ;;
+            rustbgpctl__subcmd__evpn__subcmd__help,es)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es"
+                ;;
             rustbgpctl__subcmd__evpn__subcmd__help,help)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__help"
                 ;;
@@ -279,6 +309,15 @@ _rustbgpctl() {
                 ;;
             rustbgpctl__subcmd__evpn__subcmd__help,vrfs)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__vrfs"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es,drain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__drain"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es,list)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__list"
+                ;;
+            rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es,undrain)
+                cmd="rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__undrain"
                 ;;
             rustbgpctl__subcmd__fib__subcmd__table,delete)
                 cmd="rustbgpctl__subcmd__fib__subcmd__table__subcmd__delete"
@@ -457,6 +496,9 @@ _rustbgpctl() {
             rustbgpctl__subcmd__help__subcmd__evpn,diagnose)
                 cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__diagnose"
                 ;;
+            rustbgpctl__subcmd__help__subcmd__evpn,es)
+                cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es"
+                ;;
             rustbgpctl__subcmd__help__subcmd__evpn,instances)
                 cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__instances"
                 ;;
@@ -471,6 +513,15 @@ _rustbgpctl() {
                 ;;
             rustbgpctl__subcmd__help__subcmd__evpn,vrfs)
                 cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__vrfs"
+                ;;
+            rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es,drain)
+                cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__drain"
+                ;;
+            rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es,list)
+                cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__list"
+                ;;
+            rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es,undrain)
+                cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain"
                 ;;
             rustbgpctl__subcmd__help__subcmd__fib__subcmd__table,delete)
                 cmd="rustbgpctl__subcmd__help__subcmd__fib__subcmd__table__subcmd__delete"
@@ -1861,7 +1912,7 @@ _rustbgpctl() {
             return 0
             ;;
         rustbgpctl__subcmd__evpn)
-            opts="-s -j -h --route-type --peer --rd --addr --token-file --json --no-color --help list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac runtime instances nexthops vrfs diagnose help"
+            opts="-s -j -h --route-type --peer --rd --addr --token-file --json --no-color --help list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac es runtime instances nexthops vrfs diagnose help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2238,8 +2289,182 @@ _rustbgpctl() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rustbgpctl__subcmd__evpn__subcmd__es)
+            opts="-s -j -h --addr --token-file --json --no-color --help list drain undrain help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__drain)
+            opts="-s -j -h --addr --token-file --json --no-color --help <ESI>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help)
+            opts="list drain undrain help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__drain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__help__subcmd__undrain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__list)
+            opts="-s -j -h --addr --token-file --json --no-color --help [ESI]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__es__subcmd__undrain)
+            opts="-s -j -h --addr --token-file --json --no-color --help <ESI>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rustbgpctl__subcmd__evpn__subcmd__help)
-            opts="list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac runtime instances nexthops vrfs diagnose help"
+            opts="list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac es runtime instances nexthops vrfs diagnose help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2353,6 +2578,62 @@ _rustbgpctl() {
         rustbgpctl__subcmd__evpn__subcmd__help__subcmd__diagnose)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es)
+            opts="list drain undrain"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__drain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__evpn__subcmd__help__subcmd__es__subcmd__undrain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -3347,7 +3628,7 @@ _rustbgpctl() {
             return 0
             ;;
         rustbgpctl__subcmd__help__subcmd__evpn)
-            opts="list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac runtime instances nexthops vrfs diagnose"
+            opts="list add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac es runtime instances nexthops vrfs diagnose"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3461,6 +3742,62 @@ _rustbgpctl() {
         rustbgpctl__subcmd__help__subcmd__evpn__subcmd__diagnose)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es)
+            opts="list drain undrain"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__drain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

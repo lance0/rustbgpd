@@ -1780,6 +1780,24 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // `EvpnService.ListEvpnNexthops`.
     let (evpn_fdb_nexthops_tx, evpn_fdb_nexthops_rx) =
         tokio::sync::watch::channel(rustbgpd_evpn::FdbNexthopDataplaneStatus::default());
+    let evpn_bum_enforcement_rx = evpn_dataplane_handle.as_ref().map_or_else(
+        || {
+            let (_, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+                rustbgpd_evpn::BumEnforcementTable::new(),
+            ));
+            rx
+        },
+        |handle| handle.bum_enforcement_sender().subscribe(),
+    );
+    let evpn_same_esi_bias_rx = evpn_dataplane_handle.as_ref().map_or_else(
+        || {
+            let (_, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+                rustbgpd_evpn::SameEsiBiasTable::new(),
+            ));
+            rx
+        },
+        |handle| handle.same_esi_bias_sender().subscribe(),
+    );
     let evpn_remote_ip_prefix_drop_counts_rx = evpn_dataplane_handle.as_ref().map_or_else(
         || {
             let (_, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
@@ -2221,6 +2239,24 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_fdb_nexthop_snapshot: {
             let rx = evpn_fdb_nexthops_rx.clone();
             Arc::new(move || rx.borrow().clone())
+        },
+        evpn_bum_enforcement_snapshot: {
+            let rx = evpn_bum_enforcement_rx.clone();
+            Arc::new(move || rx.borrow().clone())
+        },
+        evpn_same_esi_bias_snapshot: {
+            let rx = evpn_same_esi_bias_rx.clone();
+            Arc::new(move || rx.borrow().clone())
+        },
+        evpn_es_drain_reasons: {
+            let drain_state = evpn_es_drain_state.clone();
+            Arc::new(move |esi| {
+                drain_state
+                    .reasons_for(esi)
+                    .iter()
+                    .map(|reason| reason.as_str().to_string())
+                    .collect()
+            })
         },
         evpn_runtime_model: {
             let coordinator = evpn_runtime_coordinator.clone();
