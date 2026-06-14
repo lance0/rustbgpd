@@ -209,6 +209,11 @@ existing BUM-enforcement flow. Projection rule (`project_one`):
   re-enables a disabled port on carrier-up
   (`br_port_carrier_check`), so the reconciler diffs desired against
   *observed* port state every pass and re-blocks on the next wake.
+  Kernel STP remains mutually exclusive with AC-gate ownership: if the
+  bound port is observed in an STP-owned state (`listening`,
+  `learning`, or `blocking`), the gate warns and emits no
+  `SetAcPortState` until the port returns to the rustbgpd-owned
+  `disabled` / `forwarding` state pair.
   M67 asserts the disabled/forwarding transitions across the
   failover cycle.
 

@@ -628,7 +628,10 @@ Shipped pieces:
    `evpn_es_ac_gate` gauge (`blocked` / `forwarding` /
    `mixed-roles`). Unbound segments stay BUM-flood-only — binding
    the AC is what provides the port handle. Do not run kernel STP
-   on a bound AC. See `docs/evpn-vtep-troubleshooting.md` for the
+   on a bound AC; if the port is observed in an STP-owned state
+   (`listening`, `learning`, `blocking`), rustbgpd warns and leaves it
+   untouched until STP releases the port state. See
+   `docs/evpn-vtep-troubleshooting.md` for the
    triage section; M67 asserts the transitions in CI.
 4. **Per-ESI label allocator** — `EsiLabelAllocator` assigns stable
    labels per ESI, avoids deterministic synthesizer collisions, and

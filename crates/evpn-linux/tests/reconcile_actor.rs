@@ -3480,6 +3480,102 @@ async fn single_active_swap_retargets_group_via_one_replace() {
     h.shutdown().await;
 }
 
+// A failed group REPLACE during the ADR-0083 swap must leave the
+// pre-swap forwarding shape intact: group still points at the active
+// PE, MAC rows still point at that group, the standby NH remains
+// available for retry, and the failed op is surfaced instead of
+// being counted as a completed backup swap.
+#[tokio::test]
+async fn single_active_swap_failure_keeps_old_group_and_reports_retry() {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+
+    let nhs = h.handle.nexthop_ops();
+    let (_members, groups) = split_nexthop_ops(&nhs);
+    let group_id = groups[0].id;
+    let find = |gw: &str| -> u32 {
+        h.handle
+            .nexthop_ops()
+            .values()
+            .find_map(|m| match &m.kind {
+                KernelNexthopKind::Member { gateway } if *gateway == ipa(gw) => Some(m.id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no member NH with gateway {gw}"))
+    };
+    let active_id = find("10.0.0.2");
+    let backup_id = find("10.0.0.3");
+    let _ = h.try_drain_reports().await;
+
+    // The next targetless NexthopOps failure lands on the swap's
+    // add_nexthop_group(REPLACE): startup adoption is already done,
+    // and the backup NH was pre-created during install.
+    h.handle.inject_failure_io(None);
+
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(
+            vni(100),
+            mac(1),
+            entry_single_active_swapped("10.0.0.3", None, 7),
+        )
+        .unwrap();
+    h.intent_tx.send(intent(2, inst, macs2.build())).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+
+    assert!(
+        !last.failed.is_empty(),
+        "failed backup-PE swap must be surfaced for retry"
+    );
+    assert_eq!(
+        last.single_active_counters.backup_swaps, 0,
+        "a failed group REPLACE must not be counted as a completed backup swap"
+    );
+    let nhs = h.handle.nexthop_ops();
+    let group = nhs.get(&group_id).expect("group survives failed swap");
+    let KernelNexthopKind::Group { member_ids } = &group.kind else {
+        panic!("expected group at {group_id:#x}");
+    };
+    assert_eq!(
+        member_ids,
+        &vec![active_id],
+        "failed swap must leave the group on the pre-swap active PE"
+    );
+    assert!(
+        nhs.contains_key(&backup_id),
+        "pre-created backup NH must remain available for retry; got {nhs:?}"
+    );
+    assert_eq!(
+        h.handle.kernel_fdb_nh_id(vni(100), mac(1)),
+        Some(group_id),
+        "MAC row must keep pointing at the unchanged group"
+    );
+
+    h.shutdown().await;
+}
+
 // 8. Withdrawal with NO survivors: the ordered teardown — MAC rows
 //    removed before the group (never-through-empty), active + standby
 //    NHs reaped with the intent, and the teardown surfaced on the
@@ -3859,6 +3955,48 @@ async fn ac_gate_mixed_roles_keeps_port_forwarding() {
     assert!(
         h.handle.ac_port_states().is_empty(),
         "a mixed-roles port already forwarding needs no op"
+    );
+    h.shutdown().await;
+}
+
+// Kernel STP owns `listening`/`learning`/`blocking` bridge-port
+// states. A bound AC in one of those states is a configuration
+// conflict: rustbgpd must not force it to forwarding or disabled.
+#[tokio::test]
+async fn ac_gate_stp_owned_port_state_is_not_overridden() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_BLOCKING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::Forwarding),
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    assert!(
+        h.handle.ac_port_states().is_empty(),
+        "AC gate must not emit SetAcPortState over an STP-owned port state"
+    );
+    assert_eq!(
+        h.handle.kernel_snapshot().bridge_ports["eth2"].state,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_BLOCKING),
+        "STP-owned bridge-port state must remain untouched"
     );
     h.shutdown().await;
 }
