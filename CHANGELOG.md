@@ -98,8 +98,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp watch events --json` / `rustbgpctl watch events --json` now serialize
   BGP event envelopes and EVPN route payloads through borrowed `Serialize`
   wrappers instead of cloning proto fields into a second `serde_json::Value`
-  object before printing. The JSON shape is unchanged and remains covered by
-  the existing watch-event shape tests.
+  object before printing. The serialized output — including key ordering — is
+  byte-for-byte identical to the previous `serde_json::Value` rendering for
+  every event variant, asserted against a frozen pre-change reference builder
+  by `direct_bgp_event_json_matches_legacy_value`.
 - **Shared EVPN multi-homing interop helpers.** The M66 and M67
   rustbgpd-on-both-sides scripts now use common `test-lib.sh`
   helpers for rustbgpctl wrappers, EVPN route polling, Prometheus
