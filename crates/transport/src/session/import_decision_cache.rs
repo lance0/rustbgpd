@@ -251,12 +251,12 @@ impl ImportDecisionCache {
     /// key is absent — withdrawing a prefix we never accepted carries
     /// no operator value.
     ///
-    /// The tombstone is **lighter** than a live entry: the pre-policy
-    /// attributes and modifications are dropped, keeping only outcome,
+    /// The tombstone is **lighter** than a live entry: the cached policy
+    /// context and modifications are dropped, keeping only outcome,
     /// matched policy, RPKI/ASPA state, timestamp, and generation. A
     /// peer that churns announce/withdraw/announce therefore can't fill
     /// the bounded LRU with full-payload dead entries that crowd out
-    /// live decisions (ADR-0073). The withdrawn route's attributes are
+    /// live decisions (ADR-0073). The withdrawn route's context is
     /// the least useful field for the "why is it gone?" question
     /// anyway.
     pub fn mark_withdrawn(&mut self, key: &ImportDecisionKey) {
