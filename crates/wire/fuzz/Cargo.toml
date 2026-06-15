@@ -50,4 +50,10 @@ path = "fuzz_targets/parse_rd.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_bgpls"
+path = "fuzz_targets/decode_bgpls.rs"
+test = false
+doc = false
+
 [workspace]
