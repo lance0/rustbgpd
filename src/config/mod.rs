@@ -2556,8 +2556,8 @@ fn evpn_runtime_plan_is_reload_applied(
     if evpn_runtime_is_additive_build_up_plan(plan) {
         return evpn_runtime_validate_additive_build_up_shape(current, candidate, plan);
     }
-    if evpn_runtime_is_l2vni_swap_plan(plan) {
-        return evpn_runtime_validate_l2vni_swap_shape(current, candidate, plan);
+    if evpn_runtime_is_l2vni_mixed_plan(plan) {
+        return evpn_runtime_validate_l2vni_mixed_shape(current, candidate, plan);
     }
     if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
         return false;
@@ -2642,7 +2642,7 @@ fn evpn_runtime_validate_additive_build_up_shape(
     })
 }
 
-fn evpn_runtime_is_l2vni_swap_plan(plan: &EvpnRuntimePlan) -> bool {
+fn evpn_runtime_is_l2vni_mixed_plan(plan: &EvpnRuntimePlan) -> bool {
     let l2_change_classes = [
         !plan.evpn_instances.added.is_empty(),
         !plan.evpn_instances.deleted.is_empty(),
@@ -2651,10 +2651,15 @@ fn evpn_runtime_is_l2vni_swap_plan(plan: &EvpnRuntimePlan) -> bool {
     .into_iter()
     .filter(|changed| *changed)
     .count();
-    l2_change_classes >= 2 && !plan.ip_vrfs.has_changes() && !plan.ethernet_segments.has_changes()
+    let batch_redefine_only = plan.evpn_instances.added.is_empty()
+        && plan.evpn_instances.deleted.is_empty()
+        && plan.evpn_instances.redefined.len() > 1;
+    (l2_change_classes >= 2 || batch_redefine_only)
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
 }
 
-fn evpn_runtime_validate_l2vni_swap_shape(
+fn evpn_runtime_validate_l2vni_mixed_shape(
     current: &EvpnRuntimeModel,
     candidate: &EvpnRuntimeCandidate,
     plan: &EvpnRuntimePlan,

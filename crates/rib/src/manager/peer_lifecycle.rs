@@ -408,7 +408,10 @@ impl RibManager {
         self.clear_peer_refresh_state(peer);
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PeerUp mirrors the transport session registration payload"
+    )]
     pub(super) fn handle_peer_up(
         &mut self,
         peer: IpAddr,
@@ -585,7 +588,10 @@ impl RibManager {
     /// `AdjRibOut` is only populated after a successful channel send. On
     /// failure the peer is marked dirty so `distribute_changes()` will
     /// retry a full resync via the resync timer.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
+    )]
     pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
         let mut withdraw = Vec::new();

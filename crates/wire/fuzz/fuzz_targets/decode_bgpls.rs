@@ -14,9 +14,12 @@ fuzz_target!(|data: &[u8]| {
         let redecoded = decode_bgpls_nlri(&buf).expect("round-trip decode (nlri)");
         assert_eq!(routes, redecoded, "bgp-ls nlri round-trip mismatch");
     }
-    // VPN-scoped NLRI carries an 8-byte RD prefix and has no paired encoder;
-    // just assert the decoder never panics.
-    let _ = decode_bgpls_vpn_nlri(data);
+    if let Ok(routes) = decode_bgpls_vpn_nlri(data) {
+        let mut buf = Vec::new();
+        encode_bgpls_nlri(&routes, &mut buf).expect("round-trip encode (vpn nlri)");
+        let redecoded = decode_bgpls_vpn_nlri(&buf).expect("round-trip decode (vpn nlri)");
+        assert_eq!(routes, redecoded, "bgp-ls vpn nlri round-trip mismatch");
+    }
     if let Ok(tlvs) = decode_bgpls_tlvs(data) {
         let mut buf = Vec::new();
         encode_bgpls_tlvs(&tlvs, &mut buf).expect("round-trip encode (tlvs)");

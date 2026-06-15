@@ -295,7 +295,10 @@ impl RibManager {
 
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "route-refresh replay keeps family staging, ORF gating, and EoR together"
+    )]
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let family = (afi, safi);
         // RFC 5291 §6: a ROUTE-REFRESH (plain or ORF-carrying) for this family

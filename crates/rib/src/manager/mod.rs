@@ -1087,7 +1087,10 @@ impl RibManager {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "best-path explain assembles route, policy, and attribution in one snapshot"
+    )]
     fn handle_explain_best_path(
         &mut self,
         prefix: Prefix,

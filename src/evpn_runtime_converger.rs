@@ -2294,7 +2294,12 @@ fn is_l2vni_mixed_plan(plan: &rustbgpd_evpn::EvpnRuntimePlan) -> bool {
     .into_iter()
     .filter(|changed| *changed)
     .count();
-    l2_change_classes >= 2 && !plan.ip_vrfs.has_changes() && !plan.ethernet_segments.has_changes()
+    let batch_redefine_only = plan.evpn_instances.added.is_empty()
+        && plan.evpn_instances.deleted.is_empty()
+        && plan.evpn_instances.redefined.len() > 1;
+    (l2_change_classes >= 2 || batch_redefine_only)
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
 }
 
 #[cfg(test)]
@@ -2325,7 +2330,7 @@ fn validate_l2vni_mixed(
 ) -> Result<L2VniMixedChanges, DaemonEvpnRuntimeConvergeError> {
     if !is_l2vni_mixed_plan(plan) {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime mixed L2VNI update requires at least two L2VNI change classes and no IP-VRF row or Ethernet Segment row changes",
+            "ApplyEvpnRuntime mixed L2VNI update requires at least two L2VNI change classes or multiple L2VNI redefines, with no IP-VRF row or Ethernet Segment row changes",
         ));
     }
     validate_no_unexpected_relink(current, candidate, plan)?;
@@ -4282,8 +4287,8 @@ local_vtep_ip = "10.0.0.1"
 "#
     }
 
-    // Redefines BOTH VNIs at once — used to assert the validator rejects a
-    // multi-element redefine.
+    // Redefines BOTH VNIs at once — the batch-redefine composer accepts this
+    // as a pure L2VNI-only runtime update.
     fn two_l2vni_both_redefined_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -5094,6 +5099,54 @@ table_id = 6000
                 .instances()
                 .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_l2vni_batch_redefine_commits_after_convergence() {
+        let coordinator = two_l2vni_runtime_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: two_l2vni_both_redefined_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 2);
+        let instances = response.plan.unwrap().evpn_instances.unwrap();
+        assert_eq!(instances.redefined, vec!["100", "200"]);
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .expect("VNI 100")
+                .rd
+                .to_string(),
+            "65000:111"
+        );
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                .expect("VNI 200")
+                .rd
+                .to_string(),
+            "65000:222"
         );
     }
 
@@ -7332,6 +7385,110 @@ table_id = 6000
     }
 
     #[tokio::test]
+    async fn runtime_actor_converger_l2vni_batch_redefine_updates_models_and_imet() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_both_redefined_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let vni100 = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let vni200 = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let old_rd100 = current.instances().get(vni100).unwrap().rd;
+        let old_rd200 = current.instances().get(vni200).unwrap().rd;
+        let new_rd100 = candidate.instances().get(vni100).unwrap().rd;
+        let new_rd200 = candidate.instances().get(vni200).unwrap().rd;
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let imet_keys = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+        assert_eq!(imet_keys.len(), 2);
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        let published = evpn_instances_rx.borrow();
+        assert_eq!(published.get(vni100).expect("VNI 100").rd, new_rd100);
+        assert_eq!(published.get(vni200).expect("VNI 200").rd, new_rd200);
+        drop(published);
+
+        let drained = withdraws.lock().await.clone();
+        let injected = injects.lock().await.clone();
+        for rd in [old_rd100, old_rd200] {
+            assert!(
+                drained.iter().any(|key| matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::Imet { rd: seen, .. } if *seen == rd
+                )),
+                "batch redefine should withdraw old-RD IMET {rd}; drained {drained:?}"
+            );
+        }
+        for rd in [new_rd100, new_rd200] {
+            assert!(
+                injected.iter().any(|key| matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::Imet { rd: seen, .. } if *seen == rd
+                )),
+                "batch redefine should originate new-RD IMET {rd}; injected {injected:?}"
+            );
+        }
+
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn runtime_actor_converger_l2vni_mixed_redefine_withdraw_failure_rolls_back_without_deadlock()
      {
         // Regression: the redefine withdraw-failure path used to call
@@ -7883,6 +8040,58 @@ table_id = 6000
                 current.instances().get(redefined_vni).unwrap().rd,
                 candidate.instances().get(redefined_vni).unwrap().rd
             )]
+        );
+    }
+
+    #[test]
+    fn validate_l2vni_mixed_accepts_batch_redefine_only() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_both_redefined_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.redefined, vec![100, 200]);
+        assert!(plan.evpn_instances.added.is_empty());
+        assert!(plan.evpn_instances.deleted.is_empty());
+        assert!(is_l2vni_mixed_plan(&plan));
+
+        let changes = validate_l2vni_mixed(&current, &candidate, &plan).unwrap();
+        assert!(changes.added.is_empty());
+        assert!(changes.deleted.is_empty());
+        assert_eq!(
+            changes
+                .redefined
+                .iter()
+                .map(|(old, new)| (old.id.as_u32(), old.rd, new.rd))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    100,
+                    current
+                        .instances()
+                        .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                        .unwrap()
+                        .rd,
+                    candidate
+                        .instances()
+                        .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                        .unwrap()
+                        .rd
+                ),
+                (
+                    200,
+                    current
+                        .instances()
+                        .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                        .unwrap()
+                        .rd,
+                    candidate
+                        .instances()
+                        .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                        .unwrap()
+                        .rd
+                )
+            ]
         );
     }
 

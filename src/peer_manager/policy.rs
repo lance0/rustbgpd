@@ -606,14 +606,22 @@ impl PeerManager {
             }
             let mut detail = String::new();
             if import_bail {
-                let import_err = import_apply_result.err().unwrap_or_default();
+                let import_err = import_apply_result
+                    .as_ref()
+                    .err()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
                 let _ = write!(detail, "import: {import_err}");
             }
             if export_bail {
                 if !detail.is_empty() {
                     detail.push_str("; ");
                 }
-                let export_err = export_apply_result.err().unwrap_or_default();
+                let export_err = export_apply_result
+                    .as_ref()
+                    .err()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
                 let _ = write!(detail, "export: {export_err}");
             }
             return Err(format!(
@@ -1137,6 +1145,9 @@ impl PeerManager {
 
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
+        if next_config == self.current_config {
+            return Ok(());
+        }
 
         // ADR-0081: resolve every affected member's next config BEFORE
         // touching any peer, then commit the whole set through the

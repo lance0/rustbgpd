@@ -10,7 +10,10 @@ use super::RibManager;
 use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_aspa, validate_route_rpki};
 
 impl RibManager {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GR peer-up carries negotiated restart and LLGR session state together"
+    )]
     pub(super) fn handle_peer_graceful_restart(
         &mut self,
         peer: IpAddr,

@@ -2,6 +2,9 @@ use std::net::Ipv4Addr;
 
 use bytes::Bytes;
 use proptest::prelude::*;
+use rustbgpd_wire::bgpls::{
+    decode_bgpls_nlri, decode_bgpls_tlvs, decode_bgpls_vpn_nlri, encode_bgpls_nlri,
+};
 use rustbgpd_wire::capability::{
     AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, LlgrFamily, Safi,
 };
@@ -11,6 +14,7 @@ use rustbgpd_wire::notification::NotificationCode;
 use rustbgpd_wire::notification_msg::NotificationMessage;
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::UpdateMessage;
+use rustbgpd_wire::vpn::{decode_vpnv4_nlri, decode_vpnv6_nlri};
 
 fn arb_notification_code() -> impl Strategy<Value = NotificationCode> {
     prop_oneof![
@@ -281,6 +285,54 @@ proptest! {
         let mut buf = Bytes::from(data);
         // We don't care about the result, just that it doesn't panic
         let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
+    }
+
+    #[test]
+    fn bgpls_substrate_decoders_never_panic(
+        data in proptest::collection::vec(any::<u8>(), 0..2048),
+    ) {
+        // The BGP-LS codec is deliberately unreachable from MP-BGP dispatch
+        // today, so exercise the substrate directly instead of relying on
+        // decode_message coverage.
+        let _ = decode_bgpls_nlri(&data);
+        let _ = decode_bgpls_vpn_nlri(&data);
+        let _ = decode_bgpls_tlvs(&data);
+    }
+
+    #[test]
+    fn bgpls_successful_nlri_decode_roundtrips(
+        data in proptest::collection::vec(any::<u8>(), 0..2048),
+    ) {
+        if let Ok(routes) = decode_bgpls_nlri(&data) {
+            let mut encoded = Vec::new();
+            encode_bgpls_nlri(&routes, &mut encoded).expect("decoded BGP-LS NLRI re-encodes");
+            let redecoded = decode_bgpls_nlri(&encoded).expect("encoded BGP-LS NLRI decodes");
+            prop_assert_eq!(routes, redecoded);
+        }
+    }
+
+    #[test]
+    fn bgpls_successful_vpn_nlri_decode_roundtrips(
+        data in proptest::collection::vec(any::<u8>(), 0..2048),
+    ) {
+        if let Ok(routes) = decode_bgpls_vpn_nlri(&data) {
+            let mut encoded = Vec::new();
+            encode_bgpls_nlri(&routes, &mut encoded).expect("decoded BGP-LS VPN NLRI re-encodes");
+            let redecoded =
+                decode_bgpls_vpn_nlri(&encoded).expect("encoded BGP-LS VPN NLRI decodes");
+            prop_assert_eq!(routes, redecoded);
+        }
+    }
+
+    #[test]
+    fn vpn_substrate_decoders_never_panic(
+        data in proptest::collection::vec(any::<u8>(), 0..2048),
+    ) {
+        // VPNv4/v6 are also pure codec substrate today. Direct coverage catches
+        // label/RD/prefix length arithmetic mistakes that MP-BGP dispatch will
+        // intentionally never reach until a full vertical slice exists.
+        let _ = decode_vpnv4_nlri(&data);
+        let _ = decode_vpnv6_nlri(&data);
     }
 
     /// Encode a valid message, flip one bit, decode — must not panic.

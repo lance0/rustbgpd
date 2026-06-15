@@ -251,9 +251,9 @@ has it, no broad performance sprints without profile evidence.
   M69. Still open from the arc: generalized runtime mixed-edit composer
   for broader ES/IP-VRF-linked candidates (pure additive build-up,
   standalone/IP-VRF-linked L2VNI swaps, and L2VNI-only
-  add/delete/redefine compositions now commit live; ES-member deletes,
-  arbitrary relinks, and IP-VRF/ES row edits in the same request still
-  fail closed today). **Done:** shape-aware
+  add/delete/redefine compositions, including L2VNI-only batch redefines,
+  now commit live; ES-member deletes, arbitrary relinks, and IP-VRF/ES
+  row edits in the same request still fail closed today). **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure
@@ -518,9 +518,9 @@ has it, no broad performance sprints without profile evidence.
   policy-only peer-group edits to live dynamic sessions; session-shaping
   peer-group edits on those no-preview paths still leave dynamic sessions on
   their running config until reconnect (deliberate; see ADR-0086's deferral).
-  A no-op `SetPeerGroup` (definition identical to the running config) still
-  takes the reshape path and bounces affected static sessions — pre-existing,
-  benign, low-priority: short-circuit identical definitions before reshaping.
+  No-op targeted peer-group mutations now short-circuit before publish/reshape,
+  so identical `SetPeerGroup` updates no longer bounce affected static
+  sessions.
   (The per-peer Prometheus series leak listed here previously was fixed —
   deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
@@ -985,8 +985,11 @@ branch is between features.
   errors to the transaction executor. Static-peer lifecycle/admin replies and
   policy/catalog replies (policy definitions, neighbor sets, peer groups,
   global named chains, and per-neighbor policy/peer-group membership) now also
-  use typed errors where callers need status-class distinctions. Older
-  peer-manager / RIB commands still commonly return
+  use typed errors where callers need status-class distinctions. The transport
+  peer-session command ACK surface (`SendRouteRefresh`, live import/export
+  policy updates, and graceful-shutdown toggles) now uses typed errors while
+  preserving the existing peer-manager operator text. Older peer-manager / RIB
+  commands still commonly return
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
@@ -1091,11 +1094,12 @@ branch is between features.
   benchmark or heap profile identifies a hot, bounded, internal map. Candidate
   follow-ups are RIB-manager temporary prefix/peer sets and other
   non-adversarial control-plane maps that show up in `dhat` or Criterion.
-- [ ] **CI gate: `#[allow(clippy::*)]` requires `reason = "..."`.** ~171
-  escape-hatches workspace-wide (~40 are `cast_possible_truncation` in the wire
-  codec, intentional after a length check). A CI lint that rejects new
-  `#[allow(clippy::*)]` without an explicit `reason` arg; backfill one crate at a
-  time.
+- [ ] **CI gate: `#[allow(clippy::*)]` / `#[expect(clippy::*)]` requires
+  `reason = "..."`.** The ratchet exists and CI enforces it for
+  `crates/rib/src`, whose suppressions are backfilled. Remaining work:
+  add more paths to `scripts/check-clippy-reasons.py` as each crate/file
+  group is backfilled; do not flip this to complete until the whole
+  workspace is covered.
 - [x] **`cargo deny` for license / dependency / advisory audit.** Done: the
   dependabot + cargo-audit half of the stale branch had already landed;
   `deny.toml` now gates `cargo deny check advisories bans licenses sources`
