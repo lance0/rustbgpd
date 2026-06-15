@@ -8,6 +8,8 @@ use crate::proto::{
     ListPolicyEventsRequest, ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent,
     RouteEventType, StreamLagEvent, WatchEventsRequest, WatchRoutesRequest,
 };
+use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
 use std::net::IpAddr;
 
 pub struct EventsWatchOptions {
@@ -311,301 +313,202 @@ fn evpn_route_type_label(t: u32) -> &'static str {
     }
 }
 
-fn json_evpn_route_entry(route: &EvpnRouteEntry) -> serde_json::Value {
-    serde_json::json!({
-        "route_type": route.route_type,
-        "route_type_name": evpn_route_type_label(route.route_type),
-        "rd": route.rd,
-        "esi": route.esi,
-        "ethernet_tag": route.ethernet_tag,
-        "mac": route.mac,
-        "ip": route.ip,
-        "prefix": route.prefix,
-        "gateway": route.gateway,
-        "label": route.label,
-        "label2": route.label2,
-        "next_hop": route.next_hop,
-        "peer": route.peer_address,
-        "as_path": route.as_path,
-        "communities": route.communities,
-        "extended_communities": route.extended_communities,
-        "tunnel_type": route.tunnel_type,
-    })
+fn event_category_json_label(category: i32) -> &'static str {
+    match EventCategory::try_from(category) {
+        Ok(EventCategory::Route) => "route",
+        Ok(EventCategory::Session) => "session",
+        Ok(EventCategory::Policy) => "policy",
+        Ok(EventCategory::Dataplane) => "dataplane",
+        Ok(EventCategory::Evpn) => "evpn",
+        Ok(EventCategory::Bfd) => "bfd",
+        _ => "unknown",
+    }
 }
 
-fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "timestamp": event.timestamp,
-        "category": match EventCategory::try_from(event.category) {
-            Ok(EventCategory::Route) => "route",
-            Ok(EventCategory::Session) => "session",
-            Ok(EventCategory::Policy) => "policy",
-            Ok(EventCategory::Dataplane) => "dataplane",
-            Ok(EventCategory::Evpn) => "evpn",
-            Ok(EventCategory::Bfd) => "bfd",
-            _ => "unknown",
-        },
-        "event_type": bgp_event_type_json_label(event.event_type),
-        "severity": output::format_severity(event.severity),
-        "peer_address": event.peer_address,
-        "previous_peer_address": event.previous_peer_address,
-        "target_peer_address": event.target_peer_address,
-        "prefix": if event.prefix.is_empty() {
-            String::new()
+struct JsonEventPrefix<'a>(&'a BgpEvent);
+
+impl Serialize for JsonEventPrefix<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.0.prefix.is_empty() {
+            serializer.serialize_str("")
         } else {
-            format!("{}/{}", event.prefix, event.prefix_length)
-        },
-        "afi_safi": if event.afi_safi == AddressFamily::Unspecified as i32 {
-            serde_json::Value::Null
+            serializer.collect_str(&format_args!("{}/{}", self.0.prefix, self.0.prefix_length))
+        }
+    }
+}
+
+struct JsonAddressFamily(i32);
+
+impl Serialize for JsonAddressFamily {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.0 == AddressFamily::Unspecified as i32 {
+            serializer.serialize_none()
         } else {
-            serde_json::Value::String(output::format_family(event.afi_safi).to_string())
-        },
-        "summary": event.summary,
-    });
-    if let Some(object) = value.as_object_mut()
-        && let Some(event_id) = event
+            serializer.serialize_str(output::format_family(self.0))
+        }
+    }
+}
+
+struct JsonEvpnRouteEntry<'a>(&'a EvpnRouteEntry);
+
+impl Serialize for JsonEvpnRouteEntry<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut map = serializer.serialize_map(Some(17))?;
+        map.serialize_entry("route_type", &route.route_type)?;
+        map.serialize_entry("route_type_name", evpn_route_type_label(route.route_type))?;
+        map.serialize_entry("rd", &route.rd)?;
+        map.serialize_entry("esi", &route.esi)?;
+        map.serialize_entry("ethernet_tag", &route.ethernet_tag)?;
+        map.serialize_entry("mac", &route.mac)?;
+        map.serialize_entry("ip", &route.ip)?;
+        map.serialize_entry("prefix", &route.prefix)?;
+        map.serialize_entry("gateway", &route.gateway)?;
+        map.serialize_entry("label", &route.label)?;
+        map.serialize_entry("label2", &route.label2)?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("peer", &route.peer_address)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("communities", &route.communities)?;
+        map.serialize_entry("extended_communities", &route.extended_communities)?;
+        map.serialize_entry("tunnel_type", &route.tunnel_type)?;
+        map.end()
+    }
+}
+
+struct JsonOptionalEvpnRouteEntry<'a>(Option<&'a EvpnRouteEntry>);
+
+impl Serialize for JsonOptionalEvpnRouteEntry<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            Some(route) => JsonEvpnRouteEntry(route).serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+struct JsonBgpEvent<'a>(&'a BgpEvent);
+
+impl Serialize for JsonBgpEvent<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let event = self.0;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("timestamp", &event.timestamp)?;
+        map.serialize_entry("category", event_category_json_label(event.category))?;
+        map.serialize_entry("event_type", bgp_event_type_json_label(event.event_type))?;
+        map.serialize_entry("severity", output::format_severity(event.severity))?;
+        map.serialize_entry("peer_address", &event.peer_address)?;
+        map.serialize_entry("previous_peer_address", &event.previous_peer_address)?;
+        map.serialize_entry("target_peer_address", &event.target_peer_address)?;
+        map.serialize_entry("prefix", &JsonEventPrefix(event))?;
+        map.serialize_entry("afi_safi", &JsonAddressFamily(event.afi_safi))?;
+        map.serialize_entry("summary", &event.summary)?;
+        if let Some(event_id) = event
             .event_id
             .or_else(|| route_event_id(event).filter(|id| *id > 0))
-    {
-        object.insert(
-            "event_id".to_string(),
-            serde_json::Value::Number(event_id.into()),
-        );
+        {
+            map.serialize_entry("event_id", &event_id)?;
+        }
+
+        match event.payload.as_ref() {
+            Some(crate::proto::bgp_event::Payload::Session(session)) => {
+                map.serialize_entry("old_state", &session.old_state)?;
+                map.serialize_entry("new_state", &session.new_state)?;
+                map.serialize_entry("session_role", &session.session_role)?;
+                map.serialize_entry("reason", &session.reason)?;
+            }
+            Some(crate::proto::bgp_event::Payload::Notification(notification)) => {
+                map.serialize_entry("direction", &notification.direction)?;
+                map.serialize_entry("code", &notification.code)?;
+                map.serialize_entry("subcode", &notification.subcode)?;
+                map.serialize_entry("description", &notification.description)?;
+                map.serialize_entry("session_role", &notification.session_role)?;
+                map.serialize_entry("shutdown_reason", &notification.shutdown_reason)?;
+                map.serialize_entry("reason", &notification.reason)?;
+            }
+            Some(crate::proto::bgp_event::Payload::Policy(policy)) => {
+                map.serialize_entry("operation", &policy.operation)?;
+                map.serialize_entry("target_type", &policy.target_type)?;
+                map.serialize_entry("target", &policy.target)?;
+                map.serialize_entry("affected_peer_count", &policy.affected_peer_count)?;
+                map.serialize_entry("reason", &policy.reason)?;
+            }
+            Some(crate::proto::bgp_event::Payload::Dataplane(dataplane)) => {
+                map.serialize_entry("source", &dataplane.source)?;
+                map.serialize_entry("installed", &dataplane.installed)?;
+                map.serialize_entry("rejected", &dataplane.rejected)?;
+                map.serialize_entry("failed", &dataplane.failed)?;
+            }
+            Some(crate::proto::bgp_event::Payload::DataplaneRoute(route)) => {
+                map.serialize_entry("source", &route.source)?;
+                map.serialize_entry("action", &route.action)?;
+                map.serialize_entry("table_name", &route.table_name)?;
+                map.serialize_entry("table_id", &route.table_id)?;
+                map.serialize_entry("metric", &route.metric)?;
+                map.serialize_entry("next_hop", &route.next_hop)?;
+                map.serialize_entry("reason", &route.reason)?;
+            }
+            Some(crate::proto::bgp_event::Payload::Evpn(evpn)) => {
+                map.serialize_entry("route_type", &evpn.route_type)?;
+                map.serialize_entry("route_type_name", evpn_route_type_label(evpn.route_type))?;
+                map.serialize_entry("rd", &evpn.rd)?;
+                map.serialize_entry("route_key", &evpn.route_key)?;
+                map.serialize_entry("reason", &evpn.reason)?;
+                map.serialize_entry("route", &JsonOptionalEvpnRouteEntry(evpn.route.as_ref()))?;
+                map.serialize_entry(
+                    "previous_route",
+                    &JsonOptionalEvpnRouteEntry(evpn.previous_route.as_ref()),
+                )?;
+            }
+            Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(otc)) => {
+                map.serialize_entry("direction", &otc.direction)?;
+                map.serialize_entry("reason", &otc.reason)?;
+                map.serialize_entry("prefixes", &otc.prefixes)?;
+                map.serialize_entry("count", &otc.count)?;
+                map.serialize_entry("local_role", &otc.local_role)?;
+                map.serialize_entry("remote_role", &otc.remote_role)?;
+                map.serialize_entry("otc_value", &otc.otc_value)?;
+                map.serialize_entry("as_path", &otc.as_path)?;
+            }
+            Some(crate::proto::bgp_event::Payload::StreamLag(lag)) => {
+                map.serialize_entry(
+                    "source_category",
+                    event_category_json_label(lag.source_category),
+                )?;
+                map.serialize_entry("missed_count", &lag.missed_count)?;
+                map.serialize_entry("reason", &lag.reason)?;
+            }
+            Some(crate::proto::bgp_event::Payload::Route(_))
+            | Some(crate::proto::bgp_event::Payload::Bfd(_))
+            | None => {}
+        }
+
+        map.end()
     }
-    if let Some(crate::proto::bgp_event::Payload::Session(session)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "old_state".to_string(),
-            serde_json::Value::String(session.old_state.clone()),
-        );
-        object.insert(
-            "new_state".to_string(),
-            serde_json::Value::String(session.new_state.clone()),
-        );
-        object.insert(
-            "session_role".to_string(),
-            serde_json::Value::String(session.session_role.clone()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(session.reason.clone()),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::Notification(notification)) =
-        event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "direction".to_string(),
-            serde_json::Value::String(notification.direction.clone()),
-        );
-        object.insert(
-            "code".to_string(),
-            serde_json::Value::Number(notification.code.into()),
-        );
-        object.insert(
-            "subcode".to_string(),
-            serde_json::Value::Number(notification.subcode.into()),
-        );
-        object.insert(
-            "description".to_string(),
-            serde_json::Value::String(notification.description.clone()),
-        );
-        object.insert(
-            "session_role".to_string(),
-            serde_json::Value::String(notification.session_role.clone()),
-        );
-        object.insert(
-            "shutdown_reason".to_string(),
-            serde_json::Value::String(notification.shutdown_reason.clone()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(notification.reason.clone()),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::Policy(policy)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "operation".to_string(),
-            serde_json::Value::String(policy.operation.clone()),
-        );
-        object.insert(
-            "target_type".to_string(),
-            serde_json::Value::String(policy.target_type.clone()),
-        );
-        object.insert(
-            "target".to_string(),
-            serde_json::Value::String(policy.target.clone()),
-        );
-        object.insert(
-            "affected_peer_count".to_string(),
-            serde_json::Value::Number(policy.affected_peer_count.into()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(policy.reason.clone()),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::Dataplane(dataplane)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "source".to_string(),
-            serde_json::Value::String(dataplane.source.clone()),
-        );
-        object.insert(
-            "installed".to_string(),
-            serde_json::Value::from(dataplane.installed),
-        );
-        object.insert(
-            "rejected".to_string(),
-            serde_json::Value::from(dataplane.rejected),
-        );
-        object.insert(
-            "failed".to_string(),
-            serde_json::Value::from(dataplane.failed),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::DataplaneRoute(route)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "source".to_string(),
-            serde_json::Value::String(route.source.clone()),
-        );
-        object.insert(
-            "action".to_string(),
-            serde_json::Value::String(route.action.clone()),
-        );
-        object.insert(
-            "table_name".to_string(),
-            serde_json::Value::String(route.table_name.clone()),
-        );
-        object.insert(
-            "table_id".to_string(),
-            serde_json::Value::from(route.table_id),
-        );
-        object.insert("metric".to_string(), serde_json::Value::from(route.metric));
-        object.insert(
-            "next_hop".to_string(),
-            serde_json::Value::String(route.next_hop.clone()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(route.reason.clone()),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::Evpn(evpn)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "route_type".to_string(),
-            serde_json::Value::Number(evpn.route_type.into()),
-        );
-        object.insert(
-            "route_type_name".to_string(),
-            serde_json::Value::String(evpn_route_type_label(evpn.route_type).to_string()),
-        );
-        object.insert("rd".to_string(), serde_json::Value::String(evpn.rd.clone()));
-        object.insert(
-            "route_key".to_string(),
-            serde_json::Value::String(evpn.route_key.clone()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(evpn.reason.clone()),
-        );
-        object.insert(
-            "route".to_string(),
-            evpn.route
-                .as_ref()
-                .map_or(serde_json::Value::Null, json_evpn_route_entry),
-        );
-        object.insert(
-            "previous_route".to_string(),
-            evpn.previous_route
-                .as_ref()
-                .map_or(serde_json::Value::Null, json_evpn_route_entry),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(otc)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        // ADR-0072 follow-up — surface the OTC payload fields the
-        // operator actually needs for incident reconstruction.
-        // Without these the --json output is just the envelope +
-        // summary string, which loses prefixes, role pair, OTC
-        // value, AS_PATH, etc. Matches the shared bridge formatter
-        // in crates/api/src/json_format.rs so external consumers
-        // and the CLI render identical JSON.
-        object.insert(
-            "direction".to_string(),
-            serde_json::Value::String(otc.direction.clone()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(otc.reason.clone()),
-        );
-        object.insert(
-            "prefixes".to_string(),
-            serde_json::Value::Array(
-                otc.prefixes
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-        object.insert("count".to_string(), serde_json::Value::from(otc.count));
-        object.insert(
-            "local_role".to_string(),
-            serde_json::Value::String(otc.local_role.clone()),
-        );
-        object.insert(
-            "remote_role".to_string(),
-            serde_json::Value::String(otc.remote_role.clone()),
-        );
-        object.insert(
-            "otc_value".to_string(),
-            otc.otc_value
-                .map_or(serde_json::Value::Null, serde_json::Value::from),
-        );
-        object.insert(
-            "as_path".to_string(),
-            serde_json::Value::String(otc.as_path.clone()),
-        );
-    }
-    if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert(
-            "source_category".to_string(),
-            serde_json::Value::String(
-                match EventCategory::try_from(lag.source_category) {
-                    Ok(EventCategory::Route) => "route",
-                    Ok(EventCategory::Session) => "session",
-                    Ok(EventCategory::Policy) => "policy",
-                    Ok(EventCategory::Dataplane) => "dataplane",
-                    Ok(EventCategory::Evpn) => "evpn",
-                    Ok(EventCategory::Bfd) => "bfd",
-                    _ => "unknown",
-                }
-                .to_string(),
-            ),
-        );
-        object.insert(
-            "missed_count".to_string(),
-            serde_json::Value::Number(lag.missed_count.into()),
-        );
-        object.insert(
-            "reason".to_string(),
-            serde_json::Value::String(lag.reason.clone()),
-        );
-    }
-    value
+}
+
+fn bgp_event_json_value(event: &BgpEvent) -> Result<serde_json::Value, CliError> {
+    Ok(serde_json::to_value(JsonBgpEvent(event))?)
+}
+
+#[cfg(test)]
+fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
+    bgp_event_json_value(event).expect("serializing BGP event JSON should be infallible")
 }
 
 fn route_event_id(event: &BgpEvent) -> Option<u64> {
@@ -636,7 +539,7 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
 
 fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
     if json {
-        output::print_json_line(&json_bgp_event(event))?;
+        output::print_json_line(&JsonBgpEvent(event))?;
         return Ok(());
     }
 
@@ -668,7 +571,7 @@ fn json_route_watch_event(event: &BgpEvent) -> Result<serde_json::Value, CliErro
         Some(crate::proto::bgp_event::Payload::StreamLag(lag)) => Ok(serde_json::to_value(
             json_route_stream_lag_event(event, lag),
         )?),
-        _ => Ok(json_bgp_event(event)),
+        _ => bgp_event_json_value(event),
     }
 }
 
