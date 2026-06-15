@@ -855,11 +855,12 @@ message ImportExplainMatch {
   // per policy the chain evaluated, in chain order (a deny terminates
   // the walk, so policies after a denying one carry no step). The
   // trace is re-derived at query time from the cached pre-policy
-  // attributes against the session's import chain — the live import
-  // path records no extra state for it. Populated only on PERMIT /
+  // policy-context fields against the session's import chain — the live
+  // import path records no extra statement-trace state for it.
+  // Populated only on PERMIT /
   // DENY outcomes at the current policy generation: STALE entries
   // were decided by a chain that no longer exists, WITHDRAWN
-  // tombstones have shed the attributes the re-derivation needs, and
+  // tombstones have shed the context the re-derivation needs, and
   // NOT_SEEN / EVICTED have no decision at all. Empty also when the
   // peer has no import chain (implicit permit — nothing to attribute).
   repeated ImportExplainStatementStep statements = 13;

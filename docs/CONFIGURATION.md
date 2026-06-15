@@ -1350,7 +1350,7 @@ cache_size = 4096
 
 | Field        | Type    | Required | Default | Description |
 |--------------|---------|----------|---------|-------------|
-| `enabled`    | bool    | no       | `true`  | Gates the cache write-path. When `false`, the inbound UPDATE path skips the decision-snapshot clone entirely (one boolean check, nothing stored) and explain queries answer `not_seen`. Set `false` on perf-sensitive full-table peers. |
+| `enabled`    | bool    | no       | `true`  | Gates the cache write-path. When `false`, the inbound UPDATE path skips the compact decision/context snapshot entirely (one boolean check, nothing stored) and explain queries answer `not_seen`. Set `false` on perf-sensitive full-table peers. |
 | `cache_size` | integer | no       | `4096`  | Per-peer LRU capacity, one entry per `(AFI, SAFI, prefix, path_id)`. The 4096 default suits fabric / partial-table peers; raise it for full-table peers. |
 
 This is **diagnostic state only** — it never affects which routes are

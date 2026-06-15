@@ -135,11 +135,10 @@ impl PeerSession {
                         .import_decision_cache
                         .lookup_all_paths(afi, safi, &prefix, generation),
                 };
-                // Statement-level attribution, re-derived on demand
-                // from the cached pre-policy attributes against the
-                // session's import chain. Explain-only work on the
-                // command path — the inbound UPDATE hot path is
-                // untouched.
+                // Statement-level attribution, re-derived on demand from the
+                // cached pre-policy context against the session's import
+                // chain. Explain-only work on the command path — the inbound
+                // UPDATE hot path is untouched.
                 for m in &mut matches {
                     m.statements = self.statement_trace_for(prefix, &m.result);
                 }
@@ -205,25 +204,24 @@ impl PeerSession {
     /// qualifies: a same-generation hit guarantees the session's import
     /// chain is byte-for-byte the chain that produced the cached
     /// decision, so walking it again against the cached pre-policy
-    /// attributes reproduces the original evaluation. `Stale` entries
+    /// context reproduces the original evaluation. `Stale` entries
     /// are skipped (their chain is gone — tracing the *current* chain
     /// could contradict the recorded outcome) and `Withdrawn`
-    /// tombstones shed the attributes the reconstruction needs.
+    /// tombstones shed the context the reconstruction needs.
     ///
-    /// The evaluation context is rebuilt with the same extractor the
-    /// inbound hot path uses (`PolicyAttrSummary::from_route_attrs`)
-    /// plus the stored evaluation-time next-hop, so the trace cannot
-    /// drift from the live evaluation's view of the route. As a final
-    /// belt-and-braces gate, a trace whose terminal action disagrees
-    /// with the recorded outcome is dropped rather than rendered — an
-    /// explain surface must never contradict its own headline answer.
+    /// The cached context is an owned copy of the fields produced by the same
+    /// extractor the inbound hot path uses (`PolicyAttrSummary::from_route_attrs`)
+    /// plus the stored evaluation-time next-hop, so the trace cannot drift from
+    /// the live evaluation's view of the route. As a final belt-and-braces gate,
+    /// a trace whose terminal action disagrees with the recorded outcome is
+    /// dropped rather than rendered — an explain surface must never contradict
+    /// its own headline answer.
     fn statement_trace_for(
         &self,
         prefix: rustbgpd_wire::Prefix,
         result: &super::import_decision_cache::LookupResult,
     ) -> Vec<rustbgpd_policy::StatementAttribution> {
         use super::import_decision_cache::{CachedOutcome, LookupResult};
-        use super::inbound::PolicyAttrSummary;
         use rustbgpd_policy::{PolicyAction, RouteContext, RouteType, explain_chain_statements};
 
         let LookupResult::Hit(decision) = result else {
@@ -235,7 +233,7 @@ impl PeerSession {
             CachedOutcome::Withdrawn => return Vec::new(),
         };
 
-        let summary = PolicyAttrSummary::from_route_attrs(&decision.pre_policy_attrs);
+        let cached = &decision.policy_context;
         // Session-identity fields mirror the inbound eval sites: the
         // peer's negotiated ASN and eBGP/iBGP classification are
         // properties of the established session and cannot have
@@ -247,11 +245,11 @@ impl PeerSession {
         let ctx = RouteContext {
             prefix,
             next_hop: decision.next_hop,
-            extended_communities: summary.extended_communities,
-            communities: summary.communities,
-            large_communities: summary.large_communities,
-            as_path_str: &summary.as_path_str,
-            as_path_len: summary.as_path_len,
+            extended_communities: &cached.extended_communities,
+            communities: &cached.communities,
+            large_communities: &cached.large_communities,
+            as_path_str: &cached.as_path_str,
+            as_path_len: cached.as_path_len,
             validation_state: decision.rpki,
             aspa_state: decision.aspa,
             peer_address: Some(self.peer_ip),
@@ -263,8 +261,8 @@ impl PeerSession {
                 RouteType::Internal
             }),
             evpn_route_type: None,
-            local_pref: summary.local_pref,
-            med: summary.med,
+            local_pref: cached.local_pref,
+            med: cached.med,
         };
         let trace = explain_chain_statements(self.import_policy.as_ref(), &ctx);
         if trace.action == expected_action {

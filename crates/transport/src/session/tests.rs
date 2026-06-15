@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
-use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+use rustbgpd_policy::{
+    AsPathRegex, CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement,
+    RouteModifications,
+};
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, OrfAction, OrfEntries,
@@ -3230,6 +3233,15 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     let mut permit_stmt = deny_stmt.clone();
     permit_stmt.prefix = Some(Prefix::V4(permitted_prefix));
     permit_stmt.action = PolicyAction::Permit;
+    permit_stmt.match_community = vec![CommunityMatch::Standard {
+        value: (64512_u32 << 16) | 0x0064,
+    }];
+    permit_stmt.match_as_path = Some(AsPathRegex::new("_65002_").unwrap());
+    permit_stmt.match_as_path_length_ge = Some(1);
+    permit_stmt.match_as_path_length_le = Some(1);
+    permit_stmt.match_local_pref_ge = Some(100);
+    permit_stmt.match_med_le = Some(50);
+    permit_stmt.match_next_hop = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     permit_stmt.modifications = RouteModifications {
         set_local_pref: Some(200),
         ..RouteModifications::default()
@@ -3267,6 +3279,9 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::Communities(vec![(64512_u32 << 16) | 0x0064]),
+        PathAttribute::LocalPref(150),
+        PathAttribute::Med(42),
     ];
     let update = UpdateMessage::build(
         &[
@@ -3297,8 +3312,20 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     assert_eq!(steps[0].policy_name.as_deref(), Some("edge-import"));
     assert_eq!(steps[0].statement_index, Some(1));
     assert_eq!(steps[0].action, PolicyAction::Permit);
-    assert_eq!(steps[0].matched_conditions, vec!["prefix 192.0.2.0/24"]);
-    assert_eq!(steps[0].modifications, vec!["local_pref 100 -> 200"]);
+    assert_eq!(
+        steps[0].matched_conditions,
+        vec![
+            "prefix 192.0.2.0/24",
+            "community 64512:100",
+            "as_path ~ \"_65002_\"",
+            "as_path_len >= 1",
+            "as_path_len <= 1",
+            "local_pref >= 100",
+            "med <= 50",
+            "next_hop 10.0.0.2",
+        ]
+    );
+    assert_eq!(steps[0].modifications, vec!["local_pref 150 -> 200"]);
 
     // Deny: attributed to statement 0 — the reject fast-path is
     // explainable even though the route never reached RIB.
