@@ -35,6 +35,8 @@
 
 use std::net::IpAddr;
 
+use thiserror::Error;
+
 use super::uapi::{
     NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, Nhmsg, RTM_DELNEXTHOP, RTM_GETNEXTHOP,
     RTM_NEWNEXTHOP,
@@ -64,24 +66,50 @@ const AF_INET6: u8 = 10;
 /// `AF_UNSPEC` — used by groups and deletes.
 const AF_UNSPEC: u8 = 0;
 
+/// Raw netlink nexthop encode failures.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NexthopEncodeError {
+    /// `nlattr.nla_len` is a 16-bit field.
+    #[error("netlink attribute length {len} exceeds u16")]
+    AttributeLengthOverflow {
+        /// Attempted attribute length in bytes, including the header.
+        len: usize,
+    },
+    /// `nlmsghdr.nlmsg_len` is a 32-bit field.
+    #[error("netlink message length {len} exceeds u32")]
+    MessageLengthOverflow {
+        /// Attempted message length in bytes, including the header.
+        len: usize,
+    },
+}
+
 /// Pad `len` up to the next multiple of 4 (netlink's attribute
 /// alignment).
 const fn nla_align(len: usize) -> usize {
     (len + 3) & !3
 }
 
+fn checked_attr_len(payload_len: usize) -> Result<usize, NexthopEncodeError> {
+    let total_len = 4usize
+        .checked_add(payload_len)
+        .ok_or(NexthopEncodeError::AttributeLengthOverflow { len: usize::MAX })?;
+    u16::try_from(total_len)
+        .map_err(|_| NexthopEncodeError::AttributeLengthOverflow { len: total_len })?;
+    Ok(total_len)
+}
+
 /// Push an `nlattr { len, kind }` + payload + 4-byte alignment pad.
-fn push_attr(out: &mut Vec<u8>, kind: u16, payload: &[u8]) {
-    let total_len = 4 + payload.len();
-    let len_u16: u16 = total_len
-        .try_into()
-        .expect("netlink attribute length exceeds u16");
+fn push_attr(out: &mut Vec<u8>, kind: u16, payload: &[u8]) -> Result<(), NexthopEncodeError> {
+    let total_len = checked_attr_len(payload.len())?;
+    let len_u16 = u16::try_from(total_len)
+        .map_err(|_| NexthopEncodeError::AttributeLengthOverflow { len: total_len })?;
     out.extend_from_slice(&len_u16.to_ne_bytes());
     out.extend_from_slice(&kind.to_ne_bytes());
     out.extend_from_slice(payload);
     // Pad to 4-byte alignment.
     let padded = nla_align(total_len);
     out.resize(out.len() + (padded - total_len), 0);
+    Ok(())
 }
 
 /// Emit the `Nhmsg` struct as 8 bytes, native-endian.
@@ -95,17 +123,24 @@ fn push_nhmsg(out: &mut Vec<u8>, msg: Nhmsg) {
 
 /// Build the `nlmsghdr` (16 bytes) given the body length. Returns
 /// the prepended header bytes.
-fn build_nlmsghdr(body_len: usize, msg_type: u16, flags: u16, seq: u32) -> [u8; 16] {
-    let total_len: u32 = (16 + body_len)
-        .try_into()
-        .expect("netlink message length exceeds u32");
+fn build_nlmsghdr(
+    body_len: usize,
+    msg_type: u16,
+    flags: u16,
+    seq: u32,
+) -> Result<[u8; 16], NexthopEncodeError> {
+    let total_len = 16usize
+        .checked_add(body_len)
+        .ok_or(NexthopEncodeError::MessageLengthOverflow { len: usize::MAX })?;
+    let total_len_u32 = u32::try_from(total_len)
+        .map_err(|_| NexthopEncodeError::MessageLengthOverflow { len: total_len })?;
     let mut hdr = [0u8; 16];
-    hdr[0..4].copy_from_slice(&total_len.to_ne_bytes());
+    hdr[0..4].copy_from_slice(&total_len_u32.to_ne_bytes());
     hdr[4..6].copy_from_slice(&msg_type.to_ne_bytes());
     hdr[6..8].copy_from_slice(&flags.to_ne_bytes());
     hdr[8..12].copy_from_slice(&seq.to_ne_bytes());
     // nlmsg_pid = 0 ("kernel fills in" semantics on the way out).
-    hdr
+    Ok(hdr)
 }
 
 // ---------------------------------------------------------------------
@@ -120,7 +155,11 @@ fn build_nlmsghdr(body_len: usize, msg_type: u16, flags: u16, seq: u32) -> [u8; 
 /// `NHA_GATEWAY` payload; IPv6 gateways encode `nh_family = AF_INET6`
 /// with a 16-byte payload (ADR-0059 slice 3.5 PR 3). Caller is
 /// responsible for `id != 0`.
-pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u8> {
+pub(crate) fn encode_add_fdb_member(
+    seq: u32,
+    id: u32,
+    gateway: IpAddr,
+) -> Result<Vec<u8>, NexthopEncodeError> {
     // Body capacity sized to the v6 worst case = 8 (nhmsg) + 8
     // (NHA_ID) + 20 (NHA_GATEWAY: 4 header + 16 payload) + 4
     // (NHA_FDB) = 40 bytes. The total message (body + 16-byte
@@ -148,28 +187,37 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
     );
 
     // Attributes in iproute2 order: NHA_ID, NHA_GATEWAY, NHA_FDB.
-    push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
+    push_attr(&mut body, NHA_ID, &id.to_ne_bytes())?;
     match gateway {
-        IpAddr::V4(v4) => push_attr(&mut body, NHA_GATEWAY, &v4.octets()),
-        IpAddr::V6(v6) => push_attr(&mut body, NHA_GATEWAY, &v6.octets()),
+        IpAddr::V4(v4) => push_attr(&mut body, NHA_GATEWAY, &v4.octets())?,
+        IpAddr::V6(v6) => push_attr(&mut body, NHA_GATEWAY, &v6.octets())?,
     }
-    push_attr(&mut body, NHA_FDB, &[]); // zero-length flag.
+    push_attr(&mut body, NHA_FDB, &[])?; // zero-length flag.
 
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-    let hdr = build_nlmsghdr(body.len(), RTM_NEWNEXTHOP, flags, seq);
+    let hdr = build_nlmsghdr(body.len(), RTM_NEWNEXTHOP, flags, seq)?;
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// Encode `RTM_NEWNEXTHOP` for a group naming the `members` by
 /// nexthop ID. The members carry weight 0 (= weight 1 per kernel
 /// semantics) and zero reserved fields; group type defaults to
 /// MPATH (kernel default — we omit `NHA_GROUP_TYPE`).
-pub(crate) fn encode_add_fdb_group(seq: u32, id: u32, members: &[NexthopGrp]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(8 + 8 + (4 + 8 * members.len()) + 4);
+pub(crate) fn encode_add_fdb_group(
+    seq: u32,
+    id: u32,
+    members: &[NexthopGrp],
+) -> Result<Vec<u8>, NexthopEncodeError> {
+    let group_payload_len = members
+        .len()
+        .checked_mul(8)
+        .ok_or(NexthopEncodeError::AttributeLengthOverflow { len: usize::MAX })?;
+    checked_attr_len(group_payload_len)?;
+    let mut body = Vec::with_capacity(8 + 8 + (4 + group_payload_len) + 4);
 
     // nhmsg: AF_UNSPEC for groups (no per-message gateway).
     push_nhmsg(
@@ -183,32 +231,32 @@ pub(crate) fn encode_add_fdb_group(seq: u32, id: u32, members: &[NexthopGrp]) ->
         },
     );
 
-    push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
+    push_attr(&mut body, NHA_ID, &id.to_ne_bytes())?;
 
     // NHA_GROUP payload = concatenated NexthopGrp entries, each 8 bytes.
-    let mut group_payload = Vec::with_capacity(8 * members.len());
+    let mut group_payload = Vec::with_capacity(group_payload_len);
     for m in members {
         group_payload.extend_from_slice(&m.id.to_ne_bytes());
         group_payload.push(m.weight);
         group_payload.push(m.resvd1);
         group_payload.extend_from_slice(&m.resvd2.to_ne_bytes());
     }
-    push_attr(&mut body, NHA_GROUP, &group_payload);
+    push_attr(&mut body, NHA_GROUP, &group_payload)?;
 
-    push_attr(&mut body, NHA_FDB, &[]);
+    push_attr(&mut body, NHA_FDB, &[])?;
 
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-    let hdr = build_nlmsghdr(body.len(), RTM_NEWNEXTHOP, flags, seq);
+    let hdr = build_nlmsghdr(body.len(), RTM_NEWNEXTHOP, flags, seq)?;
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// Encode `RTM_DELNEXTHOP` for the nexthop named by `id`. Body is
 /// just `nhmsg(AF_UNSPEC) + NHA_ID(id)`.
-pub(crate) fn encode_del(seq: u32, id: u32) -> Vec<u8> {
+pub(crate) fn encode_del(seq: u32, id: u32) -> Result<Vec<u8>, NexthopEncodeError> {
     let mut body = Vec::with_capacity(8 + 8);
 
     push_nhmsg(
@@ -222,22 +270,22 @@ pub(crate) fn encode_del(seq: u32, id: u32) -> Vec<u8> {
         },
     );
 
-    push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
+    push_attr(&mut body, NHA_ID, &id.to_ne_bytes())?;
 
     let flags = NLM_F_REQUEST | NLM_F_ACK;
-    let hdr = build_nlmsghdr(body.len(), RTM_DELNEXTHOP, flags, seq);
+    let hdr = build_nlmsghdr(body.len(), RTM_DELNEXTHOP, flags, seq)?;
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// Encode an `RTM_GETNEXTHOP` dump request — empty filter, kernel
 /// returns every nexthop. Slice 3b's startup-adoption pass filters
 /// the response client-side by tag bits (`is_ours`) since the kernel
 /// doesn't expose a tag-bit filter attribute.
-pub(crate) fn encode_dump(seq: u32) -> Vec<u8> {
+pub(crate) fn encode_dump(seq: u32) -> Result<Vec<u8>, NexthopEncodeError> {
     let mut body = Vec::with_capacity(8);
 
     push_nhmsg(
@@ -252,12 +300,12 @@ pub(crate) fn encode_dump(seq: u32) -> Vec<u8> {
     );
 
     let flags = NLM_F_REQUEST | NLM_F_DUMP;
-    let hdr = build_nlmsghdr(body.len(), RTM_GETNEXTHOP, flags, seq);
+    let hdr = build_nlmsghdr(body.len(), RTM_GETNEXTHOP, flags, seq)?;
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -419,7 +467,7 @@ mod tests {
 
     #[test]
     fn add_fdb_member_v4_matches_expected_bytes_id12() {
-        let mut bytes = encode_add_fdb_member(42, 12, "10.0.0.2".parse().unwrap());
+        let mut bytes = encode_add_fdb_member(42, 12, "10.0.0.2".parse().unwrap()).unwrap();
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, ADD_FDB_MEMBER_ID12_TO_10_0_0_2);
@@ -427,7 +475,7 @@ mod tests {
 
     #[test]
     fn add_fdb_member_v4_matches_expected_bytes_id13() {
-        let mut bytes = encode_add_fdb_member(42, 13, "10.0.0.3".parse().unwrap());
+        let mut bytes = encode_add_fdb_member(42, 13, "10.0.0.3".parse().unwrap()).unwrap();
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, ADD_FDB_MEMBER_ID13_TO_10_0_0_3);
@@ -437,7 +485,7 @@ mod tests {
     fn add_fdb_member_v6_matches_expected_bytes() {
         // ADR-0059 slice 3.5 PR 3: the v6 path picks `nh_family =
         // AF_INET6` and lays out a 16-byte `NHA_GATEWAY` payload.
-        let mut bytes = encode_add_fdb_member(42, 14, "2001:db8::2".parse().unwrap());
+        let mut bytes = encode_add_fdb_member(42, 14, "2001:db8::2".parse().unwrap()).unwrap();
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, ADD_FDB_MEMBER_ID14_TO_2001_DB8_2);
@@ -459,7 +507,7 @@ mod tests {
                 resvd2: 0,
             },
         ];
-        let mut bytes = encode_add_fdb_group(42, 200, &members);
+        let mut bytes = encode_add_fdb_group(42, 200, &members).unwrap();
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, ADD_FDB_GROUP_ID200_MEMBERS_12_13);
@@ -467,7 +515,7 @@ mod tests {
 
     #[test]
     fn del_matches_expected_bytes() {
-        let mut bytes = encode_del(42, 200);
+        let mut bytes = encode_del(42, 200).unwrap();
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, DEL_ID200);
@@ -476,7 +524,7 @@ mod tests {
     #[test]
     fn seq_field_propagates_to_header() {
         // Encoder writes the caller-supplied seq into bytes[8..12].
-        let bytes = encode_add_fdb_member(0xDEAD_BEEF, 12, "10.0.0.2".parse().unwrap());
+        let bytes = encode_add_fdb_member(0xDEAD_BEEF, 12, "10.0.0.2".parse().unwrap()).unwrap();
         assert_eq!(&bytes[8..12], &0xDEAD_BEEFu32.to_ne_bytes());
     }
 
@@ -486,8 +534,37 @@ mod tests {
         // does, before calling). This test pins the encoder's
         // mechanical behaviour: it produces a valid-shaped message
         // with a zero-payload NHA_GROUP.
-        let bytes = encode_add_fdb_group(0, 99, &[]);
+        let bytes = encode_add_fdb_group(0, 99, &[]).unwrap();
         // 16 nlmsghdr + 8 nhmsg + 8 NHA_ID + 4 empty-NHA_GROUP + 4 NHA_FDB = 40
         assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 40);
+    }
+
+    #[test]
+    fn push_attr_rejects_oversized_payload_without_mutation() {
+        let payload = vec![0u8; usize::from(u16::MAX) - 3];
+        let mut out = Vec::new();
+
+        let err = push_attr(&mut out, NHA_ID, &payload).unwrap_err();
+
+        assert_eq!(
+            err,
+            NexthopEncodeError::AttributeLengthOverflow {
+                len: usize::from(u16::MAX) + 1
+            }
+        );
+        assert!(out.is_empty());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn build_nlmsghdr_rejects_u32_overflow() {
+        let err = build_nlmsghdr(u32::MAX as usize, RTM_NEWNEXTHOP, NLM_F_REQUEST, 1).unwrap_err();
+
+        assert_eq!(
+            err,
+            NexthopEncodeError::MessageLengthOverflow {
+                len: u32::MAX as usize + 16
+            }
+        );
     }
 }

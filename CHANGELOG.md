@@ -160,6 +160,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Raw EVPN nexthop netlink encoders no longer panic on length overflow.**
+  The ADR-0059 raw `RTM_NEWNEXTHOP` / `RTM_DELNEXTHOP` byte builders now
+  return `NexthopEncodeError` for oversized netlink attributes or message
+  lengths and propagate through `NexthopError`. Valid byte fixtures are
+  unchanged.
 - **EVPN hot-apply documentation drift.** `KNOWN_ISSUES.md`,
   `docs/CONFIGURATION.md`, and `docs/OPERATIONS.md` now describe the
   current ADR-0063 boundary: SIGHUP and `EvpnService.ApplyEvpnRuntime`

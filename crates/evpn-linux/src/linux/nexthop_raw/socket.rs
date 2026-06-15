@@ -29,7 +29,9 @@ use netlink_sys::{AsyncSocket, AsyncSocketExt, SocketAddr, TokioSocket, protocol
 use thiserror::Error;
 use tracing::debug;
 
-use super::encode::{encode_add_fdb_group, encode_add_fdb_member, encode_del, encode_dump};
+use super::encode::{
+    NexthopEncodeError, encode_add_fdb_group, encode_add_fdb_member, encode_del, encode_dump,
+};
 use super::uapi::{NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, RTM_NEWNEXTHOP};
 use crate::dataplane::{KernelNexthop, KernelNexthopKind};
 use crate::nh_id_alloc::NhIdAllocator;
@@ -136,6 +138,9 @@ pub enum NexthopError {
     /// Caller-side validation failed before the send.
     #[error("nexthop validation: {0}")]
     Validation(#[from] NexthopValidationError),
+    /// Local netlink request encoding failed before the send.
+    #[error("nexthop encode: {0}")]
+    Encode(#[from] NexthopEncodeError),
 }
 
 /// A `NETLINK_ROUTE` socket dedicated to FDB nexthop group
@@ -170,6 +175,8 @@ impl NexthopSocket {
     /// # Errors
     ///
     /// - [`NexthopError::Validation`] with `ZeroId` if `id == 0`.
+    /// - [`NexthopError::Encode`] if the local netlink request would exceed
+    ///   netlink length fields.
     /// - [`NexthopError::Io`] on socket failure.
     /// - [`NexthopError::Kernel`] on kernel-side errno ≠ 0
     ///   (`EEXIST` is treated as idempotent ACK).
@@ -178,7 +185,7 @@ impl NexthopSocket {
             return Err(NexthopValidationError::ZeroId.into());
         }
         let seq = self.next_seq();
-        let bytes = encode_add_fdb_member(seq, id, gateway);
+        let bytes = encode_add_fdb_member(seq, id, gateway)?;
         self.exchange(seq, &bytes, /* idempotent_eexist */ true)
             .await
     }
@@ -191,6 +198,8 @@ impl NexthopSocket {
     ///
     /// - [`NexthopError::Validation`] with `ZeroId`, `EmptyGroup`,
     ///   or `DuplicateMemberId` on precondition violation.
+    /// - [`NexthopError::Encode`] if the local netlink request would exceed
+    ///   netlink length fields.
     /// - [`NexthopError::Io`] on socket failure.
     /// - [`NexthopError::Kernel`] on kernel-side errno ≠ 0
     ///   (`EEXIST` is treated as idempotent ACK).
@@ -226,7 +235,7 @@ impl NexthopSocket {
             .collect();
 
         let seq = self.next_seq();
-        let bytes = encode_add_fdb_group(seq, id, &wire);
+        let bytes = encode_add_fdb_group(seq, id, &wire)?;
         self.exchange(seq, &bytes, /* idempotent_eexist */ true)
             .await
     }
@@ -249,13 +258,15 @@ impl NexthopSocket {
     ///
     /// # Errors
     ///
+    /// - [`NexthopError::Encode`] if the local netlink request would exceed
+    ///   netlink length fields.
     /// - [`NexthopError::Io`] on socket failure.
     /// - [`NexthopError::Kernel`] on a kernel-side error frame.
     /// - [`NexthopError::Truncated`] / [`NexthopError::UnexpectedMessage`]
     ///   if the multipart parser hits a malformed datagram.
     pub async fn dump_owned(&mut self) -> Result<Vec<KernelNexthop>, NexthopError> {
         let seq = self.next_seq();
-        let bytes = encode_dump(seq);
+        let bytes = encode_dump(seq)?;
         self.socket.send(&bytes).await?;
 
         let mut out: Vec<KernelNexthop> = Vec::new();
@@ -278,6 +289,8 @@ impl NexthopSocket {
     /// # Errors
     ///
     /// - [`NexthopError::Validation`] with `ZeroId` if `id == 0`.
+    /// - [`NexthopError::Encode`] if the local netlink request would exceed
+    ///   netlink length fields.
     /// - [`NexthopError::Io`] on socket failure.
     /// - [`NexthopError::Kernel`] on kernel-side errno ≠ 0 other
     ///   than `ENOENT` (which is treated as idempotent ACK).
@@ -286,7 +299,7 @@ impl NexthopSocket {
             return Err(NexthopValidationError::ZeroId.into());
         }
         let seq = self.next_seq();
-        let bytes = encode_del(seq, id);
+        let bytes = encode_del(seq, id)?;
         self.exchange(seq, &bytes, /* idempotent_eexist */ false)
             .await
     }
