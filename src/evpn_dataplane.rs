@@ -1406,6 +1406,7 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
         next_hop: route.next_hop,
         gateway: prefix_route.gateway,
         esi: prefix_route.esi,
+        ethernet_tag: prefix_route.ethernet_tag,
         l3vni: prefix_route.label.as_vni(),
         route_targets,
         router_mac,
@@ -1782,6 +1783,19 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    #[test]
+    fn project_type5_preserves_type5_ethernet_tag() {
+        let mut route = evpn_ip_prefix_route("10.10.0.0/24", "0.0.0.0", "10.0.0.2", 5000);
+        let EvpnRoute::IpPrefix(prefix_route) = &mut route.route else {
+            panic!("helper must build a Type 5 route");
+        };
+        prefix_route.ethernet_tag = EthernetTagId(77);
+
+        let projected = project_type5(&route).expect("Type 5 route projects");
+
+        assert_eq!(projected.ethernet_tag, EthernetTagId(77));
     }
 
     fn evpn_ead_per_es_route(

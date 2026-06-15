@@ -800,6 +800,7 @@ mod tests {
             next_hop,
             gateway,
             esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: rustbgpd_evpn::EthernetTagId(0),
             l3vni: vni,
             route_targets: vec![format!("65000:{vni}").parse().unwrap()],
             router_mac: Some(rmac),

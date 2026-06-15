@@ -89,9 +89,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[[ethernet_segments]]`, the IP-VRF has at least one linked L2VNI,
   ambiguous multi-L2VNI links specify `overlay_index_l2vni`, and that
   L2VNI is a member of the selected ESI. This is an origination slice:
-  receive-side projection now preserves Type 5 ESI metadata and drops
-  non-zero-ESI routes fail-closed with `unsupported_esi_overlay_index`
-  until protected EAD recursion and a real-peer interop proof ship.
+  receive-side projection now preserves Type 5 ESI and Ethernet Tag
+  metadata, exposes a scoped EAD-per-EVI resolver index for the future
+  receive path, and still drops non-zero-ESI routes fail-closed with
+  `unsupported_esi_overlay_index` until protected EAD recursion and a
+  real-peer interop proof ship.
 
 ### Changed
 
@@ -133,10 +135,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the general RFC 7911 Add-Path capability for AFI 25 / SAFI 70.
 - **Pinned the EVPN Type-5 ESI protected-recursion prerequisites.**
   ADR-0087 and the roadmap now call out why inbound non-zero-ESI RT-5s still
-  drop fail-closed after ESI origination shipped: the receive side needs
-  L2VNI-scoped EAD-per-EVI resolver input, Type-5 Ethernet-Tag preservation in
-  the projection DTO, and an explicit L3 multipath versus single-active-only
-  policy before it can claim RFC 9136 §4.3 protected recursion.
+  drop fail-closed after ESI origination shipped. The receive-side substrate
+  now carries Type-5 ESI and Ethernet Tag metadata and exposes a
+  L2VNI-scoped EAD-per-EVI resolver index; the remaining decision is the
+  actual L3 multipath versus single-active-only receive policy and real-peer
+  interop proof before rustbgpd can claim RFC 9136 §4.3 protected recursion.
 - **Tightened the ADR-0077 route-family substrate boundary.** Future
   BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
   review rule: substrate-only PRs must remain unreachable from peers and
@@ -160,6 +163,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RTR encode length conversions are now checked, with typed errors.** The RTR
+  encoder now returns `RtrEncodeError` for variable-length ASPA and
+  Error Report PDUs whose computed length would overflow RTR's `u32`
+  length fields, and the RTR client propagates that as a typed
+  `RtrError`. Valid PDU bytes are unchanged.
 - **Raw EVPN nexthop netlink encoders no longer panic on length overflow.**
   The ADR-0059 raw `RTM_NEWNEXTHOP` / `RTM_DELNEXTHOP` byte builders now
   return `NexthopEncodeError` for oversized netlink attributes or message
