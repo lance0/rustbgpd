@@ -837,16 +837,19 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
 /// `Kernel(errno)` routes through [`map_nexthop_kernel_errno`] for
 /// per-errno classification (`PermissionDenied` / `KernelTooOld` /
 /// `InvalidArgument` / `Other` — see that function for the
-/// permanent-vs-transient mapping); validation becomes
-/// `InvalidArgument` (permanent — our message shape is wrong);
-/// truncation / unexpected message become `Other` (transient — the
-/// next dump pass will retry on its own cadence).
+/// permanent-vs-transient mapping); validation and encode failures become
+/// `InvalidArgument` (permanent — our message shape is wrong); truncation /
+/// unexpected message become `Other` (transient — the next dump pass will retry
+/// on its own cadence).
 fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
     match e {
         nexthop_raw::NexthopError::Io(io) => DataplaneError::Io(io),
         nexthop_raw::NexthopError::Kernel(errno) => map_nexthop_kernel_errno(errno),
         nexthop_raw::NexthopError::Validation(v) => {
             DataplaneError::InvalidArgument(format!("nexthop validation: {v}"))
+        }
+        nexthop_raw::NexthopError::Encode(v) => {
+            DataplaneError::InvalidArgument(format!("nexthop encode: {v}"))
         }
         other => DataplaneError::Other(format!("nexthop socket: {other}")),
     }
@@ -948,5 +951,17 @@ mod tests {
         forget_ip_neighbour_mac(&mut cache, &mut order, second_key);
         assert!(cache.is_empty());
         assert!(order.is_empty());
+    }
+
+    #[test]
+    fn nexthop_encode_error_classifies_permanent() {
+        let err = map_nexthop_error(nexthop_raw::NexthopError::Encode(
+            nexthop_raw::encode::NexthopEncodeError::AttributeLengthOverflow { len: 65_536 },
+        ));
+
+        assert_eq!(err.class(), crate::error::FailureClass::Permanent);
+        assert!(
+            matches!(err, DataplaneError::InvalidArgument(message) if message.contains("nexthop encode"))
+        );
     }
 }
