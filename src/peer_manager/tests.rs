@@ -1817,6 +1817,65 @@ remote_asn = 65004
 peer_group = "edge"
 "#;
 
+#[tokio::test]
+async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let addresses = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+    ];
+    let before: Vec<_> = addresses
+        .iter()
+        .map(|addr| {
+            (
+                *addr,
+                mgr.peers.get(&key(*addr)).expect("managed peer").session_id,
+            )
+        })
+        .collect();
+    let config_before = mgr.current_config.clone();
+
+    mgr.apply_peer_group_change(set_edge_hold_time_event(90), addresses.to_vec())
+        .await
+        .unwrap();
+
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("managed peer");
+        assert_eq!(
+            managed.session_id, session_id,
+            "no-op peer-group set must not rebuild {addr}"
+        );
+        assert_eq!(managed.hold_time, Some(90));
+    }
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90),
+        "no-op update must leave current_config unchanged"
+    );
+    assert_eq!(
+        mgr.current_config, config_before,
+        "no-op update must leave the full resolved config structurally unchanged"
+    );
+    assert!(
+        query_policy_event_history(&mgr, None, 8).await.is_empty(),
+        "no-op update must not publish a catalog policy event"
+    );
+}
+
 /// ADR-0081 success path: a targeted `SetPeerGroup` reshapes every static
 /// member through the captured-prior snapshot primitive, advances
 /// `current_config`, and publishes the applied member count.
@@ -1835,18 +1894,26 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
     let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let before: Vec<_> = [a1, a2, a3]
+        .into_iter()
+        .map(|addr| {
+            (
+                addr,
+                mgr.peers.get(&key(addr)).expect("managed peer").session_id,
+            )
+        })
+        .collect();
 
     mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2, a3])
         .await
         .unwrap();
 
-    for addr in [a1, a2, a3] {
-        assert_eq!(
-            mgr.peers
-                .get(&key(addr))
-                .expect("reshaped member")
-                .hold_time,
-            Some(45)
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
+        assert_eq!(managed.hold_time, Some(45));
+        assert_ne!(
+            managed.session_id, session_id,
+            "real peer-group reshape must rebuild {addr}"
         );
     }
     assert_eq!(
@@ -4324,7 +4391,7 @@ fn closed_peer_handle() -> PeerHandle {
 /// primitive's partial-mutation path: the peer's import bookkeeping can advance
 /// before export fails, and rollback must restore the same peer too.
 fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let export_failed = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(async move {
@@ -4362,7 +4429,9 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                     if export_failed.swap(true, Ordering::SeqCst) {
                         let _ = reply.send(Ok(()));
                     } else {
-                        let _ = reply.send(Err("export apply failed once".to_string()));
+                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                            "export apply failed once".to_string(),
+                        )));
                     }
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
@@ -4381,7 +4450,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
 /// returns "peer lacks Route Refresh capability"). Used to verify a live-impact
 /// apply rejects an Established non-RR peer cleanly.
 fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
         while let Some(cmd) = session_rx.recv().await {
@@ -4415,7 +4484,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
-                    let _ = reply.send(Err("peer lacks Route Refresh capability".to_string()));
+                    let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
                     break;
@@ -4434,7 +4503,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
 /// `forward_completed = true`), but the refresh issued while rolling back fails,
 /// exercising `RefreshFailureHandling::BestEffortRearm`.
 fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
@@ -4474,7 +4543,9 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                     if refresh_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         let _ = reply.send(Ok(()));
                     } else {
-                        let _ = reply.send(Err("transient route refresh failure".to_string()));
+                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                            "transient route refresh failure".to_string(),
+                        )));
                     }
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
