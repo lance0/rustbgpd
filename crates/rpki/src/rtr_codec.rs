@@ -120,6 +120,19 @@ pub enum RtrDecodeError {
     Utf8Error,
 }
 
+/// RTR encode errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RtrEncodeError {
+    /// A variable-length PDU field exceeded RTR's 32-bit length field.
+    #[error("{field} length {len} exceeds the RTR u32 length field")]
+    LengthOverflow {
+        /// Human-readable field name.
+        field: &'static str,
+        /// Attempted length in bytes.
+        len: usize,
+    },
+}
+
 // ── PDU type codes ───────────────────────────────────────────────
 
 const PDU_SERIAL_NOTIFY: u8 = 0;
@@ -132,6 +145,42 @@ const PDU_END_OF_DATA: u8 = 7;
 const PDU_CACHE_RESET: u8 = 8;
 const PDU_ERROR_REPORT: u8 = 10;
 const PDU_ASPA: u8 = 11;
+
+fn checked_u32_len(field: &'static str, len: usize) -> Result<u32, RtrEncodeError> {
+    u32::try_from(len).map_err(|_| RtrEncodeError::LengthOverflow { field, len })
+}
+
+fn checked_total_len(
+    field: &'static str,
+    base: usize,
+    parts: &[usize],
+) -> Result<u32, RtrEncodeError> {
+    let mut len = base;
+    for part in parts {
+        len = len
+            .checked_add(*part)
+            .ok_or(RtrEncodeError::LengthOverflow {
+                field,
+                len: usize::MAX,
+            })?;
+    }
+    checked_u32_len(field, len)
+}
+
+fn checked_counted_len(
+    field: &'static str,
+    base: usize,
+    count: usize,
+    element_len: usize,
+) -> Result<u32, RtrEncodeError> {
+    let body_len = count
+        .checked_mul(element_len)
+        .ok_or(RtrEncodeError::LengthOverflow {
+            field,
+            len: usize::MAX,
+        })?;
+    checked_total_len(field, base, &[body_len])
+}
 
 impl RtrPdu {
     /// Peek at a buffer to determine the total PDU length.
@@ -343,21 +392,33 @@ impl RtrPdu {
 
     /// Encode this PDU into a byte buffer using the default version for each
     /// PDU type (v1 for standard PDUs, v2 for ASPA).
-    pub fn encode(&self, buf: &mut Vec<u8>) {
+    ///
+    /// # Errors
+    /// Returns [`RtrEncodeError::LengthOverflow`] if a variable-length
+    /// PDU would exceed RTR's 32-bit length fields.
+    pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), RtrEncodeError> {
         let version = if matches!(self, RtrPdu::Aspa { .. }) {
             RTR_VERSION_2
         } else {
             RTR_VERSION
         };
-        self.encode_with_version(buf, version);
+        self.encode_with_version(buf, version)
     }
 
     /// Encode this PDU with an explicit protocol version byte.
+    ///
+    /// # Errors
+    /// Returns [`RtrEncodeError::LengthOverflow`] if a variable-length
+    /// PDU would exceed RTR's 32-bit length fields.
     #[expect(
         clippy::too_many_lines,
         reason = "RTR PDU encoder mirrors the exhaustive parser and fixed wire layouts"
     )]
-    pub fn encode_with_version(&self, buf: &mut Vec<u8>, version: u8) {
+    pub fn encode_with_version(
+        &self,
+        buf: &mut Vec<u8>,
+        version: u8,
+    ) -> Result<(), RtrEncodeError> {
         match self {
             RtrPdu::SerialNotify { session_id, serial } => {
                 buf.push(version);
@@ -451,11 +512,7 @@ impl RtrPdu {
                 // ASPA PDU per draft-ietf-sidrops-8210bis:
                 //   byte 2 = flags, byte 3 = zero, no provider_count field
                 //   length = 12 + 4 * num_providers
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RTR length field is u32; constructed ASPA PDUs are bounded by memory"
-                )]
-                let total_len = (12 + provider_asns.len() * 4) as u32;
+                let total_len = checked_counted_len("RTR ASPA PDU", 12, provider_asns.len(), 4)?;
                 buf.push(version);
                 buf.push(PDU_ASPA);
                 buf.push(*flags); // byte 2: flags
@@ -468,31 +525,21 @@ impl RtrPdu {
             }
             RtrPdu::ErrorReport { code, pdu, text } => {
                 let text_bytes = text.as_bytes();
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RTR length field is u32; oversized error PDUs are outside the infallible encode API"
-                )]
-                let total_len = (16 + pdu.len() + text_bytes.len()) as u32;
+                let total_len =
+                    checked_total_len("RTR Error Report PDU", 16, &[pdu.len(), text_bytes.len()])?;
                 buf.push(version);
                 buf.push(PDU_ERROR_REPORT);
                 buf.extend_from_slice(&code.to_be_bytes());
                 buf.extend_from_slice(&total_len.to_be_bytes());
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RTR encapsulated-PDU length field is u32"
-                )]
-                let encap_len = pdu.len() as u32;
+                let encap_len = checked_u32_len("RTR Error Report encapsulated PDU", pdu.len())?;
                 buf.extend_from_slice(&encap_len.to_be_bytes());
                 buf.extend_from_slice(pdu);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RTR error-text length field is u32"
-                )]
-                let text_len = text_bytes.len() as u32;
+                let text_len = checked_u32_len("RTR Error Report text", text_bytes.len())?;
                 buf.extend_from_slice(&text_len.to_be_bytes());
                 buf.extend_from_slice(text_bytes);
             }
         }
+        Ok(())
     }
 }
 
@@ -502,7 +549,7 @@ mod tests {
 
     fn roundtrip(pdu: &RtrPdu) -> RtrPdu {
         let mut buf = Vec::new();
-        pdu.encode(&mut buf);
+        pdu.encode(&mut buf).unwrap();
         let (decoded, consumed) = RtrPdu::decode(&buf).unwrap();
         assert_eq!(consumed, buf.len());
         decoded
@@ -601,6 +648,48 @@ mod tests {
     }
 
     #[test]
+    fn error_report_encode_length_fields_are_checked_and_byte_compatible() {
+        let pdu = RtrPdu::ErrorReport {
+            code: 2,
+            pdu: vec![1, 2],
+            text: "abc".to_string(),
+        };
+        let mut buf = Vec::new();
+        pdu.encode(&mut buf).unwrap();
+
+        assert_eq!(u32::from_be_bytes(buf[4..8].try_into().unwrap()), 21);
+        assert_eq!(u32::from_be_bytes(buf[8..12].try_into().unwrap()), 2);
+        assert_eq!(u32::from_be_bytes(buf[14..18].try_into().unwrap()), 3);
+    }
+
+    #[test]
+    fn checked_total_len_rejects_usize_overflow() {
+        let err = checked_total_len("RTR Error Report PDU", usize::MAX, &[1]).unwrap_err();
+
+        assert_eq!(
+            err,
+            RtrEncodeError::LengthOverflow {
+                field: "RTR Error Report PDU",
+                len: usize::MAX
+            }
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn checked_u32_len_rejects_u32_overflow() {
+        let err = checked_u32_len("RTR Error Report text", u32::MAX as usize + 1).unwrap_err();
+
+        assert_eq!(
+            err,
+            RtrEncodeError::LengthOverflow {
+                field: "RTR Error Report text",
+                len: u32::MAX as usize + 1
+            }
+        );
+    }
+
+    #[test]
     fn ipv4_prefix_withdraw_flag() {
         let pdu = RtrPdu::Ipv4Prefix {
             flags: 0, // withdraw
@@ -615,7 +704,7 @@ mod tests {
     #[test]
     fn peek_length_works() {
         let mut buf = Vec::new();
-        RtrPdu::ResetQuery.encode(&mut buf);
+        RtrPdu::ResetQuery.encode(&mut buf).unwrap();
         assert_eq!(RtrPdu::peek_length(&buf), Some(8));
     }
 
@@ -640,7 +729,8 @@ mod tests {
             session_id: 1,
             serial: 1,
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         assert_eq!(
             RtrPdu::decode(&buf[..8]).unwrap_err(),
             RtrDecodeError::Incomplete
@@ -675,7 +765,8 @@ mod tests {
             prefix: Ipv4Addr::new(10, 0, 0, 0),
             asn: 65001,
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         // Corrupt prefix_len to 33
         buf[9] = 33;
         assert_eq!(
@@ -694,7 +785,8 @@ mod tests {
             prefix: Ipv4Addr::new(10, 0, 0, 0),
             asn: 65001,
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         // Set max_len=16, prefix_len=24 → invalid
         buf[10] = 16;
         assert_eq!(
@@ -717,8 +809,8 @@ mod tests {
         let mut buf = Vec::new();
         let pdu1 = RtrPdu::ResetQuery;
         let pdu2 = RtrPdu::CacheResponse { session_id: 42 };
-        pdu1.encode(&mut buf);
-        pdu2.encode(&mut buf);
+        pdu1.encode(&mut buf).unwrap();
+        pdu2.encode(&mut buf).unwrap();
 
         let (decoded1, consumed1) = RtrPdu::decode(&buf).unwrap();
         assert_eq!(decoded1, pdu1);
@@ -765,9 +857,39 @@ mod tests {
             customer_asn: 65001,
             provider_asns: vec![65002],
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         assert_eq!(buf[0], RTR_VERSION_2);
         assert_eq!(buf[1], PDU_ASPA);
+    }
+
+    #[test]
+    fn aspa_encode_length_is_checked_and_byte_compatible() {
+        let mut buf = Vec::new();
+        RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002, 65003, 65004],
+        }
+        .encode(&mut buf)
+        .unwrap();
+
+        assert_eq!(u32::from_be_bytes(buf[4..8].try_into().unwrap()), 24);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn aspa_encode_length_rejects_u32_overflow() {
+        let provider_count = (u32::MAX as usize / 4) + 1;
+        let err = checked_counted_len("RTR ASPA PDU", 12, provider_count, 4).unwrap_err();
+
+        assert!(matches!(
+            err,
+            RtrEncodeError::LengthOverflow {
+                field: "RTR ASPA PDU",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -778,7 +900,8 @@ mod tests {
             customer_asn: 65001,
             provider_asns: vec![65002],
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         // Overwrite version to 1 — should be rejected
         buf[0] = RTR_VERSION;
         assert_eq!(
@@ -795,7 +918,8 @@ mod tests {
             customer_asn: 65001,
             provider_asns: vec![65002],
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .unwrap();
         // Corrupt length to wrong value
         let bad_len = 14u32.to_be_bytes();
         buf[4..8].copy_from_slice(&bad_len);
