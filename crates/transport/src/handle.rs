@@ -875,7 +875,9 @@ impl PeerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session task has already exited.
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
     pub async fn update_import_policy(
         &self,
         policy: Option<PolicyChain>,
@@ -972,7 +974,9 @@ impl PeerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session task has already exited.
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
     pub async fn update_export_policy(
         &self,
         policy: Option<PolicyChain>,
