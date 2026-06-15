@@ -398,7 +398,10 @@ impl RtrClient {
     }
 
     /// Fetch VRPs until `EndOfData`, then publish the resulting update.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "RTR serial-query transaction keeps collection, timers, and publish ordering together"
+    )]
     async fn fetch_until_end_of_data(
         &mut self,
         stream: &mut TcpStream,
