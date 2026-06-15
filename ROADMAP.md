@@ -997,6 +997,12 @@ branch is between features.
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
+- [ ] **RTR encode length conversions → checked typed errors.** The
+  clippy-reason ratchet documented a few pre-existing RTR encode-path casts
+  from `usize` to `u32`. They are not peer-reachable today — the encoder is fed
+  rustbgpd-controlled/bounded records — but converting them to checked
+  conversions with typed encode errors would remove the remaining theoretical
+  silent-truncation edge and make the documented invariant executable.
 - [x] **Catalog mutator persistence + lock convergence** *(from the 2026-06
   deep audit — shipped).* All 16 policy/peer-group gRPC mutators now follow
   the `AddNeighbor`/FIB-CRUD/`ApplyConfigTransaction` contract: detached-task
