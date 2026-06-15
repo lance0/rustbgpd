@@ -755,8 +755,10 @@ The clear path returns success with `cleared=false` if no active quarantine
 exists. When it clears an active key, the originator resets the active gauge
 to `0`, republishes the quarantine set, and replays still-live local MAC or
 MAC+IP state through the normal recovery path.
-`rbgp evpn instances` also reports `originated-local-macs=N` per
-instance, and `rbgp evpn instances --json` exposes the same value as
+`rbgp evpn instances` also reports each L2VNI's
+`readiness=ready|not-ready|unbound|unknown` and
+`originated-local-macs=N`; `rbgp evpn instances --json` exposes the
+same values as `readiness`, `not_ready_reason`, and
 `originated_local_macs_count`.
 
 ---
