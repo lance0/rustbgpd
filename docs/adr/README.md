@@ -96,6 +96,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0085](0085-evpn-es-interface-binding.md) | Ethernet Segment interface binding — link-driven drain and same-ESI local bias | Accepted | 2026-06-12 |
 | [0086](0086-dynamic-peer-group-reconfigure.md) | Peer-group field edits reach live dynamic sessions via post-persist graceful reset | Accepted | 2026-06-12 |
 | [0087](0087-evpn-type5-gateway-ip-overlay-index-origination.md) | Native GW-IP overlay-index Type 5 origination (RFC 9136) | Accepted | 2026-06-12 |
+| [0088](0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md) | EVPN VLAN-aware bridge and managed netdev boundary | Accepted | 2026-06-15 |
 
 ## Template
 

@@ -1933,8 +1933,11 @@ default — RR-only deployments leave it empty.
 
 > rustbgpd is observe-only for kernel netdevs: you provision the bridge
 > and VXLAN port yourself, and the daemon probes them (ADR-0054 §4). See
-> [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe
-> the `bridge` / `local_vtep_ip` fields below must match.
+> [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe;
+> the `bridge` / `local_vtep_ip` fields below must match. ADR-0088 keeps
+> VLAN-aware bridges and rustbgpd-managed bridge / VXLAN / VRF creation
+> fail-closed until explicit ownership and VLAN / Ethernet-Tag / VNI
+> binding semantics exist.
 
 ```toml
 [[evpn_instances]]
@@ -1960,7 +1963,7 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `route_targets`       | string[] | yes*     | `[]`    | One or more EVPN Route Targets in the same encodings. Required unless `auto_derive_route_target = true` |
 | `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and `vni` (`2-octet AS only`) |
 | `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
-| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
+| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning`; VLAN-aware bridge support is deferred by ADR-0088 |
 | `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
 | `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
@@ -1972,7 +1975,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 - The combined table enforces uniqueness on both `vni` and `rd` —
   duplicates on either column reject config load.
 - `bridge` (when set) must reference a Linux bridge created out of
-  band; rustbgpd does not create/delete netdevs (ADR-0054 §4).
+  band; rustbgpd does not create/delete netdevs (ADR-0054 §4 and
+  ADR-0088).
 - `advertise_svi_mac = true` requires `bridge` non-empty.
 - `route_targets` may be omitted or empty only when
   `auto_derive_route_target = true`; otherwise at least one explicit RT is

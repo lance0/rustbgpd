@@ -54,7 +54,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   Remaining big investments are the remaining ADR-0063 runtime
   convergence shapes, ESI protected-recursion / broader recursion-path
   interop, and lower-priority VTEP operability gaps
-  such as VLAN-aware bridges and rustbgpd-managed netdev creation.
+  such as VLAN-aware bridges and rustbgpd-managed netdev creation. ADR-0088
+  records the boundary for those operability gaps: read-only topology
+  substrate may land first, but programming and netdev creation stay
+  fail-closed until explicit ownership semantics exist.
 
 ## Current Position
 
@@ -833,8 +836,8 @@ demand.
 |------|--------|------------------------|------------|
 | RFC 9136 ESI overlay-index Type 5 origination | Shipped (origination) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC while preserving the shipped GW-IP / interface-less modes | Pure origination + daemon tests; inbound non-zero-ESI RT-5s drop fail-closed until protected-recursion interop ships |
 | Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path, especially ESI recursion, without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion EAD / Type 2 state appears |
-| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability | Replace today's `NotReady` guard with explicit VLAN-filtering ownership and per-VLAN FDB/neighbor attribution | Local kernel dataplane test plus one M-series smoke |
-| rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics | Add opt-in ownership for one netdev class at a time, with crash-restart adoption and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
+| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; boundary accepted in ADR-0088 | Land read-only VLAN/topology substrate first; replace today's `NotReady` guard only after explicit VLAN / Ethernet-Tag / VNI binding and per-VLAN FDB/neighbor attribution exist | Local kernel dataplane test plus one M-series smoke |
+| rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics; boundary accepted in ADR-0088 | Add opt-in ownership for one netdev class at a time, with crash-restart adoption/reap and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
 | BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |
 | RFC 9251 Route Types 6/7/8 | Out-of-current-lane / service-provider multicast | Typed route-family slice for SMET and IGMP/MLD sync routes; no Linux dataplane change until multicast ownership is designed | Standards codec tests plus real-peer reflect/withdraw interop |
 | RFC 9572 Route Types 9/10/11 | Out-of-current-lane / service-provider BUM segmentation | Typed route-family slice for PMSI/leaf A-D routes | Standards codec tests plus real-peer interop |

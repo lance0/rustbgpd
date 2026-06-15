@@ -351,9 +351,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   while L3VNI/device/table IP-VRF identity changes (restart-required) and
   ES/IP-VRF row mixed edits fail closed ([#268](https://github.com/lance0/rustbgpd/issues/268));
   ESI overlay-index origination now ships; broader protected recursion-path
-  interop remains the nearest standards-tail item, VLAN-aware bridges
-  and bridge / VXLAN netdev creation are operator-provisioned, and
-  service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
+  interop remains the nearest standards-tail item. VLAN-aware bridges
+  and bridge / VXLAN / VRF netdev creation remain operator-provisioned
+  and fail-closed by [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md).
+  Service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
   EVPN, MPLS/SRv6 encapsulation, VPWS/E-Tree) is demand-shaped rather than
   part of the current VXLAN/Linux alpha lane
 - No VPNv4 / VPNv6 or Confederation support

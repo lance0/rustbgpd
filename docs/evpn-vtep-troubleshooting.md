@@ -113,7 +113,8 @@ Expected signals:
    Gate 7b requires an existing bridge, exactly one VXLAN port under the
    bridge, matching VNI, matching local VTEP IP, VXLAN learning disabled,
    and no VLAN-aware bridge mode. rustbgpd does not create bridge/VXLAN
-   netdevs in this gate. See
+   netdevs in this gate; ADR-0088 keeps VLAN-aware and managed-netdev
+   behavior fail-closed until explicit ownership semantics exist. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)
    for exact `ip link` pre-create commands.
 

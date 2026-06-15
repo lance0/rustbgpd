@@ -188,10 +188,14 @@ has it, no broad performance sprints without profile evidence.
   origination now ship; near-term standards work is broader protected-recursion
   interop, especially the ESI path; demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
-  bridge / VXLAN / VRF netdev creation; service-provider EVPN breadth (route
-  types 6-11, PBB-EVPN, multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service
-  encapsulation) stays out of the current lane until operator demand justifies
-  a new ADR. **Native GW-IP overlay-index origination landed
+  bridge / VXLAN / VRF netdev creation. **ADR-0088 records that boundary:**
+  VLAN-aware bridges remain fail-closed until an explicit VLAN /
+  Ethernet-Tag / VNI binding exists, read-only topology substrate may land
+  first, and managed netdev creation must be opt-in and one ownership class at
+  a time. Service-provider EVPN breadth (route types 6-11, PBB-EVPN,
+  multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation) stays out
+  of the current lane until operator demand justifies a new ADR. **Native
+  GW-IP overlay-index origination landed
   (ADR-0087):** per-IP-VRF `overlay_index_mode = "gateway_ip"` originates
   Type 5 with the kernel via (when it lands on a connected tenant subnet) in
   the Gateway Address and no Router-MAC extcomm, feeding the already-shipped
@@ -264,8 +268,11 @@ has it, no broad performance sprints without profile evidence.
   identity/generic mixed changes; actor availability and convergence failure
   remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
   follow-up inventory.
-- **EVPN Linux VTEP hardening.** VLAN-aware bridge support; rustbgpd-managed
-  bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
+- **EVPN Linux VTEP hardening.** VLAN-aware bridge support and
+  rustbgpd-managed bridge / VXLAN / VRF netdev creation are now scoped by
+  ADR-0088: read-only VLAN/topology inventory can land first; programming or
+  creation stays fail-closed until explicit ownership, rollback, and
+  adoption/reap semantics exist. `RTNLGRP_LINK` eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
   drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep

@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
+  roadmap now records the safety boundary for the remaining Linux VTEP
+  operability gap: VLAN-aware bridges stay `NotReady` until rustbgpd has
+  an explicit VLAN / Ethernet-Tag / VNI binding, managed bridge / VXLAN /
+  VRF creation stays opt-in and class-scoped, and read-only Linux
+  topology substrate can land before any programming behavior changes.
+  This is a decision document only; it adds no runtime feature.
 - **BGP-LS wire codec substrate.** The wire crate now exposes an
   unreachable RFC 9552 BGP-LS NLRI/TLV codec that preserves unknown NLRI
   types and TLVs opaquely and round-trips BGP-LS VPN route
