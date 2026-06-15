@@ -122,6 +122,7 @@ fn originated_to_projected(
         next_hop,
         gateway: p.gateway,
         esi: p.esi,
+        ethernet_tag: p.ethernet_tag,
         l3vni: p.label.as_vni(),
         route_targets,
         router_mac,

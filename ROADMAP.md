@@ -207,11 +207,12 @@ has it, no broad performance sprints without profile evidence.
   config validation tying the selected ESI to a linked local L2VNI. The
   remaining ESI tail is receive-side protected recursion / real-peer interop,
   not outbound encoding. That receive path should not be treated as a trivial
-  extension of the shipped GW-IP resolver: it first needs L2VNI-scoped
-  EAD-per-EVI resolver input, Type-5 Ethernet-Tag preservation in the
-  projection DTO, and an explicit decision between all-active L3 multipath/NHG
-  support and a documented single-active-only v1. The single-active arc below is
-  **done (ADR-0083, all four slices):** remote
+  extension of the shipped GW-IP resolver: rustbgpd now carries the
+  receive-side substrate (Type-5 ESI and Ethernet Tag metadata plus a
+  L2VNI-scoped EAD-per-EVI resolver index), but still needs an explicit
+  decision between all-active L3 multipath/NHG support and a documented
+  single-active-only v1 before importing non-zero-ESI RT-5s. The
+  single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
   with surviving eligible PEs swaps the group membership to the backup

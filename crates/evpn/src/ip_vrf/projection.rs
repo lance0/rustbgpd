@@ -71,7 +71,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_wire::{
-    EthernetSegmentIdentifier, EvpnIpPrefixValue, ExtendedCommunity, MacAddress, RouteDistinguisher,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixValue, ExtendedCommunity, MacAddress,
+    RouteDistinguisher,
 };
 
 use crate::instance::EvpnInstanceId;
@@ -105,6 +106,12 @@ pub struct ProjectedIpPrefixRoute {
     /// recursion is not implemented yet, so projection drops them
     /// fail-closed instead of treating them as Interface-less.
     pub esi: EthernetSegmentIdentifier,
+    /// Type 5 Ethernet Tag. The VLAN-based service-interface model
+    /// usually carries zero, but RFC 9136 §4.3 ESI overlay-index
+    /// recursion is scoped by the Type 5's Ethernet Tag and matching
+    /// EAD-per-EVI state, so the receive-side DTO must preserve it
+    /// even while non-zero-ESI Type 5s still drop fail-closed.
+    pub ethernet_tag: EthernetTagId,
     /// L3VNI from the route's MPLS label slot (RFC 8365: VXLAN VNI
     /// carried in the MPLS label field).
     pub l3vni: u32,
@@ -141,6 +148,101 @@ pub struct ProjectedOverlayIndexRoute {
     /// projection does — the highest sequence reflects the most recent
     /// host location.
     pub mobility_sequence: Option<u32>,
+}
+
+/// Trimmed EAD-per-EVI row usable as the future RFC 9136 §4.3
+/// receive-side resolver input for ESI overlay-index Type 5 routes.
+///
+/// This is intentionally scoped to the *local* L2VNI / MAC-VRF. The
+/// existing Type 2 alias index is keyed only by `(ESI, Ethernet Tag)`,
+/// which is sufficient for L2 aliasing but too broad for Type 5
+/// protected recursion: the Type 5 importer must resolve through an
+/// EAD-per-EVI row in an L2VNI linked to the matched IP-VRF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectedEsiOverlayEadPerEvi {
+    /// Local L2VNI / MAC-VRF that scoped the received EAD-per-EVI row.
+    pub l2vni: EvpnInstanceId,
+    /// Ethernet Segment Identifier from the EAD-per-EVI route.
+    pub esi: EthernetSegmentIdentifier,
+    /// Ethernet Tag from the EAD-per-EVI route.
+    pub ethernet_tag: EthernetTagId,
+    /// Remote VTEP next hop for the EAD-per-EVI route.
+    pub next_hop: IpAddr,
+}
+
+/// Scoped resolver index for future ESI overlay-index Type 5 receive.
+///
+/// The current Type 5 projection still drops non-zero-ESI routes
+/// fail-closed. This index is substrate only: it preserves the
+/// load-bearing lookup key `(local L2VNI, ESI, Ethernet Tag)` and a
+/// deterministic set of candidate VTEP next hops so the receive v1 can
+/// choose all-active multipath or a single-active subset deliberately.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EsiOverlayEadIndex {
+    by_key: BTreeMap<(EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
+}
+
+impl EsiOverlayEadIndex {
+    /// Build an empty index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a scoped EAD-per-EVI resolver index.
+    ///
+    /// Zero ESI rows are ignored because they cannot satisfy an ESI
+    /// overlay-index Type 5 lookup. Duplicate next hops for the same
+    /// key are de-duplicated and returned in deterministic order.
+    #[must_use]
+    pub fn build<I>(routes: I) -> Self
+    where
+        I: IntoIterator<Item = ProjectedEsiOverlayEadPerEvi>,
+    {
+        let mut tmp: BTreeMap<
+            (EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId),
+            BTreeSet<IpAddr>,
+        > = BTreeMap::new();
+        for route in routes {
+            if route.esi == EthernetSegmentIdentifier::ZERO {
+                continue;
+            }
+            tmp.entry((route.l2vni, route.esi, route.ethernet_tag))
+                .or_default()
+                .insert(route.next_hop);
+        }
+        Self {
+            by_key: tmp
+                .into_iter()
+                .map(|(key, next_hops)| (key, next_hops.into_iter().collect()))
+                .collect(),
+        }
+    }
+
+    /// Candidate VTEPs for a scoped `(L2VNI, ESI, Ethernet Tag)` lookup.
+    #[must_use]
+    pub fn candidates_for(
+        &self,
+        l2vni: EvpnInstanceId,
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: EthernetTagId,
+    ) -> Option<&[IpAddr]> {
+        self.by_key
+            .get(&(l2vni, esi, ethernet_tag))
+            .map(Vec::as_slice)
+    }
+
+    /// Number of scoped resolver keys.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// True when no non-zero-ESI EAD-per-EVI rows were indexed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
 }
 
 impl ProjectedIpPrefixRoute {
@@ -687,6 +789,7 @@ mod tests {
             next_hop: nh.parse().unwrap(),
             gateway,
             esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
             l3vni: 5000,
             route_targets: rts.iter().map(|s| rt(s)).collect(),
             router_mac: Some(mac()),
@@ -718,10 +821,73 @@ mod tests {
         }
     }
 
+    fn esi(bytes: [u8; 10]) -> EthernetSegmentIdentifier {
+        EthernetSegmentIdentifier::new(bytes)
+    }
+
     fn one_vrf(name: &str, vni: u32, local: &str, rts: &[&str]) -> IpVrfTable {
         let mut t = IpVrfTable::new();
         t.insert(vrf_with(name, vni, local, rts)).unwrap();
         t
+    }
+
+    #[test]
+    fn esi_overlay_ead_index_scopes_by_l2vni_and_ethernet_tag() {
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let index = EsiOverlayEadIndex::build(vec![
+            ProjectedEsiOverlayEadPerEvi {
+                l2vni: l2vni(100),
+                esi,
+                ethernet_tag: EthernetTagId(0),
+                next_hop: "10.0.0.2".parse().unwrap(),
+            },
+            ProjectedEsiOverlayEadPerEvi {
+                l2vni: l2vni(100),
+                esi,
+                ethernet_tag: EthernetTagId(0),
+                next_hop: "10.0.0.2".parse().unwrap(),
+            },
+            ProjectedEsiOverlayEadPerEvi {
+                l2vni: l2vni(200),
+                esi,
+                ethernet_tag: EthernetTagId(0),
+                next_hop: "10.0.0.3".parse().unwrap(),
+            },
+            ProjectedEsiOverlayEadPerEvi {
+                l2vni: l2vni(100),
+                esi,
+                ethernet_tag: EthernetTagId(42),
+                next_hop: "10.0.0.4".parse().unwrap(),
+            },
+            ProjectedEsiOverlayEadPerEvi {
+                l2vni: l2vni(100),
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                next_hop: "10.0.0.5".parse().unwrap(),
+            },
+        ]);
+
+        assert_eq!(index.len(), 3);
+        assert_eq!(
+            index.candidates_for(l2vni(100), esi, EthernetTagId(0)),
+            Some(&["10.0.0.2".parse().unwrap()][..])
+        );
+        assert_eq!(
+            index.candidates_for(l2vni(200), esi, EthernetTagId(0)),
+            Some(&["10.0.0.3".parse().unwrap()][..])
+        );
+        assert_eq!(
+            index.candidates_for(l2vni(100), esi, EthernetTagId(42)),
+            Some(&["10.0.0.4".parse().unwrap()][..])
+        );
+        assert_eq!(
+            index.candidates_for(
+                l2vni(100),
+                EthernetSegmentIdentifier::ZERO,
+                EthernetTagId(0)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -784,6 +950,7 @@ mod tests {
         let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
         let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
         r.esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        r.ethernet_tag = EthernetTagId(101);
         let table = project_ip_prefix_routes(&vrfs, vec![r]);
         assert!(
             table.is_empty(),
@@ -797,6 +964,27 @@ mod tests {
             table.drops()[0].reason_label(),
             "unsupported_esi_overlay_index"
         );
+    }
+
+    #[test]
+    fn non_zero_esi_with_non_zero_gateway_still_drops_as_esi_overlay() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        r.esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![overlay(100, "192.0.2.10", 0xaa, "10.0.0.3")],
+        );
+
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::UnsupportedEsiOverlayIndex { .. }
+        ));
     }
 
     #[test]
