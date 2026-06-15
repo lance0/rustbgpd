@@ -2048,19 +2048,17 @@ follow-up work.
 target L2VNI through the single-dst FDB path (primary VTEP only, no
 kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 
-**Restart required**: `[[evpn_instances]]` is pinned at startup today
-— config reload reverts instance-table edits — so flipping
-`apply_aliasing_ecmp` or any other instance field requires a daemon
-restart to take effect. ADR-0063's `EvpnService.ApplyEvpnRuntime`
-coordinator live-commits single L2VNI/IP-VRF/Ethernet-Segment
-add/delete/redefine (a redefine, including field flips such as
-`apply_aliasing_ecmp`, re-derives the per-VNI state via the
-`FdbNhg → SingleDst` dataplane transition), additive build-up, atomic
-tenant teardown, `ip_vrf` relink, and L2VNI-only add/delete/redefine
-compositions through both gRPC and SIGHUP reload. L3VNI/device/table IP-VRF
-identity changes are restart-required by design, and ES/IP-VRF row mixed edits
-fail closed — split those changes into supported requests
-(<https://github.com/lance0/rustbgpd/issues/268>).
+**Runtime mutation and reload behavior**: ADR-0063's coordinator
+live-commits supported `[[evpn_instances]]` changes through both
+`EvpnService.ApplyEvpnRuntime` and SIGHUP reload. A redefine, including
+field flips such as `apply_aliasing_ecmp`, re-derives per-VNI dataplane
+state via the `FdbNhg → SingleDst` transition. Supported shapes include
+single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive
+build-up, atomic tenant teardown, `ip_vrf` relink, and L2VNI-only
+add/delete/redefine compositions. L3VNI/device/table IP-VRF identity
+changes are restart-required by design, and ES/IP-VRF row mixed edits
+outside the L2VNI-only composer fail closed — split those changes into
+supported requests (<https://github.com/lance0/rustbgpd/issues/268>).
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -2250,14 +2248,15 @@ the transition once per state change rather than every pass.
   is required and must both link to the IP-VRF and appear in the selected
   Ethernet Segment's `member_vnis`.
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
-- `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
-  snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
-  `EvpnService.ApplyEvpnRuntime` can live-commit a single IP-VRF add,
-  standalone delete, or redefine with unchanged L3VNI/device/table identity, and
-  an atomic tenant teardown that drops a linked IP-VRF together with its L2VNI
-  (and any Ethernet Segment) in one pass. `ip_vrf` relink and L2VNI-only
-  add/delete/redefine compositions commit live; L3VNI/device/table IP-VRF
-  identity changes and ES/IP-VRF row mixed edits remain fail-closed #268 shapes.
+- `[[evpn_ip_vrfs]]` follows the ADR-0063 coordinator lifecycle.
+  SIGHUP and `EvpnService.ApplyEvpnRuntime` can live-commit a single
+  IP-VRF add, standalone delete, or redefine with unchanged
+  L3VNI/device/table identity, and an atomic tenant teardown that drops a
+  linked IP-VRF together with its L2VNI (and any Ethernet Segment) in one
+  pass. `ip_vrf` relink and L2VNI-only add/delete/redefine compositions
+  commit live; L3VNI/device/table IP-VRF identity changes and ES/IP-VRF
+  row mixed edits remain fail-closed
+  [#268](https://github.com/lance0/rustbgpd/issues/268) shapes.
 
 ### GW-IP overlay-index origination (`overlay_index_mode = "gateway_ip"`)
 
@@ -2476,35 +2475,28 @@ earlier reload steps still land at the manager and remain in effect.
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, `[[evpn_instances]]`,
-`[[ethernet_segments]]`, `[[evpn_ip_vrfs]]`, and
-`apply_bum_enforcement` are
+`[mrt]`, and `apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
 `rustbgpd --diff` and logged at reload time with a one-line migration
 hint to named definitions plus `import_chain` / `export_chain` where
-applicable. The `[[evpn_instances]]` case is the Phase-2 VTEP slice
-(ADR-0052 + ADR-0054 + ADR-0055): the gRPC `EvpnService` shares the
-resolved instance table via an `Arc` built once at startup, the
-dataplane reconciler (Gate 7b) consumes that same `Arc` for downward
-FDB programming, and the originator + IMET tasks (Gate 7b+1) consume
-it for upward Type 2 / Type 3 origination. SIGHUP pins the in-memory
-snapshot back to the startup value so drift detection stays observable
-across every reload. Gate 8 segment and Gate 8b enforcement settings
-follow the same pinning rule because their actors also resolve startup
-snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
-same way for SIGHUP; the Gate 9 actors consume it for IP-VRF readiness, Type 5
-origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]` table is the
-exception to the pinning rule: when the FIB reconciler is running it
+applicable. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
+and `[[evpn_ip_vrfs]]`) are coordinator-gated instead: SIGHUP and the
+whole-model `EvpnService.ApplyEvpnRuntime` RPC validate a full candidate,
+converge the daemon actors in order, and advance the committed runtime
+snapshot only after the actors accept the change. Supported live shapes
+include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine,
+additive build-up, atomic tenant teardown, `ip_vrf` relink, and
+L2VNI-only add/delete/redefine compositions. Unsupported mixed edits,
+missing actors, actor convergence failure, or restart-only IP-VRF
+identity changes pin back to the committed runtime model and keep the
+drift visible. The ADR-0061 `[[fib_tables]]` table is another
+reload-applied surface: when the FIB reconciler is running it
 **hot-applies** table edits on SIGHUP (see the `[[fib_tables]]` section),
 advancing the snapshot only after the actor acks the new set; only *starting*
 the FIB subsystem from an empty config still requires a restart. Runtime EVPN
-mutation is exposed
-through ADR-0063's full-candidate `EvpnService.ApplyEvpnRuntime` RPC for
-the supported live shapes (single L2VNI/IP-VRF/Ethernet-Segment
-add/delete/redefine and atomic tenant teardown); direct `AddEvpnInstance` /
-`DeleteEvpnInstance` RPCs and SIGHUP delta application remain out of
-scope. Unsupported shapes are tracked in
-<https://github.com/lance0/rustbgpd/issues/210>.
+mutation does not expose direct `AddEvpnInstance` / `DeleteEvpnInstance`
+RPCs; unsupported shapes are tracked in
+<https://github.com/lance0/rustbgpd/issues/268>.
 
 Reload failures are reported per-step with structured logging
 (bucket / target / error). The previous in-memory config snapshot

@@ -9,7 +9,13 @@ import re
 import sys
 
 
-DEFAULT_PATHS = ("crates/rib/src",)
+DEFAULT_PATHS = (
+    "crates/rib/src",
+    "crates/fsm/src",
+    "crates/policy/src",
+    "crates/rpki/src",
+    "crates/evpn/src",
+)
 ATTRIBUTE_HEAD = re.compile(r"#\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")
 
