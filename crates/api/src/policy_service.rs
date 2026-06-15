@@ -1425,7 +1425,7 @@ mod tests {
     #[test]
     fn resolved_match_maps_statement_trace_to_proto_steps() {
         use rustbgpd_policy::{PolicyAction, StatementAttribution};
-        use rustbgpd_transport::{CachedDecision, CachedOutcome};
+        use rustbgpd_transport::{CachedDecision, CachedOutcome, CachedPolicyContext};
         use rustbgpd_wire::{AspaValidation, RpkiValidation};
         use std::time::SystemTime;
 
@@ -1436,7 +1436,7 @@ mod tests {
                 matched_policy: Some("edge-import".into()),
                 rpki: RpkiValidation::NotFound,
                 aspa: AspaValidation::Unknown,
-                pre_policy_attrs: Vec::new(),
+                policy_context: CachedPolicyContext::default(),
                 next_hop: None,
                 modifications: rustbgpd_policy::RouteModifications::default(),
                 evaluated_at: SystemTime::UNIX_EPOCH,

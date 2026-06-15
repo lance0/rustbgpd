@@ -38,7 +38,9 @@ use std::time::SystemTime;
 
 use lru::LruCache;
 use rustbgpd_policy::{PolicyAction, RouteModifications, StatementAttribution};
-use rustbgpd_wire::{Afi, AspaValidation, PathAttribute, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{
+    Afi, AspaValidation, ExtendedCommunity, LargeCommunity, Prefix, RpkiValidation, Safi,
+};
 
 /// Default per-peer cap. Per ADR-0073 this is a deliberate fabric /
 /// partial-table starter size (hundreds–low-thousands of prefixes fully
@@ -89,6 +91,24 @@ impl From<PolicyAction> for CachedOutcome {
     }
 }
 
+/// Compact owned copy of the pre-policy fields the policy evaluator saw.
+///
+/// This is intentionally narrower than a raw `Vec<PathAttribute>`: import
+/// explain only needs these fields to re-derive statement attribution, so the
+/// bounded cache does not retain unrelated attributes such as `ORIGIN`,
+/// `NEXT_HOP`, `ORIGINATOR_ID`, `CLUSTER_LIST`, or unknown transitive
+/// attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CachedPolicyContext {
+    pub extended_communities: Vec<ExtendedCommunity>,
+    pub communities: Vec<u32>,
+    pub large_communities: Vec<LargeCommunity>,
+    pub as_path_str: String,
+    pub as_path_len: usize,
+    pub local_pref: Option<u32>,
+    pub med: Option<u32>,
+}
+
 /// A single cached decision. Carries everything required to render an
 /// `ExplainImportPolicyResponse` without consulting any other subsystem.
 #[derive(Debug, Clone)]
@@ -102,15 +122,15 @@ pub struct CachedDecision {
     pub rpki: RpkiValidation,
     /// ASPA path-verification state at evaluation time.
     pub aspa: AspaValidation,
-    /// Path attributes exactly as received before policy applied them.
-    /// Cloned at the eval site; the original UPDATE-path is unchanged.
-    pub pre_policy_attrs: Vec<PathAttribute>,
+    /// Pre-policy context fields exactly as the policy evaluator saw them.
+    /// Cloned at the eval site only when import explain is enabled; the
+    /// original UPDATE path is unchanged.
+    pub policy_context: CachedPolicyContext,
     /// The next-hop the evaluation context saw. Stored separately
-    /// because it is not always recoverable from `pre_policy_attrs`:
-    /// MP-unicast routes carry it in `MP_REACH` framing, which is
-    /// stripped before the attributes are stored. Needed so the
-    /// statement-level explain re-derivation rebuilds the *exact*
-    /// evaluation-time `RouteContext`.
+    /// because it is not part of `policy_context`: MP-unicast routes carry it
+    /// in `MP_REACH` framing, which is stripped before route attributes are
+    /// stored. Needed so the statement-level explain re-derivation rebuilds
+    /// the *exact* evaluation-time `RouteContext`.
     pub next_hop: Option<IpAddr>,
     /// Modifications the policy chain would apply on permit. Carried
     /// for both permit and deny entries — for a deny they describe what
@@ -242,7 +262,7 @@ impl ImportDecisionCache {
     pub fn mark_withdrawn(&mut self, key: &ImportDecisionKey) {
         if let Some(decision) = self.entries.get_mut(key) {
             decision.outcome = CachedOutcome::Withdrawn;
-            decision.pre_policy_attrs = Vec::new();
+            decision.policy_context = CachedPolicyContext::default();
             decision.modifications = RouteModifications::default();
         }
     }
@@ -370,7 +390,7 @@ mod tests {
             matched_policy: Some("test-permit".into()),
             rpki: RpkiValidation::NotFound,
             aspa: AspaValidation::Unknown,
-            pre_policy_attrs: Vec::new(),
+            policy_context: CachedPolicyContext::default(),
             next_hop: None,
             modifications: RouteModifications::default(),
             evaluated_at: SystemTime::UNIX_EPOCH,
@@ -384,7 +404,7 @@ mod tests {
             matched_policy: Some("test-deny".into()),
             rpki: RpkiValidation::NotFound,
             aspa: AspaValidation::Unknown,
-            pre_policy_attrs: Vec::new(),
+            policy_context: CachedPolicyContext::default(),
             next_hop: None,
             modifications: RouteModifications::default(),
             evaluated_at: SystemTime::UNIX_EPOCH,
@@ -454,7 +474,12 @@ mod tests {
         // churny peer can't fill the LRU with full-payload dead entries.
         let mut cache = ImportDecisionCache::with_capacity(4);
         let mut decision = permit_at(0);
-        decision.pre_policy_attrs = vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)];
+        decision.policy_context = CachedPolicyContext {
+            communities: vec![100],
+            as_path_str: "65002".to_string(),
+            as_path_len: 1,
+            ..CachedPolicyContext::default()
+        };
         decision.modifications = RouteModifications {
             set_local_pref: Some(150),
             ..RouteModifications::default()
@@ -464,7 +489,11 @@ mod tests {
         match cache.lookup(&key(3, 0), 0) {
             LookupResult::Hit(d) => {
                 assert_eq!(d.outcome, CachedOutcome::Withdrawn);
-                assert!(d.pre_policy_attrs.is_empty(), "attrs dropped on withdraw");
+                assert_eq!(
+                    d.policy_context,
+                    CachedPolicyContext::default(),
+                    "policy context dropped on withdraw"
+                );
                 assert!(
                     d.modifications.set_local_pref.is_none(),
                     "modifications dropped on withdraw"

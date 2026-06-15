@@ -885,7 +885,7 @@ Each result reports an outcome:
 | Outcome | Meaning |
 |---|---|
 | `permit` / `deny` | The chain admitted / rejected the prefix; a `deny` is explainable even though it never reached the RIB. |
-| `withdrawn` | Was permitted, then withdrawn by the peer (tombstone; attributes dropped). |
+| `withdrawn` | Was permitted, then withdrawn by the peer (tombstone; policy context dropped). |
 | `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. |
 | `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
 | `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart), or explain is disabled. |
@@ -908,10 +908,10 @@ Matched conditions lead with stable labels (`prefix`, `community`,
 `as_path`, `neighbor_set`, `rpki`, `local_pref`, …; `any` for an
 unconditional statement) and attribute edits render as
 `before -> after` against the route's pre-policy values. The trace is
-re-derived on demand from the cached pre-policy attributes, so it
+re-derived on demand from the cached compact pre-policy context, so it
 attaches only to current-generation `permit` / `deny` results — a
 `stale` decision's chain no longer exists and a `withdrawn` tombstone
-has dropped the attributes the re-derivation needs. `--json` carries
+has dropped the context the re-derivation needs. `--json` carries
 the same trace as a `statements` array per match.
 
 This is a side-effect-free read: it does not touch the RIB or move any

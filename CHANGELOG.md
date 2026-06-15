@@ -136,6 +136,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metrics/caps, docs, and interop. This is documentation-only; rustbgpd
   still does not negotiate those families.
 
+### Performance
+
+- **Import-policy explain cache retains a compact policy context.**
+  When `[policy.explain]` is enabled, cached import decisions now store the
+  pre-policy fields needed for statement-level re-derivation instead of the
+  full raw path-attribute vector. Explain output is unchanged, but live cache
+  entries no longer retain attributes irrelevant to policy matching.
+
 ### Fixed
 
 - **No-op peer-group updates no longer bounce sessions.** Targeted
@@ -328,8 +336,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rendered as `before -> after` against the route's pre-policy
   values (`local_pref 100 -> 200`). A deny ends the trace at the
   denying policy — later policies were never consulted and get no
-  step. The trace is re-derived at query time from the cached
-  pre-policy attributes (ADR-0073 decision cache) against the
+  step. The trace is re-derived at query time from the cached compact
+  pre-policy context (ADR-0073 decision cache) against the
   session's import chain, so the inbound UPDATE hot path records
   nothing new; the explain-only chain walk is pinned to the live
   evaluator by an agreement matrix in the policy crate, and the

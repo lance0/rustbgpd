@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::import_decision_cache::{CachedDecision, ImportDecisionKey};
+use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::{
     Afi, AsPath, BgpRole, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
     FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage,
@@ -214,6 +214,18 @@ impl<'a> PolicyAttrSummary<'a> {
             origin_asn: as_path.and_then(AsPath::origin_asn),
             local_pref,
             med,
+        }
+    }
+
+    pub(super) fn to_cached_context(&self) -> CachedPolicyContext {
+        CachedPolicyContext {
+            extended_communities: self.extended_communities.to_vec(),
+            communities: self.communities.to_vec(),
+            large_communities: self.large_communities.to_vec(),
+            as_path_str: self.as_path_str.clone(),
+            as_path_len: self.as_path_len,
+            local_pref: self.local_pref,
+            med: self.med,
         }
     }
 }
@@ -798,6 +810,9 @@ impl PeerSession {
         // policy summary (matches pre-refactor behavior). `parsed_as_path`
         // / `origin_asn` feed ASPA (per-family) and RPKI (per-prefix)
         // validation below.
+        let explain_enabled = self.import_explain_enabled;
+        let policy_summary = PolicyAttrSummary::from_route_attrs(&route_attrs);
+        let cached_policy_context = explain_enabled.then(|| policy_summary.to_cached_context());
         let PolicyAttrSummary {
             extended_communities: update_ecs,
             communities: update_communities,
@@ -808,7 +823,7 @@ impl PeerSession {
             origin_asn,
             local_pref: policy_local_pref,
             med: policy_med,
-        } = PolicyAttrSummary::from_route_attrs(&route_attrs);
+        } = policy_summary;
 
         // Borrow the current RPKI/ASPA validation snapshot for import policy.
         // Cloning is cheap (two Arc::clone). Falls back to NotFound/Unknown
@@ -853,9 +868,8 @@ impl PeerSession {
         //
         // `explain_enabled` gates the whole snapshot: when explain is
         // disabled this stays a single boolean check per NLRI and the
-        // per-route attribute / modification clone never happens
+        // per-route context / modification clone never happens
         // (ADR-0073 write-path cost control).
-        let explain_enabled = self.import_explain_enabled;
         let mut import_decisions: Vec<(ImportDecisionKey, CachedDecision)> = Vec::new();
         let mut announced: Vec<Route> =
             if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
@@ -904,11 +918,11 @@ impl PeerSession {
                         // permit gate so denies — the load-bearing
                         // explain case — are captured too. Gated on
                         // `explain_enabled` so a disabled deployment
-                        // never pays the attribute / modification clone.
+                        // never pays the context / modification clone.
                         // `modifications` is cloned here because the
                         // permit path consumes it via
                         // `apply_modifications` just below.
-                        if explain_enabled {
+                        if let Some(policy_context) = cached_policy_context.as_ref() {
                             import_decisions.push((
                                 ImportDecisionKey {
                                     afi: Afi::Ipv4,
@@ -921,7 +935,7 @@ impl PeerSession {
                                     matched_policy: evaluation.matched_policy.clone(),
                                     rpki: rpki_state,
                                     aspa: body_aspa_state,
-                                    pre_policy_attrs: (*attr_bundle.unicast).clone(),
+                                    policy_context: policy_context.clone(),
                                     next_hop: Some(body_next_hop),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
@@ -1208,7 +1222,7 @@ impl PeerSession {
                         // disabled. Keyed by the MP family (afi from
                         // mp.afi, safi == Unicast here — FlowSpec / EVPN
                         // `continue` above and never reach this loop).
-                        if explain_enabled {
+                        if let Some(policy_context) = cached_policy_context.as_ref() {
                             self.import_decision_cache.insert(
                                 ImportDecisionKey {
                                     afi: mp.afi,
@@ -1221,7 +1235,7 @@ impl PeerSession {
                                     matched_policy: evaluation.matched_policy.clone(),
                                     rpki: mp_rpki_state,
                                     aspa: mp_aspa_state,
-                                    pre_policy_attrs: (*attr_bundle.mp_unicast).clone(),
+                                    policy_context: policy_context.clone(),
                                     next_hop: Some(mp.next_hop),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
