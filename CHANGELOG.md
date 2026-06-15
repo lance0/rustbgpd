@@ -120,6 +120,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **No-op peer-group updates no longer bounce sessions.** Targeted
+  peer-group mutations whose resulting config is structurally identical
+  to the running snapshot now return success without publishing a policy
+  event or rebuilding affected sessions. Real peer-group/session reshapes
+  still take the captured-prior rebuild path and remain rollback-capable.
 - **Fail-closed MP-BGP family dispatch for future route-family substrate.**
   `MP_REACH_NLRI` / `MP_UNREACH_NLRI` decoding now runs through one
   explicit supported-family classifier before any NLRI parser is called.

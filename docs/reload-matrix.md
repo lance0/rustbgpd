@@ -57,6 +57,9 @@ dynamic sessions on their running config until reconnect. Dynamic-range
 peer-group reassignments and mixed policy/session effective-impact candidates
 remain rejected even though SIGHUP can hot-reconcile some of those shapes
 best-effort.
+Identical peer-group or peer-group-membership mutations are treated as runtime
+no-ops: they return success without publishing a policy event or rebuilding
+sessions.
 
 ## `[[neighbors]]`
 
