@@ -148,6 +148,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **EVPN hot-apply documentation drift.** `KNOWN_ISSUES.md`,
+  `docs/CONFIGURATION.md`, and `docs/OPERATIONS.md` now describe the
+  current ADR-0063 boundary: SIGHUP and `EvpnService.ApplyEvpnRuntime`
+  share the coordinator for supported EVPN table shapes, while
+  restart-only IP-VRF identity changes and ES/IP-VRF row mixed edits stay
+  outside the hot-apply set.
 - **No-op peer-group updates no longer bounce sessions.** Targeted
   peer-group mutations whose resulting config is structurally identical
   to the running snapshot now return success without publishing a policy

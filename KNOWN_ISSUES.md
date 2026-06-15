@@ -206,17 +206,18 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **EVPN instance mutation is alpha-complete with two by-design
-  exceptions.** SIGHUP keeps the running EVPN tables
-  (`[[evpn_instances]]`, `[[ethernet_segments]]`, `[[evpn_ip_vrfs]]`)
-  pinned to their startup values, so file-driven EVPN edits remain
-  restart-required. The gRPC `EvpnService.ApplyEvpnRuntime` path
-  (ADR-0063) commits these shapes live: L2VNI / IP-VRF / Ethernet-Segment
-  add/delete/redefine, atomic tenant teardown, and `ip_vrf` relink. Two
-  shapes fail closed by design: L3VNI/device/table IP-VRF identity changes
-  (restart-required — kernel VRF lifecycle) and non-teardown mixed edits
-  (apply each as a separate request). Tracked in
-  <https://github.com/lance0/rustbgpd/issues/210>.
+- **EVPN runtime mutation is alpha-complete with two by-design
+  exceptions.** SIGHUP and the gRPC `EvpnService.ApplyEvpnRuntime` path
+  both use the ADR-0063 coordinator for supported live shapes:
+  L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, additive
+  build-up, atomic tenant teardown, `ip_vrf` relink, standalone and
+  IP-VRF-linked L2VNI swaps, and L2VNI-only add/delete/redefine
+  compositions. Unsupported candidates fail closed without advancing the
+  committed generation. Two shape classes remain outside the hot-apply
+  boundary by design: L3VNI/device/table IP-VRF identity changes
+  (restart-required — kernel VRF lifecycle) and ES/IP-VRF row mixed edits
+  outside the L2VNI-only composer. Tracked in
+  <https://github.com/lance0/rustbgpd/issues/268>.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI
@@ -293,20 +294,3 @@ resolved.
   per wire semantics (the AFI comes from the MP_REACH attribute, not the
   rule itself) but worth noting — the AFI is always set correctly from
   the MP_REACH/MP_UNREACH framing.
-- **`[[evpn_instances]]` edits require a daemon restart to take effect.**
-  The Phase-2 VTEP foundation slice (ADR-0052) ships the declarative
-  EVI/VNI domain model — TOML schema, validation, runtime
-  `EvpnInstanceTable`, read-only `EvpnService.ListEvpnInstances`,
-  `rustbgpctl evpn instances` — but no SIGHUP reconcile path. The
-  daemon resolves `[[evpn_instances]]` once at startup and shares the
-  resulting `Arc<EvpnInstanceTable>` to gRPC. Adding, removing, or
-  modifying an instance via SIGHUP logs an error, pins the runtime
-  snapshot to the startup value (so drift detection stays observable
-  on every subsequent reload), and leaves the live state unchanged
-  until restart. `rustbgpd --diff` surfaces the change under
-  Restart-required. Runtime mutation via the ADR-0063 command-driven
-  EVPN coordinator (a single serialized owner of a generationed runtime
-  model — explicitly not `ArcSwap` / `RwLock` / per-service locks) is
-  exposed through the whole-model `EvpnService.ApplyEvpnRuntime` RPC; see
-  the "EVPN instance mutation is alpha-complete" entry above for the
-  current live-vs-fail-closed shape set.
