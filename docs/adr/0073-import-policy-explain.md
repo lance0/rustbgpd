@@ -78,11 +78,11 @@ flag on this one.
   key so Add-Path-enabled peers don't collapse multiple paths into
   one entry.
 - **Value:** outcome (`PERMIT` / `DENY`), terminal policy label
-  and name (from `PolicyEvaluation`), pre-policy path attributes
-  as received, modifications applied, RPKI + ASPA validation state
+  and name (from `PolicyEvaluation`), compact pre-policy policy-context
+  fields, modifications applied, RPKI + ASPA validation state
   at eval time, `evaluated_at` timestamp, `policy_generation`. A
   `WITHDRAWN` tombstone is **lighter**: on withdraw the entry's
-  pre-policy attributes and modifications are dropped, keeping only
+  pre-policy context and modifications are dropped, keeping only
   outcome + matched policy + timestamp + generation. A churny
   announce/withdraw peer therefore can't fill the LRU with
   full-payload dead entries crowding out live decisions.
@@ -104,7 +104,7 @@ flag on this one.
 - **Enable flag:** `[policy.explain].enabled` (default `true`).
   This is the load-bearing performance control: the feature's cost
   is on the **write** side (every inbound UPDATE would otherwise
-  clone the pre-policy attributes and modifications per NLRI, even
+  clone the pre-policy policy-context fields and modifications per NLRI, even
   for denies, even when no operator will ever query). Gating the
   decision-build behind this flag means a perf-sensitive deployment
   sets `enabled = false` and the inbound UPDATE path pays a single
@@ -133,7 +133,7 @@ flag on this one.
   it is the bounded-state tradeoff — but it means **operators who
   want reliable full-table explain must raise `cache_size` to near
   their expected retained-prefix count for that peer and own the
-  memory cost** (each live entry holds a cloned attribute set). The
+  memory cost** (each live entry holds a cloned policy-context snapshot). The
   earlier "mirrors the 4096-entry event ring" framing was a weak
   justification: event rings bound event volume over time, this
   bounds prefixes per peer — a different axis. 4096 is a deliberate
@@ -261,13 +261,13 @@ review added the enable flag (7). They are pinned here, not deferred:
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Default per-peer cache size | **4096 entries**, a deliberate **fabric / partial-table** starter default (hundreds–low-thousands of prefixes fully observable). **Not** sized for internet full-table retention: a 100k-prefix peer keeps the cache saturated, so explain is a coin-flip vs `EVICTED`. Operators wanting reliable full-table explain raise `cache_size` toward their expected retained-prefix count for that peer and own the memory (each live entry holds a cloned attribute set). See the Bound section — the old "mirrors the event ring" justification is retracted (different axis). |
+| 1 | Default per-peer cache size | **4096 entries**, a deliberate **fabric / partial-table** starter default (hundreds–low-thousands of prefixes fully observable). **Not** sized for internet full-table retention: a 100k-prefix peer keeps the cache saturated, so explain is a coin-flip vs `EVICTED`. Operators wanting reliable full-table explain raise `cache_size` toward their expected retained-prefix count for that peer and own the memory (each live entry holds a cloned policy-context snapshot). See the Bound section — the old "mirrors the event ring" justification is retracted (different axis). |
 | 2 | Default-on retention | **Yes — but contingent on the conservative payload + cap in (1) and gated by the enable flag in (7).** Explain works out of the box; a deployment that finds the write cost unacceptable on a hot full-table peer sets `enabled = false` rather than living with it. |
 | 3 | EVICTED tracker | **Yes**, kept compact: lossy recent-eviction key set / bloom-ish ring, false-positive-only. A wrong `EVICTED` is operationally better than a wrong `NOT_SEEN`. |
 | 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + matched policy + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
 | 5 | Add-Path | Include `path_id` in the cache key and the response. CLI accepts optional `--path-id`. Without it, return all matching entries for the prefix (a clear multi-path response), never an arbitrary first hit. |
 | 6 | Statement-level trace | **No in v1.** Terminal `matched_policy` only, aligned with the existing `PolicyEvaluation` shape. Enrichment is a separate ADR if operator feedback says terminal attribution is insufficient. |
-| 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `true`.** The load-bearing perf control: the cost is on the write path (per-NLRI attr/mod clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so `enabled = false` costs one boolean per UPDATE and stores nothing. Default-on is only defensible *because* this off-switch exists alongside the conservative cap. |
+| 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `true`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so `enabled = false` costs one boolean per UPDATE and stores nothing. Default-on is only defensible *because* this off-switch exists alongside the conservative cap. |
 
 ## Out of scope
 

@@ -99,12 +99,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   boundary now returns structured errors for route-refresh, live policy, and
   graceful-shutdown ACK failures while preserving the existing operator-facing
   error text at peer-manager/API boundaries.
-- **Clippy escape-hatch reasons are now ratcheted for the RIB crate.**
+- **Clippy escape-hatch reasons are now ratcheted across core protocol crates.**
   CI runs `scripts/check-clippy-reasons.py`, which requires every
-  `#[allow(clippy::...)]` / `#[expect(clippy::...)]` in `crates/rib/src` to
-  carry an explicit `reason = "..."`. Existing RIB suppressions are backfilled;
-  the script is intentionally path-scoped so future PRs can expand coverage one
-  crate or file group at a time without churning the whole workspace.
+  `#[allow(clippy::...)]` / `#[expect(clippy::...)]` in `crates/rib/src`,
+  `crates/fsm/src`, `crates/policy/src`, `crates/rpki/src`, and
+  `crates/evpn/src` to carry an explicit `reason = "..."`. Existing
+  suppressions in those paths are backfilled; the script is intentionally
+  path-scoped so future PRs can expand coverage one crate or file group at a
+  time without churning the whole workspace.
 - **CLI event JSON streaming now avoids an intermediate owned tree.**
   `rbgp watch events --json` / `rustbgpctl watch events --json` now serialize
   BGP event envelopes and EVPN route payloads through borrowed `Serialize`
@@ -143,8 +145,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metrics/caps, docs, and interop. This is documentation-only; rustbgpd
   still does not negotiate those families.
 
+### Performance
+
+- **CLI route JSON avoids cloning routes into an owned output tree.**
+  `rbgp rib --json` / `rustbgpctl rib --json` and best-path explain JSON
+  now serialize borrowed route fields directly instead of first cloning each
+  route into `JsonRoute`. The emitted JSON bytes are preserved by equivalence
+  tests against the previous owned builder.
+- **Import-policy explain cache retains a compact policy context.**
+  When `[policy.explain]` is enabled, cached import decisions now store the
+  pre-policy fields needed for statement-level re-derivation instead of the
+  full raw path-attribute vector. Explain output is unchanged, but live cache
+  entries no longer retain attributes irrelevant to policy matching.
+
 ### Fixed
 
+- **EVPN hot-apply documentation drift.** `KNOWN_ISSUES.md`,
+  `docs/CONFIGURATION.md`, and `docs/OPERATIONS.md` now describe the
+  current ADR-0063 boundary: SIGHUP and `EvpnService.ApplyEvpnRuntime`
+  share the coordinator for supported EVPN table shapes, while
+  restart-only IP-VRF identity changes and ES/IP-VRF row mixed edits stay
+  outside the hot-apply set.
 - **No-op peer-group updates no longer bounce sessions.** Targeted
   peer-group mutations whose resulting config is structurally identical
   to the running snapshot now return success without publishing a policy
@@ -335,8 +356,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rendered as `before -> after` against the route's pre-policy
   values (`local_pref 100 -> 200`). A deny ends the trace at the
   denying policy — later policies were never consulted and get no
-  step. The trace is re-derived at query time from the cached
-  pre-policy attributes (ADR-0073 decision cache) against the
+  step. The trace is re-derived at query time from the cached compact
+  pre-policy context (ADR-0073 decision cache) against the
   session's import chain, so the inbound UPDATE hot path records
   nothing new; the explain-only chain walk is pinned to the live
   evaluator by an agreement matrix in the policy crate, and the

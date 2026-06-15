@@ -102,7 +102,10 @@ impl Session {
         }]
     }
 
-    #[expect(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "state handlers consume Event variants while dispatching the FSM"
+    )]
     fn handle_idle(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::ManualStart => {
@@ -127,7 +130,10 @@ impl Session {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "state handlers consume Event variants while dispatching the FSM"
+    )]
     fn handle_connect(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),
@@ -174,7 +180,10 @@ impl Session {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "state handlers consume Event variants while dispatching the FSM"
+    )]
     fn handle_active(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),

@@ -1,16 +1,18 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
-    self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason, JsonRoute,
+    self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
 };
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, BlackholeDiscardState, DeletePathRequest, ExplainAdvertisedRouteRequest,
-    ExplainBestPathRequest, ExplainDecision, FibRouteState, ListBlackholeDiscardsRequest,
-    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest,
+    ExplainBestPathRequest, ExplainBestPathResponse, ExplainDecision, FibRouteState,
+    ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest,
+    Route,
 };
 use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use std::collections::HashSet;
 
 /// Parsed route filter options from CLI flags.
@@ -118,37 +120,93 @@ fn include_fib_page_meta(filters: &FibRouteFilterOpts) -> bool {
     filters.page_size.is_some_and(|page_size| page_size > 0)
 }
 
-fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
-    JsonRoute {
-        prefix: format!("{}/{}", r.prefix, r.prefix_length),
-        next_hop: r.next_hop.clone(),
-        as_path: r.as_path.clone(),
-        local_pref: r.local_pref,
-        med: r.med,
-        origin: output::format_origin(r.origin).to_string(),
-        best: r.best,
-        peer_address: r.peer_address.clone(),
-        communities: r
-            .communities
-            .iter()
-            .map(|c| output::format_community(*c))
-            .collect(),
-        large_communities: r.large_communities.clone(),
-        path_id: r.path_id,
-        validation_state: r.validation_state.clone(),
-    }
-}
-
 fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
     if json {
-        let out: Vec<JsonRoute> = routes.iter().map(route_to_json).collect();
-        output::print_json_pretty(&out)?;
+        output::print_json_pretty(&JsonRoutes(routes))?;
     } else if routes.is_empty() {
         println!("No routes");
     } else {
         output::print_route_table(routes);
     }
     Ok(())
+}
+
+struct JsonRoutes<'a>(&'a [Route]);
+
+impl Serialize for JsonRoutes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for route in self.0 {
+            seq.serialize_element(&JsonRouteRef(route))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonRouteRef<'a>(&'a Route);
+
+impl Serialize for JsonRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut len = 10;
+        if route.path_id != 0 {
+            len += 1;
+        }
+        if !route.validation_state.is_empty() {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("prefix", &JsonRoutePrefix(route))?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("local_pref", &route.local_pref)?;
+        map.serialize_entry("med", &route.med)?;
+        map.serialize_entry("origin", output::format_origin(route.origin))?;
+        map.serialize_entry("best", &route.best)?;
+        map.serialize_entry("peer_address", &route.peer_address)?;
+        map.serialize_entry("communities", &JsonCommunities(&route.communities))?;
+        map.serialize_entry("large_communities", &route.large_communities)?;
+        if route.path_id != 0 {
+            map.serialize_entry("path_id", &route.path_id)?;
+        }
+        if !route.validation_state.is_empty() {
+            map.serialize_entry("validation_state", &route.validation_state)?;
+        }
+        map.end()
+    }
+}
+
+struct JsonRoutePrefix<'a>(&'a Route);
+
+impl Serialize for JsonRoutePrefix<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&format_args!("{}/{}", self.0.prefix, self.0.prefix_length))
+    }
+}
+
+struct JsonCommunities<'a>(&'a [u32]);
+
+impl Serialize for JsonCommunities<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for community in self.0 {
+            seq.serialize_element(&output::format_community(*community))?;
+        }
+        seq.end()
+    }
 }
 
 #[derive(Serialize)]
@@ -587,68 +645,120 @@ fn print_explain_advertised(
 /// `best_reason_detail`, per-candidate `vs_best_detail` and
 /// `multipath`) are emitted unconditionally for the same reason:
 /// always present, never data-dependent.
-#[derive(Serialize)]
-struct JsonExplainBestPath {
-    prefix: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    peer_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    add_path_send_max: Option<u32>,
-    /// Always emitted (as `null` when absent) — the v0.7.0 shape
-    /// included this key unconditionally.
-    best_route: Option<JsonRoute>,
-    /// Decision step that selected the winner over the runner-up;
-    /// `"only_path"` for a single-path prefix.
-    best_reason: String,
-    /// Compared values behind `best_reason`, winner's value first.
-    /// Empty for `"only_path"`.
-    best_reason_detail: String,
-    candidates: Vec<JsonExplainCandidate>,
-}
+struct JsonExplainBestPathRef<'a>(&'a ExplainBestPathResponse);
 
-#[derive(Serialize)]
-struct JsonExplainCandidate {
-    /// Always emitted (as `null` when absent) — the v0.7.0 shape
-    /// included this key unconditionally.
-    route: Option<JsonRoute>,
-    vs_best_reason: String,
-    /// Compared values behind `vs_best_reason`, candidate's value
-    /// first (e.g. `"local_pref 100 < 200"`).
-    vs_best_detail: String,
-    vs_best_ordering: String,
-    /// Equal-cost multipath cut vs the best route: `"eligible"`,
-    /// `"relax_only"`, or `"none"` (ADR-0066 grouping).
-    multipath: String,
-    /// Only emitted in peer-scoped mode; `0` in that mode means
-    /// "filtered or beyond send_max", which is meaningful. In
-    /// global-view mode the value is always `0` and would be
-    /// noise, so the field is suppressed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    advertised_path_id: Option<u32>,
-}
+impl Serialize for JsonExplainBestPathRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let resp = self.0;
+        let peer_scoped = !resp.peer_address.is_empty();
+        let mut len = 5;
+        if peer_scoped {
+            len += 2;
+        }
 
-fn explain_best_path_to_json(resp: &crate::proto::ExplainBestPathResponse) -> JsonExplainBestPath {
-    let peer_scoped = !resp.peer_address.is_empty();
-    JsonExplainBestPath {
-        prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
-        peer_address: peer_scoped.then(|| resp.peer_address.clone()),
-        add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
-        best_route: resp.best_route.as_ref().map(route_to_json),
-        best_reason: resp.best_reason.clone(),
-        best_reason_detail: resp.best_reason_detail.clone(),
-        candidates: resp
-            .candidates
-            .iter()
-            .map(|c| JsonExplainCandidate {
-                route: c.route.as_ref().map(route_to_json),
-                vs_best_reason: c.vs_best_reason.clone(),
-                vs_best_detail: c.vs_best_detail.clone(),
-                vs_best_ordering: c.vs_best_ordering.clone(),
-                multipath: c.multipath.clone(),
-                advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
-            })
-            .collect(),
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("prefix", &JsonExplainPrefix(resp))?;
+        if peer_scoped {
+            map.serialize_entry("peer_address", &resp.peer_address)?;
+            map.serialize_entry("add_path_send_max", &resp.add_path_send_max)?;
+        }
+        map.serialize_entry(
+            "best_route",
+            &JsonOptionalRouteRef(resp.best_route.as_ref()),
+        )?;
+        map.serialize_entry("best_reason", &resp.best_reason)?;
+        map.serialize_entry("best_reason_detail", &resp.best_reason_detail)?;
+        map.serialize_entry(
+            "candidates",
+            &JsonExplainCandidatesRef {
+                candidates: &resp.candidates,
+                peer_scoped,
+            },
+        )?;
+        map.end()
     }
+}
+
+struct JsonExplainPrefix<'a>(&'a ExplainBestPathResponse);
+
+impl Serialize for JsonExplainPrefix<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&format_args!("{}/{}", self.0.prefix, self.0.prefix_length))
+    }
+}
+
+struct JsonOptionalRouteRef<'a>(Option<&'a Route>);
+
+impl Serialize for JsonOptionalRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            Some(route) => JsonRouteRef(route).serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+struct JsonExplainCandidatesRef<'a> {
+    candidates: &'a [crate::proto::BestPathCandidate],
+    peer_scoped: bool,
+}
+
+impl Serialize for JsonExplainCandidatesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.candidates.len()))?;
+        for candidate in self.candidates {
+            seq.serialize_element(&JsonExplainCandidateRef {
+                candidate,
+                peer_scoped: self.peer_scoped,
+            })?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonExplainCandidateRef<'a> {
+    candidate: &'a crate::proto::BestPathCandidate,
+    peer_scoped: bool,
+}
+
+impl Serialize for JsonExplainCandidateRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let candidate = self.candidate;
+        let mut len = 5;
+        if self.peer_scoped {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("route", &JsonOptionalRouteRef(candidate.route.as_ref()))?;
+        map.serialize_entry("vs_best_reason", &candidate.vs_best_reason)?;
+        map.serialize_entry("vs_best_detail", &candidate.vs_best_detail)?;
+        map.serialize_entry("vs_best_ordering", &candidate.vs_best_ordering)?;
+        map.serialize_entry("multipath", &candidate.multipath)?;
+        if self.peer_scoped {
+            map.serialize_entry("advertised_path_id", &candidate.advertised_path_id)?;
+        }
+        map.end()
+    }
+}
+
+fn explain_best_path_to_json(resp: &ExplainBestPathResponse) -> JsonExplainBestPathRef<'_> {
+    JsonExplainBestPathRef(resp)
 }
 
 fn print_explain_best_path(
@@ -925,6 +1035,96 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    fn legacy_route_to_json(r: &Route) -> output::JsonRoute {
+        output::JsonRoute {
+            prefix: format!("{}/{}", r.prefix, r.prefix_length),
+            next_hop: r.next_hop.clone(),
+            as_path: r.as_path.clone(),
+            local_pref: r.local_pref,
+            med: r.med,
+            origin: output::format_origin(r.origin).to_string(),
+            best: r.best,
+            peer_address: r.peer_address.clone(),
+            communities: r
+                .communities
+                .iter()
+                .map(|c| output::format_community(*c))
+                .collect(),
+            large_communities: r.large_communities.clone(),
+            path_id: r.path_id,
+            validation_state: r.validation_state.clone(),
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct LegacyJsonExplainBestPath {
+        prefix: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer_address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        add_path_send_max: Option<u32>,
+        best_route: Option<output::JsonRoute>,
+        best_reason: String,
+        best_reason_detail: String,
+        candidates: Vec<LegacyJsonExplainCandidate>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct LegacyJsonExplainCandidate {
+        route: Option<output::JsonRoute>,
+        vs_best_reason: String,
+        vs_best_detail: String,
+        vs_best_ordering: String,
+        multipath: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        advertised_path_id: Option<u32>,
+    }
+
+    fn legacy_explain_best_path_to_json(
+        resp: &ExplainBestPathResponse,
+    ) -> LegacyJsonExplainBestPath {
+        let peer_scoped = !resp.peer_address.is_empty();
+        LegacyJsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(legacy_route_to_json),
+            best_reason: resp.best_reason.clone(),
+            best_reason_detail: resp.best_reason_detail.clone(),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| LegacyJsonExplainCandidate {
+                    route: c.route.as_ref().map(legacy_route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_detail: c.vs_best_detail.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    multipath: c.multipath.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        }
+    }
+
+    fn route_for_json(path_id: u32, validation_state: &str) -> Route {
+        Route {
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "198.51.100.1".to_string(),
+            as_path: vec![64512, 64496],
+            local_pref: 200,
+            med: 50,
+            origin: 0,
+            best: true,
+            peer_address: "192.0.2.1".to_string(),
+            communities: vec![rustbgpd_wire::COMMUNITY_NO_EXPORT, (64512_u32 << 16) | 100],
+            large_communities: vec!["64512:1:100".to_string()],
+            path_id,
+            validation_state: validation_state.to_string(),
+            ..Default::default()
+        }
+    }
 
     #[tokio::test]
     async fn explain_advertised_calls_rpc() {
@@ -1243,6 +1443,61 @@ mod tests {
         assert_eq!(sampling.len(), 2);
         assert_eq!(sampling[0].table_name, "edge");
         assert_eq!(sampling[1].table_name, "core");
+    }
+
+    #[test]
+    fn route_list_json_matches_legacy_owned_builder() {
+        let mut second = route_for_json(42, "valid");
+        second.prefix = "2001:db8::".to_string();
+        second.prefix_length = 32;
+        second.next_hop = "2001:db8::1".to_string();
+        second.best = false;
+        let routes = vec![route_for_json(0, ""), second];
+
+        let direct = serde_json::to_string_pretty(&JsonRoutes(&routes)).unwrap();
+        let legacy: Vec<_> = routes.iter().map(legacy_route_to_json).collect();
+        let legacy = serde_json::to_string_pretty(&legacy).unwrap();
+
+        assert_eq!(direct, legacy);
+    }
+
+    #[test]
+    fn explain_best_path_json_matches_legacy_owned_builder() {
+        let mut candidate_route = route_for_json(9, "invalid");
+        candidate_route.best = false;
+        let resp = ExplainBestPathResponse {
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "192.0.2.99".to_string(),
+            add_path_send_max: 4,
+            best_route: Some(route_for_json(7, "valid")),
+            best_reason: "higher_local_pref".to_string(),
+            best_reason_detail: "local_pref 200 > 100".to_string(),
+            candidates: vec![
+                crate::proto::BestPathCandidate {
+                    route: Some(candidate_route),
+                    vs_best_reason: "higher_local_pref".to_string(),
+                    vs_best_detail: "local_pref 100 < 200".to_string(),
+                    vs_best_ordering: "worse".to_string(),
+                    multipath: "none".to_string(),
+                    advertised_path_id: 2,
+                },
+                crate::proto::BestPathCandidate {
+                    route: None,
+                    vs_best_reason: "only_path".to_string(),
+                    vs_best_detail: String::new(),
+                    vs_best_ordering: "equal".to_string(),
+                    multipath: "eligible".to_string(),
+                    advertised_path_id: 0,
+                },
+            ],
+        };
+
+        let direct = serde_json::to_string_pretty(&explain_best_path_to_json(&resp)).unwrap();
+        let legacy =
+            serde_json::to_string_pretty(&legacy_explain_best_path_to_json(&resp)).unwrap();
+
+        assert_eq!(direct, legacy);
     }
 
     #[test]

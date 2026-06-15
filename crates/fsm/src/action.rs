@@ -22,7 +22,10 @@ pub enum TimerType {
 
 /// Result of a successful OPEN exchange — the negotiated session parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "negotiated OPEN state is clearer as explicit capability flags"
+)]
 pub struct NegotiatedSession {
     /// Peer's 4-byte ASN (from capability, or 2-byte fallback).
     pub peer_asn: u32,
