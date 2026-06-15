@@ -250,14 +250,15 @@ least one linked L2VNI, multiple linked L2VNIs require
 the selected ESI. The pure origination and daemon-originator tests pin
 the wire shape. Receive-side ESI protected recursion and a real-peer
 interop proof are still separate standards-tail follow-ups. The
-receive-side projection DTO carries Type 5 ESI now, but non-zero-ESI
-RT-5s are dropped fail-closed until the EAD protected-recursion
-dependency exists. That dependency is deliberately more than "look up
-an ESI in the existing alias index": receive-side recursion must carry
-L2VNI/MAC-VRF scope on EAD-per-EVI resolver rows, preserve the Type-5
-Ethernet Tag in the projection DTO, and decide whether the first
-shipping receiver supports all-active L3 multipath/NHG resolution or a
-documented single-active-only subset.
+receive-side projection DTO carries Type 5 ESI and Ethernet Tag now,
+and the projection layer exposes a L2VNI-scoped EAD-per-EVI resolver
+index for the future receive path. Non-zero-ESI RT-5s still drop
+fail-closed until the remaining EAD protected-recursion policy exists.
+That dependency is deliberately more than "look up an ESI in the
+existing alias index": receive-side recursion must decide whether the
+first shipping receiver supports all-active L3 multipath/NHG resolution
+or a documented single-active-only subset, then prove it against a real
+peer.
 
 ### 7. Out of scope / follow-ups
 
@@ -272,11 +273,11 @@ documented single-active-only subset.
   imports only interface-less and GW-IP recursion. Non-zero-ESI Type 5s
   are carried far enough to drop with `unsupported_esi_overlay_index`;
   resolve them through scoped EAD-per-EVI state before claiming
-  receive-side ESI recursion. The intended sequence is: extend the
-  EAD-per-EVI projection input with L2VNI/MAC-VRF identity, carry the
-  Type-5 Ethernet-Tag into `ProjectedIpPrefixRoute`, then choose either
-  all-active L3 multipath/NHG support or a single-active-only v1 before
-  adding an M-series real-peer proof.
+  receive-side ESI recursion. The scoped EAD-per-EVI projection input
+  and Type-5 Ethernet-Tag preservation substrate now exist; the
+  remaining sequence is to choose either all-active L3 multipath/NHG
+  support or a single-active-only v1, then add an M-series real-peer
+  proof.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped
