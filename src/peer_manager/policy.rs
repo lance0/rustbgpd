@@ -606,14 +606,22 @@ impl PeerManager {
             }
             let mut detail = String::new();
             if import_bail {
-                let import_err = import_apply_result.err().unwrap_or_default();
+                let import_err = import_apply_result
+                    .as_ref()
+                    .err()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
                 let _ = write!(detail, "import: {import_err}");
             }
             if export_bail {
                 if !detail.is_empty() {
                     detail.push_str("; ");
                 }
-                let export_err = export_apply_result.err().unwrap_or_default();
+                let export_err = export_apply_result
+                    .as_ref()
+                    .err()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default();
                 let _ = write!(detail, "export: {export_err}");
             }
             return Err(format!(

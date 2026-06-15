@@ -1,5 +1,6 @@
 //! Peer session handle and command types.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +23,58 @@ use crate::error::TransportError;
 use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
 use crate::session::import_decision_cache::ImportExplainReply;
+
+/// Error returned by a peer-session command round-trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerCommandError {
+    /// The session task exited before accepting the command.
+    SessionExited,
+    /// The session task accepted the command but dropped the reply channel.
+    ReplyDropped,
+    /// The command did not complete before the caller's deadline.
+    TimedOut {
+        /// Stable operation name used in operator-facing error text.
+        operation: &'static str,
+        /// Deadline that expired.
+        deadline: Duration,
+    },
+    /// The command requires an Established BGP session.
+    NotEstablished,
+    /// The peer did not negotiate Route Refresh.
+    RouteRefreshUnsupported,
+    /// The requested AFI/SAFI is not negotiated on this session.
+    FamilyNotNegotiated {
+        /// Address Family Identifier.
+        afi: Afi,
+        /// Subsequent Address Family Identifier.
+        safi: Safi,
+    },
+    /// The encoded message could not be queued to the session writer.
+    SendFailed(String),
+    /// Session-side command rejection that does not have a more specific
+    /// transport variant yet.
+    CommandFailed(String),
+}
+
+impl fmt::Display for PeerCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionExited => f.write_str("session task exited"),
+            Self::ReplyDropped => f.write_str("session task dropped reply"),
+            Self::TimedOut {
+                operation,
+                deadline,
+            } => write!(f, "{operation} timed out after {deadline:?}"),
+            Self::NotEstablished => f.write_str("session not Established"),
+            Self::RouteRefreshUnsupported => f.write_str("peer lacks Route Refresh capability"),
+            Self::FamilyNotNegotiated { afi, safi } => write!(f, "{afi:?}/{safi:?} not negotiated"),
+            Self::SendFailed(error) => write!(f, "send failed: {error}"),
+            Self::CommandFailed(error) => f.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for PeerCommandError {}
 
 /// Role of a session relative to the `PeerManager` entry that owns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,21 +249,21 @@ pub enum PeerCommand {
         /// Subsequent Address Family Identifier.
         safi: Safi,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Replace the import policy chain for future inbound UPDATE processing.
     UpdateImportPolicy {
         /// New effective import policy chain (`None` = permit-all).
         policy: Option<PolicyChain>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Replace the export policy chain used on future `PeerUp` registration.
     UpdateExportPolicy {
         /// New effective export policy chain (`None` = permit-all).
         policy: Option<PolicyChain>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// RFC 8326 graceful-shutdown initiator: toggle attaching the
     /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
@@ -221,7 +274,7 @@ pub enum PeerCommand {
         /// `true` attaches the community; `false` clears it.
         enabled: bool,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
@@ -700,8 +753,8 @@ impl PeerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error string describing why the message was not sent.
-    pub async fn send_route_refresh(&self, afi: Afi, safi: Safi) -> Result<(), String> {
+    /// Returns a typed error describing why the message was not sent.
+    pub async fn send_route_refresh(&self, afi: Afi, safi: Safi) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::SendRouteRefresh {
@@ -710,10 +763,8 @@ impl PeerHandle {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| "session task exited".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "session task dropped reply".to_string())?
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Query the current session state.
@@ -824,8 +875,13 @@ impl PeerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session task has already exited.
-    pub async fn update_import_policy(&self, policy: Option<PolicyChain>) -> Result<(), String> {
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
+    pub async fn update_import_policy(
+        &self,
+        policy: Option<PolicyChain>,
+    ) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateImportPolicy {
@@ -833,10 +889,8 @@ impl PeerHandle {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| "session task exited".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "session task dropped reply".to_string())?
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Bounded variant of [`Self::update_import_policy`].
@@ -854,7 +908,7 @@ impl PeerHandle {
         &self,
         policy: Option<PolicyChain>,
         deadline: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -864,15 +918,16 @@ impl PeerHandle {
                     reply: reply_tx,
                 })
                 .await
-                .map_err(|_| "session task exited".to_string())?;
-            reply_rx
-                .await
-                .map_err(|_| "session task dropped reply".to_string())?
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
         })
         .await
         {
             Ok(result) => result,
-            Err(_elapsed) => Err(format!("update_import_policy timed out after {deadline:?}")),
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "update_import_policy",
+                deadline,
+            }),
         }
     }
 
@@ -919,8 +974,13 @@ impl PeerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session task has already exited.
-    pub async fn update_export_policy(&self, policy: Option<PolicyChain>) -> Result<(), String> {
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
+    pub async fn update_export_policy(
+        &self,
+        policy: Option<PolicyChain>,
+    ) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateExportPolicy {
@@ -928,10 +988,8 @@ impl PeerHandle {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| "session task exited".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "session task dropped reply".to_string())?
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Bounded variant of [`Self::update_export_policy`]. See
@@ -945,7 +1003,7 @@ impl PeerHandle {
         &self,
         policy: Option<PolicyChain>,
         deadline: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -955,15 +1013,16 @@ impl PeerHandle {
                     reply: reply_tx,
                 })
                 .await
-                .map_err(|_| "session task exited".to_string())?;
-            reply_rx
-                .await
-                .map_err(|_| "session task dropped reply".to_string())?
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
         })
         .await
         {
             Ok(result) => result,
-            Err(_elapsed) => Err(format!("update_export_policy timed out after {deadline:?}")),
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "update_export_policy",
+                deadline,
+            }),
         }
     }
 
@@ -975,7 +1034,7 @@ impl PeerHandle {
     ///
     /// Returns an error if the session task isn't reachable or replies
     /// with one.
-    pub async fn update_graceful_shutdown(&self, enabled: bool) -> Result<(), String> {
+    pub async fn update_graceful_shutdown(&self, enabled: bool) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateGracefulShutdown {
@@ -983,10 +1042,8 @@ impl PeerHandle {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| "session task exited".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "session task dropped reply".to_string())?
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Bounded variant of [`Self::update_graceful_shutdown`]. See
@@ -1003,7 +1060,7 @@ impl PeerHandle {
         &self,
         enabled: bool,
         deadline: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -1013,17 +1070,16 @@ impl PeerHandle {
                     reply: reply_tx,
                 })
                 .await
-                .map_err(|_| "session task exited".to_string())?;
-            reply_rx
-                .await
-                .map_err(|_| "session task dropped reply".to_string())?
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
         })
         .await
         {
             Ok(result) => result,
-            Err(_elapsed) => Err(format!(
-                "update_graceful_shutdown timed out after {deadline:?}"
-            )),
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "update_graceful_shutdown",
+                deadline,
+            }),
         }
     }
 
@@ -1038,6 +1094,50 @@ impl PeerHandle {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn peer_command_error_display_preserves_operator_text() {
+        assert_eq!(
+            PeerCommandError::SessionExited.to_string(),
+            "session task exited"
+        );
+        assert_eq!(
+            PeerCommandError::ReplyDropped.to_string(),
+            "session task dropped reply"
+        );
+        assert_eq!(
+            PeerCommandError::TimedOut {
+                operation: "update_import_policy",
+                deadline: Duration::from_secs(2),
+            }
+            .to_string(),
+            "update_import_policy timed out after 2s"
+        );
+        assert_eq!(
+            PeerCommandError::NotEstablished.to_string(),
+            "session not Established"
+        );
+        assert_eq!(
+            PeerCommandError::RouteRefreshUnsupported.to_string(),
+            "peer lacks Route Refresh capability"
+        );
+        assert_eq!(
+            PeerCommandError::FamilyNotNegotiated {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            }
+            .to_string(),
+            "Ipv4/Unicast not negotiated"
+        );
+        assert_eq!(
+            PeerCommandError::SendFailed("writer closed".to_string()).to_string(),
+            "send failed: writer closed"
+        );
+        assert_eq!(
+            PeerCommandError::CommandFailed("export apply failed once".to_string()).to_string(),
+            "export apply failed once"
+        );
+    }
 
     /// Reproduces the `GetHealth` wedge mode where the session-task's
     /// `select!` is parked on TCP write back-pressure: the command does

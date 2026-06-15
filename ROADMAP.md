@@ -984,8 +984,11 @@ branch is between features.
   errors to the transaction executor. Static-peer lifecycle/admin replies and
   policy/catalog replies (policy definitions, neighbor sets, peer groups,
   global named chains, and per-neighbor policy/peer-group membership) now also
-  use typed errors where callers need status-class distinctions. Older
-  peer-manager / RIB commands still commonly return
+  use typed errors where callers need status-class distinctions. The transport
+  peer-session command ACK surface (`SendRouteRefresh`, live import/export
+  policy updates, and graceful-shutdown toggles) now uses typed errors while
+  preserving the existing peer-manager operator text. Older peer-manager / RIB
+  commands still commonly return
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
