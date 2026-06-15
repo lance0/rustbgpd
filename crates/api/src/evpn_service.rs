@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstanceId, EvpnInstanceTable,
-    EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState, EvpnRuntimePlan,
-    EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
-    SameEsiBiasTable,
+    BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstance, EvpnInstanceId,
+    EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState,
+    EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, InstanceDataplaneStatus,
+    InstanceState, IpVrfDataplaneStatus, MacAddress, SameEsiBiasTable,
 };
 use tonic::{Request, Response, Status};
 
@@ -30,6 +30,15 @@ use crate::server::{AccessMode, read_only_rejection};
 
 /// Read-side hook for per-instance local-MAC origination counts.
 pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
+
+/// Read-side hook for the latest per-L2VNI readiness snapshot.
+///
+/// The daemon subscribes to `DataplaneReport.instance_status` and
+/// keeps the most recent rows in a shared watch channel; this closure
+/// returns a clone of that snapshot every call. Tests can inject a
+/// deterministic snapshot.
+pub type InstanceStatusSnapshotFn =
+    Arc<dyn Fn() -> Vec<InstanceDataplaneStatus> + Send + Sync + 'static>;
 
 /// Read-side hook for per-IP-VRF Type 5 origination counts (Gate 9
 /// slice 6b). Mirrors [`OriginatedLocalMacCountFn`] for the L3 case;
@@ -172,6 +181,7 @@ pub type EthernetSegmentDrainFn = Arc<
 pub struct EvpnService {
     access_mode: AccessMode,
     originated_local_mac_count: OriginatedLocalMacCountFn,
+    instance_status_snapshot: InstanceStatusSnapshotFn,
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
@@ -197,6 +207,7 @@ impl EvpnService {
         Self {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count: Arc::new(|_| 0),
+            instance_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
@@ -226,6 +237,7 @@ impl EvpnService {
         Self {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count,
+            instance_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
@@ -321,6 +333,7 @@ impl EvpnService {
         Self {
             access_mode,
             originated_local_mac_count,
+            instance_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
@@ -334,6 +347,18 @@ impl EvpnService {
             duplicate_mac_clear,
             ethernet_segment_drain: None,
         }
+    }
+
+    /// Override the L2VNI readiness snapshot provider. Kept as a
+    /// builder-style setter so callers that only need the static L2
+    /// surface can keep using the compact constructors.
+    #[must_use]
+    pub fn with_instance_status_snapshot(
+        mut self,
+        instance_status_snapshot: InstanceStatusSnapshotFn,
+    ) -> Self {
+        self.instance_status_snapshot = instance_status_snapshot;
+        self
     }
 
     /// Override the remote Type 5 projection-drop count provider.
@@ -394,19 +419,19 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         _request: Request<proto::ListEvpnInstancesRequest>,
     ) -> Result<Response<proto::ListEvpnInstancesResponse>, Status> {
+        let snapshot = (self.instance_status_snapshot)();
+        let by_vni = instance_status_index(&snapshot);
         let model = (self.runtime_model)();
         let instances = model
             .instances()
             .sorted()
             .into_iter()
-            .map(|inst| proto::EvpnInstanceState {
-                vni: inst.id.as_u32(),
-                rd: inst.rd.to_string(),
-                route_targets: inst.route_targets.iter().map(ToString::to_string).collect(),
-                local_vtep_ip: inst.local_vtep_ip.to_string(),
-                bridge: inst.bridge.clone().unwrap_or_default(),
-                advertise_svi_mac: inst.advertise_svi_mac,
-                originated_local_macs_count: (self.originated_local_mac_count)(inst.id.as_u32()),
+            .map(|inst| {
+                evpn_instance_to_proto(
+                    inst,
+                    by_vni.get(&inst.id).copied(),
+                    (self.originated_local_mac_count)(inst.id.as_u32()),
+                )
             })
             .collect();
         Ok(Response::new(proto::ListEvpnInstancesResponse {
@@ -763,6 +788,65 @@ fn startup_runtime_model_fn(
     Arc::new(move || model.clone())
 }
 
+/// Build an `EvpnInstanceId -> &InstanceDataplaneStatus` index from
+/// the per-call snapshot so `ListEvpnInstances` joins config rows
+/// with status rows in O(N) instead of O(N²).
+fn instance_status_index(
+    snapshot: &[InstanceDataplaneStatus],
+) -> HashMap<EvpnInstanceId, &InstanceDataplaneStatus> {
+    snapshot.iter().map(|row| (row.vni, row)).collect()
+}
+
+/// Join the config-time `EvpnInstance` shape with a snapshot row (if
+/// any) into the wire `EvpnInstanceState` message. A bound instance
+/// with no status is `UNKNOWN`; an unbound instance can be reported
+/// directly from config even before the reconciler publishes.
+fn evpn_instance_to_proto(
+    inst: &EvpnInstance,
+    status: Option<&InstanceDataplaneStatus>,
+    originated_local_macs_count: u64,
+) -> proto::EvpnInstanceState {
+    let mut state = proto::EvpnInstanceState {
+        vni: inst.id.as_u32(),
+        rd: inst.rd.to_string(),
+        route_targets: inst.route_targets.iter().map(ToString::to_string).collect(),
+        local_vtep_ip: inst.local_vtep_ip.to_string(),
+        bridge: inst.bridge.clone().unwrap_or_default(),
+        advertise_svi_mac: inst.advertise_svi_mac,
+        originated_local_macs_count,
+        readiness_state: proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32,
+        not_ready_reason: String::new(),
+    };
+
+    let Some(row) = status else {
+        if inst.bridge.is_none() {
+            state.readiness_state =
+                proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32;
+        }
+        return state;
+    };
+
+    match row.state {
+        InstanceState::Ready => {
+            state.readiness_state =
+                proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32;
+        }
+        InstanceState::NotReady => {
+            state.readiness_state =
+                proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady as i32;
+            state.not_ready_reason = row
+                .message
+                .clone()
+                .unwrap_or_else(|| "dataplane reported not-ready without a reason".into());
+        }
+        InstanceState::Unbound => {
+            state.readiness_state =
+                proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32;
+        }
+    }
+    state
+}
+
 #[must_use]
 pub fn runtime_snapshot_to_proto(snapshot: &EvpnRuntimeSnapshot) -> proto::EvpnRuntimeState {
     proto::EvpnRuntimeState {
@@ -1096,6 +1180,11 @@ mod tests {
         assert!(resp.instances[0].bridge.is_empty());
         assert!(!resp.instances[0].advertise_svi_mac);
         assert_eq!(resp.instances[0].originated_local_macs_count, 0);
+        assert_eq!(
+            resp.instances[0].readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
+        );
+        assert!(resp.instances[0].not_ready_reason.is_empty());
     }
 
     #[tokio::test]
@@ -1122,6 +1211,10 @@ mod tests {
         assert_eq!(row.bridge, "br100");
         assert!(row.advertise_svi_mac);
         assert_eq!(row.route_targets, vec!["65000:100", "65000:200"]);
+        assert_eq!(
+            row.readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32
+        );
     }
 
     #[tokio::test]
@@ -1139,6 +1232,140 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(resp.instances[0].originated_local_macs_count, 7);
+    }
+
+    #[tokio::test]
+    async fn list_evpn_instances_joins_l2_readiness_snapshot() {
+        let mut table = EvpnInstanceTable::new();
+        table
+            .insert(
+                EvpnInstance::new(
+                    EvpnInstanceId::new(100).unwrap(),
+                    rd("65000:100"),
+                    vec![rt("65000:100")],
+                    ip("10.0.0.1"),
+                    None,
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        table
+            .insert(
+                EvpnInstance::new(
+                    EvpnInstanceId::new(200).unwrap(),
+                    rd("65000:200"),
+                    vec![rt("65000:200")],
+                    ip("10.0.0.2"),
+                    Some("br200".into()),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        table
+            .insert(
+                EvpnInstance::new(
+                    EvpnInstanceId::new(300).unwrap(),
+                    rd("65000:300"),
+                    vec![rt("65000:300")],
+                    ip("10.0.0.3"),
+                    Some("br300".into()),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        table
+            .insert(
+                EvpnInstance::new(
+                    EvpnInstanceId::new(400).unwrap(),
+                    rd("65000:400"),
+                    vec![rt("65000:400")],
+                    ip("10.0.0.4"),
+                    Some("br400".into()),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let svc = EvpnService::new(Arc::new(table)).with_instance_status_snapshot(Arc::new(|| {
+            vec![
+                InstanceDataplaneStatus {
+                    vni: EvpnInstanceId::new(300).unwrap(),
+                    state: InstanceState::Ready,
+                    message: None,
+                    bridge_mac: Some(MacAddress::new([0x02, 0, 0, 0, 0, 3])),
+                },
+                InstanceDataplaneStatus {
+                    vni: EvpnInstanceId::new(400).unwrap(),
+                    state: InstanceState::NotReady,
+                    message: Some(
+                        "bridge br400 is VLAN-aware (vlan_filtering=1); not supported".into(),
+                    ),
+                    bridge_mac: None,
+                },
+            ]
+        }));
+
+        let resp = svc
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.instances.len(), 4);
+        assert_eq!(
+            resp.instances[0].readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
+        );
+        assert!(resp.instances[0].not_ready_reason.is_empty());
+        assert_eq!(
+            resp.instances[1].readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32
+        );
+        assert!(resp.instances[1].not_ready_reason.is_empty());
+        assert_eq!(
+            resp.instances[2].readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32
+        );
+        assert!(resp.instances[2].not_ready_reason.is_empty());
+        assert_eq!(
+            resp.instances[3].readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady as i32
+        );
+        assert!(resp.instances[3].not_ready_reason.contains("VLAN-aware"));
+    }
+
+    #[test]
+    fn not_ready_without_message_gets_diagnostic_fallback() {
+        let inst = EvpnInstance::new(
+            EvpnInstanceId::new(500).unwrap(),
+            rd("65000:500"),
+            vec![rt("65000:500")],
+            ip("10.0.0.5"),
+            Some("br500".into()),
+            false,
+        )
+        .unwrap();
+        let status = InstanceDataplaneStatus {
+            vni: EvpnInstanceId::new(500).unwrap(),
+            state: InstanceState::NotReady,
+            message: None,
+            bridge_mac: None,
+        };
+
+        let row = evpn_instance_to_proto(&inst, Some(&status), 0);
+
+        assert_eq!(
+            row.readiness_state,
+            proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady as i32
+        );
+        assert_eq!(
+            row.not_ready_reason,
+            "dataplane reported not-ready without a reason"
+        );
     }
 
     #[tokio::test]

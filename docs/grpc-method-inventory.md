@@ -184,7 +184,7 @@ shape itself does not raise the tier.
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `GetEvpnRuntime` | `sensitive_read` | ADR-0063 committed runtime generation, lifecycle, mutation state, and EVPN table counts. Exposes topology size and no mutating surface. |
-| `ListEvpnInstances` | `sensitive_read` | Per-VNI state — VTEP addresses, RT/RD, originated MAC counts. |
+| `ListEvpnInstances` | `sensitive_read` | Per-VNI state — VTEP addresses, RT/RD, L2 dataplane readiness, and originated MAC counts. |
 | `ListEvpnNexthops` | `sensitive_read` | ADR-0059 FDB nexthop groups — exposes multi-homing topology, ES layout, drift-recovery status. |
 | `ListEthernetSegments` | `sensitive_read` | ADR-0083/0085 Ethernet Segment diagnose state — exposes configured ES membership, composed drain reasons, DF/BUM role rows, AC-gate state, same-ESI local-bias eligibility, and FDB-NHG refs. |
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |

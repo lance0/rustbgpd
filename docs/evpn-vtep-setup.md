@@ -180,14 +180,16 @@ What you still provide:
 ## Verifying
 
 ```bash
-rbgp evpn instances        # L2VNI view (Ready / NotReady / Unbound)
+rbgp evpn instances        # L2VNI view (Ready / NotReady / Unbound / Unknown)
 rbgp evpn vrfs <name>      # IP-VRF readiness_state + not_ready_reasons
 rbgp evpn vrfs <name>      #   also: remote_prefix_drop_counts
 ```
 
-`NotReady` results name exactly which predicate failed. The reconcile
-actor logs the `Ready` ↔ `NotReady` transition once per state change
-(not every pass).
+`NotReady` L2VNI rows include the single failing probe reason on
+`rbgp evpn instances`; `Unknown` means a bound instance has no dataplane
+verdict yet; `NotReady` IP-VRF rows enumerate predicate failures on
+`rbgp evpn vrfs`. The reconcile actor logs the `Ready` ↔ `NotReady`
+transition once per state change (not every pass).
 
 ## Common pitfalls
 

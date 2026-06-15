@@ -278,7 +278,10 @@ has it, no broad performance sprints without profile evidence.
   drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep
   added `RTNLGRP_LINK` eventing on the notify socket so EVPN-surface link
   drift wakes the reconcile actor (the inventory itself is still rebuilt
-  by dump — now event-triggered rather than periodic-only); learned-port-to-ESI
+  by dump — now event-triggered rather than periodic-only); **L2 readiness
+  visibility landed**: `ListEvpnInstances` / `rbgp evpn instances` now expose
+  the existing L2 `Ready` / `NotReady` / `Unbound` verdict and the concrete
+  `NotReady` reason, including the VLAN-aware bridge rejection; learned-port-to-ESI
   disambiguation so one local VNI
   can participate in multiple Ethernet Segments; same-ESI local bias in the
   remote-MAC projection — **RESOLVED** (ADR-0085 decision 5, slice 3): M66

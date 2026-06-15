@@ -679,6 +679,9 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 bridge: "br100".to_string(),
                 advertise_svi_mac: false,
                 originated_local_macs_count: 2,
+                readiness_state:
+                    server_proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32,
+                not_ready_reason: String::new(),
             }],
         }))
     }
