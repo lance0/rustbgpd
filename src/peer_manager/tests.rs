@@ -1843,6 +1843,7 @@ async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
             )
         })
         .collect();
+    let config_before = mgr.current_config.clone();
 
     mgr.apply_peer_group_change(set_edge_hold_time_event(90), addresses.to_vec())
         .await
@@ -1864,6 +1865,10 @@ async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
             .hold_time,
         Some(90),
         "no-op update must leave current_config unchanged"
+    );
+    assert_eq!(
+        mgr.current_config, config_before,
+        "no-op update must leave the full resolved config structurally unchanged"
     );
     assert!(
         query_policy_event_history(&mgr, None, 8).await.is_empty(),
