@@ -274,7 +274,7 @@ documented single-active-only subset.
   resolve them through scoped EAD-per-EVI state before claiming
   receive-side ESI recursion. The intended sequence is: extend the
   EAD-per-EVI projection input with L2VNI/MAC-VRF identity, carry the
-  Type-5 Ethernet Tag into `ProjectedIpPrefixRoute`, then choose either
+  Type-5 Ethernet-Tag into `ProjectedIpPrefixRoute`, then choose either
   all-active L3 multipath/NHG support or a single-active-only v1 before
   adding an M-series real-peer proof.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
