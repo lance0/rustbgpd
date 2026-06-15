@@ -172,10 +172,10 @@ effective-impact view:
   control-plane-only `honor_blackhole`. SIGHUP reconciles all of these.
 - **Restart-required changes** — `[global]` ASN/router-id/families,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
-  `[rpki]`, `[bmp]`, `[mrt]`, EVPN table edits (conservative static
-  classification until shape-aware EVPN diff lands), `apply_bum_enforcement`,
-  and inline `policy.import` / `policy.export` legacy statements. Surfaced with
-  a one-line migration hint where applicable.
+  `[rpki]`, `[bmp]`, `[mrt]`, unsupported EVPN shapes,
+  `apply_bum_enforcement`, and inline `policy.import` / `policy.export`
+  legacy statements. Supported EVPN edits are shape-aware and appear under
+  Reload-applied. Surfaced with a one-line migration hint where applicable.
 - **Effectively impacted neighbors (via inheritance)** — every
   neighbor whose resolved import / export chain would move at reload,
   with the upstream change(s) responsible (peer-group / policy /
@@ -230,15 +230,18 @@ fields.
 "Restart-required" in `--diff`): `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
-`[mrt]`, EVPN table edits, and inline `policy.import` / `policy.export` legacy
-global-fallback statements. The static diff remains conservative for EVPN until
-shape-aware classification lands; SIGHUP itself is coordinator-gated. Supported
-L2VNI/IP-VRF/ES shapes, atomic tenant teardown, and `ip_vrf` relink reuse the
-same daemon actor converger as `EvpnService.ApplyEvpnRuntime`; unsupported
-mixed edits, L3VNI/device/table IP-VRF identity changes, missing EVPN actors,
-or actor convergence failure are pinned back to the committed runtime model and
-logged. `apply_bum_enforcement` remains restart-required because it is a Gate
-8b dataplane actor startup flag.
+`[mrt]`, inline `policy.import` / `policy.export` legacy global-fallback
+statements, and `apply_bum_enforcement`. EVPN table edits are
+coordinator-gated rather than blanket restart-required: SIGHUP uses the
+same daemon actor converger as `EvpnService.ApplyEvpnRuntime` for supported
+L2VNI/IP-VRF/ES shapes, additive build-up, atomic tenant teardown,
+`ip_vrf` relink, and L2VNI-only mixed compositions. Static
+`rustbgpd --diff` is shape-aware: supported EVPN edits appear under
+Reload-applied, while unsupported mixed edits or L3VNI/device/table IP-VRF
+identity changes remain restart-required or rejected. Missing EVPN actors
+or actor convergence failure are runtime outcomes; those pin back to the
+committed runtime model and are logged. `apply_bum_enforcement` remains
+restart-required because it is a Gate 8b dataplane actor startup flag.
 
 `[[fib_tables]]` is the exception to those restart-required tables: when the
 ADR-0061 FIB reconciler is running (at least one table present at startup),
