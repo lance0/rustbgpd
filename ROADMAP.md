@@ -251,9 +251,9 @@ has it, no broad performance sprints without profile evidence.
   M69. Still open from the arc: generalized runtime mixed-edit composer
   for broader ES/IP-VRF-linked candidates (pure additive build-up,
   standalone/IP-VRF-linked L2VNI swaps, and L2VNI-only
-  add/delete/redefine compositions now commit live; ES-member deletes,
-  arbitrary relinks, and IP-VRF/ES row edits in the same request still
-  fail closed today). **Done:** shape-aware
+  add/delete/redefine compositions, including L2VNI-only batch redefines,
+  now commit live; ES-member deletes, arbitrary relinks, and IP-VRF/ES
+  row edits in the same request still fail closed today). **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure
