@@ -189,10 +189,14 @@ has it, no broad performance sprints without profile evidence.
   interop, especially the ESI path; demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
   bridge / VXLAN / VRF netdev creation. **ADR-0088 records that boundary:**
-  VLAN-aware bridges remain fail-closed until an explicit VLAN /
-  Ethernet-Tag / VNI binding exists, and managed netdev creation must be
-  opt-in and one ownership class at a time. The first read-only substrate
-  slice landed: the Linux link inventory now snapshots `AF_BRIDGE`
+  VLAN-aware bridges remain fail-closed until an explicit EVPN-to-Linux
+  binding exists, and managed netdev creation must be opt-in and one
+  ownership class at a time. **ADR-0089 narrows the first programming
+  target:** VNI-per-broadcast-domain EVPN over Linux `vlan_filtering=1`
+  bridges, with a local bridge-VLAN binding and Ethernet Tag ID still
+  `0`; true RFC VLAN-aware bundle / non-zero-Ethernet-Tag service stays
+  deferred. The first read-only substrate slice landed: the Linux link
+  inventory now snapshots `AF_BRIDGE`
   bridge/port VLAN membership and tunnel mappings while keeping
   `vlan_filtering=1` bridges `NotReady`. Service-provider EVPN breadth
   (route types 6-11, PBB-EVPN,
@@ -273,11 +277,14 @@ has it, no broad performance sprints without profile evidence.
   follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support and
   rustbgpd-managed bridge / VXLAN / VRF netdev creation are now scoped by
-  ADR-0088. **Read-only VLAN/topology inventory landed:** `AF_BRIDGE`
-  VLAN membership and tunnel mappings are now parsed into the Linux
-  snapshot for diagnostics/future work; programming or creation still stays
-  fail-closed until explicit ownership, rollback, and adoption/reap
-  semantics exist. `RTNLGRP_LINK` eventing instead of
+  ADR-0088, with ADR-0089 selecting the first VLAN-aware programming
+  subset: traditional multi-VXLAN-device Linux bridges, local
+  `bridge_vlan` attribution, and EVPN Ethernet Tag ID `0`. **Read-only
+  VLAN/topology inventory landed:** `AF_BRIDGE` VLAN membership and tunnel
+  mappings are now parsed into the Linux snapshot for diagnostics/future
+  work; programming or creation still stays fail-closed until explicit
+  ownership, rollback, and adoption/reap semantics exist. `RTNLGRP_LINK`
+  eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
   drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep

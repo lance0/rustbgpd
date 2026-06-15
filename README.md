@@ -353,7 +353,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   ESI overlay-index origination now ships; broader protected recursion-path
   interop remains the nearest standards-tail item. VLAN-aware bridges
   and bridge / VXLAN / VRF netdev creation remain operator-provisioned
-  and fail-closed by [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md).
+  and fail-closed by [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
+  [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
+  scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain
+  service with Ethernet Tag ID `0`.
   Service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
   EVPN, MPLS/SRv6 encapsulation, VPWS/E-Tree) is demand-shaped rather than
   part of the current VXLAN/Linux alpha lane

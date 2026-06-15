@@ -11,13 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0089 EVPN VNI-per-broadcast-domain VLAN-aware bridge support.**
+  The VLAN-aware bridge follow-up now has a precise v1 scope: Linux
+  `vlan_filtering=1` support targets the existing one-VNI-per-broadcast
+  domain EVPN model, keeps Type 2 / Type 3 / EAD-per-EVI Ethernet Tag ID
+  at `0`, adds a local `bridge_vlan` binding for kernel attribution, and
+  defers true RFC VLAN-aware bundle / non-zero-Ethernet-Tag service
+  models plus SVD / managed-netdev support to separate gates. This is a
+  decision document only; it adds no runtime feature.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware bridges stay `NotReady` until rustbgpd has
-  an explicit VLAN / Ethernet-Tag / VNI binding, managed bridge / VXLAN /
-  VRF creation stays opt-in and class-scoped, and read-only Linux
-  topology substrate can land before any programming behavior changes.
-  This is a decision document only; it adds no runtime feature.
+  an explicit EVPN-to-Linux binding, managed bridge / VXLAN / VRF creation
+  stays opt-in and class-scoped, and read-only Linux topology substrate can
+  land before any programming behavior changes. This is a decision document
+  only; it adds no runtime feature.
 - **EVPN L2 readiness API/CLI surface.** `EvpnService.ListEvpnInstances`
   and `rbgp evpn instances` now join each configured L2VNI with the
   Linux dataplane reconciler's latest `Ready` / `NotReady` / `Unbound`

@@ -19,9 +19,12 @@
 //!
 //! Keys are `(EvpnInstanceId, MacAddress)`. RFC 7432 §15 distinguishes
 //! MAC moves *within* an EVI by mobility-sequence comparison; the table
-//! keeps a single best-path entry per `(VNI, MAC)`. VLAN-aware bundle
-//! support (where keys widen to `(VNI, VLAN, MAC)`) is deferred until
-//! the `EvpnInstance` schema gains a `vlan` field — see ADR-0054 §4.
+//! keeps a single best-path entry per `(VNI, MAC)`. ADR-0089's first
+//! VLAN-aware bridge slice keeps that EVPN key because the VNI still
+//! identifies the broadcast domain and Ethernet Tag ID remains `0`; the
+//! local bridge VLAN belongs to the Linux attribution layer. True
+//! VLAN-aware bundle support with non-zero Ethernet Tags would be a
+//! separate route-identity expansion.
 //!
 //! ## Why a builder
 //!

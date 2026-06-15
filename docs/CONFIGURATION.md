@@ -1936,8 +1936,9 @@ default — RR-only deployments leave it empty.
 > [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe;
 > the `bridge` / `local_vtep_ip` fields below must match. ADR-0088 keeps
 > VLAN-aware bridges and rustbgpd-managed bridge / VXLAN / VRF creation
-> fail-closed until explicit ownership and VLAN / Ethernet-Tag / VNI
-> binding semantics exist.
+> fail-closed until explicit ownership exists; ADR-0089 narrows the first
+> VLAN-aware bridge programming target to a local bridge-VLAN / VNI binding
+> while keeping EVPN Ethernet Tag ID at `0`.
 
 ```toml
 [[evpn_instances]]
