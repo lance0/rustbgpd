@@ -57,17 +57,18 @@ pub struct KernelLinkInfo {
     /// Future VLAN-aware support will decide whether these are desired
     /// state; today they are diagnostics only.
     pub vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
-    /// VLAN membership/tunnel inventory for bridge-member links. This
-    /// includes VXLAN and non-VXLAN members so future code can reason
-    /// about the full VLAN-aware topology without changing the
-    /// existing AC-gate `bridge_ports` map.
+    /// VLAN membership/tunnel inventory for bridge-member links that carry
+    /// at least one VLAN or tunnel row (members with neither are omitted).
+    /// This includes VXLAN and non-VXLAN members so future code can reason
+    /// about the VLAN-aware topology without changing the existing AC-gate
+    /// `bridge_ports` map.
     pub port_vlan_inventory: Vec<KernelBridgePortVlanInfo>,
 }
 
 /// Parsed Linux bridge VLAN flags kept as raw booleans so the snapshot
 /// layer remains independent of the netlink crate's bitflags type.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KernelBridgeVlanFlags {
     /// `BRIDGE_VLAN_INFO_MASTER` / crate `Controller`: operation or row
     /// applies to the bridge device.

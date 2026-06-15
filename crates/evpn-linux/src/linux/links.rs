@@ -66,7 +66,8 @@ pub(crate) struct BridgeLink {
     pub vlans: Vec<KernelBridgeVlanInfo>,
     /// VLAN tunnel mappings observed on the bridge device itself.
     pub vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
-    /// VLAN membership/tunnel inventory for every bridge member,
+    /// VLAN membership/tunnel inventory for each bridge member that has at
+    /// least one VLAN or tunnel row (members with neither are omitted),
     /// including VXLAN members. Read-only ADR-0088 substrate.
     pub port_vlan_inventory: Vec<KernelBridgePortVlanInfo>,
 }
@@ -131,7 +132,17 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
     // there. Keep this diagnostic substrate optional so a kernel that
     // refuses the extension mask does not break existing readiness.
-    let vlan_inventory = dump_bridge_vlan_inventory(handle).await.unwrap_or_default();
+    let vlan_inventory = match dump_bridge_vlan_inventory(handle).await {
+        Ok(inventory) => inventory,
+        Err(e) => {
+            // Best-effort: a kernel that refuses the extension mask (or any
+            // dump error) leaves us with no VLAN-aware substrate this pass,
+            // which is the fail-closed default. Log so an unexpected refusal
+            // is still diagnosable rather than silently invisible.
+            tracing::debug!(error = %e, "bridge VLAN inventory dump unavailable; continuing without VLAN-aware substrate");
+            BridgeVlanInventory::default()
+        }
+    };
     // Every link that has a Controller attribute. Post-processed by
     // `index_bridge_ports` to seed `bridge_port_to_vni` and
     // `bridge_ports_by_name` for non-VXLAN ports of known bridges.
@@ -404,16 +415,12 @@ fn extract_bridge_vlan_inventory(
             }
         }
     }
-    vlans.sort_by_key(|v| {
-        (
-            v.vid,
-            v.flags.range_begin,
-            v.flags.range_end,
-            v.flags.pvid,
-            v.flags.untagged,
-        )
-    });
-    vlan_tunnels.sort_by_key(|v| (v.vid, v.tunnel_id));
+    // Sort keys must be total — these vectors participate in snapshot `Eq`
+    // comparisons, so any field that distinguishes two rows (every flag bit,
+    // not just the range/pvid/untagged subset) has to be in the key, or the
+    // ordering stays dependent on netlink arrival order and churns the snapshot.
+    vlans.sort_by_key(|v| (v.vid, v.flags));
+    vlan_tunnels.sort_by_key(|v| (v.vid, v.tunnel_id, v.flags));
     (vlans, vlan_tunnels)
 }
 
