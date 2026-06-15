@@ -26,6 +26,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rows carry the existing probe reason, including the VLAN-aware bridge
   fail-closed diagnostic. This is visibility only: VLAN-aware bridges
   remain unsupported for programming.
+- **EVPN read-only VLAN-aware topology substrate.** The Linux EVPN link
+  inventory now requests `AF_BRIDGE` compressed bridge-VLAN data and
+  snapshots bridge / port VLAN membership plus VLAN tunnel mappings for
+  diagnostics and future ADR-0088 work. This is intentionally read-only:
+  `vlan_filtering=1` bridges still report `NotReady`, rustbgpd still
+  writes no VLAN-scoped bridge state, and managed netdev creation remains
+  deferred.
 - **BGP-LS wire codec substrate.** The wire crate now exposes an
   unreachable RFC 9552 BGP-LS NLRI/TLV codec that preserves unknown NLRI
   types and TLVs opaquely and round-trips BGP-LS VPN route

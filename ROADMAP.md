@@ -190,9 +190,12 @@ has it, no broad performance sprints without profile evidence.
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
   bridge / VXLAN / VRF netdev creation. **ADR-0088 records that boundary:**
   VLAN-aware bridges remain fail-closed until an explicit VLAN /
-  Ethernet-Tag / VNI binding exists, read-only topology substrate may land
-  first, and managed netdev creation must be opt-in and one ownership class at
-  a time. Service-provider EVPN breadth (route types 6-11, PBB-EVPN,
+  Ethernet-Tag / VNI binding exists, and managed netdev creation must be
+  opt-in and one ownership class at a time. The first read-only substrate
+  slice landed: the Linux link inventory now snapshots `AF_BRIDGE`
+  bridge/port VLAN membership and tunnel mappings while keeping
+  `vlan_filtering=1` bridges `NotReady`. Service-provider EVPN breadth
+  (route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation) stays out
   of the current lane until operator demand justifies a new ADR. **Native
   GW-IP overlay-index origination landed
@@ -270,9 +273,11 @@ has it, no broad performance sprints without profile evidence.
   follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support and
   rustbgpd-managed bridge / VXLAN / VRF netdev creation are now scoped by
-  ADR-0088: read-only VLAN/topology inventory can land first; programming or
-  creation stays fail-closed until explicit ownership, rollback, and
-  adoption/reap semantics exist. `RTNLGRP_LINK` eventing instead of
+  ADR-0088. **Read-only VLAN/topology inventory landed:** `AF_BRIDGE`
+  VLAN membership and tunnel mappings are now parsed into the Linux
+  snapshot for diagnostics/future work; programming or creation still stays
+  fail-closed until explicit ownership, rollback, and adoption/reap
+  semantics exist. `RTNLGRP_LINK` eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
   drain needs — name + `IFF_LOWER_UP`), and the poll-cadence tail sweep

@@ -103,6 +103,7 @@ mod tests {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10, 11],
+            ..KernelLinkInfo::default()
         });
 
         let rows = build_bum_enforcement_status(&table, &snapshot);
@@ -128,6 +129,7 @@ mod tests {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10],
+            ..KernelLinkInfo::default()
         });
 
         let rows = build_bum_enforcement_status(&table, &snapshot);
@@ -164,6 +166,7 @@ mod tests {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: Vec::new(),
+            ..KernelLinkInfo::default()
         });
 
         let rows = build_bum_enforcement_status(&table, &snapshot);

@@ -183,6 +183,7 @@ mod tests {
                 local_ip: ipa(local),
                 learning_disabled: Some(true),
             }),
+            ..BridgeLink::default()
         }
     }
 
