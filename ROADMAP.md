@@ -659,11 +659,12 @@ has it, no broad performance sprints without profile evidence.
     measurement-gated.
   - CLI/API JSON outside route listing: the CLI JSON error path is hardened —
     runtime serializers now return `CliError::Json` instead of panicking on
-    `serde_json` failures. Remaining work here is allocation/data-shape cleanup:
-    after the route-listing cleanup, apply the same borrowed `Serialize` wrapper
-    / direct serializer pattern to high-volume event and telemetry JSON so the
-    CLI and API do not build a second owned JSON tree from already-owned
-    proto/event data.
+    `serde_json` failures. The high-volume CLI BGP event stream now uses
+    borrowed `Serialize` wrappers for event envelopes and EVPN route payloads
+    instead of cloning proto fields into a second `serde_json::Value` tree.
+    Remaining allocation/data-shape cleanup: CLI route JSON still maps proto
+    routes into a second owned `JsonRoute` tree, and lower-volume API/CLI
+    snapshot/reporting paths should only be changed when a profile shows value.
   - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
     `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
     workflow exists); a continuous churn bench (short criterion variant of the
