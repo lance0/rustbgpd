@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BGP-LS wire codec substrate.** The wire crate now exposes an
+  unreachable RFC 9552 BGP-LS NLRI/TLV codec that preserves unknown NLRI
+  types and TLVs opaquely and round-trips BGP-LS VPN route
+  distinguishers. This does **not** enable BGP-LS negotiation,
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI` dispatch, RIB storage, policy,
+  API/CLI output, or MPLS dataplane behavior; those remain behind the
+  ADR-0077 full-family checklist.
 - **VPNv4/VPNv6 wire codec substrate.** `rustbgpd-wire` now has pure
   helpers for RFC 8277 MPLS label-stack entries and RFC 4364 / RFC 4659
   RD-prefixed VPN NLRI keys. The substrate preserves VPN route identity
