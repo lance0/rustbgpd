@@ -57,16 +57,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ADR-0063 EVPN runtime convergence — mixed L2VNI composer.**
   `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff`
   now treat L2VNI-only candidates that compose add/delete/redefine
-  change classes as coordinator-supported hot-apply shapes. The daemon
-  composes the existing legs: added VNIs originate IMET, deleted VNIs
-  withdraw IMET, redefined VNIs withdraw the old Type 3 key and
-  originate the new one, IP-VRF link metadata is republished when the
-  changed references belong only to added/deleted VNIs, and the
-  dataplane/Type 2/SVI/segment consumers receive a single candidate
-  instance snapshot before the runtime generation advances. The slice
-  deliberately excludes ES-member deletes, arbitrary `ip_vrf` relinks
-  on surviving/redefined VNIs, and IP-VRF/ES row changes; those broader
-  mixed edits still fail closed.
+  change classes, or redefine multiple standalone L2VNIs together, as
+  coordinator-supported hot-apply shapes. The daemon composes the
+  existing legs: added VNIs originate IMET, deleted VNIs withdraw IMET,
+  redefined VNIs withdraw the old Type 3 key and originate the new one,
+  IP-VRF link metadata is republished when the changed references belong
+  only to added/deleted VNIs, and the dataplane/Type 2/SVI/segment
+  consumers receive a single candidate instance snapshot before the
+  runtime generation advances. The slice deliberately excludes
+  ES-member deletes, arbitrary `ip_vrf` relinks on surviving/redefined
+  VNIs, and IP-VRF/ES row changes; those broader mixed edits still fail
+  closed.
 - **M68 FRR consume-side interop proof for native GW-IP overlay-index
   Type 5 origination (ADR-0087).** The hosted kernel-dataplane suite now
   includes a rustbgpd → FRR topology where rustbgpd originates a
@@ -123,6 +124,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **No-op peer-group updates no longer bounce sessions.** Targeted
+  peer-group mutations whose resulting config is structurally identical
+  to the running snapshot now return success without publishing a policy
+  event or rebuilding affected sessions. Real peer-group/session reshapes
+  still take the captured-prior rebuild path and remain rollback-capable.
 - **Fail-closed MP-BGP family dispatch for future route-family substrate.**
   `MP_REACH_NLRI` / `MP_UNREACH_NLRI` decoding now runs through one
   explicit supported-family classifier before any NLRI parser is called.

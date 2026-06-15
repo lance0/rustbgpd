@@ -251,9 +251,9 @@ has it, no broad performance sprints without profile evidence.
   M69. Still open from the arc: generalized runtime mixed-edit composer
   for broader ES/IP-VRF-linked candidates (pure additive build-up,
   standalone/IP-VRF-linked L2VNI swaps, and L2VNI-only
-  add/delete/redefine compositions now commit live; ES-member deletes,
-  arbitrary relinks, and IP-VRF/ES row edits in the same request still
-  fail closed today). **Done:** shape-aware
+  add/delete/redefine compositions, including L2VNI-only batch redefines,
+  now commit live; ES-member deletes, arbitrary relinks, and IP-VRF/ES
+  row edits in the same request still fail closed today). **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
   identity/generic mixed changes; actor availability and convergence failure
@@ -518,9 +518,9 @@ has it, no broad performance sprints without profile evidence.
   policy-only peer-group edits to live dynamic sessions; session-shaping
   peer-group edits on those no-preview paths still leave dynamic sessions on
   their running config until reconnect (deliberate; see ADR-0086's deferral).
-  A no-op `SetPeerGroup` (definition identical to the running config) still
-  takes the reshape path and bounces affected static sessions — pre-existing,
-  benign, low-priority: short-circuit identical definitions before reshaping.
+  No-op targeted peer-group mutations now short-circuit before publish/reshape,
+  so identical `SetPeerGroup` updates no longer bounce affected static
+  sessions.
   (The per-peer Prometheus series leak listed here previously was fixed —
   deleted peers now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
