@@ -71,7 +71,11 @@ fn record_export_policy_eval(
 }
 
 impl RibManager {
-    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "explain mirrors live single-best export inputs for policy parity"
+    )]
     pub(super) fn explain_single_best_prefix(
         loc_rib: &LocRib,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
@@ -234,7 +238,10 @@ impl RibManager {
         explain
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "outbound commit needs all family queues for one atomic send"
+    )]
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
@@ -435,7 +442,10 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "RIB update messages carry every supported family as one transaction"
+    )]
     pub(super) fn enqueue_routes_received(
         &mut self,
         peer: IpAddr,
@@ -1050,7 +1060,11 @@ impl RibManager {
     /// Collects all candidates from all Adj-RIB-In entries, filters by
     /// split-horizon/iBGP/family/policy, sorts by best-path, takes top N,
     /// and diffs against `AdjRibOut` to produce announces and withdrawals.
-    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together"
+    )]
     pub(super) fn distribute_multipath_prefix(
         ribs: &HashMap<IpAddr, AdjRibIn>,
         rib_out: &AdjRibOut,
@@ -1216,7 +1230,11 @@ impl RibManager {
         }
     }
 
-    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "single-best export keeps peer, policy, and Adj-RIB-Out diff state together"
+    )]
     pub(super) fn distribute_single_best_prefix(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -1380,7 +1398,10 @@ impl RibManager {
     /// provided outbound view. Passing an empty `AdjRibOut` view causes a full
     /// re-advertisement of the current `FlowSpec` export set, which is useful
     /// for initial table dump and ROUTE-REFRESH responses.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "FlowSpec staging mirrors unicast distribution context"
+    )]
     pub(super) fn stage_flowspec_rules(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -1498,7 +1519,11 @@ impl RibManager {
     ///
     /// Phase 1: policy uses a placeholder `0.0.0.0/0` prefix; RT / community
     /// matching works through the existing `RouteContext` fields.
-    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "EVPN staging mirrors unicast distribution context for policy parity"
+    )]
     pub(super) fn stage_evpn_routes(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -1678,7 +1703,10 @@ impl RibManager {
     /// so that Adj-RIB-Out only contains routes the transport can actually
     /// serialize for this peer. The transport retains `is_family_negotiated`
     /// as a safety net.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "distribution loop coordinates dirty peers, forced resync, and all families"
+    )]
     pub(super) fn distribute_changes(
         &mut self,
         best_changed: &HashSet<Prefix>,
@@ -2135,7 +2163,10 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "EVPN recompute keeps best-path, events, and outbound staging consistent"
+    )]
     pub(super) fn recompute_and_distribute_evpn(
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,

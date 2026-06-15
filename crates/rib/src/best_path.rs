@@ -434,7 +434,11 @@ pub(crate) fn link_bandwidth_weights(weighted: bool, bandwidths: &[Option<f32>])
         .iter()
         .map(|b| {
             // Clamped to [1, 256]: the cast is exact and non-negative.
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "weights are clamped to the positive u16 ECMP range before casting"
+            )]
             let weight = (b.unwrap_or(0.0) / max * 256.0).round().clamp(1.0, 256.0) as u16;
             weight
         })

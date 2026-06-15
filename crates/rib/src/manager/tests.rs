@@ -2217,7 +2217,10 @@ async fn per_peer_export_policy() {
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "scenario test keeps policy setup, stimulus, and assertions together"
+)]
 async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filtered_event() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
@@ -2890,7 +2893,10 @@ async fn peer_down_cleans_up_export_policy() {
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "channel-backpressure scenario needs setup, retry clock, and assertions together"
+)]
 async fn channel_full_marks_dirty_and_resyncs() {
     tokio::time::pause();
 
@@ -3927,7 +3933,10 @@ async fn route_event_history_capacity_evicts_oldest_event() {
 }
 
 #[tokio::test]
-#[expect(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test fixture counts are small and cast only for gauge comparison"
+)]
 async fn route_event_history_gauges_track_depth_and_capacity() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
@@ -4312,7 +4321,10 @@ async fn route_event_carries_best_path_id() {
 // --- Prometheus gauge tests ---
 
 #[tokio::test]
-#[expect(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test fixture counts are small and cast only for gauge comparison"
+)]
 async fn rib_prefixes_gauge_tracks_adjribin() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
@@ -4375,7 +4387,10 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
 }
 
 #[tokio::test]
-#[expect(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test fixture counts are small and cast only for gauge comparison"
+)]
 async fn loc_rib_gauge_tracks_best() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
@@ -4416,7 +4431,10 @@ async fn loc_rib_gauge_tracks_best() {
 }
 
 #[tokio::test]
-#[expect(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test fixture counts are small and cast only for gauge comparison"
+)]
 async fn adj_rib_out_gauge_tracks_advertised() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
@@ -8944,7 +8962,10 @@ async fn multipath_send_max_one_uses_path_id_one() {
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "multipath policy-filter scenario keeps both peers and assertions together"
+)]
 async fn multipath_policy_filtered_events_for_denied_candidates() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
@@ -10146,7 +10167,10 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
 /// survives, and a post-convergence advertisement MUST be delivered on
 /// the winner's outbound channel.
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "collision regression keeps both session orderings and assertions together"
+)]
 async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let (tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
@@ -10406,7 +10430,10 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
 /// request an inbound ROUTE-REFRESH through its channel) instead of
 /// tearing the peer down.
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "failover regression keeps session interleaving and recovery assertions together"
+)]
 async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let (tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
@@ -12041,7 +12068,10 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
 /// but `result.modifications` was discarded, so RT/community/`LocalPref`
 /// rewrite policy silently had no effect on EVPN exports.
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "EVPN export-policy regression keeps route setup and modification assertions together"
+)]
 async fn evpn_export_policy_applies_modifications() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 

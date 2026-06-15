@@ -1090,11 +1090,12 @@ branch is between features.
   benchmark or heap profile identifies a hot, bounded, internal map. Candidate
   follow-ups are RIB-manager temporary prefix/peer sets and other
   non-adversarial control-plane maps that show up in `dhat` or Criterion.
-- [ ] **CI gate: `#[allow(clippy::*)]` requires `reason = "..."`.** ~171
-  escape-hatches workspace-wide (~40 are `cast_possible_truncation` in the wire
-  codec, intentional after a length check). A CI lint that rejects new
-  `#[allow(clippy::*)]` without an explicit `reason` arg; backfill one crate at a
-  time.
+- [ ] **CI gate: `#[allow(clippy::*)]` / `#[expect(clippy::*)]` requires
+  `reason = "..."`.** The ratchet exists and CI enforces it for
+  `crates/rib/src`, whose suppressions are backfilled. Remaining work:
+  add more paths to `scripts/check-clippy-reasons.py` as each crate/file
+  group is backfilled; do not flip this to complete until the whole
+  workspace is covered.
 - [x] **`cargo deny` for license / dependency / advisory audit.** Done: the
   dependabot + cargo-audit half of the stale branch had already landed;
   `deny.toml` now gates `cargo deny check advisories bans licenses sources`

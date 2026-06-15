@@ -32,7 +32,10 @@ pub(super) struct LlgrPeerConfig {
 }
 
 /// Safe cast from usize to i64 for gauge metrics.
-#[expect(clippy::cast_possible_wrap)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "Prometheus gauge values are bounded by in-memory route counts in practice"
+)]
 pub(super) fn gauge_val(n: usize) -> i64 {
     n as i64
 }
