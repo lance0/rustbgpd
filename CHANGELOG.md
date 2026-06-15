@@ -136,6 +136,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metrics/caps, docs, and interop. This is documentation-only; rustbgpd
   still does not negotiate those families.
 
+### Performance
+
+- **CLI route JSON avoids cloning routes into an owned output tree.**
+  `rbgp rib --json` / `rustbgpctl rib --json` and best-path explain JSON
+  now serialize borrowed route fields directly instead of first cloning each
+  route into `JsonRoute`. The emitted JSON bytes are preserved by equivalence
+  tests against the previous owned builder.
+
 ### Fixed
 
 - **No-op peer-group updates no longer bounce sessions.** Targeted
