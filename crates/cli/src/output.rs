@@ -253,6 +253,7 @@ pub struct JsonNeighborDetail {
     pub add_path_send_max: u32,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 pub struct JsonRoute {
     pub prefix: String,
