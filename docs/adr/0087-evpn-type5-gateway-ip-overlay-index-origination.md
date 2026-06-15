@@ -252,7 +252,12 @@ the wire shape. Receive-side ESI protected recursion and a real-peer
 interop proof are still separate standards-tail follow-ups. The
 receive-side projection DTO carries Type 5 ESI now, but non-zero-ESI
 RT-5s are dropped fail-closed until the EAD protected-recursion
-dependency exists.
+dependency exists. That dependency is deliberately more than "look up
+an ESI in the existing alias index": receive-side recursion must carry
+L2VNI/MAC-VRF scope on EAD-per-EVI resolver rows, preserve the Type-5
+Ethernet Tag in the projection DTO, and decide whether the first
+shipping receiver supports all-active L3 multipath/NHG resolution or a
+documented single-active-only subset.
 
 ### 7. Out of scope / follow-ups
 
@@ -266,8 +271,12 @@ dependency exists.
   standards-shaped, but rustbgpd's receive-side Type 5 projection still
   imports only interface-less and GW-IP recursion. Non-zero-ESI Type 5s
   are carried far enough to drop with `unsupported_esi_overlay_index`;
-  resolve them through EAD state before claiming receive-side ESI
-  recursion.
+  resolve them through scoped EAD-per-EVI state before claiming
+  receive-side ESI recursion. The intended sequence is: extend the
+  EAD-per-EVI projection input with L2VNI/MAC-VRF identity, carry the
+  Type-5 Ethernet-Tag into `ProjectedIpPrefixRoute`, then choose either
+  all-active L3 multipath/NHG support or a single-active-only v1 before
+  adding an M-series real-peer proof.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped
