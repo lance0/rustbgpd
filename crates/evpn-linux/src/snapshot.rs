@@ -33,7 +33,7 @@ const RTPROT_BGP: u8 = 186;
 /// Phase 2 holds only the fields the diff loop and per-instance probe
 /// need today; Phase 4 (the real netlink impl) extends with admin/oper
 /// state and bridge aging time as those become relevant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelLinkInfo {
     /// Bridge name (e.g., `"br100"`).
     pub bridge_name: String,
@@ -49,6 +49,76 @@ pub struct KernelLinkInfo {
     /// These are the CE-facing candidates Gate 8b will target for
     /// BUM suppression once the kernel primitive is selected.
     pub ce_port_ifindexes: Vec<u32>,
+    /// VLAN membership observed on the bridge device itself via
+    /// `IFLA_AF_SPEC(AF_BRIDGE)`. Read-only ADR-0088 substrate; the
+    /// probe still reports `vlan_filtering=1` as `NotReady`.
+    pub vlans: Vec<KernelBridgeVlanInfo>,
+    /// VLAN tunnel mappings observed on the bridge device itself.
+    /// Future VLAN-aware support will decide whether these are desired
+    /// state; today they are diagnostics only.
+    pub vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
+    /// VLAN membership/tunnel inventory for bridge-member links. This
+    /// includes VXLAN and non-VXLAN members so future code can reason
+    /// about the full VLAN-aware topology without changing the
+    /// existing AC-gate `bridge_ports` map.
+    pub port_vlan_inventory: Vec<KernelBridgePortVlanInfo>,
+}
+
+/// Parsed Linux bridge VLAN flags kept as raw booleans so the snapshot
+/// layer remains independent of the netlink crate's bitflags type.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KernelBridgeVlanFlags {
+    /// `BRIDGE_VLAN_INFO_MASTER` / crate `Controller`: operation or row
+    /// applies to the bridge device.
+    pub controller: bool,
+    /// VLAN is the ingress untagged PVID.
+    pub pvid: bool,
+    /// VLAN egresses untagged.
+    pub untagged: bool,
+    /// Start of a compressed VLAN range.
+    pub range_begin: bool,
+    /// End of a compressed VLAN range.
+    pub range_end: bool,
+    /// Global bridge VLAN entry.
+    pub bridge_entry: bool,
+    /// Kernel row carries options only.
+    pub only_options: bool,
+}
+
+/// One `IFLA_BRIDGE_VLAN_INFO` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelBridgeVlanInfo {
+    /// VLAN identifier.
+    pub vid: u16,
+    /// Kernel flags for this row.
+    pub flags: KernelBridgeVlanFlags,
+}
+
+/// One `IFLA_BRIDGE_VLAN_TUNNEL_INFO` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelBridgeVlanTunnelInfo {
+    /// Tunnel ID / VNI, when the kernel reported it.
+    pub tunnel_id: Option<u32>,
+    /// VLAN identifier, when the kernel reported it.
+    pub vid: Option<u16>,
+    /// Kernel flags for this tunnel row.
+    pub flags: KernelBridgeVlanFlags,
+}
+
+/// VLAN inventory observed on one bridge-member link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelBridgePortVlanInfo {
+    /// Kernel ifindex of the member link.
+    pub ifindex: u32,
+    /// Link name if the kernel reported one.
+    pub name: Option<String>,
+    /// `true` when this member is a VXLAN device.
+    pub is_vxlan: bool,
+    /// VLAN membership rows for this member.
+    pub vlans: Vec<KernelBridgeVlanInfo>,
+    /// VLAN tunnel mappings for this member.
+    pub vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
 }
 
 /// One non-VXLAN bridge port observed in the kernel link inventory,

@@ -86,6 +86,11 @@ instance `Ready` only when all hold (otherwise `NotReady{reason}`):
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 
+The Linux inventory also records bridge / port VLAN membership and VLAN
+tunnel mappings read-only for ADR-0088 follow-up work. That does **not**
+change predicate 2: a `vlan_filtering=1` bridge remains `NotReady` until
+rustbgpd has explicit VLAN / Ethernet-Tag / VNI ownership semantics.
+
 ### MAC+IP origination (ARP/ND suppression)
 
 To originate Type 2 routes carrying the host IP (MAC+IP), enable

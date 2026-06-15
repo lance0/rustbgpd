@@ -216,6 +216,7 @@ async fn reconcile_report_includes_observable_bum_enforcement_plan() {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10],
+            ..KernelLinkInfo::default()
         },
     );
     h.handle.set_links(links);
@@ -281,6 +282,7 @@ async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10, 11],
+            ..KernelLinkInfo::default()
         },
     );
     h.handle.set_links(links);
@@ -339,6 +341,7 @@ async fn shutdown_restores_bum_flags_even_without_owned_fdb_entries() {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10],
+            ..KernelLinkInfo::default()
         },
     );
     h.handle.set_links(links);
@@ -402,6 +405,7 @@ async fn failed_bum_op_is_re_emitted_on_next_pass() {
                 learning_disabled: Some(true),
             }),
             ce_port_ifindexes: vec![10],
+            ..KernelLinkInfo::default()
         },
     );
     h.handle.set_links(links);

@@ -659,6 +659,7 @@ mod tests {
                 }),
                 vxlan_attach_count: 1,
                 ce_port_ifindexes: vec![port_ifindex],
+                ..BridgeLink::default()
             },
         );
         let mut vxlan_ifindex_to_vni = HashMap::new();

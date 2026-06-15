@@ -14,8 +14,10 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use futures::stream::TryStreamExt;
+use netlink_packet_route::AddressFamily;
 use netlink_packet_route::link::{
-    InfoBridge, InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVxlan, LinkAttribute,
+    AfSpecBridge, BridgeVlanInfo, BridgeVlanInfoFlags, BridgeVlanTunnelInfo, InfoBridge,
+    InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVxlan, LinkAttribute, LinkExtentMask,
     LinkInfo, LinkMessage,
 };
 use rtnetlink::Handle;
@@ -23,7 +25,10 @@ use rtnetlink::Handle;
 use rustbgpd_evpn::MacAddress;
 
 use crate::error::DataplaneError;
-use crate::snapshot::KernelVxlanInfo;
+use crate::snapshot::{
+    KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+    KernelBridgeVlanTunnelInfo, KernelVxlanInfo,
+};
 
 /// One bridge link the inventory cared about.
 #[derive(Debug, Clone, Default)]
@@ -57,6 +62,13 @@ pub(crate) struct BridgeLink {
     /// Non-VXLAN bridge-member ifindexes. These are CE-facing
     /// candidates for Gate 8b BUM enforcement.
     pub ce_port_ifindexes: Vec<u32>,
+    /// VLAN membership observed on the bridge device itself.
+    pub vlans: Vec<KernelBridgeVlanInfo>,
+    /// VLAN tunnel mappings observed on the bridge device itself.
+    pub vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
+    /// VLAN membership/tunnel inventory for every bridge member,
+    /// including VXLAN members. Read-only ADR-0088 substrate.
+    pub port_vlan_inventory: Vec<KernelBridgePortVlanInfo>,
 }
 
 /// Per-VXLAN port slice, before being attached to a bridge.
@@ -100,6 +112,9 @@ pub(crate) struct LinkCache {
     pub bridge_ports_by_name: HashMap<String, crate::snapshot::KernelBridgePortInfo>,
 }
 
+type BridgeVlanInventory =
+    HashMap<u32, (Vec<KernelBridgeVlanInfo>, Vec<KernelBridgeVlanTunnelInfo>)>;
+
 /// Walk every netlink-reported link and build the inventory cache.
 ///
 /// Two-pass: pass 1 captures bridges with their VLAN-filtering state;
@@ -110,7 +125,13 @@ pub(crate) struct LinkCache {
 pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneError> {
     let mut bridges: HashMap<String, BridgeLink> = HashMap::new();
     let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
-    let mut vxlans: Vec<VxlanPort> = Vec::new();
+    let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
+    // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
+    // rows, but on real kernels it is not a substitute for the normal
+    // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
+    // there. Keep this diagnostic substrate optional so a kernel that
+    // refuses the extension mask does not break existing readiness.
+    let vlan_inventory = dump_bridge_vlan_inventory(handle).await.unwrap_or_default();
     // Every link that has a Controller attribute. Post-processed by
     // `index_bridge_ports` to seed `bridge_port_to_vni` and
     // `bridge_ports_by_name` for non-VXLAN ports of known bridges.
@@ -123,6 +144,10 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         .map_err(|e| DataplaneError::Other(format!("link dump: {e}")))?
     {
         let (kind, name) = link_kind_and_name(&msg);
+        let (bridge_vlans, vlan_tunnels) = vlan_inventory
+            .get(&msg.header.index)
+            .cloned()
+            .unwrap_or_else(|| extract_bridge_vlan_inventory(&msg));
         let ifindex = msg.header.index;
         let master = extract_controller(&msg);
         if let Some(master_idx) = master {
@@ -132,6 +157,8 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                 is_vxlan: matches!(kind, Some(InfoKind::Vxlan)),
                 name: name.clone(),
                 brport_state: extract_bridge_port_state(&msg),
+                vlans: bridge_vlans.clone(),
+                vlan_tunnels: vlan_tunnels.clone(),
             });
         }
         match kind {
@@ -148,6 +175,9 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                             vxlan: None,
                             vxlan_attach_count: 0,
                             ce_port_ifindexes: Vec::new(),
+                            vlans: bridge_vlans,
+                            vlan_tunnels,
+                            port_vlan_inventory: Vec::new(),
                         },
                     );
                     bridge_ifindex_to_name.insert(ifindex, name);
@@ -155,7 +185,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
             }
             Some(InfoKind::Vxlan) => {
                 if let Some(port) = parse_vxlan_port(&msg) {
-                    vxlans.push(port);
+                    vxlan_ports.push(port);
                 }
             }
             _ => {}
@@ -163,7 +193,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     }
 
     let mut vxlan_ifindex_to_vni: HashMap<u32, u32> = HashMap::new();
-    for vxlan in vxlans {
+    for vxlan in vxlan_ports {
         let Some(master_idx) = vxlan.master else {
             continue;
         };
@@ -201,6 +231,31 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     })
 }
 
+async fn dump_bridge_vlan_inventory(
+    handle: &Handle,
+) -> Result<BridgeVlanInventory, DataplaneError> {
+    let mut inventory = HashMap::new();
+    let mut stream = handle
+        .link()
+        .get()
+        .set_filter_mask(
+            AddressFamily::Bridge,
+            vec![LinkExtentMask::BrvlanCompressed],
+        )
+        .execute();
+    while let Some(msg) = stream
+        .try_next()
+        .await
+        .map_err(|e| DataplaneError::Other(format!("bridge VLAN link dump: {e}")))?
+    {
+        let rows = extract_bridge_vlan_inventory(&msg);
+        if !rows.0.is_empty() || !rows.1.is_empty() {
+            inventory.insert(msg.header.index, rows);
+        }
+    }
+    Ok(inventory)
+}
+
 /// One enslaved link from the dump's first pass — the raw material
 /// for [`index_bridge_ports`].
 struct EnslavedLink {
@@ -209,6 +264,8 @@ struct EnslavedLink {
     is_vxlan: bool,
     name: Option<String>,
     brport_state: Option<u8>,
+    vlans: Vec<KernelBridgeVlanInfo>,
+    vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
 }
 
 /// Build `bridge_port_to_vni` + `bridge_ports_by_name` from the
@@ -232,12 +289,23 @@ fn index_bridge_ports(
     let mut bridge_ports_by_name: HashMap<String, crate::snapshot::KernelBridgePortInfo> =
         HashMap::new();
     for port in all_enslaved {
-        if port.is_vxlan {
-            continue;
-        }
         let Some(bridge_name) = bridge_ifindex_to_name.get(&port.master) else {
             continue;
         };
+        if (!port.vlans.is_empty() || !port.vlan_tunnels.is_empty())
+            && let Some(bridge) = bridges.get_mut(bridge_name)
+        {
+            bridge.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+                ifindex: port.ifindex,
+                name: port.name.clone(),
+                is_vxlan: port.is_vxlan,
+                vlans: port.vlans.clone(),
+                vlan_tunnels: port.vlan_tunnels.clone(),
+            });
+        }
+        if port.is_vxlan {
+            continue;
+        }
         if let Some(name) = port.name {
             bridge_ports_by_name.insert(
                 name,
@@ -261,6 +329,9 @@ fn index_bridge_ports(
     for bridge in bridges.values_mut() {
         bridge.ce_port_ifindexes.sort_unstable();
         bridge.ce_port_ifindexes.dedup();
+        bridge
+            .port_vlan_inventory
+            .sort_by(|a, b| (a.ifindex, &a.name).cmp(&(b.ifindex, &b.name)));
     }
     (bridge_port_to_vni, bridge_ports_by_name)
 }
@@ -311,6 +382,77 @@ fn extract_bridge_port_state(msg: &LinkMessage) -> Option<u8> {
         }
     }
     None
+}
+
+fn extract_bridge_vlan_inventory(
+    msg: &LinkMessage,
+) -> (Vec<KernelBridgeVlanInfo>, Vec<KernelBridgeVlanTunnelInfo>) {
+    let mut vlans = Vec::new();
+    let mut vlan_tunnels = Vec::new();
+    for attr in &msg.attributes {
+        if let LinkAttribute::AfSpecBridge(items) = attr {
+            for item in items {
+                match item {
+                    AfSpecBridge::VlanInfo(info) => {
+                        vlans.push(kernel_bridge_vlan_info(*info));
+                    }
+                    AfSpecBridge::VlanTunnelInfo(items) => {
+                        vlan_tunnels.push(kernel_bridge_vlan_tunnel_info(items));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    vlans.sort_by_key(|v| {
+        (
+            v.vid,
+            v.flags.range_begin,
+            v.flags.range_end,
+            v.flags.pvid,
+            v.flags.untagged,
+        )
+    });
+    vlan_tunnels.sort_by_key(|v| (v.vid, v.tunnel_id));
+    (vlans, vlan_tunnels)
+}
+
+fn kernel_bridge_vlan_info(info: BridgeVlanInfo) -> KernelBridgeVlanInfo {
+    KernelBridgeVlanInfo {
+        vid: info.vid,
+        flags: kernel_bridge_vlan_flags(info.flags),
+    }
+}
+
+fn kernel_bridge_vlan_tunnel_info(items: &[BridgeVlanTunnelInfo]) -> KernelBridgeVlanTunnelInfo {
+    let mut tunnel_id = None;
+    let mut vid = None;
+    let mut flags = KernelBridgeVlanFlags::default();
+    for item in items {
+        match item {
+            BridgeVlanTunnelInfo::Id(id) => tunnel_id = Some(*id),
+            BridgeVlanTunnelInfo::Vid(v) => vid = Some(*v),
+            BridgeVlanTunnelInfo::Flags(f) => flags = kernel_bridge_vlan_flags(*f),
+            _ => {}
+        }
+    }
+    KernelBridgeVlanTunnelInfo {
+        tunnel_id,
+        vid,
+        flags,
+    }
+}
+
+fn kernel_bridge_vlan_flags(flags: BridgeVlanInfoFlags) -> KernelBridgeVlanFlags {
+    KernelBridgeVlanFlags {
+        controller: flags.contains(BridgeVlanInfoFlags::Controller),
+        pvid: flags.contains(BridgeVlanInfoFlags::Pvid),
+        untagged: flags.contains(BridgeVlanInfoFlags::Untagged),
+        range_begin: flags.contains(BridgeVlanInfoFlags::RangeBegin),
+        range_end: flags.contains(BridgeVlanInfoFlags::RangeEnd),
+        bridge_entry: flags.contains(BridgeVlanInfoFlags::Brentry),
+        only_options: flags.contains(BridgeVlanInfoFlags::OnlyOpts),
+    }
 }
 
 fn link_kind_and_name(msg: &LinkMessage) -> (Option<InfoKind>, Option<String>) {
@@ -400,7 +542,10 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::snapshot::KernelVxlanInfo;
     use netlink_packet_route::link::LinkMessage;
 
     fn synthesize_link_msg(addr: Vec<u8>) -> LinkMessage {
@@ -461,5 +606,112 @@ mod tests {
     fn extract_bridge_port_state_none_without_port_data() {
         let msg = LinkMessage::default();
         assert!(extract_bridge_port_state(&msg).is_none());
+    }
+
+    #[test]
+    fn extract_bridge_vlan_inventory_reads_vlan_and_tunnel_rows() {
+        let mut msg = LinkMessage::default();
+        msg.attributes.push(LinkAttribute::AfSpecBridge(vec![
+            AfSpecBridge::VlanInfo(BridgeVlanInfo {
+                flags: BridgeVlanInfoFlags::Pvid | BridgeVlanInfoFlags::Untagged,
+                vid: 100,
+            }),
+            AfSpecBridge::VlanTunnelInfo(vec![
+                BridgeVlanTunnelInfo::Id(5000),
+                BridgeVlanTunnelInfo::Vid(100),
+                BridgeVlanTunnelInfo::Flags(BridgeVlanInfoFlags::Untagged),
+            ]),
+        ]));
+
+        let (vlans, tunnels) = extract_bridge_vlan_inventory(&msg);
+
+        assert_eq!(vlans.len(), 1);
+        assert_eq!(vlans[0].vid, 100);
+        assert!(vlans[0].flags.pvid);
+        assert!(vlans[0].flags.untagged);
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].tunnel_id, Some(5000));
+        assert_eq!(tunnels[0].vid, Some(100));
+        assert!(tunnels[0].flags.untagged);
+    }
+
+    #[test]
+    fn index_bridge_ports_keeps_vlan_inventory_read_only() {
+        let mut bridges = HashMap::new();
+        bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vxlan_attach_count: 1,
+                vxlan: Some(KernelVxlanInfo {
+                    ifindex: 20,
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    learning_disabled: Some(true),
+                }),
+                ..BridgeLink::default()
+            },
+        );
+        let mut bridge_ifindex_to_name = HashMap::new();
+        bridge_ifindex_to_name.insert(10, "br100".to_string());
+
+        let (bridge_port_to_vni, bridge_ports_by_name) = index_bridge_ports(
+            vec![
+                EnslavedLink {
+                    ifindex: 20,
+                    master: 10,
+                    is_vxlan: true,
+                    name: Some("vxlan100".to_string()),
+                    brport_state: None,
+                    vlans: vec![KernelBridgeVlanInfo {
+                        vid: 100,
+                        flags: KernelBridgeVlanFlags {
+                            untagged: true,
+                            ..KernelBridgeVlanFlags::default()
+                        },
+                    }],
+                    vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                        tunnel_id: Some(5000),
+                        vid: Some(100),
+                        flags: KernelBridgeVlanFlags::default(),
+                    }],
+                },
+                EnslavedLink {
+                    ifindex: 30,
+                    master: 10,
+                    is_vxlan: false,
+                    name: Some("swp1".to_string()),
+                    brport_state: Some(3),
+                    vlans: vec![KernelBridgeVlanInfo {
+                        vid: 100,
+                        flags: KernelBridgeVlanFlags {
+                            pvid: true,
+                            untagged: true,
+                            ..KernelBridgeVlanFlags::default()
+                        },
+                    }],
+                    vlan_tunnels: Vec::new(),
+                },
+            ],
+            &bridge_ifindex_to_name,
+            &mut bridges,
+        );
+
+        assert_eq!(bridge_port_to_vni.get(&30), Some(&100));
+        assert!(!bridge_port_to_vni.contains_key(&20));
+        assert!(bridge_ports_by_name.contains_key("swp1"));
+        assert!(!bridge_ports_by_name.contains_key("vxlan100"));
+        let inventory = &bridges["br100"].port_vlan_inventory;
+        assert_eq!(inventory.len(), 2);
+        assert!(
+            inventory
+                .iter()
+                .any(|row| row.is_vxlan && row.ifindex == 20)
+        );
+        assert!(
+            inventory
+                .iter()
+                .any(|row| !row.is_vxlan && row.ifindex == 30)
+        );
     }
 }

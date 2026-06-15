@@ -2941,6 +2941,7 @@ mod tests {
                     learning_disabled: Some(true),
                 }),
                 ce_port_ifindexes: vec![10],
+                ..KernelLinkInfo::default()
             },
         );
         dp_handle.set_links(links);

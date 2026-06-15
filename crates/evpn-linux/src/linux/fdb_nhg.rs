@@ -240,6 +240,7 @@ mod tests {
             }),
             ce_port_ifindexes: vec![],
             vxlan_attach_count: 1,
+            ..BridgeLink::default()
         };
         cache.bridges.insert("br100".into(), bridge);
         cache.vxlan_ifindex_to_vni.insert(11, vni);
