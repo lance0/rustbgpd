@@ -3,6 +3,7 @@ use super::{
     RibUpdate, RouteRefreshMessage, SessionNotificationDirection, SessionState, cease_subcode,
     info,
 };
+use crate::handle::PeerCommandError;
 
 impl PeerSession {
     /// Map external commands to FSM events.
@@ -70,7 +71,7 @@ impl PeerSession {
             }
             PeerCommand::SendRouteRefresh { afi, safi, reply } => {
                 if self.fsm.state() != SessionState::Established {
-                    let _ = reply.send(Err("session not Established".into()));
+                    let _ = reply.send(Err(PeerCommandError::NotEstablished));
                     return ControlFlow::Continue(());
                 }
                 if !self
@@ -78,16 +79,16 @@ impl PeerSession {
                     .as_ref()
                     .is_some_and(|n| n.peer_route_refresh)
                 {
-                    let _ = reply.send(Err("peer lacks Route Refresh capability".into()));
+                    let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                     return ControlFlow::Continue(());
                 }
                 if !self.negotiated_families.contains(&(afi, safi)) {
-                    let _ = reply.send(Err(format!("{afi:?}/{safi:?} not negotiated")));
+                    let _ = reply.send(Err(PeerCommandError::FamilyNotNegotiated { afi, safi }));
                     return ControlFlow::Continue(());
                 }
                 let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
                 if let Err(e) = self.enqueue_priority(&msg) {
-                    let _ = reply.send(Err(format!("send failed: {e}")));
+                    let _ = reply.send(Err(PeerCommandError::SendFailed(e.to_string())));
                 } else {
                     info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
                     self.metrics

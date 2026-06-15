@@ -4324,7 +4324,7 @@ fn closed_peer_handle() -> PeerHandle {
 /// primitive's partial-mutation path: the peer's import bookkeeping can advance
 /// before export fails, and rollback must restore the same peer too.
 fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let export_failed = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(async move {
@@ -4362,7 +4362,9 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                     if export_failed.swap(true, Ordering::SeqCst) {
                         let _ = reply.send(Ok(()));
                     } else {
-                        let _ = reply.send(Err("export apply failed once".to_string()));
+                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                            "export apply failed once".to_string(),
+                        )));
                     }
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
@@ -4381,7 +4383,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
 /// returns "peer lacks Route Refresh capability"). Used to verify a live-impact
 /// apply rejects an Established non-RR peer cleanly.
 fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
         while let Some(cmd) = session_rx.recv().await {
@@ -4415,7 +4417,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
-                    let _ = reply.send(Err("peer lacks Route Refresh capability".to_string()));
+                    let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
                     break;
@@ -4434,7 +4436,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
 /// `forward_completed = true`), but the refresh issued while rolling back fails,
 /// exercising `RefreshFailureHandling::BestEffortRearm`.
 fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
-    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
@@ -4474,7 +4476,9 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                     if refresh_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         let _ = reply.send(Ok(()));
                     } else {
-                        let _ = reply.send(Err("transient route refresh failure".to_string()));
+                        let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                            "transient route refresh failure".to_string(),
+                        )));
                     }
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
