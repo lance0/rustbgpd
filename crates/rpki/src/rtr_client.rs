@@ -14,7 +14,7 @@ use tokio::time::Instant as TokioInstant;
 use tracing::{debug, info, warn};
 
 use crate::aspa::AspaRecord;
-use crate::rtr_codec::{RtrDecodeError, RtrPdu};
+use crate::rtr_codec::{RtrDecodeError, RtrEncodeError, RtrPdu};
 use crate::vrp::VrpEntry;
 
 /// Maximum read buffer size (256 KiB).
@@ -255,7 +255,7 @@ impl RtrClient {
         let query_pdu = self.build_query_pdu(query);
         let is_reset = matches!(query_pdu, RtrPdu::ResetQuery);
         let mut send_buf = Vec::new();
-        query_pdu.encode_with_version(&mut send_buf, self.negotiated_version);
+        query_pdu.encode_with_version(&mut send_buf, self.negotiated_version)?;
         stream.write_all(&send_buf).await.map_err(RtrError::Io)?;
         Ok(is_reset)
     }
@@ -622,6 +622,9 @@ pub enum RtrError {
     /// RTR PDU decoding failure.
     #[error("RTR decode error: {0}")]
     Decode(#[from] RtrDecodeError),
+    /// RTR PDU encoding failure.
+    #[error("RTR encode error: {0}")]
+    Encode(#[from] RtrEncodeError),
     /// The remote end closed the connection.
     #[error("connection closed")]
     ConnectionClosed,
@@ -694,7 +697,7 @@ mod tests {
 
     async fn write_pdu(stream: &mut TcpStream, pdu: RtrPdu) {
         let mut buf = Vec::new();
-        pdu.encode(&mut buf);
+        pdu.encode(&mut buf).unwrap();
         stream.write_all(&buf).await.unwrap();
     }
 

@@ -163,6 +163,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RTR encode length conversions are now checked, with typed errors.** The RTR
+  encoder now returns `RtrEncodeError` for variable-length ASPA and
+  Error Report PDUs whose computed length would overflow RTR's `u32`
+  length fields, and the RTR client propagates that as a typed
+  `RtrError`. Valid PDU bytes are unchanged.
 - **EVPN hot-apply documentation drift.** `KNOWN_ISSUES.md`,
   `docs/CONFIGURATION.md`, and `docs/OPERATIONS.md` now describe the
   current ADR-0063 boundary: SIGHUP and `EvpnService.ApplyEvpnRuntime`
