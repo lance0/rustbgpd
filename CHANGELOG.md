@@ -99,6 +99,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   boundary now returns structured errors for route-refresh, live policy, and
   graceful-shutdown ACK failures while preserving the existing operator-facing
   error text at peer-manager/API boundaries.
+- **Clippy escape-hatch reasons are now ratcheted for the RIB crate.**
+  CI runs `scripts/check-clippy-reasons.py`, which requires every
+  `#[allow(clippy::...)]` / `#[expect(clippy::...)]` in `crates/rib/src` to
+  carry an explicit `reason = "..."`. Existing RIB suppressions are backfilled;
+  the script is intentionally path-scoped so future PRs can expand coverage one
+  crate or file group at a time without churning the whole workspace.
 - **Shared EVPN multi-homing interop helpers.** The M66 and M67
   rustbgpd-on-both-sides scripts now use common `test-lib.sh`
   helpers for rustbgpctl wrappers, EVPN route polling, Prometheus

@@ -30,6 +30,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
+      - run: python3 scripts/check-clippy-reasons.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps

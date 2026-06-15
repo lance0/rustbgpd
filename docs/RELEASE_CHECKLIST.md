@@ -11,6 +11,7 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 `.github/workflows/interop.yml`):
 
 - [ ] `cargo fmt --check`
+- [ ] `python3 scripts/check-clippy-reasons.py`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `cargo doc --workspace --lib --no-deps` (warning denial comes from

@@ -27,8 +27,15 @@ cargo test --workspace             # All tests
 
 All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo fmt --check`
+- `python3 scripts/check-clippy-reasons.py`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
+
+The clippy-reason ratchet currently covers `crates/rib/src`. Any
+`#[allow(clippy::...)]` or `#[expect(clippy::...)]` in a ratcheted path must
+include `reason = "..."` explaining why the escape hatch is intentional.
+When another crate is backfilled, add it to `DEFAULT_PATHS` in
+`scripts/check-clippy-reasons.py`.
 
 ### Pre-commit hooks
 
