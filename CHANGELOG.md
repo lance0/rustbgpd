@@ -160,7 +160,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **RTR encode length conversions are checked typed errors.** The RTR
+- **RTR encode length conversions are now checked, with typed errors.** The RTR
   encoder now returns `RtrEncodeError` for variable-length ASPA and
   Error Report PDUs whose computed length would overflow RTR's `u32`
   length fields, and the RTR client propagates that as a typed

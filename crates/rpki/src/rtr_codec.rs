@@ -128,7 +128,8 @@ pub enum RtrEncodeError {
     LengthOverflow {
         /// Human-readable field name.
         field: &'static str,
-        /// Attempted length in bytes.
+        /// Attempted length in bytes, or `usize::MAX` if the length
+        /// computation itself overflowed `usize`.
         len: usize,
     },
 }
