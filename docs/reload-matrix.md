@@ -230,8 +230,9 @@ SIGHUP reuses the ADR-0063 EVPN runtime coordinator for the same supported
 live shapes as `EvpnService.ApplyEvpnRuntime`: single L2VNI/IP-VRF/ES
 add/delete/redefine within the documented identity bounds, atomic tenant
 teardown, `ip_vrf` relink, additive build-up, and standalone L2VNI swaps that
-only combine L2VNI adds with standalone L2VNI deletes. The runtime snapshot
-advances only after the coordinator and daemon actor converger accept the
+only combine L2VNI adds with standalone L2VNI deletes, plus L2VNI-only batch
+redefines that do not relink IP-VRF membership. The runtime snapshot advances
+only after the coordinator and daemon actor converger accept the
 candidate. Unsupported shapes, missing EVPN actors, or actor convergence
 failure are pinned back to the committed runtime model and logged at `ERROR`,
 so repeated SIGHUPs keep surfacing the drift. Static `rustbgpd --diff` is
@@ -242,7 +243,7 @@ or a later convergence failure; those remain runtime SIGHUP outcomes.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps; unsupported mixed edits, missing actors, or convergence failure pin/log. |
+| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; unsupported mixed edits, missing actors, or convergence failure pin/log. |
 | `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply; L3VNI/device/table identity changes stay restart-required. |
 | `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge. |
 
