@@ -973,9 +973,9 @@ branch is between features.
   outside `#[cfg(test)]` measure at ~5 sites after the v0.30 quality scan
   (mostly startup metric-registration invariants, poisoned-lock guards, and a
   few defensive parses of already-validated strings). The practical prefix-map
-  conversion, BFD socket-option setup, and BFD timer-pop sites have been cleaned
-  up; keep this open as a forcing function when the remaining invariants come up
-  for refactor.
+  conversion, BFD socket-option setup, BFD timer-pop sites, and raw EVPN
+  nexthop netlink encode length conversions have been cleaned up; keep this
+  open as a forcing function when the remaining invariants come up for refactor.
 - [x] **`panic!` → typed-error sweep on the one production site.**
   `crates/bfd/src/discriminator.rs` now returns a typed discriminator-exhaustion
   error instead of panicking. The daemon logs and refuses to install the new BFD
