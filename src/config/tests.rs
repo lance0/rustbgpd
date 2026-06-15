@@ -5792,6 +5792,129 @@ table_id = 5000
 }
 
 #[test]
+fn evpn_instance_multi_redefine_marks_reload_applied() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:111"
+route_targets = ["65000:111"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:222"
+route_targets = ["65000:222"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.evpn_instances_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["evpn_runtime_change_class"], "reload_applied");
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
+}
+
+#[test]
+fn evpn_instance_multi_redefine_relink_stays_restart_required() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "10.0.0.100:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:111"
+route_targets = ["65000:111"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:222"
+route_targets = ["65000:222"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "10.0.0.100:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    ))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.evpn_instances_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::RestartRequired
+    );
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["evpn_runtime_change_class"], "restart_required");
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
+}
+
+#[test]
 fn evpn_instance_mixed_redefine_relink_stays_restart_required() {
     let old = parse(&evpn_toml_with(
         r#"
