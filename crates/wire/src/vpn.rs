@@ -425,7 +425,22 @@ fn decode_one_vpn_nlri(
     let mut rd = [0u8; ROUTE_DISTINGUISHER_LEN];
     rd.copy_from_slice(&value[rd_offset..rd_end]);
 
-    let prefix_len = total_len_bits - label_bits - ROUTE_DISTINGUISHER_BITS;
+    // Reserve the label-stack and RD bits with checked subtraction: a
+    // multi-label stack can consume enough bits that `total_len_bits` no longer
+    // covers the RD, which would underflow this u8 and panic in debug builds
+    // (violating the crate's no-panic-on-malformed-input invariant).
+    let Some(prefix_len) = total_len_bits
+        .checked_sub(label_bits)
+        .and_then(|rem| rem.checked_sub(ROUTE_DISTINGUISHER_BITS))
+    else {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} NLRI length {total_len_bits} bits cannot hold the {label_bits}-bit label stack plus Route Distinguisher"
+            ),
+            field_start,
+            1 + value.len(),
+        );
+    };
     if prefix_len > family.max_prefix_len() {
         return invalid_vpn_nlri(
             format!(
@@ -609,7 +624,13 @@ fn total_vpn_nlri_bits(label_count: usize, prefix_len: u8) -> u16 {
     let label_bits = u16::try_from(label_count)
         .unwrap_or(u16::MAX)
         .saturating_mul(u16::from(MPLS_LABEL_ENTRY_BITS));
-    label_bits + u16::from(ROUTE_DISTINGUISHER_BITS) + u16::from(prefix_len)
+    // Saturate the final adds too: an extreme label_count saturates label_bits
+    // to u16::MAX, and a plain `+` would then overflow and panic in debug.
+    // Callers reject any total > u8::MAX, so a saturated value is rejected
+    // cleanly downstream.
+    label_bits
+        .saturating_add(u16::from(ROUTE_DISTINGUISHER_BITS))
+        .saturating_add(u16::from(prefix_len))
 }
 
 fn mask_v4(addr: Ipv4Addr, len: u8) -> u32 {
@@ -754,6 +775,19 @@ mod tests {
     #[test]
     fn decode_rejects_missing_bottom_of_stack() {
         let mut buf = vec![24 + 64, 0, 0x0C, 0x80];
+        buf.extend_from_slice(&rd().0);
+        let err = decode_vpnv4_nlri(&buf).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    #[test]
+    fn decode_rejects_label_stack_consuming_rd_bits_without_underflow() {
+        // total_len_bits = 105 with a two-label stack (48 label bits) leaves
+        // only 57 bits — fewer than the 64 Route Distinguisher bits — so the
+        // prefix-length computation would underflow u8 and panic in debug.
+        // The decoder must reject cleanly instead. Bytes: len=105, label1
+        // (no BoS), label2 (BoS set), then the 8-byte RD.
+        let mut buf = vec![105u8, 0, 0, 0, 0, 0, 1];
         buf.extend_from_slice(&rd().0);
         let err = decode_vpnv4_nlri(&buf).unwrap_err();
         assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));

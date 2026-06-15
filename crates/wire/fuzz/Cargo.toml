@@ -50,4 +50,10 @@ path = "fuzz_targets/parse_rd.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_vpn"
+path = "fuzz_targets/decode_vpn.rs"
+test = false
+doc = false
+
 [workspace]
