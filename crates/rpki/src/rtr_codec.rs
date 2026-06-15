@@ -153,7 +153,10 @@ impl RtrPdu {
     ///
     /// Returns `Incomplete` if more bytes are needed, or a specific error
     /// for malformed PDUs.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "RTR PDU parser is an exhaustive byte-level dispatch over one wire frame"
+    )]
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), RtrDecodeError> {
         if buf.len() < 8 {
             return Err(RtrDecodeError::Incomplete);
@@ -350,7 +353,10 @@ impl RtrPdu {
     }
 
     /// Encode this PDU with an explicit protocol version byte.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "RTR PDU encoder mirrors the exhaustive parser and fixed wire layouts"
+    )]
     pub fn encode_with_version(&self, buf: &mut Vec<u8>, version: u8) {
         match self {
             RtrPdu::SerialNotify { session_id, serial } => {
@@ -445,7 +451,10 @@ impl RtrPdu {
                 // ASPA PDU per draft-ietf-sidrops-8210bis:
                 //   byte 2 = flags, byte 3 = zero, no provider_count field
                 //   length = 12 + 4 * num_providers
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RTR length field is u32; constructed ASPA PDUs are bounded by memory"
+                )]
                 let total_len = (12 + provider_asns.len() * 4) as u32;
                 buf.push(version);
                 buf.push(PDU_ASPA);
@@ -459,17 +468,26 @@ impl RtrPdu {
             }
             RtrPdu::ErrorReport { code, pdu, text } => {
                 let text_bytes = text.as_bytes();
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RTR length field is u32; oversized error PDUs are outside the infallible encode API"
+                )]
                 let total_len = (16 + pdu.len() + text_bytes.len()) as u32;
                 buf.push(version);
                 buf.push(PDU_ERROR_REPORT);
                 buf.extend_from_slice(&code.to_be_bytes());
                 buf.extend_from_slice(&total_len.to_be_bytes());
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RTR encapsulated-PDU length field is u32"
+                )]
                 let encap_len = pdu.len() as u32;
                 buf.extend_from_slice(&encap_len.to_be_bytes());
                 buf.extend_from_slice(pdu);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RTR error-text length field is u32"
+                )]
                 let text_len = text_bytes.len() as u32;
                 buf.extend_from_slice(&text_len.to_be_bytes());
                 buf.extend_from_slice(text_bytes);

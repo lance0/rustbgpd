@@ -99,12 +99,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   boundary now returns structured errors for route-refresh, live policy, and
   graceful-shutdown ACK failures while preserving the existing operator-facing
   error text at peer-manager/API boundaries.
-- **Clippy escape-hatch reasons are now ratcheted for the RIB crate.**
+- **Clippy escape-hatch reasons are now ratcheted across core protocol crates.**
   CI runs `scripts/check-clippy-reasons.py`, which requires every
-  `#[allow(clippy::...)]` / `#[expect(clippy::...)]` in `crates/rib/src` to
-  carry an explicit `reason = "..."`. Existing RIB suppressions are backfilled;
-  the script is intentionally path-scoped so future PRs can expand coverage one
-  crate or file group at a time without churning the whole workspace.
+  `#[allow(clippy::...)]` / `#[expect(clippy::...)]` in `crates/rib/src`,
+  `crates/fsm/src`, `crates/policy/src`, `crates/rpki/src`, and
+  `crates/evpn/src` to carry an explicit `reason = "..."`. Existing
+  suppressions in those paths are backfilled; the script is intentionally
+  path-scoped so future PRs can expand coverage one crate or file group at a
+  time without churning the whole workspace.
 - **CLI event JSON streaming now avoids an intermediate owned tree.**
   `rbgp watch events --json` / `rustbgpctl watch events --json` now serialize
   BGP event envelopes and EVPN route payloads through borrowed `Serialize`

@@ -57,7 +57,10 @@ fn ctx<'a>(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper exposes the RouteContext dimensions each case varies"
+)]
 fn evaluate_policy(
     policy: Option<&Policy>,
     prefix: Prefix,
@@ -82,7 +85,10 @@ fn evaluate_policy(
     )
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper exposes the RouteContext dimensions each case varies"
+)]
 fn evaluate_chain(
     chain: Option<&PolicyChain>,
     prefix: Prefix,

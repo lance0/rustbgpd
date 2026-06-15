@@ -216,7 +216,10 @@ impl PeerConfig {
         if self.local_asn > u32::from(u16::MAX) {
             AS_TRANS
         } else {
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "guard above proves local_asn fits the OPEN my_as u16 field"
+            )]
             let v = self.local_asn as u16;
             v
         }
