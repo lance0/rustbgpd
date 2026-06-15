@@ -1817,6 +1817,60 @@ remote_asn = 65004
 peer_group = "edge"
 "#;
 
+#[tokio::test]
+async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let addresses = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+    ];
+    let before: Vec<_> = addresses
+        .iter()
+        .map(|addr| {
+            (
+                *addr,
+                mgr.peers.get(&key(*addr)).expect("managed peer").session_id,
+            )
+        })
+        .collect();
+
+    mgr.apply_peer_group_change(set_edge_hold_time_event(90), addresses.to_vec())
+        .await
+        .unwrap();
+
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("managed peer");
+        assert_eq!(
+            managed.session_id, session_id,
+            "no-op peer-group set must not rebuild {addr}"
+        );
+        assert_eq!(managed.hold_time, Some(90));
+    }
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90),
+        "no-op update must leave current_config unchanged"
+    );
+    assert!(
+        query_policy_event_history(&mgr, None, 8).await.is_empty(),
+        "no-op update must not publish a catalog policy event"
+    );
+}
+
 /// ADR-0081 success path: a targeted `SetPeerGroup` reshapes every static
 /// member through the captured-prior snapshot primitive, advances
 /// `current_config`, and publishes the applied member count.
@@ -1835,18 +1889,26 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
     let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let before: Vec<_> = [a1, a2, a3]
+        .into_iter()
+        .map(|addr| {
+            (
+                addr,
+                mgr.peers.get(&key(addr)).expect("managed peer").session_id,
+            )
+        })
+        .collect();
 
     mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2, a3])
         .await
         .unwrap();
 
-    for addr in [a1, a2, a3] {
-        assert_eq!(
-            mgr.peers
-                .get(&key(addr))
-                .expect("reshaped member")
-                .hold_time,
-            Some(45)
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
+        assert_eq!(managed.hold_time, Some(45));
+        assert_ne!(
+            managed.session_id, session_id,
+            "real peer-group reshape must rebuild {addr}"
         );
     }
     assert_eq!(
