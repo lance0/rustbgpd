@@ -66,6 +66,8 @@ pub mod route_refresh;
 pub mod update;
 /// UPDATE attribute semantic validation (RFC 4271 §6.3).
 pub mod validate;
+/// VPNv4/VPNv6 labeled NLRI codec substrate (RFC 4364 / RFC 4659 / RFC 8277).
+pub mod vpn;
 
 // Re-export primary public API
 pub use capability::{
@@ -81,6 +83,11 @@ pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
 pub use route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
+pub use vpn::{
+    LABELED_UNICAST_SAFI, MPLS_VPN_SAFI, MplsLabelEntry, VPNV4_AFI, VPNV6_AFI, VpnAddressFamily,
+    VpnNlri, VpnPrefix, VpnRouteKey, decode_vpn_nlri, decode_vpnv4_nlri, decode_vpnv6_nlri,
+    encode_vpn_nlri, encode_vpnv4_nlri, encode_vpnv6_nlri,
+};
 
 // ── Routing-domain result enums ──────────────────────────────────────
 //

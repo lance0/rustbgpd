@@ -189,6 +189,14 @@ future storage work, but that codec remains unreachable from MP-BGP dispatch
 until the BGP-LS vertical slice also includes family negotiation, RIB storage,
 policy/export behavior, object caps, API/CLI exposure, docs, and interop.
 
+The VPNv4/VPNv6 wire substrate follows the same rule. The callable codec for
+RFC 8277 label stacks plus RFC 4364 / RFC 4659 RD-prefixed VPN prefixes is
+kept unreachable from peer UPDATE dispatch. It records VPN route identity as
+Route Distinguisher plus family-specific prefix and leaves MPLS labels as route
+data, not route-key identity. Until a full typed family slice lands, rustbgpd
+still does not negotiate, accept, store, reflect, expose, rewrite, allocate, or
+program VPNv4/VPNv6 routes.
+
 ### 4. Preserve opaque data where the standard requires extensibility
 
 Unknown path attributes are already preserved in rustbgpd. The same principle
