@@ -3,10 +3,11 @@
 rustbgpd is **observe-only** for kernel netdev topology. It programs and
 reconciles FDB / L3 FIB state on top of interfaces you provide, but it
 does **not** create or delete the bridge, VXLAN, or VRF netdevs
-(ADR-0063 non-goals; ADR-0054 §4). You provision those with your host's
-network layer (`ip link`, ifupdown2, systemd-networkd, NetworkManager,
-SONiC, a CNI, ansible, …); rustbgpd probes them each reconcile pass and
-reports their state until they match the configured model.
+(ADR-0063 non-goals; ADR-0054 §4; ADR-0088). You provision those with
+your host's network layer (`ip link`, ifupdown2, systemd-networkd,
+NetworkManager, SONiC, a CNI, ansible, …); rustbgpd probes them each
+reconcile pass and reports their state until they match the configured
+model.
 
 Two independent readiness surfaces govern this:
 
@@ -46,9 +47,10 @@ LOCAL_IP=10.0.0.1          # must equal [[evpn_instances]].local_vtep_ip
 BRIDGE=br100               # must equal [[evpn_instances]].bridge
 VXLAN=vxlan100
 
-# Bridge for the VNI. Must NOT be VLAN-aware: the probe rejects
-# vlan_filtering=1. Set it explicitly rather than relying on the
-# kernel default.
+# Bridge for the VNI. Must NOT be VLAN-aware: ADR-0088 keeps
+# vlan_filtering=1 fail-closed until rustbgpd has explicit VLAN /
+# Ethernet-Tag / VNI ownership. Set it explicitly rather than relying on
+# the kernel default.
 ip link add name "${BRIDGE}" type bridge vlan_filtering 0
 ip link set dev "${BRIDGE}" up
 
