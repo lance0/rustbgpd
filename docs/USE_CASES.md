@@ -808,7 +808,8 @@ Be honest about where rustbgpd isn't the right tool:
 	  origination, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
 	  have also shipped. **Still missing for full VTEP parity:**
-	  ESI overlay-index origination / broader recursion-path interop,
+	  ESI overlay-index receive-side protected recursion /
+	  broader recursion-path interop,
 	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
 	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
 	  ESI overlay-index or MPLS/PBB requirements, rustbgpd is a fit today.
