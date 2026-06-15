@@ -1611,7 +1611,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | RPC | Description |
 |-----|-------------|
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
-| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, and `not_ready_reason` when NotReady) |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
@@ -1702,10 +1702,17 @@ rbgp evpn instances --json    # JSON output
 rbgp evpn diagnose            # instance / Type 2 / Type 3 / metric summary
 ```
 
-The human CLI includes `originated-local-macs=N` per instance. JSON and
-gRPC expose the same value as `originated_local_macs_count`; it counts
-MAC-only Type 2 routes currently originated by this daemon for the
-instance and accepted by the RIB.
+The human CLI includes `readiness=ready|not-ready|unbound|unknown` and
+`originated-local-macs=N` per instance; `not-ready` rows include the
+single L2 readiness probe reason. JSON exposes the same fields as
+`readiness`, `originated_local_macs_count`, and `not_ready_reason`;
+gRPC exposes the enum as `readiness_state`. `Unbound` means no
+`bridge` is configured for that L2VNI. `Unknown` means the instance is
+bridge-bound but no dataplane verdict is on file yet, usually cold start
+before the first reconcile report or an RR-only / dataplane-disabled
+deployment. `originated_local_macs_count` counts MAC-only Type 2 routes
+currently originated by this daemon for the instance and accepted by the
+RIB.
 
 ### List EVPN FDB nexthop groups
 

@@ -174,6 +174,8 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     assert_eq!(rows[0]["local_vtep_ip"], "10.0.0.10");
     assert_eq!(optional_json_string(&rows[0], "bridge"), "");
     assert_eq!(rows[0]["advertise_svi_mac"], false);
+    assert_eq!(rows[0]["readiness"], "unbound");
+    assert_eq!(optional_json_string(&rows[0], "not_ready_reason"), "");
 
     assert_eq!(rows[1]["vni"], 200);
     assert_eq!(rows[1]["rd"], "65000:200");
@@ -184,6 +186,11 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     assert_eq!(rows[1]["local_vtep_ip"], "10.0.0.10");
     assert_eq!(optional_json_string(&rows[1], "bridge"), "br200");
     assert_eq!(rows[1]["advertise_svi_mac"], true);
+    assert_eq!(rows[1]["readiness"], "not-ready");
+    assert_eq!(
+        optional_json_string(&rows[1], "not_ready_reason"),
+        "bridge br200 not found"
+    );
 
     let human_output = rustbgpctl(&grpc_addr, &["evpn", "instances"]);
     assert!(
@@ -199,7 +206,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     );
     assert!(
         human.contains(
-            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] bridge=br200 advertise-svi-mac"
+            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] readiness=not-ready bridge=br200 advertise-svi-mac originated-local-macs=0 reason=[bridge br200 not found]"
         ),
         "human output missing full VNI 200 row:\n{human}"
     );

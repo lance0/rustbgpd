@@ -7,11 +7,11 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
-    EthernetSegmentState, EvpnRuntimeLifecycle, EvpnRuntimeMutationState, EvpnRuntimeState,
-    GetEvpnRuntimeRequest, GetIpVrfRequest, IpVrfReadinessState, IpVrfState,
-    ListEthernetSegmentsRequest, ListEthernetSegmentsResponse, ListEvpnInstancesRequest,
-    ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
-    SetEthernetSegmentDrainRequest,
+    EthernetSegmentState, EvpnInstanceReadinessState, EvpnInstanceState, EvpnRuntimeLifecycle,
+    EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest, GetIpVrfRequest,
+    IpVrfReadinessState, IpVrfState, ListEthernetSegmentsRequest, ListEthernetSegmentsResponse,
+    ListEvpnInstancesRequest, ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest,
+    MetricsRequest, SetEthernetSegmentDrainRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -492,7 +492,8 @@ pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError>
 ///
 /// Read-only. Surfaces the daemon's resolved `EvpnInstanceTable` —
 /// the same data the operator put in `[[evpn_instances]]` blocks,
-/// already normalized through RD/RT parsing and uniqueness checks.
+/// already normalized through RD/RT parsing and uniqueness checks,
+/// joined with the latest L2 dataplane readiness report when present.
 pub async fn list_instances(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -502,21 +503,8 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
         .into_inner();
 
     if json {
-        let out: Vec<serde_json::Value> = resp
-            .instances
-            .iter()
-            .map(|i| {
-                serde_json::json!({
-                    "vni": i.vni,
-                    "rd": i.rd,
-                    "route_targets": i.route_targets,
-                    "local_vtep_ip": i.local_vtep_ip,
-                    "bridge": i.bridge,
-                    "advertise_svi_mac": i.advertise_svi_mac,
-                    "originated_local_macs_count": i.originated_local_macs_count,
-                })
-            })
-            .collect();
+        let out: Vec<serde_json::Value> =
+            resp.instances.iter().map(evpn_instance_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if resp.instances.is_empty() {
         println!("No local EVPN instances configured");
@@ -527,6 +515,10 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
                 format!("rd={}", inst.rd),
                 format!("vtep={}", inst.local_vtep_ip),
                 format!("rts=[{}]", inst.route_targets.join(",")),
+                format!(
+                    "readiness={}",
+                    evpn_instance_readiness_label(inst.readiness_state)
+                ),
             ];
             if !inst.bridge.is_empty() {
                 detail.push(format!("bridge={}", inst.bridge));
@@ -538,10 +530,36 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
                 "originated-local-macs={}",
                 inst.originated_local_macs_count
             ));
+            if !inst.not_ready_reason.is_empty() {
+                detail.push(format!("reason=[{}]", inst.not_ready_reason));
+            }
             println!("{}", detail.join(" "));
         }
     }
     Ok(())
+}
+
+fn evpn_instance_readiness_label(state: i32) -> &'static str {
+    match EvpnInstanceReadinessState::try_from(state) {
+        Ok(EvpnInstanceReadinessState::EvpnInstanceReadinessReady) => "ready",
+        Ok(EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady) => "not-ready",
+        Ok(EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound) => "unbound",
+        Ok(EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown) | Err(_) => "unknown",
+    }
+}
+
+fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
+    serde_json::json!({
+        "vni": instance.vni,
+        "rd": instance.rd,
+        "route_targets": instance.route_targets,
+        "local_vtep_ip": instance.local_vtep_ip,
+        "bridge": instance.bridge,
+        "advertise_svi_mac": instance.advertise_svi_mac,
+        "originated_local_macs_count": instance.originated_local_macs_count,
+        "readiness": evpn_instance_readiness_label(instance.readiness_state),
+        "not_ready_reason": instance.not_ready_reason,
+    })
 }
 
 /// List owned ADR-0059 FDB nexthop groups.
@@ -1150,6 +1168,11 @@ mod tests {
         assert!(row100.bridge.is_empty(), "no bridge on minimal instance");
         assert!(!row100.advertise_svi_mac);
         assert_eq!(row100.originated_local_macs_count, 0);
+        assert_eq!(
+            row100.readiness_state,
+            crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnbound as i32
+        );
+        assert!(row100.not_ready_reason.is_empty());
 
         let row200 = &resp.instances[1];
         assert_eq!(row200.vni, 200);
@@ -1157,6 +1180,10 @@ mod tests {
         assert_eq!(row200.bridge, "br200");
         assert!(row200.advertise_svi_mac);
         assert_eq!(row200.originated_local_macs_count, 0);
+        assert_eq!(
+            row200.readiness_state,
+            crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32
+        );
         // RTs preserved in the canonicalized order EvpnInstance::new
         // produces (sorted + deduped).
         assert_eq!(row200.route_targets, vec!["65000:200", "65000:201"]);
@@ -1450,6 +1477,32 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             "unresolved_overlay_index_gateway"
         );
         assert_eq!(value["remote_prefix_drop_counts"][0]["count"], 4);
+    }
+
+    #[test]
+    fn evpn_instance_json_shape_includes_readiness() {
+        let value = super::evpn_instance_to_json(&crate::proto::EvpnInstanceState {
+            vni: 100,
+            rd: "65000:100".to_string(),
+            route_targets: vec!["65000:100".to_string()],
+            local_vtep_ip: "10.0.0.1".to_string(),
+            bridge: "br100".to_string(),
+            advertise_svi_mac: true,
+            originated_local_macs_count: 5,
+            readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady
+                as i32,
+            not_ready_reason: "bridge br100 is VLAN-aware (vlan_filtering=1)".to_string(),
+        });
+
+        assert_eq!(value["vni"], 100);
+        assert_eq!(value["bridge"], "br100");
+        assert_eq!(value["advertise_svi_mac"], true);
+        assert_eq!(value["originated_local_macs_count"], 5);
+        assert_eq!(value["readiness"], "not-ready");
+        assert_eq!(
+            value["not_ready_reason"],
+            "bridge br100 is VLAN-aware (vlan_filtering=1)"
+        );
     }
 
     #[test]

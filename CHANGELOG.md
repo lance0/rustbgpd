@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN L2 readiness API/CLI surface.** `EvpnService.ListEvpnInstances`
+  and `rbgp evpn instances` now join each configured L2VNI with the
+  Linux dataplane reconciler's latest `Ready` / `NotReady` / `Unbound`
+  verdict. Bound instances without a report yet show `Unknown`; unbound
+  instances are visible even before a dataplane report. `NotReady`
+  rows carry the existing probe reason, including the VLAN-aware bridge
+  fail-closed diagnostic. This is visibility only: VLAN-aware bridges
+  remain unsupported for programming.
 - **BGP-LS wire codec substrate.** The wire crate now exposes an
   unreachable RFC 9552 BGP-LS NLRI/TLV codec that preserves unknown NLRI
   types and TLVs opaquely and round-trips BGP-LS VPN route

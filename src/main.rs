@@ -1753,6 +1753,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let (evpn_ip_vrf_status_tx, evpn_ip_vrf_status_rx) =
         tokio::sync::watch::channel(Vec::<rustbgpd_evpn::IpVrfDataplaneStatus>::new());
 
+    // Latest snapshot of `DataplaneReport.instance_status` rows for
+    // the gRPC / CLI `ListEvpnInstances` L2 readiness surface. Empty
+    // means either cold start before the first reconcile report or an
+    // RR-only / dataplane-disabled deployment.
+    let (evpn_instance_status_tx, evpn_instance_status_rx) =
+        tokio::sync::watch::channel(Vec::<rustbgpd_evpn::InstanceDataplaneStatus>::new());
+
     // Latest snapshot of `DataplaneReport.ip_vrf_routes.observations`
     // for the Gate 9 slice 6b L3 originator subscriber and for
     // Prometheus gauge updates. Stays empty on RR-only deployments and
@@ -1825,6 +1832,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         // updates the value in place and wakes any
                         // pending watchers. Safe to call from inside
                         // a tokio task without blocking the worker.
+                        evpn_instance_status_tx.send_replace(report.instance_status);
                         evpn_fdb_nexthops_tx.send_replace(report.fdb_nexthops);
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
                         // Slice 6a: publish per-VRF observed-routes
@@ -2201,6 +2209,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             Arc::new(move |vni| {
                 rustbgpd_evpn::EvpnInstanceId::new(vni).map_or(0, |id| counts.count(id))
             })
+        },
+        evpn_instance_status_snapshot: {
+            let rx = evpn_instance_status_rx.clone();
+            Arc::new(move || rx.borrow().clone())
         },
         evpn_ip_vrf_status_snapshot: {
             // `borrow()` on a watch receiver is lock-free (internal

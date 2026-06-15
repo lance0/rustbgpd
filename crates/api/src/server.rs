@@ -28,8 +28,8 @@ use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{
     BumEnforcementSnapshotFn, DuplicateMacClearFn, EthernetSegmentDrainReasonsFn,
-    EvpnRuntimeApplyFn, EvpnRuntimeModelFn, EvpnService, OriginatedLocalMacCountFn,
-    SameEsiBiasSnapshotFn,
+    EvpnRuntimeApplyFn, EvpnRuntimeModelFn, EvpnService, InstanceStatusSnapshotFn,
+    OriginatedLocalMacCountFn, SameEsiBiasSnapshotFn,
 };
 use crate::global_service::GlobalService;
 use crate::gnmi::g_nmi_server::GNmiServer;
@@ -434,6 +434,11 @@ pub struct ServeConfig {
     /// accepted by the RIB, keyed by VNI.
     pub evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
     /// Live snapshot reader for the most recent
+    /// `DataplaneReport.instance_status` rows. Returns an empty Vec
+    /// before the reconcile actor's first pass or when the dataplane
+    /// actor is absent.
+    pub evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
+    /// Live snapshot reader for the most recent
     /// `DataplaneReport.ip_vrf_status` rows. Returns an empty Vec
     /// when no IP-VRFs are configured or before the reconcile
     /// actor's first pass.
@@ -817,6 +822,7 @@ async fn run_listener(
     let start_time = config.start_time;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
+    let evpn_instance_status_snapshot = config.evpn_instance_status_snapshot;
     let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
@@ -875,6 +881,7 @@ async fn run_listener(
                 start_time,
                 mrt_trigger_tx,
                 evpn_originated_local_mac_count,
+                evpn_instance_status_snapshot,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
@@ -928,6 +935,7 @@ async fn run_listener(
                 start_time,
                 mrt_trigger_tx,
                 evpn_originated_local_mac_count,
+                evpn_instance_status_snapshot,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
@@ -988,6 +996,7 @@ async fn run_tcp_listener(
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
+    evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
@@ -1146,6 +1155,7 @@ async fn run_tcp_listener(
             access_mode,
             evpn_duplicate_mac_clear,
         )
+        .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,
@@ -1206,6 +1216,7 @@ async fn run_uds_listener(
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
+    evpn_instance_status_snapshot: InstanceStatusSnapshotFn,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
@@ -1344,6 +1355,7 @@ async fn run_uds_listener(
             access_mode,
             evpn_duplicate_mac_clear,
         )
+        .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,

@@ -30,8 +30,10 @@ bridge fdb show
 
 Expected signals:
 
-- `rbgp evpn instances` lists each configured VNI and
-  `originated-local-macs=N`.
+- `rbgp evpn instances` lists each configured VNI, its L2 dataplane
+  `readiness=ready|not-ready|unbound|unknown`, and
+  `originated-local-macs=N`. A `not-ready` row includes the readiness
+  probe reason.
 - `rbgp evpn --route-type 3` lists one IMET for each configured
   L2VNI after the daemon starts.
 - `bridge fdb show` contains remote MACs as `extern_learn` rows with a
@@ -113,7 +115,9 @@ Expected signals:
    Gate 7b requires an existing bridge, exactly one VXLAN port under the
    bridge, matching VNI, matching local VTEP IP, VXLAN learning disabled,
    and no VLAN-aware bridge mode. rustbgpd does not create bridge/VXLAN
-   netdevs in this gate. See
+   netdevs in this gate. `rbgp evpn instances` reports the same probe
+   result as `readiness` and, for `not-ready`, the concrete failed
+   predicate. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)
    for exact `ip link` pre-create commands.
 

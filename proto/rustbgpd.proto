@@ -2556,10 +2556,32 @@ enum IpVrfReadinessState {
   IP_VRF_READINESS_NOT_READY = 2;
 }
 
+// Coarse readiness verdict for a local L2 EVPN instance. The daemon
+// derives this from the Linux dataplane reconciler's latest
+// `instance_status` report when one exists. Bound instances with no
+// report yet surface as UNKNOWN; unbound instances are UNBOUND even
+// before the reconciler reports.
+enum EvpnInstanceReadinessState {
+  // No dataplane verdict is on file for this bound instance yet. The
+  // usual cases are cold start before the first reconcile report, or
+  // RR-only / dataplane-disabled deployments where no reconciler is
+  // running. Probe failures report NOT_READY with a reason instead.
+  EVPN_INSTANCE_READINESS_UNKNOWN = 0;
+  // The ADR-0054 L2 bridge/VXLAN readiness predicates hold.
+  EVPN_INSTANCE_READINESS_READY = 1;
+  // At least one L2 readiness predicate failed. See
+  // `not_ready_reason`.
+  EVPN_INSTANCE_READINESS_NOT_READY = 2;
+  // The instance has no bridge binding and is intentionally outside
+  // the local Linux dataplane.
+  EVPN_INSTANCE_READINESS_UNBOUND = 3;
+}
+
 // One installed local EVPN instance. Mirrors the shape of the
 // `[[evpn_instances]]` TOML block but rendered through the same
-// resolution pass that validates uniqueness and parses RD/RT, so a
-// listed instance is always one the daemon would actually act on.
+// resolution pass that validates uniqueness and parses RD/RT, then
+// joined with the latest L2 dataplane readiness report when present.
+// A listed instance is always one the daemon would actually act on.
 message EvpnInstanceState {
   // 24-bit VNI (RFC 8365 §5).
   uint32 vni = 1;
@@ -2581,4 +2603,11 @@ message EvpnInstanceState {
   // Number of MAC-only Type 2 routes currently locally originated by
   // this daemon for the instance and accepted by the RIB.
   uint64 originated_local_macs_count = 7;
+  // Live L2 dataplane readiness from the most recent reconcile pass,
+  // or UNKNOWN when no bound-instance report is available yet.
+  EvpnInstanceReadinessState readiness_state = 8;
+  // Populated when `readiness_state == NOT_READY`. Human-readable
+  // diagnostic from the L2 readiness probe, such as a missing bridge
+  // or unsupported VLAN-aware bridge.
+  string not_ready_reason = 9;
 }
