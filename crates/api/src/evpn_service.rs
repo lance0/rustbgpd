@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstance, EvpnInstanceId,
-    EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState,
-    EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, InstanceDataplaneStatus,
-    InstanceState, IpVrfDataplaneStatus, MacAddress, SameEsiBiasTable,
+    BridgeVlan, BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstance,
+    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
+    EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
+    InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, MacAddress, SameEsiBiasTable,
 };
 use tonic::{Request, Response, Status};
 
@@ -816,6 +816,7 @@ fn evpn_instance_to_proto(
         originated_local_macs_count,
         readiness_state: proto::EvpnInstanceReadinessState::EvpnInstanceReadinessUnknown as i32,
         not_ready_reason: String::new(),
+        bridge_vlan: inst.bridge_vlan.map(BridgeVlan::as_u32),
     };
 
     let Some(row) = status else {
@@ -1070,7 +1071,7 @@ fn format_not_ready_reason(reason: &IpVrfNotReady) -> String {
 mod tests {
     use super::*;
     use proto::evpn_service_server::EvpnService as _;
-    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
+    use rustbgpd_evpn::{BridgeVlan, EvpnInstance, EvpnInstanceId, RouteTarget};
     use rustbgpd_wire::RouteDistinguisher;
     use std::net::IpAddr;
 
@@ -1178,6 +1179,7 @@ mod tests {
         assert_eq!(resp.instances[0].local_vtep_ip, "10.0.0.1");
         assert_eq!(resp.instances[0].route_targets, vec!["65000:100"]);
         assert!(resp.instances[0].bridge.is_empty());
+        assert_eq!(resp.instances[0].bridge_vlan, None);
         assert!(!resp.instances[0].advertise_svi_mac);
         assert_eq!(resp.instances[0].originated_local_macs_count, 0);
         assert_eq!(
@@ -1199,6 +1201,7 @@ mod tests {
             true,
         )
         .unwrap();
+        let inst = inst.with_bridge_vlan(Some(BridgeVlan::new(10).unwrap()));
         table.insert(inst).unwrap();
         let svc = EvpnService::new(Arc::new(table));
 
@@ -1209,6 +1212,7 @@ mod tests {
             .into_inner();
         let row = &resp.instances[0];
         assert_eq!(row.bridge, "br100");
+        assert_eq!(row.bridge_vlan, Some(10));
         assert!(row.advertise_svi_mac);
         assert_eq!(row.route_targets, vec!["65000:100", "65000:200"]);
         assert_eq!(

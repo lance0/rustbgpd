@@ -17,8 +17,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   domain EVPN model, keeps Type 2 / Type 3 / EAD-per-EVI Ethernet Tag ID
   at `0`, adds a local `bridge_vlan` binding for kernel attribution, and
   defers true RFC VLAN-aware bundle / non-zero-Ethernet-Tag service
-  models plus SVD / managed-netdev support to separate gates. This is a
-  decision document only; it adds no runtime feature.
+  models plus SVD / managed-netdev support to separate gates. The ADR is
+  the design gate for the implementation slices below.
+- **EVPN bridge-VLAN schema/status plumbing.** `[[evpn_instances]]` now
+  accepts optional `bridge_vlan` values from `1..=4094` when `bridge` is
+  set, and `EvpnService.ListEvpnInstances` / `rbgp evpn instances` expose
+  the local binding. This is intentionally status plumbing only:
+  `vlan_filtering=1` bridges remain `NotReady`, no VLAN-scoped FDB write
+  path is enabled yet, and EVPN Type 2 / Type 3 / EAD-per-EVI routes still
+  use Ethernet Tag ID `0`.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware bridges stay `NotReady` until rustbgpd has

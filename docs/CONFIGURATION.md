@@ -1948,6 +1948,7 @@ route_targets = ["65000:100"]
 auto_derive_route_target = false        # derive RFC 8365 VXLAN RT from [global].asn + VNI when true
 local_vtep_ip = "10.0.0.1"
 bridge = "br100"                       # Linux bridge name (optional — RR-only deployments omit)
+bridge_vlan = 100                      # local Linux VLAN selector for ADR-0089 VLAN-aware bridge attribution
 advertise_svi_mac = false              # originate Type 2 for the bridge's own MAC (RFC 9135 §6.1)
 sticky_macs = ["aa:bb:cc:dd:ee:01"]    # MACs to originate with RFC 7432 §15.4 sticky bit (ADR-0056)
 ip_vrf = "vrf1"                        # link this L2VNI to a declared [[evpn_ip_vrfs]] entry (Gate 9 / ADR-0058)
@@ -1964,8 +1965,9 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `route_targets`       | string[] | yes*     | `[]`    | One or more EVPN Route Targets in the same encodings. Required unless `auto_derive_route_target = true` |
 | `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and `vni` (`2-octet AS only`) |
 | `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
-| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning`; VLAN-aware bridge support is deferred by ADR-0088 |
-| `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
+| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Until the ADR-0089 readiness/FDB slices land, a `Ready` L2VNI still requires a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
+| `bridge_vlan`         | u32      | no       | --      | Local Linux bridge VLAN selector (`1..=4094`) for ADR-0089 VLAN-aware bridge attribution. Valid only with `bridge`; this is **not** an EVPN Ethernet Tag, and EVPN routes still use Ethernet Tag ID `0` |
+| `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1) when the instance has a Ready bridge report |
 | `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
@@ -1978,7 +1980,13 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 - `bridge` (when set) must reference a Linux bridge created out of
   band; rustbgpd does not create/delete netdevs (ADR-0054 §4 and
   ADR-0088).
-- `advertise_svi_mac = true` requires `bridge` non-empty.
+- `bridge_vlan` (when set) must be in `1..=4094` and requires
+  `bridge`. It is accepted and surfaced in status output today, but
+  VLAN-aware bridges remain `NotReady` until the later ADR-0089
+  readiness/FDB programming slices land.
+- `advertise_svi_mac = true` is inert until the instance has a Ready
+  bridge report with a bridge MAC; configs without `bridge` are accepted
+  but originate nothing.
 - `route_targets` may be omitted or empty only when
   `auto_derive_route_target = true`; otherwise at least one explicit RT is
   required.
@@ -2056,7 +2064,7 @@ kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 **Runtime mutation and reload behavior**: ADR-0063's coordinator
 live-commits supported `[[evpn_instances]]` changes through both
 `EvpnService.ApplyEvpnRuntime` and SIGHUP reload. A redefine, including
-field flips such as `apply_aliasing_ecmp`, re-derives per-VNI dataplane
+field flips such as `bridge_vlan` or `apply_aliasing_ecmp`, re-derives per-VNI dataplane
 state via the `FdbNhg → SingleDst` transition. Supported shapes include
 single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive
 build-up, atomic tenant teardown, `ip_vrf` relink, and L2VNI-only

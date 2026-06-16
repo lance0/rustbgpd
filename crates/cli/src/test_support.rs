@@ -677,6 +677,7 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 route_targets: vec!["65000:100".to_string()],
                 local_vtep_ip: "10.0.0.1".to_string(),
                 bridge: "br100".to_string(),
+                bridge_vlan: Some(10),
                 advertise_svi_mac: false,
                 originated_local_macs_count: 2,
                 readiness_state:

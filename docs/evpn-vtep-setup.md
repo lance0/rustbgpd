@@ -47,10 +47,10 @@ LOCAL_IP=10.0.0.1          # must equal [[evpn_instances]].local_vtep_ip
 BRIDGE=br100               # must equal [[evpn_instances]].bridge
 VXLAN=vxlan100
 
-# Bridge for the VNI. Must NOT be VLAN-aware today: ADR-0088 keeps
-# vlan_filtering=1 fail-closed, and ADR-0089 scopes the future first
-# programming slice to an explicit local bridge-VLAN / VNI binding with
-# EVPN Ethernet Tag ID still 0. Set vlan_filtering explicitly rather
+# Bridge for the VNI. Must NOT be VLAN-aware for Ready status today:
+# ADR-0088 keeps vlan_filtering=1 fail-closed, and ADR-0089 scopes the
+# future programming slice to an explicit local bridge-VLAN / VNI binding
+# with EVPN Ethernet Tag ID still 0. Set vlan_filtering explicitly rather
 # than relying on the kernel default.
 ip link add name "${BRIDGE}" type bridge vlan_filtering 0
 ip link set dev "${BRIDGE}" up
@@ -87,11 +87,12 @@ instance `Ready` only when all hold (otherwise `NotReady{reason}`):
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 
-The Linux inventory also records bridge / port VLAN membership and VLAN
-tunnel mappings read-only for ADR-0088 follow-up work. That does **not**
-change predicate 2: a `vlan_filtering=1` bridge remains `NotReady` until
-rustbgpd has the ADR-0089 local bridge-VLAN / VNI binding and VLAN-scoped
-FDB attribution implemented.
+The config schema accepts an optional `bridge_vlan` for ADR-0089's local
+Linux attribution model, and the API/CLI status surfaces report it. That
+does **not** change predicate 2 yet: a `vlan_filtering=1` bridge remains
+`NotReady` until the ADR-0089 readiness and VLAN-scoped FDB attribution
+slices land. `bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
+EAD-per-EVI routes remain Ethernet Tag ID `0`.
 
 ### MAC+IP origination (ARP/ND suppression)
 

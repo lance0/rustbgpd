@@ -129,6 +129,7 @@ rd = "65000:200"
 route_targets = ["65000:200", "65000:201"]
 local_vtep_ip = "10.0.0.10"
 bridge = "br200"
+bridge_vlan = 20
 advertise_svi_mac = true
 
 [[evpn_instances]]
@@ -173,6 +174,11 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     assert_eq!(rows[0]["route_targets"], serde_json::json!(["65000:100"]));
     assert_eq!(rows[0]["local_vtep_ip"], "10.0.0.10");
     assert_eq!(optional_json_string(&rows[0], "bridge"), "");
+    assert!(
+        rows[0].as_object().unwrap().contains_key("bridge_vlan"),
+        "bridge_vlan must be present even when absent in config"
+    );
+    assert!(rows[0]["bridge_vlan"].is_null());
     assert_eq!(rows[0]["advertise_svi_mac"], false);
     assert_eq!(rows[0]["readiness"], "unbound");
     assert_eq!(optional_json_string(&rows[0], "not_ready_reason"), "");
@@ -185,6 +191,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     );
     assert_eq!(rows[1]["local_vtep_ip"], "10.0.0.10");
     assert_eq!(optional_json_string(&rows[1], "bridge"), "br200");
+    assert_eq!(rows[1]["bridge_vlan"], 20);
     assert_eq!(rows[1]["advertise_svi_mac"], true);
     assert_eq!(rows[1]["readiness"], "not-ready");
     assert_eq!(
@@ -206,7 +213,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     );
     assert!(
         human.contains(
-            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] readiness=not-ready bridge=br200 advertise-svi-mac originated-local-macs=0 reason=[bridge br200 not found]"
+            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] readiness=not-ready bridge=br200 bridge-vlan=20 advertise-svi-mac originated-local-macs=0 reason=[bridge br200 not found]"
         ),
         "human output missing full VNI 200 row:\n{human}"
     );

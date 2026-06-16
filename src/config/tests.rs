@@ -5156,6 +5156,7 @@ rd = "10.0.0.100:200"
 route_targets = ["65000:200", "65000:100"]
 local_vtep_ip = "10.0.0.100"
 bridge = "br200"
+bridge_vlan = 20
 advertise_svi_mac = true
 "#,
     );
@@ -5164,6 +5165,7 @@ advertise_svi_mac = true
     let inst = table.sorted()[0];
     assert_eq!(inst.id.as_u32(), 200);
     assert_eq!(inst.bridge.as_deref(), Some("br200"));
+    assert_eq!(inst.bridge_vlan.unwrap().as_u32(), 20);
     assert!(inst.advertise_svi_mac);
     // RTs are sorted/deduped on construction.
     assert_eq!(inst.route_targets.len(), 2);
@@ -5379,6 +5381,78 @@ bridge = "   "
 }
 
 #[test]
+fn evpn_instance_bridge_vlan_accepts_bounds() {
+    for vlan in [1, 4094] {
+        let toml = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = {vlan}
+rd = "10.0.0.100:{vlan}"
+route_targets = ["65000:{vlan}"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br{vlan}"
+bridge_vlan = {vlan}
+"#
+        ));
+        let config = parse(&toml).unwrap();
+        let table = config.resolve_evpn_instances().unwrap();
+        let inst = table.get(EvpnInstanceId::new(vlan).unwrap()).unwrap();
+        let bridge = format!("br{vlan}");
+        assert_eq!(inst.bridge.as_deref(), Some(bridge.as_str()));
+        assert_eq!(inst.bridge_vlan.unwrap().as_u32(), vlan);
+    }
+}
+
+#[test]
+fn evpn_instance_bridge_vlan_requires_bridge() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge_vlan = 10
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(
+        err.to_string().contains("bridge_vlan requires bridge"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn evpn_instance_bridge_vlan_rejects_out_of_range() {
+    for bad in [0, 4095, 70_000] {
+        let toml = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = {bad}
+"#
+        ));
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+            "expected InvalidEvpnInstance for bridge_vlan={bad}, got {err}"
+        );
+        assert!(
+            err.to_string().contains("bridge_vlan must be in 1..=4094"),
+            "unexpected message for bridge_vlan={bad}: {err}"
+        );
+    }
+}
+
+#[test]
 fn evpn_instance_rejects_duplicate_vni() {
     let toml = evpn_toml_with(
         r#"
@@ -5588,6 +5662,42 @@ local_vtep_ip = "10.0.0.100"
     assert_eq!(json["evpn_runtime_change_class"], "reload_applied");
     assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
     assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
+}
+
+#[test]
+fn evpn_instance_bridge_vlan_redefine_marks_reload_applied() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = 10
+"#,
+    ))
+    .unwrap();
+
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_instances_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]

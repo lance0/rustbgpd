@@ -115,8 +115,11 @@ Expected signals:
    Gate 7b requires an existing bridge, exactly one VXLAN port under the
    bridge, matching VNI, matching local VTEP IP, VXLAN learning disabled,
    and no VLAN-aware bridge mode. rustbgpd does not create bridge/VXLAN
-   netdevs in this gate; ADR-0088 keeps VLAN-aware and managed-netdev
-   behavior fail-closed until explicit ownership semantics exist.
+   netdevs in this gate; ADR-0088 keeps managed-netdev behavior
+   fail-closed until explicit ownership semantics exist. The optional
+   `bridge_vlan` config/status field is local ADR-0089 attribution
+   plumbing only; it does not make a `vlan_filtering=1` bridge Ready until
+   the readiness and VLAN-scoped FDB programming slices land.
    `rbgp evpn instances` reports the same probe result as `readiness`
    and, for `not-ready`, the concrete failed predicate. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)
