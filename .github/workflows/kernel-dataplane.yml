@@ -380,6 +380,24 @@ jobs:
           topology: tests/interop/m69-evpn-preference-df-frr.clab.yml
           script: tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
 
+  m70:
+    name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # Cross-vendor proof for ADR-0089's v1 Linux topology: rustbgpd owns
+      # one vlan_filtering=1 bridge with explicit bridge_vlan bindings, FRR
+      # originates the same MAC from two traditional VNIs, and rustbgpd must
+      # program/remove only the matching VLAN-scoped FDB row.
+      - name: Run M70 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M70
+          topology: tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml
+          script: tests/interop/scripts/test-m70-evpn-vlan-aware-bridge-frr.sh
+
   m65:
     name: M65 — ADR-0083 single-active failover blackout measurement (GoBGP 3.x)
     runs-on: ubuntu-latest

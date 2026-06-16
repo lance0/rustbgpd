@@ -1,0 +1,49 @@
+# Containerlab topology: rustbgpd ADR-0089 VLAN-aware bridge VTEP ↔
+# FRR traditional per-VNI originator (M70).
+#
+# Validates the cross-vendor receipt missing from ADR-0089 step 6:
+# rustbgpd owns one vlan_filtering=1 bridge with VLAN10/VNI100 and
+# VLAN20/VNI200 bindings, FRR originates the same MAC from two
+# traditional VNIs, and rustbgpd programs/removes only the matching
+# VLAN-scoped FDB row.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml
+#   bash tests/interop/scripts/test-m70-evpn-vlan-aware-bridge-frr.sh
+#   sudo containerlab destroy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml --cleanup
+
+name: m70-evpn-vlan-aware-bridge-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m70-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m70-vtep.sh:/usr/local/bin/start-rustbgpd-m70-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-m70-vtep.sh 10.0.0.1
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m70-vtep.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-m70-vtep.sh:/usr/local/bin/start-frr-m70-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-m70-vtep.sh 10.0.0.2
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]

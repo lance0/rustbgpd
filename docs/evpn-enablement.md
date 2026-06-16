@@ -59,8 +59,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   gaps; ADR-0089's first VNI-per-broadcast-domain VLAN-aware bridge slice
   now validates an explicit `bridge_vlan` binding, programs VLAN-scoped
   remote-MAC FDB rows, and attributes AF_BRIDGE local-MAC observations by
-  `NDA_VLAN`, while managed netdev creation stays fail-closed until explicit
-  ownership semantics exist.
+  `NDA_VLAN`. M70 adds the FRR cross-vendor receipt for the same-MAC
+  two-VNI remote-FDB path on a rustbgpd-owned `vlan_filtering=1` bridge,
+  while managed netdev creation stays fail-closed until explicit ownership
+  semantics exist.
 
 ## Current Position
 
@@ -825,7 +827,7 @@ Still ahead:
 
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 /
-M60 / M61 / M65 / M66 / M67 / M68 — #130 closed. Non-EVPN kernel
+M60 / M61 / M65 / M66 / M67 / M68 / M69 / M70 — #130 closed. Non-EVPN kernel
 dataplane, BFD, and TCP-AO coverage is catalogued in `INTEROP.md` and
 `kernel-dataplane-runner.md`.)
 
@@ -839,7 +841,7 @@ demand.
 |------|--------|------------------------|------------|
 | RFC 9136 ESI overlay-index Type 5 origination | Shipped (origination) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC while preserving the shipped GW-IP / interface-less modes | Pure origination + daemon tests; inbound non-zero-ESI RT-5s drop fail-closed until protected-recursion interop ships |
 | Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path, especially ESI recursion, without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion EAD / Type 2 state appears |
-| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; ADR-0088 boundary accepted; ADR-0089 v1 VNI-per-broadcast-domain slice landed for traditional multi-VXLAN bridges: `bridge_vlan` schema/status, observed VLAN topology validation, `NDA_VLAN` remote-MAC FDB attribution, and AF_BRIDGE local-MAC VLAN attribution. Ethernet Tag ID stays `0` | Next: MAC+IP VLAN attribution only after kernel evidence, then SVD/shared-VNI or managed-netdev slices only with operator demand | Unit tests plus gated local kernel netns tests; broader M-series smoke only when the next interop-visible slice lands |
+| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; ADR-0088 boundary accepted; ADR-0089 v1 VNI-per-broadcast-domain slice landed for traditional multi-VXLAN bridges: `bridge_vlan` schema/status, observed VLAN topology validation, `NDA_VLAN` remote-MAC FDB attribution, AF_BRIDGE local-MAC VLAN attribution, and M70 FRR interop proving same-MAC two-VNI isolation on a rustbgpd-owned `vlan_filtering=1` bridge. Ethernet Tag ID stays `0` | Next: MAC+IP VLAN attribution only after kernel evidence, then SVD/shared-VNI or managed-netdev slices only with operator demand | Unit tests, gated local kernel netns tests, and hosted M70 FRR containerlab receipt |
 | rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics; boundary accepted in ADR-0088 | Add opt-in ownership for one netdev class at a time, with crash-restart adoption/reap and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
 | BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |
 | RFC 9251 Route Types 6/7/8 | Out-of-current-lane / service-provider multicast | Typed route-family slice for SMET and IGMP/MLD sync routes; no Linux dataplane change until multicast ownership is designed | Standards codec tests plus real-peer reflect/withdraw interop |

@@ -42,6 +42,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one bridge with no cross-VNI bleed; MAC+IP ARP/ND observations on
   VLAN-aware bridges now fail closed and remain a separate follow-up pending
   kernel evidence.
+- **M70 FRR interop proof for ADR-0089 VLAN-aware bridge FDB attribution.**
+  The hosted kernel-dataplane suite now includes a rustbgpd ↔ FRR topology
+  where rustbgpd owns one `vlan_filtering=1` bridge with VLAN10/VNI100 and
+  VLAN20/VNI200 `bridge_vlan` bindings, while FRR uses traditional
+  one-bridge/one-VXLAN-per-VNI topology. FRR originates the same MAC in both
+  VNIs; rustbgpd programs `NDA_VLAN`-scoped rows on `vxlan100 vlan 10` and
+  `vxlan200 vlan 20`, then a VNI100 withdraw removes only the VLAN10 row and
+  leaves VLAN20 intact. The proof keeps Ethernet Tag ID `0` and deliberately
+  does not enable SVD, managed netdev creation, or RFC VLAN-Aware Bundle
+  service.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware programming requires an explicit
