@@ -49,8 +49,8 @@ The hosted `kernel-dataplane` workflow adds the privileged Linux
 coverage that needs containerlab, kernel modules, or real netns route tables:
 **M36**,
 **M37**, **M37+IP**, **M38**, **M39**, **M39b**, **M40**, **M42**, **M46**,
-**M47**, **M48**, **M49**, **M50**, **M51**, **M52**, **M53**, **M58**, **M60**, **M61**, **M62**, **M65**, **M66**, **M67**, **M68**, **M69**, the conditional
-**M70**, the conditional **M43** TCP-AO smoke, and the Docker
+**M47**, **M48**, **M49**, **M50**, **M51**, **M52**, **M53**, **M58**, **M60**, **M61**, **M62**, **M65**, **M66**, **M67**, **M68**, **M69**, **M70**, the conditional
+**M43** TCP-AO smoke, and the Docker
 `fdb_nhg` / `fib_runtime` / `bfd_runtime` / `dataplane_vlan_fdb` netns selectors. Those jobs run on PRs, pushes to `main`, nightly schedule, and
 manual dispatch on GitHub-hosted `ubuntu-latest` runners.
 The current hosted runner advertises `CONFIG_TCP_AO=y`, so M43 runs the

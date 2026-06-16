@@ -48,8 +48,9 @@ rb_has_vlan_master_row() {
     local vxlan=${1:?} mac=${2:?} vlan=${3:?}
     rb_fdb "$vxlan" \
         | grep -iF "$mac" \
-        | grep -qE "vlan[[:space:]]+$vlan\\b.*master|master .*vlan[[:space:]]+$vlan\\b" \
-        && rb_fdb "$vxlan" | grep -iF "$mac" | grep "vlan $vlan" | grep -qE 'extern_learn|offload'
+        | grep -E "vlan[[:space:]]+$vlan\\b" \
+        | grep -E '(^|[[:space:]])master([[:space:]]|$)' \
+        | grep -qE 'extern_learn|offload'
 }
 
 rb_has_vxlan_self_dst_row() {
