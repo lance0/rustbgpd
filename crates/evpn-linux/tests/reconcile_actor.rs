@@ -20,7 +20,7 @@ use rustbgpd_evpn::ip_vrf::{
     project_ip_prefix_routes,
 };
 use rustbgpd_evpn::{
-    BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
+    BridgeVlan, BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
     EthernetSegmentIdentifier, EthernetTagId, EvpnInstance, EvpnInstanceId, EvpnInstanceTable,
     EvpnIpPrefixValue, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RouteDistinguisher, RouteTarget,
@@ -64,6 +64,11 @@ fn instance(v: u32, bridge: Option<&str>, vtep: &str) -> EvpnInstance {
         false,
     )
     .unwrap()
+}
+
+fn instance_with_bridge_vlan(v: u32, bridge: &str, vlan: u16, vtep: &str) -> EvpnInstance {
+    instance(v, Some(bridge), vtep)
+        .with_bridge_vlan(Some(BridgeVlan::new(u32::from(vlan)).unwrap()))
 }
 
 fn one_instance_table(inst: EvpnInstance) -> EvpnInstanceTable {
@@ -2226,6 +2231,51 @@ async fn unmanaged_vni_marker_rows_never_adopted_or_reaped() {
     assert!(
         h.handle.kernel_has_fdb(vni(200), mac(7)),
         "unmanaged-VNI marker row must survive — another controller owns it"
+    );
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn other_vlan_marker_rows_on_managed_vni_never_adopted_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut foreign_vlan_row = extern_learn_row(mac(7), "10.0.0.9");
+    foreign_vlan_row.vlan = Some(20);
+    h.handle.pre_load_fdb(vni(100), foreign_vlan_row);
+
+    let inst = one_instance_table(instance_with_bridge_vlan(100, "br100", 10, "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 0,
+        "marker row on another VLAN is foreign to this bridge_vlan binding"
+    );
+    assert_eq!(counters.single_dst_reaped, 0);
+    assert!(
+        h.handle
+            .kernel_snapshot()
+            .find_fdb_in_vlan(vni(100), mac(7), Some(20))
+            .is_some(),
+        "other-VLAN marker row must survive the adoption/reap pass"
     );
 
     h.shutdown().await;

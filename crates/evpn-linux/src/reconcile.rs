@@ -678,7 +678,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             self.state.fdb_adoption_reap_after =
                 Some(Instant::now() + self.config.fdb_adoption_reap_deferral);
             for ((vni, mac), kernel_entry) in snapshot.iter_fdb() {
-                if intent.instances.get(vni).is_none() {
+                let Some(instance) = intent.instances.get(vni) else {
+                    continue;
+                };
+                let instance_vlan = instance.bridge_vlan.map(rustbgpd_evpn::BridgeVlan::as_u16);
+                if kernel_entry.vlan != instance_vlan {
                     continue;
                 }
                 if kernel_entry.is_extern_learned()
