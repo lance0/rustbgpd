@@ -1022,9 +1022,10 @@ pub struct AsPathPrependConfig {
 ///   must be a unicast address (rejects unspecified / multicast /
 ///   loopback).
 /// - `bridge` — optional Linux bridge name this EVI is bound to.
-///   Reserved for the kernel-reconciliation slice; a bridge name is
-///   accepted today and surfaces in `ListEvpnInstances` output, but
-///   no kernel state is consumed yet.
+///   Kernel reconciliation requires the named bridge to exist.
+/// - `bridge_vlan` — optional local Linux bridge VLAN selector
+///   (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN
+///   Ethernet Tag ID `0`, so this is not a wire-protocol tag.
 /// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
 ///   own MAC address (RFC 9135 §6.1). Off by default. Wired through to
 ///   origination once Type 2 origination lands.
@@ -1054,6 +1055,10 @@ pub struct EvpnInstanceConfig {
     /// doesn't churn between phases.
     #[serde(default)]
     pub bridge: Option<String>,
+    /// Optional local Linux bridge VLAN selector for ADR-0089
+    /// VLAN-aware bridge attribution. This is not an EVPN Ethernet Tag.
+    #[serde(default)]
+    pub bridge_vlan: Option<u32>,
     /// Originate Type 2 routes for the SVI's own MAC address (RFC 9135 §6.1).
     /// Off by default.
     #[serde(default)]

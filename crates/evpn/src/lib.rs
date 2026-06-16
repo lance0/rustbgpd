@@ -34,7 +34,8 @@
 //!   [`RouteTarget::FourOctetAs`]).
 //! - [`EvpnInstance`] — one local EVI's resolved configuration: VNI,
 //!   route distinguisher, route targets, local VTEP source IP,
-//!   optional Linux bridge name, `advertise_svi_mac`, `sticky_macs`.
+//!   optional Linux bridge name / local bridge VLAN,
+//!   `advertise_svi_mac`, `sticky_macs`.
 //! - [`EvpnInstanceTable`] — uniqueness-enforcing collection,
 //!   indexed by VNI, with a parallel RD index that surfaces
 //!   collisions between two instances using the same Route
@@ -127,7 +128,8 @@ pub use duplicate_mac::{
     DuplicateMacDetector, DuplicateMacKey,
 };
 pub use instance::{
-    EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
+    BridgeVlan, BridgeVlanError, EvpnInstance, EvpnInstanceId, EvpnInstanceIdError,
+    EvpnInstanceTable, EvpnInstanceTableError,
 };
 pub use ip_vrf::{
     IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfRouteDump, IpVrfTable, IpVrfTableError,

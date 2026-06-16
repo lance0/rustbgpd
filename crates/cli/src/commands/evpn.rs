@@ -523,6 +523,9 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
             if !inst.bridge.is_empty() {
                 detail.push(format!("bridge={}", inst.bridge));
             }
+            if let Some(bridge_vlan) = inst.bridge_vlan {
+                detail.push(format!("bridge-vlan={bridge_vlan}"));
+            }
             if inst.advertise_svi_mac {
                 detail.push("advertise-svi-mac".to_string());
             }
@@ -555,6 +558,9 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
         "route_targets": instance.route_targets,
         "local_vtep_ip": instance.local_vtep_ip,
         "bridge": instance.bridge,
+        "bridge_vlan": instance
+            .bridge_vlan
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
         "advertise_svi_mac": instance.advertise_svi_mac,
         "originated_local_macs_count": instance.originated_local_macs_count,
         "readiness": evpn_instance_readiness_label(instance.readiness_state),
@@ -1031,7 +1037,7 @@ mod tests {
 
     use rustbgpd_api::EvpnService;
     use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
-    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget};
+    use rustbgpd_evpn::{BridgeVlan, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget};
     use rustbgpd_wire::RouteDistinguisher;
 
     use crate::proto::ListEvpnInstancesRequest;
@@ -1051,7 +1057,8 @@ mod tests {
                 None,
                 false,
             )
-            .unwrap(),
+            .unwrap()
+            .with_bridge_vlan(Some(BridgeVlan::new(20).unwrap())),
         )
         .unwrap();
         t.insert(
@@ -1178,6 +1185,7 @@ mod tests {
         assert_eq!(row200.vni, 200);
         assert_eq!(row200.rd, "65000:200");
         assert_eq!(row200.bridge, "br200");
+        assert_eq!(row200.bridge_vlan, Some(20));
         assert!(row200.advertise_svi_mac);
         assert_eq!(row200.originated_local_macs_count, 0);
         assert_eq!(
@@ -1487,6 +1495,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             route_targets: vec!["65000:100".to_string()],
             local_vtep_ip: "10.0.0.1".to_string(),
             bridge: "br100".to_string(),
+            bridge_vlan: Some(10),
             advertise_svi_mac: true,
             originated_local_macs_count: 5,
             readiness_state: crate::proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady
@@ -1496,6 +1505,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
 
         assert_eq!(value["vni"], 100);
         assert_eq!(value["bridge"], "br100");
+        assert_eq!(value["bridge_vlan"], 10);
         assert_eq!(value["advertise_svi_mac"], true);
         assert_eq!(value["originated_local_macs_count"], 5);
         assert_eq!(value["readiness"], "not-ready");

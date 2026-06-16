@@ -3,7 +3,8 @@
 //! An [`EvpnInstance`] is the daemon's resolved view of one local EVI on
 //! this VTEP. The shape mirrors the durable bits operators set in TOML
 //! — VNI, RD, RTs, local VTEP source IP, optional Linux bridge name,
-//! and the `advertise_svi_mac` flag — and nothing else. Runtime state
+//! optional local bridge VLAN, and the `advertise_svi_mac` flag — and
+//! nothing else. Runtime state
 //! the kernel/RIB will own (learned MACs, sequence numbers, peer
 //! adjacency lists) lives elsewhere.
 //!
@@ -62,6 +63,57 @@ impl std::fmt::Display for EvpnInstanceId {
     }
 }
 
+/// Maximum VLAN ID accepted for ADR-0089 local bridge attribution.
+///
+/// Linux bridge VLAN membership uses the normal VLAN range. `0` stays
+/// available as the proto/default "unset" sentinel and `4095` is reserved.
+pub const MAX_BRIDGE_VLAN: u16 = 4094;
+
+/// Local Linux bridge VLAN selector for an EVPN instance.
+///
+/// This is not an EVPN Ethernet Tag. ADR-0089 v1 keeps Ethernet Tag ID `0`;
+/// the bridge VLAN is only the Linux dataplane attribution key used by later
+/// readiness/FDB/local-MAC slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BridgeVlan(u16);
+
+impl BridgeVlan {
+    /// Validate and construct a bridge VLAN selector.
+    ///
+    /// # Errors
+    /// Returns [`BridgeVlanError`] when `vlan` is outside `1..=4094`.
+    pub fn new(vlan: u32) -> Result<Self, BridgeVlanError> {
+        if vlan == 0 {
+            return Err(BridgeVlanError::Zero);
+        }
+        let Ok(vlan) = u16::try_from(vlan) else {
+            return Err(BridgeVlanError::TooLarge(vlan));
+        };
+        if vlan > MAX_BRIDGE_VLAN {
+            return Err(BridgeVlanError::TooLarge(u32::from(vlan)));
+        }
+        Ok(Self(vlan))
+    }
+
+    /// Return the VLAN ID as a `u16` for Linux/netlink call sites.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    /// Return the VLAN ID as a `u32` for API/proto surfaces.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0 as u32
+    }
+}
+
+impl std::fmt::Display for BridgeVlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Errors produced when constructing an [`EvpnInstanceId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EvpnInstanceIdError {
@@ -70,6 +122,17 @@ pub enum EvpnInstanceIdError {
     Zero,
     /// The VNI exceeds the 24-bit ceiling defined by RFC 8365 §5.
     #[error("VNI {0} exceeds 24-bit maximum {MAX_VNI}")]
+    TooLarge(u32),
+}
+
+/// Errors produced when constructing a [`BridgeVlan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BridgeVlanError {
+    /// VLAN zero is reserved as the absent/default value.
+    #[error("bridge_vlan must be in 1..={MAX_BRIDGE_VLAN} (got 0)")]
+    Zero,
+    /// VLAN ID exceeded [`MAX_BRIDGE_VLAN`].
+    #[error("bridge_vlan must be in 1..={MAX_BRIDGE_VLAN} (got {0})")]
     TooLarge(u32),
 }
 
@@ -99,6 +162,12 @@ pub struct EvpnInstance {
     /// type now lets validation reject duplicate bindings without a
     /// later schema break.
     pub bridge: Option<String>,
+    /// Optional local Linux bridge VLAN selector for ADR-0089 v1
+    /// VLAN-aware bridge attribution.
+    ///
+    /// This is a kernel/dataplane binding only. EVPN Type 2 / Type 3 /
+    /// EAD-per-EVI routes keep Ethernet Tag ID `0`.
+    pub bridge_vlan: Option<BridgeVlan>,
     /// Originate Type 2 routes for the SVI's MAC address (RFC 9135 §6.1).
     /// Wired through to origination only once Type 2 origination
     /// lands; persisted on the domain type so the operator-facing
@@ -160,6 +229,7 @@ impl EvpnInstance {
             route_targets: rts,
             local_vtep_ip,
             bridge,
+            bridge_vlan: None,
             advertise_svi_mac,
             sticky_macs: BTreeSet::new(),
             apply_aliasing_ecmp: true,
@@ -173,6 +243,13 @@ impl EvpnInstance {
     #[must_use]
     pub fn with_sticky_macs(mut self, sticky_macs: BTreeSet<MacAddress>) -> Self {
         self.sticky_macs = sticky_macs;
+        self
+    }
+
+    /// Attach the local Linux bridge VLAN selector parsed from config.
+    #[must_use]
+    pub const fn with_bridge_vlan(mut self, bridge_vlan: Option<BridgeVlan>) -> Self {
+        self.bridge_vlan = bridge_vlan;
         self
     }
 
@@ -218,6 +295,9 @@ impl std::fmt::Display for EvpnInstance {
         f.write_str("]")?;
         if let Some(ref br) = self.bridge {
             write!(f, " bridge={br}")?;
+        }
+        if let Some(vlan) = self.bridge_vlan {
+            write!(f, " bridge-vlan={vlan}")?;
         }
         if self.advertise_svi_mac {
             f.write_str(" advertise-svi-mac")?;
@@ -418,6 +498,31 @@ mod tests {
     }
 
     #[test]
+    fn bridge_vlan_accepts_normal_range() {
+        assert_eq!(BridgeVlan::new(1).unwrap().as_u16(), 1);
+        assert_eq!(
+            BridgeVlan::new(u32::from(MAX_BRIDGE_VLAN))
+                .unwrap()
+                .as_u32(),
+            u32::from(MAX_BRIDGE_VLAN)
+        );
+        assert_eq!(BridgeVlan::new(10).unwrap().to_string(), "10");
+    }
+
+    #[test]
+    fn bridge_vlan_rejects_zero_and_reserved_values() {
+        assert_eq!(BridgeVlan::new(0), Err(BridgeVlanError::Zero));
+        assert_eq!(
+            BridgeVlan::new(u32::from(MAX_BRIDGE_VLAN) + 1),
+            Err(BridgeVlanError::TooLarge(u32::from(MAX_BRIDGE_VLAN) + 1))
+        );
+        assert_eq!(
+            BridgeVlan::new(70_000),
+            Err(BridgeVlanError::TooLarge(70_000))
+        );
+    }
+
+    #[test]
     fn instance_rejects_empty_rt_list() {
         let err = EvpnInstance::new(
             EvpnInstanceId::new(100).unwrap(),
@@ -483,10 +588,11 @@ mod tests {
             Some("br100".into()),
             true,
         )
-        .unwrap();
+        .unwrap()
+        .with_bridge_vlan(Some(BridgeVlan::new(10).unwrap()));
         assert_eq!(
             inst.to_string(),
-            "vni=100 rd=65000:100 vtep=10.0.0.1 rts=[65000:100,65000:200] bridge=br100 advertise-svi-mac"
+            "vni=100 rd=65000:100 vtep=10.0.0.1 rts=[65000:100,65000:200] bridge=br100 bridge-vlan=10 advertise-svi-mac"
         );
     }
 

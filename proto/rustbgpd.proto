@@ -2610,4 +2610,9 @@ message EvpnInstanceState {
   // diagnostic from the L2 readiness probe, such as a missing bridge
   // or unsupported VLAN-aware bridge.
   string not_ready_reason = 9;
+  // Optional local Linux bridge VLAN selector (`1..=4094`) configured
+  // by `[[evpn_instances]].bridge_vlan`. This is a dataplane
+  // attribution key only; EVPN Ethernet Tag ID remains zero in the
+  // ADR-0089 v1 service model.
+  optional uint32 bridge_vlan = 10;
 }

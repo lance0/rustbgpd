@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 
 use rustbgpd_evpn::{
-    DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
+    BridgeVlan, DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
     EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeCandidate, EvpnRuntimeModel, EvpnRuntimePlan,
     IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget,
 };
@@ -4012,6 +4012,18 @@ fn parse_evpn_instance(
             reason: format!("vni {}: bridge name must not be empty", cfg.vni),
         });
     }
+    let bridge_vlan = cfg
+        .bridge_vlan
+        .map(BridgeVlan::new)
+        .transpose()
+        .map_err(|e| ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: {e}", cfg.vni),
+        })?;
+    if bridge_vlan.is_some() && cfg.bridge.is_none() {
+        return Err(ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: bridge_vlan requires bridge", cfg.vni),
+        });
+    }
 
     let mut sticky_macs: BTreeSet<MacAddress> = BTreeSet::new();
     for raw in &cfg.sticky_macs {
@@ -4042,6 +4054,7 @@ fn parse_evpn_instance(
     let duplicate_mac_detection =
         parse_duplicate_mac_detection(cfg.vni, &cfg.duplicate_mac_detection)?;
     Ok(inst
+        .with_bridge_vlan(bridge_vlan)
         .with_sticky_macs(sticky_macs)
         .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp)
         .with_duplicate_mac_detection(duplicate_mac_detection))

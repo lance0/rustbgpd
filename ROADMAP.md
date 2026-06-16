@@ -282,8 +282,11 @@ has it, no broad performance sprints without profile evidence.
   `bridge_vlan` attribution, and EVPN Ethernet Tag ID `0`. **Read-only
   VLAN/topology inventory landed:** `AF_BRIDGE` VLAN membership and tunnel
   mappings are now parsed into the Linux snapshot for diagnostics/future
-  work; programming or creation still stays fail-closed until explicit
-  ownership, rollback, and adoption/reap semantics exist. `RTNLGRP_LINK`
+  work. **Schema/status plumbing landed:** `[[evpn_instances]]` accepts an
+  optional `bridge_vlan` and API/CLI status exposes it, but programming or
+  creation still stays fail-closed until explicit observed-topology
+  validation, VLAN-scoped FDB attribution, ownership, rollback, and
+  adoption/reap semantics exist. `RTNLGRP_LINK`
   eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
