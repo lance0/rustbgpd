@@ -15,10 +15,13 @@
 //! ## VNI resolution on dump
 //!
 //! Bridge FDB messages carry the VXLAN ifindex in `header.ifindex`.
-//! The link-cache's `vxlan_ifindex_to_vni` map turns that back into
-//! an `EvpnInstanceId`; entries whose ifindex isn't indexed (a
-//! non-EVPN VXLAN, or a stale entry on a since-removed port) are
-//! silently dropped from the snapshot.
+//! For traditional VXLAN devices, the link-cache's
+//! `vxlan_ifindex_to_vni` map turns that back into an `EvpnInstanceId`.
+//! Collect-metadata / SVD VXLAN devices can carry many VNIs on one
+//! ifindex, so rows on an observed SVD ifindex must include an explicit
+//! VNI attribute (`NDA_SRC_VNI` or `NDA_VNI`) before they enter the
+//! snapshot. Entries whose ifindex can't be attributed are silently
+//! dropped from the snapshot.
 
 use std::collections::HashMap;
 use std::io;
@@ -62,9 +65,10 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 /// `(EvpnInstanceId, Option<VLAN>, MacAddress)`.
 ///
 /// Each FDB entry's `header.ifindex` points at the **VXLAN port** for
-/// bridge-family neighbours. We map that ifindex back to a VNI via
-/// the link cache's `vxlan_ifindex_to_vni` table; entries on VXLAN
-/// ports outside the EVPN inventory drop out silently.
+/// bridge-family neighbours. We map traditional VXLAN rows via the
+/// link cache's `vxlan_ifindex_to_vni` table. Rows on known
+/// collect-metadata / SVD ports must carry explicit VNI metadata,
+/// because their ifindex no longer identifies a single VNI.
 ///
 /// ## Multi-row merge
 ///
@@ -147,17 +151,16 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     }
     // Bridge-family FDB header.ifindex points at the VXLAN port, not
     // the bridge. (For non-VXLAN bridge ports it's the slave ifindex,
-    // but those aren't EVPN-managed so we drop them via the lookup
-    // miss on `vxlan_ifindex_to_vni` below.)
+    // but those aren't EVPN-managed so we drop them via the
+    // attribution lookup below.)
     let port_ifindex = msg.header.ifindex;
-    let vni_raw = *cache.vxlan_ifindex_to_vni.get(&port_ifindex)?;
-    let vni = EvpnInstanceId::new(vni_raw).ok()?;
 
     let mut mac: Option<MacAddress> = None;
     let mut dst: Option<std::net::IpAddr> = None;
     let mut nh_id: Option<u32> = None;
     let mut protocol: Option<u8> = None;
     let mut vlan: Option<u16> = None;
+    let mut explicit_vni: Option<u32> = None;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -190,10 +193,27 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
             // platform-independent and don't see netlink enums.
             NeighbourAttribute::Protocol(p) => protocol = Some(u8::from(*p)),
             NeighbourAttribute::Vlan(v) => vlan = Some(*v),
+            // SVD / collect-metadata VXLAN rows need an explicit
+            // VNI because the VXLAN ifindex no longer identifies one
+            // VNI. `src_vni` is the bridge FDB spelling for "the VNI
+            // this entry belongs to"; accept `vni` too for kernels /
+            // iproute2 paths that echo the destination-VNI attribute
+            // on dump.
+            NeighbourAttribute::SourceVni(v) | NeighbourAttribute::Vni(v) => {
+                explicit_vni = Some(*v);
+            }
             _ => {}
         }
     }
     let mac = mac?;
+    let vni_raw = if let Some(vni) = cache.vxlan_ifindex_to_vni.get(&port_ifindex) {
+        *vni
+    } else if cache.svd_vxlan_ifindexes.contains(&port_ifindex) {
+        explicit_vni?
+    } else {
+        return None;
+    };
+    let vni = EvpnInstanceId::new(vni_raw).ok()?;
 
     let mut flags = KernelFdbFlags::default();
     let hf = msg.header.flags;
@@ -278,6 +298,7 @@ fn build_remote_fdb_message(
     mac: MacAddress,
     dst: IpAddr,
     vlan: Option<u16>,
+    source_vni: Option<EvpnInstanceId>,
 ) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
@@ -295,6 +316,10 @@ fn build_remote_fdb_message(
         }));
     if let Some(vlan) = vlan {
         msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
+    if let Some(vni) = source_vni {
+        msg.attributes
+            .push(NeighbourAttribute::SourceVni(vni.as_u32()));
     }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
@@ -374,7 +399,7 @@ pub(crate) async fn apply_op(
                 .neighbours()
                 .add_bridge(vxlan_ifindex, &mac.octets())
                 .replace();
-            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst, *vlan);
+            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst, *vlan, None);
             req.execute().await.map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
@@ -747,7 +772,7 @@ mod tests {
     #[test]
     fn build_remote_fdb_message_shape_includes_ownership_stamp() {
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None, None);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -782,8 +807,20 @@ mod tests {
     #[test]
     fn build_remote_fdb_message_carries_vlan_when_scoped() {
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10));
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10), None);
         assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+    }
+
+    #[test]
+    fn build_remote_fdb_message_carries_source_vni_for_svd_shape() {
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10), Some(vni));
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::SourceVni(vni.as_u32()))
+        );
     }
 
     #[test]
@@ -868,19 +905,51 @@ mod tests {
         // Round-trip our own encode shape through the parser, as a
         // future FDB-storing kernel would echo it back.
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None, None);
         let (_, entry) = parse_fdb_entry(&msg, &cache).unwrap();
         assert_eq!(entry.protocol, Some(186));
         assert!(entry.is_extern_learned());
 
         // Current kernels return no protocol attribute at all.
-        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
+        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None, None);
         unstamped
             .attributes
             .retain(|a| !matches!(a, NeighbourAttribute::Protocol(_)));
         let (_, entry) = parse_fdb_entry(&unstamped, &cache).unwrap();
         assert_eq!(entry.protocol, None);
         assert!(entry.is_extern_learned());
+    }
+
+    #[test]
+    fn parse_fdb_entry_uses_source_vni_for_svd_ifindex() {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(11);
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(
+            11,
+            mac,
+            ipa("10.0.0.2"),
+            Some(10),
+            Some(EvpnInstanceId::new(200).unwrap()),
+        );
+        let (key, entry) = parse_fdb_entry(&msg, &cache).unwrap();
+
+        assert_eq!(key.0, EvpnInstanceId::new(200).unwrap());
+        assert_eq!(key.1, Some(10));
+        assert_eq!(entry.vlan, Some(10));
+    }
+
+    #[test]
+    fn parse_fdb_entry_drops_svd_row_without_explicit_vni() {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(11);
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10), None);
+
+        assert!(
+            parse_fdb_entry(&msg, &cache).is_none(),
+            "SVD ifindexes must not be attributed without explicit VNI metadata"
+        );
     }
 
     // ── errno classification ──

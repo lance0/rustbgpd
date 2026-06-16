@@ -27,7 +27,7 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 use crate::error::DataplaneError;
 use crate::snapshot::{
     KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
-    KernelBridgeVlanTunnelInfo, KernelVxlanInfo, vlan_rows_contain,
+    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo, vlan_rows_contain,
 };
 
 /// One bridge link the inventory cared about.
@@ -61,6 +61,10 @@ pub(crate) struct BridgeLink {
     /// VNI matches the instance and then verifies VLAN membership on
     /// that specific port.
     pub vxlan_ports: Vec<KernelVxlanInfo>,
+    /// Collect-metadata / SVD VXLAN members attached to this bridge.
+    /// LAN-64 PR1 observes them and keeps readiness fail-closed; runtime
+    /// FDB programming still uses fixed-VNI [`Self::vxlan_ports`].
+    pub svd_vxlan_ports: Vec<KernelSvdVxlanInfo>,
     /// Number of VXLAN ports attached to this bridge. Legacy
     /// VLAN-unaware readiness still requires exactly one; ADR-0089
     /// VLAN-aware readiness allows multiple VXLAN ports on a bridge
@@ -81,13 +85,28 @@ pub(crate) struct BridgeLink {
 
 /// Per-VXLAN port slice, before being attached to a bridge.
 #[derive(Debug, Clone)]
-struct VxlanPort {
+enum VxlanPort {
+    Fixed(FixedVxlanPort),
+    Svd(SvdVxlanPort),
+}
+
+/// Per fixed-VNI VXLAN port slice, before being attached to a bridge.
+#[derive(Debug, Clone)]
+struct FixedVxlanPort {
     /// Bridge-master ifindex this VXLAN port slaves to (`IFLA_MASTER`
     /// in netlink terms; we read it from the Controller attribute on
     /// the link message). `None` means the VXLAN device is unparented
     /// and unusable for EVPN.
     master: Option<u32>,
     info: KernelVxlanInfo,
+}
+
+/// Per collect-metadata VXLAN port slice, before being attached to a bridge.
+#[derive(Debug, Clone)]
+struct SvdVxlanPort {
+    /// Bridge-master ifindex this VXLAN port slaves to.
+    master: Option<u32>,
+    info: KernelSvdVxlanInfo,
 }
 
 /// Result of one link inventory pass. Built fresh on every dump and
@@ -102,6 +121,11 @@ pub(crate) struct LinkCache {
     /// FDB entry from `msg.header.ifindex` (which is the *VXLAN*
     /// ifindex for bridge FDB entries, not the bridge itself).
     pub vxlan_ifindex_to_vni: HashMap<u32, u32>,
+    /// Collect-metadata VXLAN ifindexes. These do not imply one VNI per
+    /// ifindex; FDB parsing may use an explicit `NDA_VNI` / `NDA_SRC_VNI`
+    /// attribute for rows on these ports, but runtime programming remains
+    /// fail-closed until LAN-64 enables SVD Ready.
+    pub svd_vxlan_ifindexes: HashSet<u32>,
     /// **Non-VXLAN** bridge port ifindex -> VNI of the bridge it is
     /// enslaved to. Populated by walking every link's Controller
     /// attribute against the known bridge inventory. Used by the
@@ -370,6 +394,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                             vlan_filtering,
                             vxlan: None,
                             vxlan_ports: Vec::new(),
+                            svd_vxlan_ports: Vec::new(),
                             vxlan_attach_count: 0,
                             ce_port_ifindexes: Vec::new(),
                             vlans: bridge_vlans,
@@ -389,30 +414,8 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         }
     }
 
-    let mut vxlan_ifindex_to_vni: HashMap<u32, u32> = HashMap::new();
-    for vxlan in vxlan_ports {
-        let Some(master_idx) = vxlan.master else {
-            continue;
-        };
-        let Some(bridge_name) = bridge_ifindex_to_name.get(&master_idx) else {
-            continue;
-        };
-        if let Some(bridge) = bridges.get_mut(bridge_name) {
-            bridge.vxlan_attach_count = bridge.vxlan_attach_count.saturating_add(1);
-            vxlan_ifindex_to_vni.insert(vxlan.info.ifindex, vxlan.info.vni);
-            bridge.vxlan_ports.push(vxlan.info.clone());
-            // Keep the legacy single-port slot only while the bridge has
-            // one VXLAN member. VLAN-aware probing uses `vxlan_ports` to
-            // select the member matching the configured VNI.
-            if bridge.vxlan_attach_count == 1 {
-                bridge.vxlan = Some(vxlan.info);
-            } else {
-                // Clear the legacy slot so non-VLAN-aware probing reports
-                // NotReady instead of guessing.
-                bridge.vxlan = None;
-            }
-        }
-    }
+    let (vxlan_ifindex_to_vni, svd_vxlan_ifindexes) =
+        attach_vxlan_ports(vxlan_ports, &bridge_ifindex_to_name, &mut bridges);
 
     let (bridge_port_to_vni, bridge_ports_by_name) =
         index_bridge_ports(all_enslaved, &bridge_ifindex_to_name, &mut bridges);
@@ -420,6 +423,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     Ok(LinkCache {
         bridges,
         vxlan_ifindex_to_vni,
+        svd_vxlan_ifindexes,
         bridge_port_to_vni,
         local_mac_vlan_bindings: HashMap::new(),
         bridge_port_vlan_to_vni: HashMap::new(),
@@ -428,6 +432,79 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
     })
+}
+
+fn attach_vxlan_ports(
+    vxlan_ports: Vec<VxlanPort>,
+    bridge_ifindex_to_name: &HashMap<u32, String>,
+    bridges: &mut HashMap<String, BridgeLink>,
+) -> (HashMap<u32, u32>, HashSet<u32>) {
+    let mut vxlan_ifindex_to_vni = HashMap::new();
+    let mut svd_vxlan_ifindexes = HashSet::new();
+    for vxlan in vxlan_ports {
+        match vxlan {
+            VxlanPort::Fixed(vxlan) => {
+                attach_fixed_vxlan(
+                    vxlan,
+                    bridge_ifindex_to_name,
+                    bridges,
+                    &mut vxlan_ifindex_to_vni,
+                );
+            }
+            VxlanPort::Svd(vxlan) => {
+                if let Some(ifindex) = attach_svd_vxlan(vxlan, bridge_ifindex_to_name, bridges) {
+                    svd_vxlan_ifindexes.insert(ifindex);
+                }
+            }
+        }
+    }
+    (vxlan_ifindex_to_vni, svd_vxlan_ifindexes)
+}
+
+fn attach_fixed_vxlan(
+    vxlan: FixedVxlanPort,
+    bridge_ifindex_to_name: &HashMap<u32, String>,
+    bridges: &mut HashMap<String, BridgeLink>,
+    vxlan_ifindex_to_vni: &mut HashMap<u32, u32>,
+) {
+    let Some(master_idx) = vxlan.master else {
+        return;
+    };
+    let Some(bridge_name) = bridge_ifindex_to_name.get(&master_idx) else {
+        return;
+    };
+    let Some(bridge) = bridges.get_mut(bridge_name) else {
+        return;
+    };
+    bridge.vxlan_attach_count = bridge.vxlan_attach_count.saturating_add(1);
+    vxlan_ifindex_to_vni.insert(vxlan.info.ifindex, vxlan.info.vni);
+    bridge.vxlan_ports.push(vxlan.info.clone());
+    // Keep the legacy single-port slot only while the bridge has one
+    // VXLAN member. VLAN-aware probing uses `vxlan_ports` to select the
+    // member matching the configured VNI.
+    if bridge.vxlan_attach_count == 1 {
+        bridge.vxlan = Some(vxlan.info);
+    } else {
+        // Clear the legacy slot so non-VLAN-aware probing reports NotReady
+        // instead of guessing.
+        bridge.vxlan = None;
+    }
+}
+
+fn attach_svd_vxlan(
+    vxlan: SvdVxlanPort,
+    bridge_ifindex_to_name: &HashMap<u32, String>,
+    bridges: &mut HashMap<String, BridgeLink>,
+) -> Option<u32> {
+    let master_idx = vxlan.master?;
+    let bridge_name = bridge_ifindex_to_name.get(&master_idx)?;
+    let bridge = bridges.get_mut(bridge_name)?;
+    let ifindex = vxlan.info.ifindex;
+    bridge.vxlan_attach_count = bridge.vxlan_attach_count.saturating_add(1);
+    bridge.svd_vxlan_ports.push(vxlan.info);
+    // SVD does not satisfy the legacy fixed-VNI slot.
+    bridge.vxlan = None;
+    Some(ifindex)
 }
 
 async fn dump_bridge_vlan_inventory(
@@ -691,6 +768,8 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
     let mut master = None;
     let mut vni: Option<u32> = None;
     let mut local: Option<IpAddr> = None;
+    let mut collect_metadata = false;
+    let mut vnifilter = false;
     // None until we observe IFLA_VXLAN_LEARNING. Probe fails closed
     // on `None` so a kernel that omits the attribute doesn't quietly
     // pass the readiness check.
@@ -712,6 +791,8 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
                                     local = Some(IpAddr::V6(*addr));
                                 }
                                 InfoVxlan::Learning(b) => learning_disabled = Some(!*b),
+                                InfoVxlan::CollectMetadata(b) => collect_metadata = *b,
+                                InfoVxlan::Vnifilter(b) => vnifilter = *b,
                                 _ => {}
                             }
                         }
@@ -722,22 +803,32 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
         }
     }
 
-    let vni = vni?;
-    let local = local?;
-    Some(VxlanPort {
+    if collect_metadata {
+        return Some(VxlanPort::Svd(SvdVxlanPort {
+            master,
+            info: KernelSvdVxlanInfo {
+                ifindex,
+                vnifilter,
+                local_ip: local,
+                learning_disabled,
+            },
+        }));
+    }
+
+    Some(VxlanPort::Fixed(FixedVxlanPort {
         master,
         info: KernelVxlanInfo {
             ifindex,
-            vni,
-            local_ip: local,
+            vni: vni?,
+            local_ip: local?,
             learning_disabled,
         },
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
     use crate::snapshot::KernelVxlanInfo;
@@ -853,6 +944,99 @@ mod tests {
         assert_eq!(tunnels[0].tunnel_id, Some(5000));
         assert_eq!(tunnels[0].vid, Some(100));
         assert!(tunnels[0].flags.untagged);
+    }
+
+    #[test]
+    fn parse_vxlan_port_captures_fixed_vni_device() {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 20;
+        msg.attributes.push(LinkAttribute::Controller(10));
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vxlan),
+            LinkInfo::Data(InfoData::Vxlan(vec![
+                InfoVxlan::Id(100),
+                InfoVxlan::Local("10.0.0.1".parse().unwrap()),
+                InfoVxlan::Learning(false),
+            ])),
+        ]));
+
+        let Some(VxlanPort::Fixed(port)) = parse_vxlan_port(&msg) else {
+            panic!("expected fixed VXLAN port");
+        };
+        assert_eq!(port.master, Some(10));
+        assert_eq!(port.info.ifindex, 20);
+        assert_eq!(port.info.vni, 100);
+        assert_eq!(port.info.local_ip, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(port.info.learning_disabled, Some(true));
+    }
+
+    #[test]
+    fn parse_vxlan_port_captures_collect_metadata_without_fixed_vni() {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 30;
+        msg.attributes.push(LinkAttribute::Controller(10));
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vxlan),
+            LinkInfo::Data(InfoData::Vxlan(vec![
+                InfoVxlan::CollectMetadata(true),
+                InfoVxlan::Vnifilter(true),
+                InfoVxlan::Learning(false),
+            ])),
+        ]));
+
+        let Some(VxlanPort::Svd(port)) = parse_vxlan_port(&msg) else {
+            panic!("expected SVD VXLAN port");
+        };
+        assert_eq!(port.master, Some(10));
+        assert_eq!(port.info.ifindex, 30);
+        assert!(port.info.vnifilter);
+        assert_eq!(port.info.local_ip, None);
+        assert_eq!(port.info.learning_disabled, Some(true));
+    }
+
+    #[test]
+    fn attach_vxlan_ports_indexes_only_bridge_attached_svd_ports() {
+        let mut bridges = HashMap::new();
+        bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                ..BridgeLink::default()
+            },
+        );
+        let mut bridge_ifindex_to_name = HashMap::new();
+        bridge_ifindex_to_name.insert(10, "br100".to_string());
+
+        let svd_info = |ifindex| KernelSvdVxlanInfo {
+            ifindex,
+            vnifilter: true,
+            local_ip: None,
+            learning_disabled: Some(true),
+        };
+        let (_, svd_ifindexes) = attach_vxlan_ports(
+            vec![
+                VxlanPort::Svd(SvdVxlanPort {
+                    master: None,
+                    info: svd_info(20),
+                }),
+                VxlanPort::Svd(SvdVxlanPort {
+                    master: Some(99),
+                    info: svd_info(21),
+                }),
+                VxlanPort::Svd(SvdVxlanPort {
+                    master: Some(10),
+                    info: svd_info(22),
+                }),
+            ],
+            &bridge_ifindex_to_name,
+            &mut bridges,
+        );
+
+        assert_eq!(svd_ifindexes, HashSet::from([22]));
+        let bridge = bridges.get("br100").unwrap();
+        assert_eq!(bridge.vxlan_attach_count, 1);
+        assert_eq!(bridge.svd_vxlan_ports.len(), 1);
+        assert_eq!(bridge.svd_vxlan_ports[0].ifindex, 22);
     }
 
     #[test]

@@ -194,6 +194,15 @@ The `bridge_vlan` schema is deliberately compatible with that follow-up:
 SVD changes how the Linux binding is observed and programmed, not the
 EVPN wire model.
 
+The first LAN-64 follow-up landed only the safe substrate/proof slice:
+rustbgpd detects collect-metadata VXLAN devices and `vnifilter`, reports a
+matching SVD `bridge_vlan` topology as NotReady with an explicit reason, and
+parses explicit-VNI FDB rows on known SVD ifindexes. The privileged
+`svd_fdb_vni` netns proof established the tested kernel/iproute2 contract:
+`src_vni` round-trips as the VNI attribution for an SVD FDB row, while that
+self row does not round-trip `NDA_VLAN` / `NDA_DST`. SVD therefore remains
+fail-closed until a later programming tranche accounts for that row shape.
+
 ### 6. Defer non-zero Ethernet Tag service models
 
 The following remain out of v1:

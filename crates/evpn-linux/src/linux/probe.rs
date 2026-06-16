@@ -24,7 +24,8 @@
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
 
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelVxlanInfo, vlan_rows_contain,
+    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelSvdVxlanInfo, KernelVxlanInfo,
+    vlan_rows_contain,
 };
 
 use super::links::{BridgeLink, LinkCache};
@@ -110,6 +111,14 @@ fn probe_vlan_aware_bridge(
     bridge_vlan: u16,
 ) -> InstanceProbe {
     let want_vni = inst.id.as_u32();
+    if !vlan_rows_contain(&bridge.vlans, bridge_vlan) {
+        return InstanceProbe::NotReady {
+            reason: format!("bridge {bridge_name} does not carry VLAN {bridge_vlan}"),
+        };
+    }
+    if let Some(reason) = svd_not_ready_reason(bridge, bridge_name, bridge_vlan, want_vni) {
+        return InstanceProbe::NotReady { reason };
+    }
     let matching: Vec<_> = bridge
         .vxlan_ports
         .iter()
@@ -124,11 +133,6 @@ fn probe_vlan_aware_bridge(
             ),
         };
     };
-    if !vlan_rows_contain(&bridge.vlans, bridge_vlan) {
-        return InstanceProbe::NotReady {
-            reason: format!("bridge {bridge_name} does not carry VLAN {bridge_vlan}"),
-        };
-    }
     let Some(port_inventory) = bridge
         .port_vlan_inventory
         .iter()
@@ -203,6 +207,51 @@ fn port_vlan_inventory_contains(row: &KernelBridgePortVlanInfo, vlan: u16) -> bo
     vlan_rows_contain(&row.vlans, vlan)
 }
 
+fn svd_not_ready_reason(
+    bridge: &BridgeLink,
+    bridge_name: &str,
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> Option<String> {
+    let mut matches = bridge.svd_vxlan_ports.iter().filter(|svd| {
+        bridge
+            .port_vlan_inventory
+            .iter()
+            .any(|row| svd_inventory_matches(row, svd, bridge_vlan, want_vni))
+    });
+    let first = matches.next()?;
+    if !first.vnifilter {
+        return Some(format!(
+            "bridge {bridge_name} has collect-metadata VXLAN ifindex {} for \
+             bridge_vlan={bridge_vlan}/VNI {want_vni}, but vnifilter is disabled; \
+             LAN-64 SVD readiness requires vnifilter",
+            first.ifindex
+        ));
+    }
+    let extra = matches.count();
+    let count = extra + 1;
+    Some(format!(
+        "bridge {bridge_name} has {count} collect-metadata VXLAN port(s) for \
+         bridge_vlan={bridge_vlan}/VNI {want_vni}; SVD topology is detected \
+         but remains NotReady until LAN-64 enables explicit FDB VNI programming"
+    ))
+}
+
+fn svd_inventory_matches(
+    row: &KernelBridgePortVlanInfo,
+    svd: &KernelSvdVxlanInfo,
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> bool {
+    row.is_vxlan
+        && row.ifindex == svd.ifindex
+        && vlan_rows_contain(&row.vlans, bridge_vlan)
+        && row
+            .vlan_tunnels
+            .iter()
+            .any(|t| t.vid == Some(bridge_vlan) && t.tunnel_id == Some(want_vni))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -216,7 +265,8 @@ mod tests {
     use super::super::links::{BridgeLink, LinkCache};
     use super::*;
     use crate::snapshot::{
-        KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo, KernelVxlanInfo,
+        KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+        KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo,
     };
 
     fn vni(n: u32) -> EvpnInstanceId {
@@ -262,6 +312,7 @@ mod tests {
         LinkCache {
             bridges,
             vxlan_ifindex_to_vni: vxlan_to_vni,
+            svd_vxlan_ifindexes: HashSet::new(),
             bridge_port_to_vni: HashMap::new(),
             local_mac_vlan_bindings: HashMap::new(),
             bridge_port_vlan_to_vni: HashMap::new(),
@@ -320,6 +371,37 @@ mod tests {
                 is_vxlan: true,
                 vlans: vec![vlan_row(bridge_vlan)],
                 vlan_tunnels: Vec::new(),
+            }],
+            ..BridgeLink::default()
+        }
+    }
+
+    fn svd_vlan_aware_link(vni: u32, bridge_vlan: u16, vnifilter: bool) -> BridgeLink {
+        let svd = KernelSvdVxlanInfo {
+            ifindex: 300,
+            vnifilter,
+            local_ip: None,
+            learning_disabled: Some(true),
+        };
+        BridgeLink {
+            ifindex: 100,
+            mac: None,
+            vlan_filtering: true,
+            vxlan: None,
+            svd_vxlan_ports: vec![svd.clone()],
+            vxlan_attach_count: 1,
+            ce_port_ifindexes: Vec::new(),
+            vlans: vec![vlan_row(bridge_vlan)],
+            port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                ifindex: svd.ifindex,
+                name: Some("vxlan-svd".to_string()),
+                is_vxlan: true,
+                vlans: vec![vlan_row(bridge_vlan)],
+                vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                    tunnel_id: Some(vni),
+                    vid: Some(bridge_vlan),
+                    flags: KernelBridgeVlanFlags::default(),
+                }],
             }],
             ..BridgeLink::default()
         }
@@ -412,6 +494,31 @@ mod tests {
         let cache = cache_with("br100", vlan_aware_link(200, 10, "10.0.0.1"));
         match probe_one(&inst, &cache) {
             InstanceProbe::NotReady { reason } => assert!(reason.contains("0 VXLAN ports")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_svd_topology_matches_vlan_binding() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let cache = cache_with("br100", svd_vlan_aware_link(100, 10, true));
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("collect-metadata VXLAN"));
+                assert!(reason.contains("explicit FDB VNI programming"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_svd_topology_lacks_vnifilter() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let cache = cache_with("br100", svd_vlan_aware_link(100, 10, false));
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("vnifilter is disabled"));
+            }
             other => panic!("{other:?}"),
         }
     }

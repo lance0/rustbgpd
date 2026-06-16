@@ -537,6 +537,7 @@ impl Dataplane for LinuxDataplane {
                 bridge_name: name.clone(),
                 vlan_filtering: link.vlan_filtering,
                 vxlan,
+                svd_vxlan_ports: link.svd_vxlan_ports.clone(),
                 ce_port_ifindexes: link.ce_port_ifindexes.clone(),
                 vlans: link.vlans.clone(),
                 vlan_tunnels: link.vlan_tunnels.clone(),

@@ -97,7 +97,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
         .neighbours()
         .add_bridge(vxlan_ifindex, &mac.octets())
         .replace();
-    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, vlan, nh_id);
+    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, vlan, nh_id, None);
     req.execute()
         .await
         .map_err(|e| super::fdb::classify_apply_error(&e))?;
@@ -121,6 +121,7 @@ fn build_fdb_nhg_message(
     mac: MacAddress,
     vlan: Option<u16>,
     nh_id: u32,
+    source_vni: Option<EvpnInstanceId>,
 ) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
@@ -138,6 +139,10 @@ fn build_fdb_nhg_message(
         )));
     if let Some(vlan) = vlan {
         msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
+    if let Some(vni) = source_vni {
+        msg.attributes
+            .push(NeighbourAttribute::SourceVni(vni.as_u32()));
     }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
@@ -354,7 +359,7 @@ mod tests {
     #[test]
     fn build_fdb_nhg_message_carries_nh_id_and_ownership_stamp() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_fdb_nhg_message(11, mac, None, 0x4000_0001);
+        let msg = build_fdb_nhg_message(11, mac, None, 0x4000_0001, None);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -397,7 +402,19 @@ mod tests {
     #[test]
     fn build_fdb_nhg_message_carries_vlan_when_scoped() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_fdb_nhg_message(11, mac, Some(10), 0x4000_0001);
+        let msg = build_fdb_nhg_message(11, mac, Some(10), 0x4000_0001, None);
         assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+    }
+
+    #[test]
+    fn build_fdb_nhg_message_carries_source_vni_for_svd_shape() {
+        let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let msg = build_fdb_nhg_message(11, mac, Some(10), 0x4000_0001, Some(vni));
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::SourceVni(vni.as_u32()))
+        );
     }
 }
