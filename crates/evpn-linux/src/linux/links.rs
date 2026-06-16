@@ -10,7 +10,7 @@
 //! membership relationships. Statistics, MTU, neighbor tables, etc.
 //! are out of scope.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::net::IpAddr;
 
 use futures::stream::TryStreamExt;
@@ -22,7 +22,7 @@ use netlink_packet_route::link::{
 };
 use rtnetlink::Handle;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 
 use crate::error::DataplaneError;
 use crate::snapshot::{
@@ -110,6 +110,20 @@ pub(crate) struct LinkCache {
     /// VXLAN ports are intentionally excluded — those carry remote
     /// MACs reached via VXLAN, not local kernel learns.
     pub bridge_port_to_vni: HashMap<u32, u32>,
+    /// Configured `(bridge_name, bridge_vlan) -> VNI` bindings used to
+    /// rebuild the VLAN-aware local-MAC attribution maps after a fresh
+    /// link dump. `None` means the config attempted an ambiguous duplicate
+    /// binding and must fail closed for observation purposes.
+    pub local_mac_vlan_bindings: HashMap<(String, u16), Option<u32>>,
+    /// VLAN-aware non-VXLAN bridge-port attribution:
+    /// `(port_ifindex, bridge_vlan) -> VNI`. Populated only from
+    /// configured `bridge_vlan` instances whose observed topology has
+    /// exactly one matching VXLAN member carrying the same VLAN.
+    pub bridge_port_vlan_to_vni: HashMap<(u32, u16), u32>,
+    /// VLAN-aware VXLAN-port attribution for remote-takeover echoes:
+    /// `(vxlan_ifindex, bridge_vlan) -> VNI`. This prevents a remote row
+    /// in one bridge VLAN from withdrawing a local claim in another VNI.
+    pub vxlan_port_vlan_to_vni: HashMap<(u32, u16), u32>,
     /// Non-VXLAN ports of **any** known bridge, by link name, with
     /// the observed `IFLA_BRPORT_STATE` from the port's
     /// `IFLA_INFO_PORT_DATA` slave info. Unlike `bridge_port_to_vni`
@@ -167,6 +181,124 @@ fn record_vxlan_match<'a>(
             existing.ifindex, candidate.ifindex
         ))),
     }
+}
+
+impl LinkCache {
+    /// Rebuild VLAN-aware local-MAC attribution from the configured EVPN
+    /// instances. The raw link inventory is intentionally not enough:
+    /// a Linux port may carry default or extra VLANs that rustbgpd did
+    /// not bind to an L2VNI. Only explicit `bridge_vlan` config creates
+    /// an observation map entry.
+    pub(crate) fn bind_local_mac_vlan_attribution(&mut self, instances: &EvpnInstanceTable) {
+        self.local_mac_vlan_bindings.clear();
+        for inst in instances.iter() {
+            let (Some(bridge), Some(bridge_vlan)) = (&inst.bridge, inst.bridge_vlan) else {
+                continue;
+            };
+            insert_unique_binding(
+                &mut self.local_mac_vlan_bindings,
+                (bridge.clone(), bridge_vlan.as_u16()),
+                inst.id.as_u32(),
+            );
+        }
+        self.rebuild_local_mac_vlan_attribution();
+    }
+
+    /// Carry the last configured bindings across a fresh link dump.
+    pub(crate) fn inherit_local_mac_vlan_attribution_from(&mut self, previous: &Self) {
+        self.local_mac_vlan_bindings
+            .clone_from(&previous.local_mac_vlan_bindings);
+        self.rebuild_local_mac_vlan_attribution();
+    }
+
+    fn rebuild_local_mac_vlan_attribution(&mut self) {
+        let mut bridge_port_vlan_to_vni = HashMap::new();
+        let mut vxlan_port_vlan_to_vni = HashMap::new();
+        for ((bridge_name, vlan), vni) in &self.local_mac_vlan_bindings {
+            let Some(vni) = *vni else {
+                continue;
+            };
+            let Some(bridge) = self.bridges.get(bridge_name) else {
+                continue;
+            };
+            if !bridge.vlan_filtering || !vlan_rows_contain(&bridge.vlans, *vlan) {
+                continue;
+            }
+            let matching_vxlan: Vec<_> = bridge
+                .vxlan_ports
+                .iter()
+                .filter(|port| port.vni == vni)
+                .collect();
+            let [vxlan] = matching_vxlan.as_slice() else {
+                continue;
+            };
+            let Some(vxlan_inventory) = bridge
+                .port_vlan_inventory
+                .iter()
+                .find(|row| row.is_vxlan && row.ifindex == vxlan.ifindex)
+            else {
+                continue;
+            };
+            if !vlan_rows_contain(&vxlan_inventory.vlans, *vlan) {
+                continue;
+            }
+            vxlan_port_vlan_to_vni.insert((vxlan.ifindex, *vlan), vni);
+            for row in &bridge.port_vlan_inventory {
+                if row.is_vxlan || !vlan_rows_contain(&row.vlans, *vlan) {
+                    continue;
+                }
+                bridge_port_vlan_to_vni.insert((row.ifindex, *vlan), vni);
+            }
+        }
+        self.bridge_port_vlan_to_vni = bridge_port_vlan_to_vni;
+        self.vxlan_port_vlan_to_vni = vxlan_port_vlan_to_vni;
+    }
+}
+
+fn insert_unique_binding(
+    bindings: &mut HashMap<(String, u16), Option<u32>>,
+    key: (String, u16),
+    vni: u32,
+) {
+    match bindings.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(Some(vni));
+        }
+        Entry::Occupied(mut entry) => {
+            if *entry.get() != Some(vni) {
+                entry.insert(None);
+            }
+        }
+    }
+}
+
+fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> bool {
+    let mut range_start = None;
+    for row in rows {
+        if row.flags.range_begin {
+            range_start = Some(row.vid);
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.flags.range_end {
+            if let Some(start) = range_start.take()
+                && start <= vlan
+                && vlan <= row.vid
+            {
+                return true;
+            }
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.vid == vlan {
+            return true;
+        }
+    }
+    false
 }
 
 type BridgeVlanInventory =
@@ -292,6 +424,9 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         bridges,
         vxlan_ifindex_to_vni,
         bridge_port_to_vni,
+        local_mac_vlan_bindings: HashMap::new(),
+        bridge_port_vlan_to_vni: HashMap::new(),
+        vxlan_port_vlan_to_vni: HashMap::new(),
         bridge_ports_by_name,
     })
 }
@@ -608,11 +743,36 @@ mod tests {
     use super::*;
     use crate::snapshot::KernelVxlanInfo;
     use netlink_packet_route::link::LinkMessage;
+    use rustbgpd_evpn::{
+        BridgeVlan, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteDistinguisher,
+    };
 
     fn synthesize_link_msg(addr: Vec<u8>) -> LinkMessage {
         let mut msg = LinkMessage::default();
         msg.attributes.push(LinkAttribute::Address(addr));
         msg
+    }
+
+    fn vlan_row(vid: u16) -> KernelBridgeVlanInfo {
+        KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags::default(),
+        }
+    }
+
+    fn instance(vni: u32, bridge: &str, vlan: u16) -> EvpnInstance {
+        EvpnInstance::new(
+            EvpnInstanceId::new(vni).unwrap(),
+            format!("65000:{vni}")
+                .parse::<RouteDistinguisher>()
+                .unwrap(),
+            vec![format!("65000:{vni}").parse().unwrap()],
+            "10.0.0.1".parse().unwrap(),
+            Some(bridge.to_string()),
+            false,
+        )
+        .unwrap()
+        .with_bridge_vlan(Some(BridgeVlan::new(u32::from(vlan)).unwrap()))
     }
 
     #[test]
@@ -774,5 +934,117 @@ mod tests {
                 .iter()
                 .any(|row| !row.is_vxlan && row.ifindex == 30)
         );
+    }
+
+    #[test]
+    fn bind_local_mac_vlan_attribution_uses_configured_bridge_vlans_only() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 20,
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 21,
+                        vni: 200,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                vlans: vec![vlan_row(10), vlan_row(20), vlan_row(99)],
+                port_vlan_inventory: vec![
+                    KernelBridgePortVlanInfo {
+                        ifindex: 20,
+                        name: Some("vxlan100".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10), vlan_row(99)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 21,
+                        name: Some("vxlan200".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(20)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 30,
+                        name: Some("swp1".to_string()),
+                        is_vxlan: false,
+                        vlans: vec![vlan_row(10), vlan_row(20), vlan_row(99)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                ],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+        instances.insert(instance(200, "br100", 20)).unwrap();
+
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 10)), Some(&100));
+        assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 20)), Some(&200));
+        assert!(
+            !cache.bridge_port_vlan_to_vni.contains_key(&(30, 99)),
+            "extra topology VLAN without configured bridge_vlan must not become observable"
+        );
+        assert_eq!(cache.vxlan_port_vlan_to_vni.get(&(20, 10)), Some(&100));
+        assert_eq!(cache.vxlan_port_vlan_to_vni.get(&(21, 20)), Some(&200));
+        assert!(!cache.vxlan_port_vlan_to_vni.contains_key(&(20, 99)));
+    }
+
+    #[test]
+    fn bind_local_mac_vlan_attribution_drops_duplicate_config_binding() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan_ports: vec![KernelVxlanInfo {
+                    ifindex: 20,
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 1,
+                vlans: vec![vlan_row(10)],
+                port_vlan_inventory: vec![
+                    KernelBridgePortVlanInfo {
+                        ifindex: 20,
+                        name: Some("vxlan100".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 30,
+                        name: Some("swp1".to_string()),
+                        is_vxlan: false,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                ],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+        instances.insert(instance(200, "br100", 10)).unwrap();
+
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        assert!(cache.bridge_port_vlan_to_vni.is_empty());
+        assert!(cache.vxlan_port_vlan_to_vni.is_empty());
     }
 }

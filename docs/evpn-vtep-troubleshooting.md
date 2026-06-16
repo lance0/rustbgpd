@@ -92,9 +92,13 @@ Expected signals:
    RUST_LOG=rustbgpd_evpn_linux=debug,rustbgpd=info rustbgpd --config config.toml
    ```
 
-   Look for local-MAC classifier messages and cache misses. A miss means
-   the bridge-port ifindex was not yet mapped to a VNI; the startup dump
-   and periodic supervisor pass should populate it.
+   Look for local-MAC classifier messages and cache misses. On legacy
+   non-VLAN-aware bridges, a miss means the bridge-port ifindex was not yet
+   mapped to a VNI; the startup dump and periodic supervisor pass should
+   populate it. On ADR-0089 VLAN-aware bridges, a miss can also mean the
+   kernel event lacked `NDA_VLAN`, carried a VLAN not configured as an
+   `[[evpn_instances]].bridge_vlan`, or matched a duplicate bridge/VLAN
+   binding; those cases fail closed rather than guessing.
 
 ## Remote Type 2 visible, but FDB is not programmed
 

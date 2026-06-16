@@ -33,6 +33,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NDA_VLAN`, snapshots / owned-state / adoption-reap bookkeeping are
   VLAN-scoped, and legacy instances without `bridge_vlan` still reject
   VLAN-aware bridges fail-closed.
+- **EVPN VLAN-aware local-MAC attribution.** Kernel-learned AF_BRIDGE
+  local-MAC events now resolve `(bridge port or VXLAN port, NDA_VLAN)` through
+  the configured `bridge_vlan` bindings before emitting local Type 2
+  observations. Missing, unknown, or duplicate VLAN attribution fails closed,
+  while legacy non-VLAN-aware single-VXLAN bridges keep the existing ifindex
+  path. A gated netns test covers the same MAC on VLAN 10 and VLAN 20 sharing
+  one bridge with no cross-VNI bleed; MAC+IP ARP/ND observations on
+  VLAN-aware bridges now fail closed and remain a separate follow-up pending
+  kernel evidence.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware programming requires an explicit

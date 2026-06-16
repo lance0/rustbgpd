@@ -39,9 +39,10 @@
 //! 2. Drop if `NTF_EXT_LEARNED` on a non-VXLAN port — programmed
 //!    rows never land there from us, so these are a foreign
 //!    controller's entries, not kernel local learns.
-//! 3. Resolve `header.ifindex` → VNI via
-//!    `LinkCache::bridge_port_to_vni`. A miss means the port isn't
-//!    enslaved to any EVPN-managed bridge.
+//! 3. Resolve `header.ifindex` → VNI. Legacy single-VXLAN bridges use
+//!    `LinkCache::bridge_port_to_vni`; ADR-0089 VLAN-aware bridges use
+//!    `(ifindex, NDA_VLAN)` attribution and fail closed when the VLAN is
+//!    missing or ambiguous.
 //! 4. Extract MAC from the `LinkLayerAddress` attribute
 //!    (`NDA_LLADDR`).
 //! 5. Emit `Learned { vni, mac, ifindex }` (or `Aged` on
@@ -227,7 +228,8 @@ fn classify_bridge_fdb(
     // indicate dataplane drift; [`classify_fdb_drift`] handles that
     // on the separate reconcile-wake path.)
     let ifindex = msg.header.ifindex;
-    if let Some(&vni_raw) = cache.vxlan_ifindex_to_vni.get(&ifindex) {
+    let vlan = extract_vlan(msg);
+    if let Some(vni_raw) = resolve_vxlan_observation_vni(cache, ifindex, vlan) {
         if !matches!(kind, NeighEventKind::New) {
             return None;
         }
@@ -250,11 +252,11 @@ fn classify_bridge_fdb(
     // until the supervisor's next periodic dump). Logged at debug to
     // make the latter diagnosable in field issues without spamming
     // the happy path.
-    let Some(&vni_raw) = cache.bridge_port_to_vni.get(&ifindex) else {
+    let Some(vni_raw) = resolve_bridge_port_observation_vni(cache, ifindex, vlan) else {
         debug!(
             ifindex,
-            "RTNLGRP_NEIGH AF_BRIDGE classifier: ifindex not in bridge_port_to_vni; \
-             event dropped"
+            vlan,
+            "RTNLGRP_NEIGH AF_BRIDGE classifier: ifindex/VLAN not mapped to an EVPN VNI; event dropped"
         );
         return None;
     };
@@ -265,6 +267,35 @@ fn classify_bridge_fdb(
         NeighEventKind::New => LocalMacObservation::Learned { vni, mac, ifindex },
         NeighEventKind::Del => LocalMacObservation::Aged { vni, mac },
     })
+}
+
+fn resolve_vxlan_observation_vni(
+    cache: &LinkCache,
+    ifindex: u32,
+    vlan: Option<u16>,
+) -> Option<u32> {
+    if has_vlan_attribution_for_ifindex(&cache.vxlan_port_vlan_to_vni, ifindex) {
+        return vlan.and_then(|vid| cache.vxlan_port_vlan_to_vni.get(&(ifindex, vid)).copied());
+    }
+    cache.vxlan_ifindex_to_vni.get(&ifindex).copied()
+}
+
+fn resolve_bridge_port_observation_vni(
+    cache: &LinkCache,
+    ifindex: u32,
+    vlan: Option<u16>,
+) -> Option<u32> {
+    if has_vlan_attribution_for_ifindex(&cache.bridge_port_vlan_to_vni, ifindex) {
+        return vlan.and_then(|vid| cache.bridge_port_vlan_to_vni.get(&(ifindex, vid)).copied());
+    }
+    cache.bridge_port_to_vni.get(&ifindex).copied()
+}
+
+fn has_vlan_attribution_for_ifindex(
+    map: &std::collections::HashMap<(u32, u16), u32>,
+    ifindex: u32,
+) -> bool {
+    map.keys().any(|(idx, _)| *idx == ifindex)
 }
 
 /// `AF_INET` / `AF_INET6` classifier — kernel learns an `(IP, MAC)`
@@ -321,11 +352,17 @@ fn classify_ip_neighbour_with_cached_mac(
     // bridge_port_to_vni is the wrong map for this family.
     let ifindex = msg.header.ifindex;
     let Some(vni_raw) = cache.bridges.values().find_map(|b| {
-        if b.ifindex == ifindex {
-            b.vxlan.as_ref().map(|v| v.vni)
-        } else {
-            None
+        if b.ifindex != ifindex {
+            return None;
         }
+        if b.vlan_filtering {
+            // ADR-0089 MAC+IP VLAN attribution is deliberately deferred:
+            // AF_INET/AF_INET6 bridge-neighbour notifications are not
+            // acted on for VLAN-aware bridges until we have a kernel proof
+            // for unambiguous VLAN identity.
+            return None;
+        }
+        b.vxlan.as_ref().map(|v| v.vni)
     }) else {
         debug!(
             ifindex,
@@ -615,6 +652,15 @@ fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
     None
 }
 
+fn extract_vlan(msg: &NeighbourMessage) -> Option<u16> {
+    for attr in &msg.attributes {
+        if let NeighbourAttribute::Vlan(vlan) = attr {
+            return Some(*vlan);
+        }
+    }
+    None
+}
+
 fn extract_ip(msg: &NeighbourMessage) -> Option<IpAddr> {
     for attr in &msg.attributes {
         if let NeighbourAttribute::Destination(addr) = attr {
@@ -670,8 +716,22 @@ mod tests {
             bridges,
             vxlan_ifindex_to_vni,
             bridge_port_to_vni,
+            local_mac_vlan_bindings: HashMap::new(),
+            bridge_port_vlan_to_vni: HashMap::new(),
+            vxlan_port_vlan_to_vni: HashMap::new(),
             bridge_ports_by_name: HashMap::new(),
         }
+    }
+
+    fn vlan_aware_cache() -> LinkCache {
+        let mut cache = cache_for(100, /* vxlan */ 11, /* swp */ 22);
+        cache.vxlan_ifindex_to_vni.insert(33, 200);
+        cache.bridge_port_to_vni.clear();
+        cache.bridge_port_vlan_to_vni.insert((22, 10), 100);
+        cache.bridge_port_vlan_to_vni.insert((22, 20), 200);
+        cache.vxlan_port_vlan_to_vni.insert((11, 10), 100);
+        cache.vxlan_port_vlan_to_vni.insert((33, 20), 200);
+        cache
     }
 
     fn neigh_msg(
@@ -692,6 +752,11 @@ mod tests {
             msg.attributes
                 .push(NeighbourAttribute::LinkLayerAddress(bytes));
         }
+        msg
+    }
+
+    fn with_vlan(mut msg: NeighbourMessage, vlan: u16) -> NeighbourMessage {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
         msg
     }
 
@@ -726,6 +791,54 @@ mod tests {
         );
         let obs = classify_neigh(NeighEventKind::Del, &msg, &cache).expect("emit");
         assert!(matches!(obs, LocalMacObservation::Aged { .. }));
+    }
+
+    #[test]
+    fn classify_vlan_aware_local_bridge_port_by_vlan() {
+        let cache = vlan_aware_cache();
+        let msg = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                22,
+                NeighbourFlags::Controller,
+                Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            ),
+            20,
+        );
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+        assert!(
+            matches!(
+                obs,
+                LocalMacObservation::Learned { vni, mac, ifindex }
+                    if vni.as_u32() == 200
+                        && mac.octets() == [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+                        && ifindex == 22
+            ),
+            "unexpected observation: {obs:?}"
+        );
+    }
+
+    #[test]
+    fn classify_vlan_aware_local_bridge_port_drops_missing_or_unknown_vlan() {
+        let cache = vlan_aware_cache();
+        let missing = neigh_msg(
+            AddressFamily::Bridge,
+            22,
+            NeighbourFlags::Controller,
+            Some(vec![0xaa; 6]),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &missing, &cache).is_none());
+
+        let unknown = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                22,
+                NeighbourFlags::Controller,
+                Some(vec![0xaa; 6]),
+            ),
+            30,
+        );
+        assert!(classify_neigh(NeighEventKind::New, &unknown, &cache).is_none());
     }
 
     #[test]
@@ -764,6 +877,41 @@ mod tests {
             }
             other => panic!("expected ObservedOnVxlanPort, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_vlan_aware_vxlan_port_by_vlan() {
+        let cache = vlan_aware_cache();
+        let msg = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                33,
+                NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+                Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            ),
+            20,
+        );
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+        assert!(
+            matches!(
+                obs,
+                LocalMacObservation::ObservedOnVxlanPort { vni, mac }
+                    if vni.as_u32() == 200
+                        && mac.octets() == [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+            ),
+            "unexpected observation: {obs:?}"
+        );
+
+        let wrong_vlan = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                33,
+                NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+                Some(vec![0xaa; 6]),
+            ),
+            10,
+        );
+        assert!(classify_neigh(NeighEventKind::New, &wrong_vlan, &cache).is_none());
     }
 
     /// Same shape without `NTF_EXT_LEARNED` — a foreign controller's
@@ -915,6 +1063,22 @@ mod tests {
             }
             other => panic!("expected IpAdded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_inet_drops_vlan_aware_bridge_until_vlan_identity_exists() {
+        let mut cache = cache_for(100, 11, 22);
+        cache.bridges.get_mut("br100").unwrap().vlan_filtering = true;
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
     #[test]

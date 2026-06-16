@@ -488,7 +488,8 @@ impl Dataplane for LinuxDataplane {
         // there.
         let refresh = links::dump_links(&self.handle).await;
         let cache = match refresh {
-            Ok(c) => {
+            Ok(mut c) => {
+                c.bind_local_mac_vlan_attribution(instances);
                 let mut guard = self.link_cache.lock().await;
                 *guard = c.clone();
                 c
@@ -511,9 +512,10 @@ impl Dataplane for LinuxDataplane {
     }
 
     async fn dump_snapshot(&mut self) -> Result<KernelSnapshot, DataplaneError> {
-        let cache = links::dump_links(&self.handle).await?;
+        let mut cache = links::dump_links(&self.handle).await?;
         {
             let mut guard = self.link_cache.lock().await;
+            cache.inherit_local_mac_vlan_attribution_from(&guard);
             *guard = cache.clone();
         }
         let fdb_entries = fdb::dump_fdb(&self.handle, &cache).await?;

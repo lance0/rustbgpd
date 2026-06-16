@@ -234,7 +234,7 @@ class of ownership.
 - The control-plane blast radius stays small. Type 2 / Type 3 /
   EAD-per-EVI routes keep Ethernet Tag `0`, and `RemoteMacTable` remains
   keyed by `(VNI, MAC)`.
-- The next code slices are concrete: config binding, probe readiness,
+- The staged code slices are concrete: config binding, probe readiness,
   VLAN-scoped FDB writes, local-MAC VLAN attribution, and netns proof.
 - The design remains compatible with SVD as a follow-up because
   `bridge_vlan` is a local Linux selector, not an EVPN service-interface

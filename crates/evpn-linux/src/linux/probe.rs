@@ -292,6 +292,9 @@ mod tests {
             bridges,
             vxlan_ifindex_to_vni: vxlan_to_vni,
             bridge_port_to_vni: HashMap::new(),
+            local_mac_vlan_bindings: HashMap::new(),
+            bridge_port_vlan_to_vni: HashMap::new(),
+            vxlan_port_vlan_to_vni: HashMap::new(),
             bridge_ports_by_name: HashMap::new(),
         }
     }

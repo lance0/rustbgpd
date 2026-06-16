@@ -29,9 +29,11 @@
 
 use std::net::IpAddr;
 use std::process::Command;
+use std::time::Duration;
 
 use rustbgpd_evpn::{
-    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RouteDistinguisher, RouteTarget,
+    BridgeVlan, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress,
+    RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, InstanceProbe, LinuxDataplane};
 
@@ -102,6 +104,76 @@ fn mac_str(m: MacAddress) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         o[0], o[1], o[2], o[3], o[4], o[5]
     )
+}
+
+fn rd_for(vni: EvpnInstanceId) -> RouteDistinguisher {
+    let mut bytes = [0u8; 8];
+    bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
+    bytes[4..8].copy_from_slice(&vni.as_u32().to_be_bytes());
+    RouteDistinguisher::new(bytes)
+}
+
+fn table_with_vlan_instances(local_ip: &str) -> EvpnInstanceTable {
+    let mut table = EvpnInstanceTable::new();
+    for (raw_vni, vlan) in [(100, 10), (200, 20)] {
+        let vni = EvpnInstanceId::new(raw_vni).unwrap();
+        table
+            .insert(
+                EvpnInstance::new(
+                    vni,
+                    rd_for(vni),
+                    vec![RouteTarget::TwoOctetAs {
+                        asn: 65001,
+                        value: raw_vni,
+                    }],
+                    local_ip.parse::<IpAddr>().unwrap(),
+                    Some("brvlan".to_string()),
+                    false,
+                )
+                .expect("EvpnInstance")
+                .with_bridge_vlan(Some(BridgeVlan::new(vlan).unwrap())),
+            )
+            .expect("insert");
+    }
+    table
+}
+
+async fn expect_learned(
+    rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>,
+    want_vni: u32,
+    want_mac: MacAddress,
+) {
+    let obs = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for local MAC observation")
+        .expect("local MAC channel closed");
+    assert!(
+        matches!(
+            obs,
+            LocalMacObservation::Learned { vni, mac, .. }
+                if vni.as_u32() == want_vni && mac == want_mac
+        ),
+        "unexpected observation: {obs:?}"
+    );
+
+    while let Ok(Some(extra)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        assert!(
+            matches!(
+                extra,
+                LocalMacObservation::Learned { vni, mac, .. }
+                    if vni.as_u32() == want_vni && mac == want_mac
+            ),
+            "cross-VLAN or unrelated observation: {extra:?}"
+        );
+    }
+}
+
+async fn expect_no_observation(rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>) {
+    match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        Err(_) => {}
+        Ok(None) => panic!("local MAC channel closed"),
+        Ok(Some(obs)) => panic!("unexpected observation: {obs:?}"),
+    }
 }
 
 #[tokio::test]
@@ -297,4 +369,163 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
         !after_rem.contains(&mac_str(test_mac)),
         "removed MAC still present:\n{after_rem}"
     );
+}
+
+#[tokio::test]
+async fn linux_dataplane_attributes_vlan_local_mac_observations() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("vlan-local-mac") {
+        linux_dataplane_attributes_vlan_local_mac_observations_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("vlan-local-mac");
+    let local_ip = "127.0.0.10";
+
+    ns.exec(
+        "ip",
+        &["addr", "add", &format!("{local_ip}/32"), "dev", "lo"],
+    );
+    ns.exec(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "brvlan",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+            "vlan_default_pvid",
+            "0",
+        ],
+    );
+    ns.exec("ip", &["link", "set", "brvlan", "up"]);
+    for (vxlan, vni) in [("vxlan100", "100"), ("vxlan200", "200")] {
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                vxlan,
+                "type",
+                "vxlan",
+                "id",
+                vni,
+                "local",
+                local_ip,
+                "dstport",
+                "4789",
+                "nolearning",
+            ],
+        );
+        ns.exec("ip", &["link", "set", vxlan, "master", "brvlan"]);
+        ns.exec("ip", &["link", "set", vxlan, "up"]);
+    }
+    ns.exec(
+        "ip",
+        &[
+            "link", "add", "swp1", "type", "veth", "peer", "name", "host1",
+        ],
+    );
+    ns.exec("ip", &["link", "set", "swp1", "master", "brvlan"]);
+    ns.exec("ip", &["link", "set", "swp1", "up"]);
+    ns.exec("ip", &["link", "set", "host1", "up"]);
+    for vlan in ["10", "20", "30"] {
+        ns.exec(
+            "bridge",
+            &["vlan", "add", "vid", vlan, "dev", "brvlan", "self"],
+        );
+        ns.exec("bridge", &["vlan", "add", "vid", vlan, "dev", "swp1"]);
+    }
+    ns.exec("bridge", &["vlan", "add", "vid", "10", "dev", "vxlan100"]);
+    ns.exec("bridge", &["vlan", "add", "vid", "20", "dev", "vxlan200"]);
+
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "linux_dataplane_attributes_vlan_local_mac_observations";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "vlan-local-mac")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn linux_dataplane_attributes_vlan_local_mac_observations_inner() {
+    let local_ip = "127.0.0.10";
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let mut rx = dp.take_local_mac_rx().expect("local MAC receiver");
+    let table = table_with_vlan_instances(local_ip);
+    let probes = dp.probe(&table).await;
+    for raw_vni in [100, 200] {
+        let vni = EvpnInstanceId::new(raw_vni).unwrap();
+        match probes.get(vni) {
+            Some(InstanceProbe::Ready) => {}
+            Some(other) => panic!("VNI {raw_vni} not Ready in real netns: {other:?}"),
+            None => panic!("probe returned no result for VNI {raw_vni}"),
+        }
+    }
+
+    let shared_mac = mac(0x63);
+    let shared_mac_str = mac_str(shared_mac);
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &shared_mac_str,
+            "dev",
+            "swp1",
+            "master",
+            "vlan",
+            "10",
+            "static",
+        ],
+    );
+    expect_learned(&mut rx, 100, shared_mac).await;
+
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &shared_mac_str,
+            "dev",
+            "swp1",
+            "master",
+            "vlan",
+            "20",
+            "static",
+        ],
+    );
+    expect_learned(&mut rx, 200, shared_mac).await;
+
+    let foreign_vlan_mac = mac(0x64);
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "add",
+            &mac_str(foreign_vlan_mac),
+            "dev",
+            "swp1",
+            "master",
+            "vlan",
+            "30",
+            "static",
+        ],
+    );
+    expect_no_observation(&mut rx).await;
 }
