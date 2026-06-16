@@ -284,9 +284,17 @@ has it, no broad performance sprints without profile evidence.
   `NDA_VLAN` through configured bridge-VLAN bindings before Type 2
   origination. **Cross-vendor receipt landed:** M70 has FRR originate the same
   MAC in VNI100 and VNI200 while rustbgpd programs and withdraws only the
-  matching VLAN-scoped FDB row on one `vlan_filtering=1` bridge. Remaining
-  VLAN-aware work: MAC+IP ARP/ND VLAN attribution, SVD / shared-VNI designs,
-  and managed netdev creation. `RTNLGRP_LINK`
+  matching VLAN-scoped FDB row on one `vlan_filtering=1` bridge. The only
+  concrete next VLAN-aware feature slice is SVD / collect-metadata VXLAN
+  (tracked separately); true RFC VLAN-aware bundle / non-zero Ethernet Tag
+  remains a separate ADR gate, MAC+IP ARP/ND VLAN attribution is
+  kernel-evidence-gated, and managed netdev creation stays separate operator
+  ergonomics work. A dedicated counter for unattributable-VLAN local-MAC
+  classifier misses is intentionally not a feature: those events fail closed as
+  normal "not ours" outcomes, while downstream originator backpressure is
+  already metered by `evpn_local_observations_dropped_total{reason}`. The
+  early-boot cache-miss window is bounded by startup link-cache priming plus
+  the first probe / supervisor dump, with no cross-VNI leak. `RTNLGRP_LINK`
   eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
