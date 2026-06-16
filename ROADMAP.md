@@ -282,8 +282,11 @@ has it, no broad performance sprints without profile evidence.
   single-dst and FDB-NHG rows program `NDA_VLAN`, and snapshot / owned /
   adoption-reap state is VLAN-scoped; AF_BRIDGE local-MAC observations resolve
   `NDA_VLAN` through configured bridge-VLAN bindings before Type 2
-  origination. Remaining VLAN-aware work: MAC+IP ARP/ND VLAN attribution,
-  SVD / shared-VNI designs, and managed netdev creation. `RTNLGRP_LINK`
+  origination. **Cross-vendor receipt landed:** M70 has FRR originate the same
+  MAC in VNI100 and VNI200 while rustbgpd programs and withdraws only the
+  matching VLAN-scoped FDB row on one `vlan_filtering=1` bridge. Remaining
+  VLAN-aware work: MAC+IP ARP/ND VLAN attribution, SVD / shared-VNI designs,
+  and managed netdev creation. `RTNLGRP_LINK`
   eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven

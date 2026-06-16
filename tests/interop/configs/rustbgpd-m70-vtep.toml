@@ -1,0 +1,44 @@
+# M70: rustbgpd VLAN-aware bridge VTEP, peering with an FRR
+# traditional per-VNI originator.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# ADR-0089 v1 shape: one VLAN-aware bridge, one traditional VXLAN
+# device per VNI, and a local bridge_vlan binding. Ethernet Tag ID
+# remains 0 on the wire; bridge_vlan is local kernel attribution.
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "brvlan"
+bridge_vlan = 10
+advertise_svi_mac = false
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.1:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+bridge = "brvlan"
+bridge_vlan = 20
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "frr-traditional-vni-originator"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"
