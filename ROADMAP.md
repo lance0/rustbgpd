@@ -193,9 +193,9 @@ has it, no broad performance sprints without profile evidence.
   netdev creation must be opt-in and one ownership class at a time.
   **ADR-0089's first programming target landed:** VNI-per-broadcast-domain
   EVPN over Linux `vlan_filtering=1` bridges, with a local bridge-VLAN
-  binding, `NDA_VLAN` remote-MAC FDB attribution, and Ethernet Tag ID still
-  `0`; true RFC VLAN-aware bundle / non-zero-Ethernet-Tag service stays
-  deferred. Service-provider EVPN breadth
+  binding, `NDA_VLAN` remote-MAC FDB attribution, AF_BRIDGE local-MAC VLAN
+  attribution, and Ethernet Tag ID still `0`; true RFC VLAN-aware bundle /
+  non-zero-Ethernet-Tag service stays deferred. Service-provider EVPN breadth
   (route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation) stays out
   of the current lane until operator demand justifies a new ADR. **Native
@@ -277,12 +277,13 @@ has it, no broad performance sprints without profile evidence.
   ADR-0088, with ADR-0089 selecting the first VLAN-aware programming
   subset: traditional multi-VXLAN-device Linux bridges, local
   `bridge_vlan` attribution, and EVPN Ethernet Tag ID `0`. **Readiness +
-  FDB attribution landed for the traditional multi-VXLAN shape:**
+  FDB + local-MAC attribution landed for the traditional multi-VXLAN shape:**
   `bridge_vlan` instances validate observed bridge/VXLAN VLAN membership,
   single-dst and FDB-NHG rows program `NDA_VLAN`, and snapshot / owned /
-  adoption-reap state is VLAN-scoped. Remaining VLAN-aware work: local MAC
-  observation/origination attribution, SVD / shared-VNI designs, and managed
-  netdev creation. `RTNLGRP_LINK`
+  adoption-reap state is VLAN-scoped; AF_BRIDGE local-MAC observations resolve
+  `NDA_VLAN` through configured bridge-VLAN bindings before Type 2
+  origination. Remaining VLAN-aware work: MAC+IP ARP/ND VLAN attribution,
+  SVD / shared-VNI designs, and managed netdev creation. `RTNLGRP_LINK`
   eventing instead of
   poll-only link inventory — **carrier eventing landed** (ADR-0085 slice 1:
   the `link_carrier` monitor subscribes for the attributes link-driven
