@@ -21,8 +21,9 @@ pub use origination::{
     select_overlay_gateway,
 };
 pub use projection::{
-    EsiOverlayEadIndex, ProjectedEsiOverlayEadPerEvi, ProjectedIpPrefixRoute,
-    ProjectedOverlayIndexRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable, project_ip_prefix_routes,
+    EsiOverlayEadCandidate, EsiOverlayEadIndex, ProjectedEsiOverlayEadPerEvi,
+    ProjectedIpPrefixRoute, ProjectedOverlayIndexRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable,
+    project_ip_prefix_routes, project_ip_prefix_routes_with_overlay_and_esi_index,
     project_ip_prefix_routes_with_overlay_index,
 };
 pub use readiness::{

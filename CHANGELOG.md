@@ -148,12 +148,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Config load fails closed unless the selected ESI exists in
   `[[ethernet_segments]]`, the IP-VRF has at least one linked L2VNI,
   ambiguous multi-L2VNI links specify `overlay_index_l2vni`, and that
-  L2VNI is a member of the selected ESI. This is an origination slice:
-  receive-side projection now preserves Type 5 ESI and Ethernet Tag
-  metadata, exposes a scoped EAD-per-EVI resolver index for the future
-  receive path, and still drops non-zero-ESI routes fail-closed with
-  `unsupported_esi_overlay_index` until protected EAD recursion and a
-  real-peer interop proof ship.
+  L2VNI is a member of the selected ESI. The companion receive-side
+  substrate preserves Type 5 ESI and Ethernet Tag metadata and exposes
+  a scoped EAD-per-EVI resolver index.
+- **RFC 9136 §4.3 single-active ESI overlay-index Type 5 receive v1.**
+  Remote non-zero-ESI Type 5 routes can now resolve through matching
+  EAD-per-EVI protected-recursion state when the matched IP-VRF has a
+  linked L2VNI and that EAD candidate is exactly one single-active
+  remote VTEP. The Type 5 Router MAC remains the inner destination MAC,
+  the resolved EAD next hop becomes the FIB next hop, and existing
+  interface-less / GW-IP overlay-index behavior is unchanged. All-active
+  and ambiguous ESI candidates stay fail-closed with bounded drop reasons
+  until L3 multipath/NHG support and a real-peer interop proof exist.
 
 ### Changed
 
@@ -186,20 +192,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Documented the EVPN standards-tail boundary.** The README, roadmap,
   comparison matrix, EVPN enablement guide, and ADR-0087 now distinguish the
   near-term VXLAN/Linux alpha gaps (notably overlay-index protected-recursion
-  interop beyond the shipped GW-IP proof; ESI origination ships, but
-  receive-side ESI protected recursion remains) from demand-shaped
+  interop beyond the shipped GW-IP proof; ESI origination and single-active
+  receive now ship, while all-active ESI receive and ESI interop remain)
+  from demand-shaped
   service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
   The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:
   RFC 9252 is SRv6 BGP overlay services; future EVPN Add-Path work would use
   the general RFC 7911 Add-Path capability for AFI 25 / SAFI 70.
 - **Pinned the EVPN Type-5 ESI protected-recursion prerequisites.**
-  ADR-0087 and the roadmap now call out why inbound non-zero-ESI RT-5s still
-  drop fail-closed after ESI origination shipped. The receive-side substrate
-  now carries Type-5 ESI and Ethernet Tag metadata and exposes a
-  L2VNI-scoped EAD-per-EVI resolver index; the remaining decision is the
-  actual L3 multipath versus single-active-only receive policy and real-peer
-  interop proof before rustbgpd can claim RFC 9136 §4.3 protected recursion.
+  ADR-0087 and the roadmap now call out why all-active non-zero-ESI RT-5s
+  still drop fail-closed after ESI origination and single-active receive
+  shipped. The receive-side substrate carries Type-5 ESI and Ethernet Tag
+  metadata and exposes a L2VNI-scoped EAD-per-EVI resolver index; the
+  remaining work is L3 multipath/NHG receive policy plus a real-peer interop
+  proof before rustbgpd can claim full RFC 9136 §4.3 protected recursion.
 - **Tightened the ADR-0077 route-family substrate boundary.** Future
   BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
   review rule: substrate-only PRs must remain unreachable from peers and

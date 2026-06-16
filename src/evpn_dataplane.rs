@@ -1289,10 +1289,22 @@ async fn build_intent_tables(
             .iter()
             .filter_map(|route| project_overlay_index(route, instances))
             .collect();
-        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes_with_overlay_index(
+        let esi_overlay_ead: Vec<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> = routes
+            .iter()
+            .filter_map(|route| {
+                project_esi_overlay_ead_per_evi(
+                    route,
+                    &local_vtep_ips,
+                    instances,
+                    &ead_per_es_modes,
+                )
+            })
+            .collect();
+        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes_with_overlay_and_esi_index(
             ip_vrfs,
             projected_t5,
             overlay_index_t2,
+            esi_overlay_ead,
         )
     };
     let remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
@@ -1485,6 +1497,40 @@ fn project_ead_per_evi(
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         next_hop: route.next_hop,
+    })
+}
+
+/// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the scoped
+/// resolver input used by ESI overlay-index Type 5 receive. The row is
+/// usable only when it is remote, its label names a configured local
+/// L2VNI, and a matching EAD-per-ES row supplied the ES redundancy
+/// mode. Both single-active and all-active rows are passed through so
+/// the Type 5 projection can import the former and fail closed on the
+/// latter with a precise drop reason.
+fn project_esi_overlay_ead_per_evi(
+    route: &EvpnRibRoute,
+    local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+    instances: &EvpnInstanceTable,
+    ead_per_es_modes: &std::collections::BTreeMap<
+        (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+        bool,
+    >,
+) -> Option<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> {
+    let EvpnRoute::EadPerEvi(ead) = &route.route else {
+        return None;
+    };
+    if local_vtep_ips.contains(&route.next_hop) {
+        return None;
+    }
+    let l2vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
+    instances.get(l2vni)?;
+    let single_active = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
+    Some(rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi {
+        l2vni,
+        esi: ead.esi,
+        ethernet_tag: ead.ethernet_tag,
+        next_hop: route.next_hop,
+        single_active,
     })
 }
 
@@ -1829,12 +1875,21 @@ mod tests {
         ethernet_tag: u32,
         next_hop: &str,
     ) -> EvpnRibRoute {
+        evpn_ead_per_evi_route_with_label(esi, ethernet_tag, ethernet_tag, next_hop)
+    }
+
+    fn evpn_ead_per_evi_route_with_label(
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: u32,
+        label: u32,
+        next_hop: &str,
+    ) -> EvpnRibRoute {
         EvpnRibRoute {
             route: EvpnRoute::EadPerEvi(EvpnEadPerEvi {
                 rd: RouteDistinguisher::ZERO,
                 esi,
                 ethernet_tag: EthernetTagId(ethernet_tag),
-                label: MplsLabel::new(ethernet_tag),
+                label: MplsLabel::new(label),
             }),
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
@@ -1846,6 +1901,31 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    fn type5_with_esi_and_router_mac(
+        prefix: &str,
+        next_hop: &str,
+        l3vni: u32,
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: u32,
+        router_mac: [u8; 6],
+    ) -> EvpnRibRoute {
+        let mut route = evpn_ip_prefix_route(prefix, "0.0.0.0", next_hop, l3vni);
+        let EvpnRoute::IpPrefix(ip_prefix) = &mut route.route else {
+            panic!("helper must build Type 5");
+        };
+        ip_prefix.esi = esi;
+        ip_prefix.ethernet_tag = EthernetTagId(ethernet_tag);
+        route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+            RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: l3vni,
+            }
+            .to_extended_community(),
+            ExtendedCommunity::router_mac(router_mac),
+        ])]);
+        route
     }
 
     #[test]
@@ -2284,6 +2364,46 @@ mod tests {
         assert!(
             project_ead_per_evi(&ead, &local_vteps, &single_active).is_none(),
             "single-active EAD-per-ES reachability must suppress all-active alias ECMP"
+        );
+    }
+
+    #[test]
+    fn project_esi_overlay_ead_per_evi_carries_l2vni_tag_and_mode() {
+        let esi = EthernetSegmentIdentifier::new([8; 10]);
+        let local_vteps = BTreeSet::new();
+        let instances = local_instance_table(100, Some("br100"));
+        let ead = evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2");
+        let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), false)]);
+        let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), true)]);
+
+        let all_active_projected =
+            project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &all_active)
+                .expect("all-active still feeds the fail-closed Type 5 resolver");
+        assert_eq!(all_active_projected.l2vni, vni(100));
+        assert_eq!(all_active_projected.ethernet_tag, EthernetTagId(42));
+        assert_eq!(all_active_projected.next_hop, ipa("10.0.0.2"));
+        assert!(!all_active_projected.single_active);
+
+        let single_active_projected =
+            project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &single_active)
+                .expect("single-active feeds the import-capable Type 5 resolver");
+        assert!(single_active_projected.single_active);
+
+        let self_originated = BTreeSet::from([ipa("10.0.0.2")]);
+        assert!(
+            project_esi_overlay_ead_per_evi(&ead, &self_originated, &instances, &single_active)
+                .is_none(),
+            "self-originated EAD rows must not become resolver candidates"
+        );
+        assert!(
+            project_esi_overlay_ead_per_evi(
+                &ead,
+                &local_vteps,
+                &EvpnInstanceTable::new(),
+                &single_active,
+            )
+            .is_none(),
+            "EAD label must name a configured local L2VNI"
         );
     }
 
@@ -2799,6 +2919,86 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
         assert_eq!(entries[0].1.router_mac, MacAddress::new([0xaa; 6]));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_resolves_single_active_esi_overlay_type5_through_ead() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 58]);
+        let overlay_mac = [0x02, 0x58, 0, 0, 0, 1];
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.58.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        42,
+                        overlay_mac,
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        let entries: Vec<_> = tables
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
+        assert_eq!(entries[0].1.router_mac, MacAddress::new(overlay_mac));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_drops_all_active_esi_overlay_type5() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.59.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        0,
+                        [0x02, 0x59, 0, 0, 0, 1],
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(tables.remote_ip_prefixes.is_empty());
+        assert!(matches!(
+            tables.remote_ip_prefixes.drops()[0],
+            rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {
+                ref vrf,
+                candidates: 1,
+                ..
+            } if vrf == "blue"
+        ));
     }
 
     #[test]
