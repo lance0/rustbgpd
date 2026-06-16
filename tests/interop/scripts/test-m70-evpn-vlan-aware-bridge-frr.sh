@@ -85,6 +85,10 @@ frr_has_vni() {
 
 frr_route_detail_has_rd_route_rt() {
     local rd=${1:?} route=${2:?} rt=${3:?}
+    # M70 fixes the fixture at VNI100/VNI200 and exact RT/RD strings,
+    # so substring matching inside one FRR route-detail block is sound.
+    # Revisit if a future fixture adds ambiguous values such as
+    # VNI1000/RT 65000:1000 next to VNI100/RT 65000:100.
     frr_vtysh "show bgp l2vpn evpn route detail" \
         | awk -v rd="Route Distinguisher: ${rd}" -v route="$route" -v rt="$rt" '
             /^Route Distinguisher:/ {
