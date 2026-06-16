@@ -39,6 +39,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg   # FDB nexthop g
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_roundtrip # FDB-NHG round-trip only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve # FDB-NHG nolearning guard only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FIB runtime
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
 ```
 
 `--cap-add=NET_ADMIN` is required for `bridge link set ... flood off`
@@ -65,6 +66,7 @@ caches across runs.
 | `fdb_nhg_roundtrip` | `round_trip_install_and_remove_fdb_nhg`          | FDB-NHG member + group + FDB-row install, dump, and teardown      |
 | `fdb_nhg_cve` | `cve_guard_blocks_install_when_learning_enabled`        | CVE-2025-39851 nolearning readiness guard for FDB-NHG installs   |
 | `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
+| `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,
