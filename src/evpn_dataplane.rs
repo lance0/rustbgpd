@@ -1207,6 +1207,11 @@ async fn build_intent_tables(
     // `.collect()` would make this nondeterministic across duplicate or
     // transient (e.g. RD-changing) EAD-per-ES rows for the same key.
     let ead_per_es_modes = fold_ead_per_es_modes(&routes);
+    // Strict unanimous fold for the RFC 9136 §4.3 Type 5 overlay-index
+    // import decision only — fail-closed on conflicting redundancy signals.
+    // The OR-folded `ead_per_es_modes` above stays the L2 aliasing contract
+    // and feeds every L2 consumer below unchanged.
+    let ead_per_es_modes_esi_type5 = fold_ead_per_es_modes_for_esi_type5_import(&routes);
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
@@ -1296,7 +1301,7 @@ async fn build_intent_tables(
                     route,
                     &local_vtep_ips,
                     instances,
-                    &ead_per_es_modes,
+                    &ead_per_es_modes_esi_type5,
                 )
             })
             .collect();
@@ -1438,6 +1443,31 @@ fn fold_ead_per_es_modes(
     for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
         let entry = modes.entry(key).or_insert(false);
         *entry = *entry || single_active;
+    }
+    modes
+}
+
+/// Strict (unanimous) `(next-hop, ESI)` mode fold for the RFC 9136 §4.3
+/// ESI overlay-index Type 5 **import** decision. A pair is single-active
+/// only if EVERY EAD-per-ES signal for it says single-active; any
+/// all-active or conflicting (mixed) signal folds to non-single-active,
+/// which the Type 5 receive path then drops fail-closed.
+///
+/// This deliberately differs from [`fold_ead_per_es_modes`]: the OR-fold
+/// there is the L2 aliasing-suppression contract ("if anything says
+/// single-active, suppress all-active aliasing"), which is the safer L2
+/// behavior. An *import* decision must instead bias toward NOT importing
+/// on ambiguity, so it must not collapse a conflicting pair to
+/// single-active and admit the route (which OR-folding would, e.g. under
+/// future Add-Path duplicates).
+fn fold_ead_per_es_modes_for_esi_type5_import(
+    routes: &[EvpnRibRoute],
+) -> std::collections::BTreeMap<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier), bool>
+{
+    let mut modes = std::collections::BTreeMap::new();
+    for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
+        let entry = modes.entry(key).or_insert(true);
+        *entry = *entry && single_active;
     }
     modes
 }
@@ -2425,10 +2455,13 @@ mod tests {
 
     #[test]
     fn fold_ead_per_es_modes_or_folds_single_active_across_duplicates() {
-        // Two EAD-per-ES rows for the SAME (next-hop, ESI): one all-active, one
-        // single-active (e.g. a transient RD-changing duplicate). The OR-fold
-        // must yield single-active regardless of arrival order, so the receiver
-        // deterministically suppresses all-active aliasing ECMP.
+        // L2 ALIASING-SUPPRESSION contract only. Two EAD-per-ES rows for the
+        // SAME (next-hop, ESI): one all-active, one single-active (e.g. a
+        // transient RD-changing duplicate). The OR-fold must yield
+        // single-active regardless of arrival order, so the receiver
+        // deterministically suppresses all-active aliasing ECMP. The RFC 9136
+        // §4.3 Type 5 *import* path does NOT use this fold — it uses the strict
+        // unanimous fold (see the test below), which fails closed on conflict.
         let esi = EthernetSegmentIdentifier::new([9; 10]);
         let nh = ipa("10.0.0.2");
         let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
@@ -2445,6 +2478,39 @@ mod tests {
                 "single-active must win the (next-hop, ESI) fold"
             );
         }
+    }
+
+    #[test]
+    fn fold_ead_per_es_modes_for_esi_type5_import_fails_closed_on_conflict() {
+        // The Type 5 import fold is the STRICT mirror of the L2 OR-fold above.
+        // For the SAME (next-hop, ESI) with conflicting duplicate signals (one
+        // all-active, one single-active), it must yield NON-single-active
+        // regardless of arrival order, so the Type 5 receive path drops the
+        // route fail-closed instead of admitting it (which OR-folding would).
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        let nh = ipa("10.0.0.2");
+        let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
+        let single_active = evpn_ead_per_es_route(esi, "10.0.0.2", true);
+
+        for routes in [
+            vec![all_active.clone(), single_active.clone()],
+            vec![single_active.clone(), all_active.clone()],
+        ] {
+            let modes = fold_ead_per_es_modes_for_esi_type5_import(&routes);
+            assert_eq!(
+                modes.get(&(nh, esi)),
+                Some(&false),
+                "conflicting signal must fail closed (non-single-active) for Type 5 import"
+            );
+        }
+
+        // Unanimous single-active still resolves to single-active.
+        let unanimous = vec![single_active.clone(), single_active];
+        assert_eq!(
+            fold_ead_per_es_modes_for_esi_type5_import(&unanimous).get(&(nh, esi)),
+            Some(&true),
+            "unanimous single-active must remain single-active"
+        );
     }
 
     #[tokio::test]
@@ -2991,6 +3057,56 @@ mod tests {
                 .await
                 .unwrap();
         assert!(tables.remote_ip_prefixes.is_empty());
+        assert!(matches!(
+            tables.remote_ip_prefixes.drops()[0],
+            rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {
+                ref vrf,
+                candidates: 1,
+                ..
+            } if vrf == "blue"
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_drops_conflicting_esi_overlay_type5_fail_closed() {
+        // Conflicting duplicate EAD-per-ES signals for the SAME (next-hop, ESI):
+        // one single-active, one all-active. The strict Type 5 import fold must
+        // collapse this to non-single-active and drop the Type 5 fail-closed.
+        // (The L2 OR-fold would instead treat the pair as single-active — this
+        // test guards that the import path does NOT inherit that, e.g. under
+        // future Add-Path duplicates.)
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.59.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        0,
+                        [0x02, 0x59, 0, 0, 0, 1],
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(
+            tables.remote_ip_prefixes.is_empty(),
+            "conflicting redundancy signals must not import a Type 5 overlay route"
+        );
         assert!(matches!(
             tables.remote_ip_prefixes.drops()[0],
             rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {

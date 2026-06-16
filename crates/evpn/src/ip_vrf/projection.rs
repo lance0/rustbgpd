@@ -230,8 +230,16 @@ impl EsiOverlayEadIndex {
                 .entry((route.l2vni, route.esi, route.ethernet_tag))
                 .or_default()
                 .entry(route.next_hop)
-                .or_insert(false);
-            *entry = *entry || route.single_active;
+                .or_insert(true);
+            // AND-fold (defense in depth): a candidate is single-active only
+            // if every duplicate signal for it agrees. Any all-active or
+            // conflicting signal forces non-single-active, so the Type 5
+            // import drops fail-closed. An import decision biases toward NOT
+            // importing on ambiguity — unlike the L2 aliasing OR-fold, whose
+            // contract is "if anything says single-active, suppress all-active
+            // aliasing". The daemon also feeds this path a strict (unanimous)
+            // EAD-per-ES mode fold; see `fold_ead_per_es_modes_for_esi_type5_import`.
+            *entry = *entry && route.single_active;
         }
         Self {
             by_key: tmp
@@ -461,9 +469,12 @@ pub enum DropReason {
         next_hop: IpAddr,
         vrf: String,
     },
-    /// The route uses ESI overlay-index semantics, but no matching
-    /// EAD-per-EVI row in a linked L2VNI satisfied the `(ESI,
-    /// Ethernet Tag)` protected-recursion key.
+    /// The route uses ESI overlay-index semantics, but no resolvable
+    /// EAD candidate in a linked L2VNI satisfied the `(ESI, Ethernet
+    /// Tag)` protected-recursion key. This covers both "no matching
+    /// EAD-per-EVI row" and the daemon-side case where an EAD-per-EVI
+    /// row existed but its companion EAD-per-ES mode was missing or
+    /// unknown (so the candidate was filtered out before resolution).
     UnresolvedEsiOverlayIndex {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
