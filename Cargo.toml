@@ -145,10 +145,16 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.21"
-netlink-packet-route = "0.30"
+netlink-packet-route = "0.31"
 libc.workspace = true
 nix.workspace = true
 futures = "0.3"
+
+[patch.crates-io]
+# crates.io `rtnetlink 0.21.0` still depends on `netlink-packet-route 0.30`.
+# This pinned upstream revision carries the 0.31 dependency until the next
+# `rtnetlink` release can replace the patch with a normal version bump.
+rtnetlink = { git = "https://github.com/rust-netlink/rtnetlink.git", rev = "e7799b6ee24267586e6aadc0e3fb415b4d921dd4" }
 
 [[bin]]
 name = "rustbgpd"
