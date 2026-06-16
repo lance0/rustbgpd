@@ -1057,8 +1057,7 @@ mod tests {
                 None,
                 false,
             )
-            .unwrap()
-            .with_bridge_vlan(Some(BridgeVlan::new(20).unwrap())),
+            .unwrap(),
         )
         .unwrap();
         t.insert(
@@ -1073,7 +1072,8 @@ mod tests {
                 Some("br200".into()),
                 true,
             )
-            .unwrap(),
+            .unwrap()
+            .with_bridge_vlan(Some(BridgeVlan::new(20).unwrap())),
         )
         .unwrap();
         t
