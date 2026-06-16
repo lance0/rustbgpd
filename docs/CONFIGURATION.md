@@ -1982,9 +1982,11 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   ADR-0088).
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
   `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
-  observed bridge must have `vlan_filtering=1`, exactly one VXLAN
-  member for the instance VNI, and the configured VLAN present on both
-  the bridge and that VXLAN member. Without `bridge_vlan`, a
+  observed bridge must have `vlan_filtering=1`, the configured VLAN
+  present on the bridge, and exactly one matching VXLAN target. A
+  target can be either a fixed-VNI VXLAN member carrying the VLAN, or
+  a collect-metadata / SVD VXLAN member whose VLAN tunnel mapping ties
+  that VLAN to the instance VNI. Without `bridge_vlan`, a
   `vlan_filtering=1` bridge remains `NotReady`.
 - `advertise_svi_mac = true` is inert until the instance has a Ready
   bridge report with a bridge MAC; configs without `bridge` are accepted

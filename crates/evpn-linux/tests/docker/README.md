@@ -68,7 +68,7 @@ caches across runs.
 | `fdb_nhg_cve` | `cve_guard_blocks_install_when_learning_enabled`        | CVE-2025-39851 nolearning readiness guard for FDB-NHG installs   |
 | `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
-| `svd_fdb_vni` | `svd_topology_is_detected_and_explicit_src_vni_fdb_rows_parse` | LAN-64 collect-metadata VXLAN detection + explicit `src_vni` FDB parse proof |
+| `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,
