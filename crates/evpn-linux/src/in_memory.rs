@@ -84,10 +84,6 @@ struct State {
     /// coordinator drives this; tests stage it pre-startup to
     /// exercise the adoption path.
     nexthop_ops: BTreeMap<u32, KernelNexthop>,
-    /// Recorded FDB-NHG rows keyed by `(VNI, MAC)` → `nh_id`. Mirrors
-    /// the kernel's `NDA_NH_ID` row, distinct from the single-dst
-    /// `KernelFdbEntry::dst` path.
-    fdb_nhg_rows: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
     /// Gate 9 L3 kernel route rows, keyed the way the kernel keys
     /// them: `(table_id, prefix)`. `apply` of `AddRemoteIpRoute` /
     /// `RemoveRemoteIpRoute` mutates this map (replace semantics on
@@ -199,7 +195,6 @@ impl InMemoryDataplane {
         Self {
             state: Arc::new(Mutex::new(State {
                 nexthop_ops: BTreeMap::new(),
-                fdb_nhg_rows: BTreeMap::new(),
                 kernel: KernelSnapshot::new(),
                 probes: InstanceProbes::new(),
                 failures: VecDeque::new(),
@@ -634,7 +629,6 @@ impl NexthopOps for InMemoryDataplane {
         if let Some(e) = take_universal_failure(&mut state) {
             return Err(e);
         }
-        state.fdb_nhg_rows.insert((vni, mac), nh_id);
         // Mirror into `state.kernel` so a subsequent `dump_snapshot`
         // reflects the row — without this, the slice 3b drift check
         // in `compute_diff` Pass 1b would see no row, treat it as
@@ -669,7 +663,6 @@ impl NexthopOps for InMemoryDataplane {
         }
         // Idempotent — slice 3b coordinator may issue this on
         // already-removed rows during stale cleanup.
-        state.fdb_nhg_rows.remove(&(vni, mac));
         state.kernel.remove_fdb_in_vlan(vni, mac, vlan);
         Ok(())
     }

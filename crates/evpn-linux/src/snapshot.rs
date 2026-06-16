@@ -98,6 +98,42 @@ pub struct KernelBridgeVlanInfo {
     pub flags: KernelBridgeVlanFlags,
 }
 
+/// Return whether a Linux bridge VLAN row list contains `vlan`.
+///
+/// Linux may compress contiguous VLAN membership rows into a
+/// `range_begin` / `range_end` pair. This helper preserves that
+/// interpretation for both the readiness probe and the link inventory
+/// snapshot path.
+#[must_use]
+pub(crate) fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> bool {
+    let mut range_start = None;
+    for row in rows {
+        if row.flags.range_begin {
+            range_start = Some(row.vid);
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.flags.range_end {
+            if let Some(start) = range_start.take()
+                && start <= vlan
+                && vlan <= row.vid
+            {
+                return true;
+            }
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.vid == vlan {
+            return true;
+        }
+    }
+    false
+}
+
 /// One `IFLA_BRIDGE_VLAN_TUNNEL_INFO` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBridgeVlanTunnelInfo {
@@ -622,6 +658,45 @@ mod tests {
     }
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn vlan_rows_contain_handles_single_rows_and_ranges() {
+        let rows = [
+            KernelBridgeVlanInfo {
+                vid: 10,
+                flags: KernelBridgeVlanFlags::default(),
+            },
+            KernelBridgeVlanInfo {
+                vid: 20,
+                flags: KernelBridgeVlanFlags {
+                    range_begin: true,
+                    ..Default::default()
+                },
+            },
+            KernelBridgeVlanInfo {
+                vid: 25,
+                flags: KernelBridgeVlanFlags {
+                    range_end: true,
+                    ..Default::default()
+                },
+            },
+            KernelBridgeVlanInfo {
+                vid: 30,
+                flags: KernelBridgeVlanFlags {
+                    range_end: true,
+                    ..Default::default()
+                },
+            },
+        ];
+
+        assert!(vlan_rows_contain(&rows, 10));
+        assert!(vlan_rows_contain(&rows, 20));
+        assert!(vlan_rows_contain(&rows, 23));
+        assert!(vlan_rows_contain(&rows, 25));
+        assert!(vlan_rows_contain(&rows, 30));
+        assert!(!vlan_rows_contain(&rows, 19));
+        assert!(!vlan_rows_contain(&rows, 26));
     }
 
     #[test]
