@@ -59,7 +59,7 @@ const NUD_PERMANENT: u16 = 0x80;
 const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 
 /// Dump every bridge FDB entry in the kernel and key them by
-/// `(EvpnInstanceId, MacAddress)`.
+/// `(EvpnInstanceId, Option<VLAN>, MacAddress)`.
 ///
 /// Each FDB entry's `header.ifindex` points at the **VXLAN port** for
 /// bridge-family neighbours. We map that ifindex back to a VNI via
@@ -425,10 +425,10 @@ pub(crate) async fn apply_op(
 fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
     let raw = vni.as_u32();
     cache
-        .bridges
-        .values()
-        .filter(|b| b.vxlan_attach_count == 1)
-        .find_map(|b| b.vxlan.as_ref().filter(|v| v.vni == raw).map(|v| v.ifindex))
+        .vxlan_ifindex_to_vni
+        .iter()
+        .filter_map(|(ifindex, candidate)| (*candidate == raw).then_some(*ifindex))
+        .min()
 }
 
 /// Classify a netlink error into the right [`DataplaneError`] variant.
@@ -521,6 +521,8 @@ mod tests {
 
     use super::*;
     use crate::FailureClass;
+    use crate::linux::links::BridgeLink;
+    use crate::snapshot::KernelVxlanInfo;
 
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -786,6 +788,46 @@ mod tests {
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
         let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10));
         assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+    }
+
+    #[test]
+    fn vxlan_ifindex_lookup_supports_multi_vxlan_vlan_aware_bridge() {
+        let mut cache = LinkCache::default();
+        cache.vxlan_ifindex_to_vni.insert(11, 100);
+        cache.vxlan_ifindex_to_vni.insert(22, 200);
+        cache.bridges.insert(
+            "br-tenant".to_string(),
+            BridgeLink {
+                ifindex: 7,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 200,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        assert_eq!(
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()),
+            Some(11)
+        );
+        assert_eq!(
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(200).unwrap()),
+            Some(22)
+        );
     }
 
     #[test]

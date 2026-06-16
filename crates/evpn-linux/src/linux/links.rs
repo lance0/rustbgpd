@@ -61,10 +61,10 @@ pub(crate) struct BridgeLink {
     /// VNI matches the instance and then verifies VLAN membership on
     /// that specific port.
     pub vxlan_ports: Vec<KernelVxlanInfo>,
-    /// Number of VXLAN ports attached to this bridge. `1` is the
-    /// only legal value for an EVPN-managed bridge; `0` means
-    /// missing topology, `>=2` means ambiguous and reports
-    /// `NotReady`.
+    /// Number of VXLAN ports attached to this bridge. Legacy
+    /// VLAN-unaware readiness still requires exactly one; ADR-0089
+    /// VLAN-aware readiness allows multiple VXLAN ports on a bridge
+    /// when each configured VNI has exactly one matching VLAN member.
     pub vxlan_attach_count: u32,
     /// Non-VXLAN bridge-member ifindexes. These are CE-facing
     /// candidates for Gate 8b BUM enforcement.
