@@ -84,8 +84,9 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 pub(crate) async fn dump_fdb(
     handle: &Handle,
     cache: &LinkCache,
-) -> Result<HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>, DataplaneError> {
-    let mut out: HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry> = HashMap::new();
+) -> Result<HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>, DataplaneError> {
+    let mut out: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry> =
+        HashMap::new();
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -138,10 +139,9 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     existing.flags.self_flag |= incoming.flags.self_flag;
 }
 
-fn parse_fdb_entry(
-    msg: &NeighbourMessage,
-    cache: &LinkCache,
-) -> Option<((EvpnInstanceId, MacAddress), KernelFdbEntry)> {
+type FdbSnapshotRow = ((EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry);
+
+fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnapshotRow> {
     if msg.header.family != AddressFamily::Bridge {
         return None;
     }
@@ -157,6 +157,7 @@ fn parse_fdb_entry(
     let mut dst: Option<std::net::IpAddr> = None;
     let mut nh_id: Option<u32> = None;
     let mut protocol: Option<u8> = None;
+    let mut vlan: Option<u16> = None;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -188,6 +189,7 @@ fn parse_fdb_entry(
             // `rtm_protocol` byte — the snapshot types are
             // platform-independent and don't see netlink enums.
             NeighbourAttribute::Protocol(p) => protocol = Some(u8::from(*p)),
+            NeighbourAttribute::Vlan(v) => vlan = Some(*v),
             _ => {}
         }
     }
@@ -210,9 +212,10 @@ fn parse_fdb_entry(
     decode_state(msg.header.state, &mut flags);
 
     Some((
-        (vni, mac),
+        (vni, vlan, mac),
         KernelFdbEntry {
             mac,
+            vlan,
             dst,
             nh_id,
             protocol,
@@ -270,7 +273,12 @@ fn decode_state(state: NeighbourState, flags: &mut KernelFdbFlags) {
 /// on current kernels, exactly FRR's posture: when bridge/vxlan
 /// support merges, already-deployed daemons start writing effective
 /// stamps with no upgrade.
-fn build_remote_fdb_message(vxlan_ifindex: u32, mac: MacAddress, dst: IpAddr) -> NeighbourMessage {
+fn build_remote_fdb_message(
+    vxlan_ifindex: u32,
+    mac: MacAddress,
+    dst: IpAddr,
+    vlan: Option<u16>,
+) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
     msg.header.ifindex = vxlan_ifindex;
@@ -285,6 +293,9 @@ fn build_remote_fdb_message(vxlan_ifindex: u32, mac: MacAddress, dst: IpAddr) ->
             IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
             IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
         }));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
     msg
@@ -323,7 +334,7 @@ pub(crate) async fn apply_op(
     let (vni, mac) = match op {
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
-        | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
+        | DataplaneOp::RemoveRemoteFdb { vni, mac, .. } => (*vni, *mac),
         DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
@@ -351,7 +362,8 @@ pub(crate) async fn apply_op(
         })?;
 
     match op {
-        DataplaneOp::AddRemoteFdb { dst, .. } | DataplaneOp::UpdateRemoteFdb { dst, .. } => {
+        DataplaneOp::AddRemoteFdb { dst, vlan, .. }
+        | DataplaneOp::UpdateRemoteFdb { dst, vlan, .. } => {
             // Single message matching what iproute2 sends for
             // `bridge fdb add MAC dev vxlanX master dst R self
             // extern_learn` (verified via strace on FRR's exact wire
@@ -365,11 +377,11 @@ pub(crate) async fn apply_op(
                 .neighbours()
                 .add_bridge(vxlan_ifindex, &mac.octets())
                 .replace();
-            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst);
+            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst, *vlan);
             req.execute().await.map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
-        DataplaneOp::RemoveRemoteFdb { .. } => {
+        DataplaneOp::RemoveRemoteFdb { vlan, .. } => {
             // Delete the same row we programmed: single NTF_SELF |
             // NTF_MASTER message on the VXLAN port. Kernel cleans
             // up both the bridge-FDB row and the VXLAN-encap row.
@@ -380,6 +392,9 @@ pub(crate) async fn apply_op(
             msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
             msg.attributes
                 .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+            if let Some(vlan) = vlan {
+                msg.attributes.push(NeighbourAttribute::Vlan(*vlan));
+            }
             handle
                 .neighbours()
                 .del(msg)
@@ -537,6 +552,7 @@ mod tests {
     fn fdb_row(dst: Option<&str>, f: KernelFdbFlags) -> KernelFdbEntry {
         KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: dst.map(ipa),
             nh_id: None,
             protocol: None,
@@ -634,6 +650,7 @@ mod tests {
         };
         let mut acc = KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: None,
             nh_id: None,
             protocol: None,
@@ -641,6 +658,7 @@ mod tests {
         };
         let nhg_row = KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: None,
             nh_id: Some(0x4000_0001),
             protocol: None,
@@ -731,7 +749,7 @@ mod tests {
     #[test]
     fn build_remote_fdb_message_shape_includes_ownership_stamp() {
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -756,6 +774,18 @@ mod tests {
             msg.attributes
                 .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
         );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, NeighbourAttribute::Vlan(_)))
+        );
+    }
+
+    #[test]
+    fn build_remote_fdb_message_carries_vlan_when_scoped() {
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10));
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
     }
 
     #[test]
@@ -765,13 +795,13 @@ mod tests {
         // Round-trip our own encode shape through the parser, as a
         // future FDB-storing kernel would echo it back.
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         let (_, entry) = parse_fdb_entry(&msg, &cache).unwrap();
         assert_eq!(entry.protocol, Some(186));
         assert!(entry.is_extern_learned());
 
         // Current kernels return no protocol attribute at all.
-        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         unstamped
             .attributes
             .retain(|a| !matches!(a, NeighbourAttribute::Protocol(_)));

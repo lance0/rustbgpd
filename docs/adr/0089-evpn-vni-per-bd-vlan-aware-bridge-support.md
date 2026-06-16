@@ -46,7 +46,7 @@ is keyed by `(VNI, MAC)`. The missing v1 information is not an EVPN
 Ethernet Tag. It is the local Linux bridge VLAN that selects the
 broadcast domain on a `vlan_filtering=1` bridge.
 
-Local implementation facts:
+Local implementation facts at ADR acceptance:
 
 - `EvpnInstanceConfig` has `vni`, `bridge`, and `local_vtep_ip`, but no
   bridge VLAN binding.

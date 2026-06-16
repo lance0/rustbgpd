@@ -347,12 +347,23 @@ impl InMemoryDataplane {
         }
 
         match op {
-            DataplaneOp::AddRemoteFdb { vni, mac, dst }
-            | DataplaneOp::UpdateRemoteFdb { vni, mac, dst } => {
+            DataplaneOp::AddRemoteFdb {
+                vni,
+                mac,
+                vlan,
+                dst,
+            }
+            | DataplaneOp::UpdateRemoteFdb {
+                vni,
+                mac,
+                vlan,
+                dst,
+            } => {
                 state.kernel.insert_fdb(
                     *vni,
                     KernelFdbEntry {
                         mac: *mac,
+                        vlan: *vlan,
                         dst: Some(*dst),
                         nh_id: None,
                         protocol: None,
@@ -364,8 +375,8 @@ impl InMemoryDataplane {
                     },
                 );
             }
-            DataplaneOp::RemoveRemoteFdb { vni, mac } => {
-                state.kernel.remove_fdb(*vni, *mac);
+            DataplaneOp::RemoveRemoteFdb { vni, mac, vlan } => {
+                state.kernel.remove_fdb_in_vlan(*vni, *mac, *vlan);
             }
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 state.bum_port_flags.insert(*ifindex, *flags);
@@ -616,6 +627,7 @@ impl NexthopOps for InMemoryDataplane {
         &mut self,
         vni: EvpnInstanceId,
         mac: MacAddress,
+        vlan: Option<u16>,
         nh_id: u32,
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
@@ -631,6 +643,7 @@ impl NexthopOps for InMemoryDataplane {
             vni,
             KernelFdbEntry {
                 mac,
+                vlan,
                 dst: None,
                 nh_id: Some(nh_id),
                 protocol: None,
@@ -648,6 +661,7 @@ impl NexthopOps for InMemoryDataplane {
         &mut self,
         vni: EvpnInstanceId,
         mac: MacAddress,
+        vlan: Option<u16>,
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
         if let Some(e) = take_universal_failure(&mut state) {
@@ -656,7 +670,7 @@ impl NexthopOps for InMemoryDataplane {
         // Idempotent — slice 3b coordinator may issue this on
         // already-removed rows during stale cleanup.
         state.fdb_nhg_rows.remove(&(vni, mac));
-        state.kernel.remove_fdb(vni, mac);
+        state.kernel.remove_fdb_in_vlan(vni, mac, vlan);
         Ok(())
     }
 
@@ -1067,6 +1081,7 @@ mod tests {
         let op_add = DataplaneOp::AddRemoteFdb {
             vni: vni(100),
             mac: mac(1),
+            vlan: None,
             dst: ip("10.0.0.2"),
         };
         dp.apply(&op_add).await.unwrap();
@@ -1075,6 +1090,7 @@ mod tests {
         let op_rem = DataplaneOp::RemoveRemoteFdb {
             vni: vni(100),
             mac: mac(1),
+            vlan: None,
         };
         dp.apply(&op_rem).await.unwrap();
         assert!(!h.kernel_has_fdb(vni(100), mac(1)));
@@ -1088,6 +1104,7 @@ mod tests {
         let op = DataplaneOp::AddRemoteFdb {
             vni: vni(100),
             mac: mac(1),
+            vlan: None,
             dst: ip("10.0.0.2"),
         };
         h.inject_failure_io(Some(op.clone()));
@@ -1145,6 +1162,7 @@ mod tests {
         let op = DataplaneOp::AddRemoteFdb {
             vni: vni(100),
             mac: mac(1),
+            vlan: None,
             dst: ip("10.0.0.2"),
         };
         assert!(dp.apply(&op).await.is_err());
@@ -1178,6 +1196,7 @@ mod tests {
             vni(100),
             KernelFdbEntry {
                 mac: mac(9),
+                vlan: None,
                 dst: None,
                 nh_id: None,
                 protocol: None,

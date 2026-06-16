@@ -54,6 +54,10 @@ pub enum DataplaneOp {
         vni: EvpnInstanceId,
         /// MAC the entry programs.
         mac: MacAddress,
+        /// Local Linux bridge VLAN attribution for ADR-0089
+        /// VLAN-aware instances. `None` preserves the legacy
+        /// non-VLAN-aware FDB wire shape.
+        vlan: Option<u16>,
         /// Remote VTEP destination IP.
         dst: IpAddr,
     },
@@ -64,6 +68,10 @@ pub enum DataplaneOp {
         vni: EvpnInstanceId,
         /// MAC the entry programs.
         mac: MacAddress,
+        /// Local Linux bridge VLAN attribution for ADR-0089
+        /// VLAN-aware instances. `None` preserves the legacy
+        /// non-VLAN-aware FDB wire shape.
+        vlan: Option<u16>,
         /// New remote VTEP destination IP.
         dst: IpAddr,
     },
@@ -77,6 +85,10 @@ pub enum DataplaneOp {
         vni: EvpnInstanceId,
         /// MAC the entry programmed.
         mac: MacAddress,
+        /// Local Linux bridge VLAN attribution for the row to remove.
+        /// Keeps VLAN-aware deletes scoped to the configured bridge
+        /// VLAN instead of matching another VLAN's row.
+        vlan: Option<u16>,
     },
     /// Apply the per-port flood-flag triplet to a CE-facing bridge
     /// port (Gate 8b BUM-suppression primitive). Realized in
@@ -232,6 +244,10 @@ pub enum DataplaneOp {
         vni: EvpnInstanceId,
         /// MAC the entry programs.
         mac: MacAddress,
+        /// Local Linux bridge VLAN attribution for ADR-0089
+        /// VLAN-aware instances. `None` preserves the legacy
+        /// non-VLAN-aware FDB-NHG wire shape.
+        vlan: Option<u16>,
         /// Dataplane-owned group identity `(VNI, ESI, EthernetTag)`.
         /// ADR-0059 §7's `share_l2_nhg` knob defaults off, so the
         /// key includes VNI in slice 3 — two L2VNIs sharing the same
@@ -287,6 +303,10 @@ pub enum DataplaneOp {
         vni: EvpnInstanceId,
         /// MAC the entry programmed.
         mac: MacAddress,
+        /// Local Linux bridge VLAN attribution for the row to remove.
+        /// Keeps VLAN-aware deletes scoped to the configured bridge
+        /// VLAN instead of matching another VLAN's row.
+        vlan: Option<u16>,
         /// Dataplane-owned group identity (needed so the coordinator
         /// knows which group to unref without re-deriving it from
         /// owned state).
@@ -496,6 +516,7 @@ pub trait NexthopOps: Send {
         &mut self,
         vni: EvpnInstanceId,
         mac: MacAddress,
+        vlan: Option<u16>,
         nh_id: u32,
     ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
 
@@ -504,6 +525,7 @@ pub trait NexthopOps: Send {
         &mut self,
         vni: EvpnInstanceId,
         mac: MacAddress,
+        vlan: Option<u16>,
     ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
 
     /// Dump rustbgpd-owned kernel nexthops (filtered by the

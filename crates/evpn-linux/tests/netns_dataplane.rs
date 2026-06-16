@@ -233,6 +233,7 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     dp.apply(&DataplaneOp::AddRemoteFdb {
         vni: vni(),
         mac: test_mac,
+        vlan: None,
         dst,
     })
     .await
@@ -285,6 +286,7 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     dp.apply(&DataplaneOp::RemoveRemoteFdb {
         vni: vni(),
         mac: test_mac,
+        vlan: None,
     })
     .await
     .expect("RemoveRemoteFdb");

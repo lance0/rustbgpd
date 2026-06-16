@@ -37,9 +37,10 @@ const RTPROT_BGP: u8 = 186;
 pub struct KernelLinkInfo {
     /// Bridge name (e.g., `"br100"`).
     pub bridge_name: String,
-    /// `true` if the bridge has `vlan_filtering=1`. ADR-0054 §4 rejects
-    /// VLAN-aware bridges in Gate 7b — the probe surfaces this as
-    /// `NotReady`.
+    /// `true` if the bridge has `vlan_filtering=1`. Legacy L2VNIs still
+    /// reject VLAN-aware bridges; ADR-0089 L2VNIs with `bridge_vlan`
+    /// validate an explicit local VLAN/VNI binding before reporting
+    /// `Ready`.
     pub vlan_filtering: bool,
     /// VXLAN port attached to the bridge for this instance's VNI, if
     /// exactly one is found. `None` indicates a missing or ambiguous
@@ -50,8 +51,9 @@ pub struct KernelLinkInfo {
     /// BUM suppression once the kernel primitive is selected.
     pub ce_port_ifindexes: Vec<u32>,
     /// VLAN membership observed on the bridge device itself via
-    /// `IFLA_AF_SPEC(AF_BRIDGE)`. Read-only ADR-0088 substrate; the
-    /// probe still reports `vlan_filtering=1` as `NotReady`.
+    /// `IFLA_AF_SPEC(AF_BRIDGE)`. Used by ADR-0089 readiness for
+    /// `bridge_vlan` instances and kept as diagnostics for the remaining
+    /// VLAN-aware follow-ups.
     pub vlans: Vec<KernelBridgeVlanInfo>,
     /// VLAN tunnel mappings observed on the bridge device itself.
     /// Future VLAN-aware support will decide whether these are desired
@@ -173,6 +175,10 @@ pub struct KernelVxlanInfo {
 pub struct KernelFdbEntry {
     /// MAC address the entry covers.
     pub mac: MacAddress,
+    /// Linux bridge VLAN carried by `NDA_VLAN`, when the kernel row
+    /// is scoped to a VLAN-aware bridge domain. `None` is the legacy
+    /// non-VLAN-aware FDB shape.
+    pub vlan: Option<u16>,
     /// Remote VTEP destination if the entry is a tunnel-encap entry,
     /// `None` for bridge-port-local entries and for FDB rows that
     /// point at an FDB nexthop group via `nh_id`.
@@ -318,8 +324,8 @@ pub enum InstanceProbe {
     /// Probe failed. The accompanying message is operator-facing.
     NotReady {
         /// Why the probe failed (e.g., "bridge br100 not found", "VXLAN
-        /// VNI mismatch: expected 100, found 200", "VLAN-aware bridges
-        /// not supported in Gate 7b").
+        /// VNI mismatch: expected 100, found 200", "configure
+        /// `bridge_vlan` for VLAN-aware bridge br100").
         reason: String,
     },
     /// Instance has `bridge = None` — no probe applies.
@@ -327,13 +333,15 @@ pub enum InstanceProbe {
 }
 
 /// Snapshot of every kernel FDB entry the dataplane is interested in,
-/// keyed by `(VNI, MAC)`. The Linux netlink dump derives the VNI from
-/// the FDB entry's **VXLAN-port** ifindex (which is what bridge-family
-/// `RTM_NEWNEIGH` messages carry in `header.ifindex`) by looking it
-/// up in the link cache's `vxlan_ifindex_to_vni` table.
+/// keyed by `(VNI, VLAN, MAC)`. The Linux netlink dump derives the VNI
+/// from the FDB entry's **VXLAN-port** ifindex (which is what
+/// bridge-family `RTM_NEWNEIGH` messages carry in `header.ifindex`) by
+/// looking it up in the link cache's `vxlan_ifindex_to_vni` table.
+/// VLAN is Linux attribution only: EVPN route identity remains
+/// `(VNI, MAC)` with Ethernet Tag ID `0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
-    fdb: BTreeMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>,
+    fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
     /// Per-bridge link info, indexed by bridge name. Used by the probe
     /// pass; the diff function itself does not read this.
     pub links: BTreeMap<String, KernelLinkInfo>,
@@ -353,28 +361,51 @@ impl KernelSnapshot {
 
     /// Insert (or overwrite) a kernel FDB entry.
     pub fn insert_fdb(&mut self, vni: EvpnInstanceId, entry: KernelFdbEntry) {
-        self.fdb.insert((vni, entry.mac), entry);
+        self.fdb.insert((vni, entry.vlan, entry.mac), entry);
     }
 
-    /// Remove an FDB entry, returning the previous value if any. Used
-    /// by [`crate::InMemoryDataplane`] to simulate kernel-side
-    /// withdrawals.
+    /// Remove a legacy non-VLAN-aware FDB entry, returning the previous
+    /// value if any. Used by older tests and by legacy apply paths.
     pub fn remove_fdb(&mut self, vni: EvpnInstanceId, mac: MacAddress) -> Option<KernelFdbEntry> {
-        self.fdb.remove(&(vni, mac))
+        self.remove_fdb_in_vlan(vni, mac, None)
     }
 
-    /// Look up a single FDB entry.
+    /// Remove an FDB entry in the requested Linux VLAN scope.
+    pub fn remove_fdb_in_vlan(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+        vlan: Option<u16>,
+    ) -> Option<KernelFdbEntry> {
+        self.fdb.remove(&(vni, vlan, mac))
+    }
+
+    /// Look up a legacy non-VLAN-aware FDB entry.
     #[must_use]
     pub fn find_fdb(&self, vni: EvpnInstanceId, mac: MacAddress) -> Option<&KernelFdbEntry> {
-        self.fdb.get(&(vni, mac))
+        self.find_fdb_in_vlan(vni, mac, None)
     }
 
-    /// Iterate FDB entries in deterministic `(VNI, MAC)` ascending
-    /// order.
+    /// Look up a single FDB entry in the requested Linux VLAN scope.
+    #[must_use]
+    pub fn find_fdb_in_vlan(
+        &self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+        vlan: Option<u16>,
+    ) -> Option<&KernelFdbEntry> {
+        self.fdb.get(&(vni, vlan, mac))
+    }
+
+    /// Iterate FDB entries in deterministic `(VNI, VLAN, MAC)` order.
+    /// The returned key keeps the legacy `(VNI, MAC)` shape; callers
+    /// that need VLAN attribution read it from [`KernelFdbEntry::vlan`].
     pub fn iter_fdb(
         &self,
-    ) -> impl Iterator<Item = (&(EvpnInstanceId, MacAddress), &KernelFdbEntry)> {
-        self.fdb.iter()
+    ) -> impl Iterator<Item = ((EvpnInstanceId, MacAddress), &KernelFdbEntry)> {
+        self.fdb
+            .iter()
+            .map(|(&(vni, _vlan, mac), entry)| ((vni, mac), entry))
     }
 
     /// Number of FDB entries in the snapshot.
@@ -476,6 +507,9 @@ impl OwnedSet {
 /// states like `dst=X AND group_key=Some(...)` are unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedEntry {
+    /// Linux bridge VLAN the row was programmed with. `None` is the
+    /// legacy non-VLAN-aware FDB shape.
+    pub vlan: Option<u16>,
     pub kind: OwnedEntryKind,
 }
 
@@ -510,6 +544,16 @@ impl OwnedEntry {
     #[must_use]
     pub fn single_dst(dst: IpAddr, mobility_seq: Option<u32>) -> Self {
         Self {
+            vlan: None,
+            kind: OwnedEntryKind::SingleDst { dst, mobility_seq },
+        }
+    }
+
+    /// Convenience constructor for a VLAN-scoped single-VTEP entry.
+    #[must_use]
+    pub fn single_dst_in_vlan(dst: IpAddr, mobility_seq: Option<u32>, vlan: Option<u16>) -> Self {
+        Self {
+            vlan,
             kind: OwnedEntryKind::SingleDst { dst, mobility_seq },
         }
     }
@@ -518,6 +562,19 @@ impl OwnedEntry {
     #[must_use]
     pub fn fdb_nhg(group_key: crate::group_state::AliasGroupKey) -> Self {
         Self {
+            vlan: None,
+            kind: OwnedEntryKind::FdbNhg { group_key },
+        }
+    }
+
+    /// Convenience constructor for a VLAN-scoped FDB-NHG entry.
+    #[must_use]
+    pub fn fdb_nhg_in_vlan(
+        group_key: crate::group_state::AliasGroupKey,
+        vlan: Option<u16>,
+    ) -> Self {
+        Self {
+            vlan,
             kind: OwnedEntryKind::FdbNhg { group_key },
         }
     }
@@ -571,6 +628,7 @@ mod tests {
     fn extern_learned_classification() {
         let entry = KernelFdbEntry {
             mac: mac(1),
+            vlan: None,
             dst: Some(ip("10.0.0.2")),
             nh_id: None,
             protocol: None,
@@ -590,6 +648,7 @@ mod tests {
         // local) — the kernel learned this from data-plane traffic.
         let entry = KernelFdbEntry {
             mac: mac(2),
+            vlan: None,
             dst: None,
             nh_id: None,
             protocol: None,
@@ -607,6 +666,7 @@ mod tests {
         // claims it. Our own stamp (186) keeps the classification.
         let mut entry = KernelFdbEntry {
             mac: mac(1),
+            vlan: None,
             dst: Some(ip("10.0.0.2")),
             nh_id: None,
             protocol: Some(11), // RTPROT_ZEBRA
@@ -627,6 +687,7 @@ mod tests {
     fn operator_static_is_neither_ours_nor_kernel_learned() {
         let entry = KernelFdbEntry {
             mac: mac(3),
+            vlan: None,
             dst: None,
             nh_id: None,
             protocol: None,
@@ -677,6 +738,7 @@ mod tests {
             vni(100),
             KernelFdbEntry {
                 mac: mac(1),
+                vlan: None,
                 dst: Some(ip("10.0.0.2")),
                 nh_id: None,
                 protocol: None,
@@ -701,6 +763,7 @@ mod tests {
                 vni(v),
                 KernelFdbEntry {
                     mac: mac(1),
+                    vlan: None,
                     dst: Some(ip("10.0.0.2")),
                     nh_id: None,
                     protocol: None,

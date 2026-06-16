@@ -518,7 +518,7 @@ impl Dataplane for LinuxDataplane {
         }
         let fdb_entries = fdb::dump_fdb(&self.handle, &cache).await?;
         let mut snap = KernelSnapshot::new();
-        for ((vni, _mac), entry) in fdb_entries {
+        for ((vni, _vlan, _mac), entry) in fdb_entries {
             snap.insert_fdb(vni, entry);
         }
         for (name, link) in &cache.bridges {
@@ -810,19 +810,21 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
         &mut self,
         vni: rustbgpd_evpn::EvpnInstanceId,
         mac: rustbgpd_evpn::MacAddress,
+        vlan: Option<u16>,
         nh_id: u32,
     ) -> Result<(), DataplaneError> {
         let cache = self.link_cache.lock().await.clone();
-        fdb_nhg::apply_install_fdb_nhg_row(&self.handle, &cache, vni, mac, nh_id).await
+        fdb_nhg::apply_install_fdb_nhg_row(&self.handle, &cache, vni, mac, vlan, nh_id).await
     }
 
     async fn remove_fdb_nhg_row(
         &mut self,
         vni: rustbgpd_evpn::EvpnInstanceId,
         mac: rustbgpd_evpn::MacAddress,
+        vlan: Option<u16>,
     ) -> Result<(), DataplaneError> {
         let cache = self.link_cache.lock().await.clone();
-        fdb_nhg::apply_remove_fdb_nhg_row(&self.handle, &cache, vni, mac).await
+        fdb_nhg::apply_remove_fdb_nhg_row(&self.handle, &cache, vni, mac, vlan).await
     }
 
     async fn dump_owned_nexthops(

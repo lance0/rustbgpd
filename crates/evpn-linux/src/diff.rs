@@ -43,7 +43,9 @@ use rustbgpd_evpn::{
 
 use crate::dataplane::DataplaneOp;
 use crate::group_state::{AliasGroupKey, GroupOwnedMap};
-use crate::snapshot::{InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntryKind, OwnedSet};
+use crate::snapshot::{
+    InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
+};
 
 /// Output of a single diff pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -144,6 +146,7 @@ pub fn compute_diff(
         if !probes.is_ready(vni) {
             continue;
         }
+        let vlan = desired_vlan(instances, vni);
 
         // Decide single-dst vs FDB-NHG path on three dimensions:
         //   - `alias_group_key`: Some(_) when the wire intent
@@ -178,6 +181,7 @@ pub fn compute_diff(
                 emit_fdb_nhg_pass(
                     vni,
                     mac,
+                    vlan,
                     entry,
                     linux_key,
                     last_applied,
@@ -212,6 +216,7 @@ pub fn compute_diff(
                 emit_single_dst_pass(
                     vni,
                     mac,
+                    vlan,
                     entry,
                     snapshot,
                     last_applied,
@@ -238,6 +243,7 @@ pub fn compute_diff(
                 emit_single_dst_pass(
                     vni,
                     mac,
+                    vlan,
                     entry,
                     snapshot,
                     last_applied,
@@ -267,8 +273,12 @@ pub fn compute_diff(
                 // it. Interface flap / manual `bridge fdb del` is a
                 // no-op for this pass — the actor's OwnedSet drift
                 // self-heals on the next successful reconcile.
-                if snapshot.find_fdb(vni, mac).is_some() {
-                    deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+                if snapshot.find_fdb_in_vlan(vni, mac, owned.vlan).is_some() {
+                    deletes.push(DataplaneOp::RemoveRemoteFdb {
+                        vni,
+                        mac,
+                        vlan: owned.vlan,
+                    });
                 }
             }
             OwnedEntryKind::FdbNhg { group_key } => {
@@ -281,6 +291,7 @@ pub fn compute_diff(
                 deletes.push(DataplaneOp::RemoveFdbNhg {
                     vni,
                     mac,
+                    vlan: owned.vlan,
                     group_key,
                 });
             }
@@ -349,12 +360,19 @@ fn all_same_family(entry: &RemoteMacEntry) -> bool {
         .all(|ip| ip.is_ipv4() == primary_is_v4)
 }
 
+fn desired_vlan(instances: &EvpnInstanceTable, vni: EvpnInstanceId) -> Option<u16> {
+    instances
+        .get(vni)
+        .and_then(|inst| inst.bridge_vlan.map(rustbgpd_evpn::BridgeVlan::as_u16))
+}
+
 /// Pass 1 / IPv6-fallback emission — emit `AddRemoteFdb` /
 /// `UpdateRemoteFdb` for a single-dst entry.
 #[allow(clippy::too_many_arguments)]
 fn emit_single_dst_pass(
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
     entry: &RemoteMacEntry,
     snapshot: &KernelSnapshot,
     last_applied: &OwnedSet,
@@ -362,6 +380,31 @@ fn emit_single_dst_pass(
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
 ) {
+    if let Some(owned) = last_applied.get(vni, mac)
+        && owned.vlan != vlan
+    {
+        match owned.kind {
+            OwnedEntryKind::SingleDst { .. } => conversions.push(DataplaneOp::RemoveRemoteFdb {
+                vni,
+                mac,
+                vlan: owned.vlan,
+            }),
+            OwnedEntryKind::FdbNhg { group_key } => conversions.push(DataplaneOp::RemoveFdbNhg {
+                vni,
+                mac,
+                vlan: owned.vlan,
+                group_key,
+            }),
+        }
+        conversions.push(DataplaneOp::AddRemoteFdb {
+            vni,
+            mac,
+            vlan,
+            dst: entry.remote_vtep_ip,
+        });
+        return;
+    }
+
     // Transition: previously installed as FdbNhg, now wants single-dst
     // (the ES degraded to one PE / lost its backup, or the segment
     // config went away). The kernel rejects converting an nhid row to
@@ -380,21 +423,24 @@ fn emit_single_dst_pass(
         conversions.push(DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
+            vlan,
             group_key,
         });
         conversions.push(DataplaneOp::AddRemoteFdb {
             vni,
             mac,
+            vlan,
             dst: entry.remote_vtep_ip,
         });
         return;
     }
 
-    match snapshot.find_fdb(vni, mac) {
+    match snapshot.find_fdb_in_vlan(vni, mac, vlan) {
         None => {
             creates.push(DataplaneOp::AddRemoteFdb {
                 vni,
                 mac,
+                vlan,
                 dst: entry.remote_vtep_ip,
             });
         }
@@ -404,6 +450,7 @@ fn emit_single_dst_pass(
                 mac,
                 kernel_entry,
                 entry.remote_vtep_ip,
+                vlan,
                 last_applied,
                 updates,
                 conversions,
@@ -417,10 +464,11 @@ fn emit_single_dst_pass(
 /// aliasing, or ADR-0083 single-active with a backup — the entry's
 /// `single_active_backup_vtep_ip` rides every Install/Update so the
 /// coordinator can pre-create + pin the backup NH).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn emit_fdb_nhg_pass(
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
     entry: &RemoteMacEntry,
     linux_key: AliasGroupKey,
     last_applied: &OwnedSet,
@@ -440,8 +488,24 @@ fn emit_fdb_nhg_pass(
     // holds a dst row at this MAC, the Install must delete→add per
     // row (`convert_from_dst`).
     let kernel_dst_row = snapshot
-        .find_fdb(vni, mac)
+        .find_fdb_in_vlan(vni, mac, vlan)
         .is_some_and(|k| k.nh_id.is_none());
+
+    if let Some(owned) = last_applied.get(vni, mac)
+        && emit_fdb_nhg_vlan_conversion(
+            vni,
+            mac,
+            vlan,
+            owned,
+            linux_key,
+            &canonical,
+            standby,
+            kernel_dst_row,
+            conversions,
+        )
+    {
+        return;
+    }
 
     let owned_kind = last_applied.get(vni, mac).map(|e| e.kind.clone());
     match owned_kind {
@@ -462,14 +526,11 @@ fn emit_fdb_nhg_pass(
             // Operator-static / kernel-learned rows are skipped here
             // the same way `handle_existing_kernel_entry` does for the
             // single-dst path.
-            let install_safe = match snapshot.find_fdb(vni, mac) {
-                None => true,
-                Some(k) => k.is_extern_learned(),
-            };
-            if install_safe {
+            if fdb_nhg_install_safe(snapshot, vni, mac, vlan) {
                 creates.push(DataplaneOp::InstallFdbNhg {
                     vni,
                     mac,
+                    vlan,
                     group_key: linux_key,
                     members: canonical,
                     standby,
@@ -495,6 +556,7 @@ fn emit_fdb_nhg_pass(
             creates.push(DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
+                vlan,
                 group_key: linux_key,
                 members: canonical,
                 standby,
@@ -513,11 +575,13 @@ fn emit_fdb_nhg_pass(
             conversions.push(DataplaneOp::RemoveFdbNhg {
                 vni,
                 mac,
+                vlan,
                 group_key: prev_key,
             });
             conversions.push(DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
+                vlan,
                 group_key: linux_key,
                 members: canonical,
                 standby,
@@ -562,13 +626,14 @@ fn emit_fdb_nhg_pass(
             // `InstallFdbNhg` is idempotent under `NLM_F_REPLACE` so
             // re-emitting when the row is already correct is safe.
             let kernel_row_correct = snapshot
-                .find_fdb(vni, mac)
+                .find_fdb_in_vlan(vni, mac, vlan)
                 .and_then(|k| k.nh_id)
                 .is_some_and(|kernel_id| tracked_group_id == Some(kernel_id));
             if !kernel_row_correct {
                 creates.push(DataplaneOp::InstallFdbNhg {
                     vni,
                     mac,
+                    vlan,
                     group_key: linux_key,
                     members: canonical,
                     standby,
@@ -576,6 +641,58 @@ fn emit_fdb_nhg_pass(
                 });
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_fdb_nhg_vlan_conversion(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    desired_vlan: Option<u16>,
+    owned: &OwnedEntry,
+    linux_key: AliasGroupKey,
+    members: &[std::net::IpAddr],
+    standby: Option<std::net::IpAddr>,
+    convert_from_dst: bool,
+    conversions: &mut Vec<DataplaneOp>,
+) -> bool {
+    if owned.vlan == desired_vlan {
+        return false;
+    }
+    match owned.kind {
+        OwnedEntryKind::SingleDst { .. } => conversions.push(DataplaneOp::RemoveRemoteFdb {
+            vni,
+            mac,
+            vlan: owned.vlan,
+        }),
+        OwnedEntryKind::FdbNhg { group_key } => conversions.push(DataplaneOp::RemoveFdbNhg {
+            vni,
+            mac,
+            vlan: owned.vlan,
+            group_key,
+        }),
+    }
+    conversions.push(DataplaneOp::InstallFdbNhg {
+        vni,
+        mac,
+        vlan: desired_vlan,
+        group_key: linux_key,
+        members: members.to_vec(),
+        standby,
+        convert_from_dst,
+    });
+    true
+}
+
+fn fdb_nhg_install_safe(
+    snapshot: &KernelSnapshot,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    vlan: Option<u16>,
+) -> bool {
+    match snapshot.find_fdb_in_vlan(vni, mac, vlan) {
+        None => true,
+        Some(k) => k.is_extern_learned(),
     }
 }
 
@@ -614,6 +731,7 @@ fn handle_existing_kernel_entry(
     mac: MacAddress,
     kernel_entry: &KernelFdbEntry,
     desired_dst: std::net::IpAddr,
+    desired_vlan: Option<u16>,
     last_applied: &OwnedSet,
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
@@ -625,19 +743,28 @@ fn handle_existing_kernel_entry(
         // pair claims the row in the same breath (the Add lands in
         // the OwnedSet via record_success).
         if kernel_entry.nh_id.is_some() {
-            conversions.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+            conversions.push(DataplaneOp::RemoveRemoteFdb {
+                vni,
+                mac,
+                vlan: desired_vlan,
+            });
             conversions.push(DataplaneOp::AddRemoteFdb {
                 vni,
                 mac,
+                vlan: desired_vlan,
                 dst: desired_dst,
             });
             return;
         }
-        if last_applied.contains(vni, mac) {
+        if last_applied
+            .get(vni, mac)
+            .is_some_and(|owned| owned.vlan == desired_vlan)
+        {
             if kernel_entry.dst != Some(desired_dst) {
                 updates.push(DataplaneOp::UpdateRemoteFdb {
                     vni,
                     mac,
+                    vlan: desired_vlan,
                     dst: desired_dst,
                 });
             }
@@ -652,6 +779,7 @@ fn handle_existing_kernel_entry(
         updates.push(DataplaneOp::UpdateRemoteFdb {
             vni,
             mac,
+            vlan: desired_vlan,
             dst: desired_dst,
         });
         return;
@@ -683,7 +811,7 @@ mod tests {
     use std::net::IpAddr;
 
     use rustbgpd_evpn::{
-        EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry,
+        BridgeVlan, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry,
         RemoteMacSource, RemoteMacTable, RouteTarget,
     };
 
@@ -734,6 +862,24 @@ mod tests {
         t
     }
 
+    fn instances_with_vlan(vlan: u16, vnis: &[EvpnInstanceId]) -> EvpnInstanceTable {
+        let mut t = EvpnInstanceTable::new();
+        for &v in vnis {
+            let inst = EvpnInstance::new(
+                v,
+                "65000:1".parse().unwrap(),
+                vec!["65000:1".parse::<RouteTarget>().unwrap()],
+                "10.0.0.1".parse().unwrap(),
+                Some(format!("br{}", v.as_u32())),
+                false,
+            )
+            .unwrap()
+            .with_bridge_vlan(Some(BridgeVlan::new(u32::from(vlan)).unwrap()));
+            t.insert(inst).unwrap();
+        }
+        t
+    }
+
     fn entry(remote: &str, seq: Option<u32>) -> RemoteMacEntry {
         RemoteMacEntry {
             remote_vtep_ip: ip(remote),
@@ -748,6 +894,7 @@ mod tests {
     fn ours(dst: &str) -> KernelFdbEntry {
         KernelFdbEntry {
             mac: mac(0),
+            vlan: None,
             dst: Some(ip(dst)),
             nh_id: None,
             protocol: None,
@@ -791,6 +938,7 @@ mod tests {
             vec![DataplaneOp::AddRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.2"),
             }]
         );
@@ -840,6 +988,7 @@ mod tests {
             vec![DataplaneOp::UpdateRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.3"),
             }]
         );
@@ -872,6 +1021,7 @@ mod tests {
             vec![DataplaneOp::UpdateRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.2"),
             }]
         );
@@ -902,6 +1052,7 @@ mod tests {
             vec![DataplaneOp::UpdateRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.3"),
             }]
         );
@@ -930,6 +1081,7 @@ mod tests {
             vec![DataplaneOp::RemoveRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
             }]
         );
     }
@@ -963,6 +1115,7 @@ mod tests {
             vec![DataplaneOp::RemoveRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
             }]
         );
     }
@@ -978,6 +1131,7 @@ mod tests {
             vni(100),
             KernelFdbEntry {
                 mac: mac(1),
+                vlan: None,
                 dst: Some(ip("10.0.0.99")),
                 nh_id: None,
                 protocol: None,
@@ -1005,6 +1159,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn vlan_scoped_desire_ignores_foreign_row_in_other_vlan() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                vlan: Some(20),
+                dst: Some(ip("10.0.0.99")),
+                nh_id: None,
+                protocol: None,
+                flags: KernelFdbFlags {
+                    permanent: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::AddRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: Some(10),
+                dst: ip("10.0.0.2"),
+            }]
+        );
+    }
+
+    #[test]
+    fn vlan_scoped_desire_reclaims_marker_row_in_same_vlan() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut marker = ours("10.0.0.2");
+        marker.mac = mac(1);
+        marker.vlan = Some(10);
+        snapshot.insert_fdb(vni(100), marker);
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: Some(10),
+                dst: ip("10.0.0.2"),
+            }]
+        );
+    }
+
+    #[test]
+    fn vlan_binding_change_converts_owned_row_to_new_vlan() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut old = ours("10.0.0.2");
+        old.mac = mac(1);
+        old.vlan = Some(20);
+        snapshot.insert_fdb(vni(100), old);
+        let mut applied = OwnedSet::new();
+        applied.record_applied(
+            vni(100),
+            mac(1),
+            OwnedEntry::single_dst_in_vlan(ip("10.0.0.2"), None, Some(20)),
+        );
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![
+                DataplaneOp::RemoveRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                    vlan: Some(20),
+                },
+                DataplaneOp::AddRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                    vlan: Some(10),
+                    dst: ip("10.0.0.2"),
+                },
+            ]
+        );
+    }
+
     // 7. Foreign kernel-learned local entry — same (VNI, MAC), dynamic,
     //    no extern_learn. Must skip; mobility resolution belongs to
     //    the domain layer.
@@ -1016,6 +1289,7 @@ mod tests {
             vni(100),
             KernelFdbEntry {
                 mac: mac(1),
+                vlan: None,
                 dst: None,
                 nh_id: None,
                 protocol: None,
@@ -1111,6 +1385,7 @@ mod tests {
             vec![DataplaneOp::UpdateRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.3"),
             }]
         );
@@ -1159,6 +1434,7 @@ mod tests {
             vni(200),
             KernelFdbEntry {
                 mac: mac(9),
+                vlan: None,
                 dst: Some(ip("10.0.0.99")),
                 nh_id: None,
                 protocol: None,
@@ -1200,7 +1476,7 @@ mod tests {
                         "Add/Update key not in desired: {op:?}"
                     );
                 }
-                DataplaneOp::RemoveRemoteFdb { vni: v, mac: m } => {
+                DataplaneOp::RemoveRemoteFdb { vni: v, mac: m, .. } => {
                     assert!(
                         applied.contains(*v, *m),
                         "Remove key not in applied: {op:?}"
@@ -1309,6 +1585,45 @@ mod tests {
             )),
             "expected InstallFdbNhg with convert_from_dst in {:?}",
             plan.ops,
+        );
+    }
+
+    #[test]
+    fn vlan_scoped_multi_homed_desire_installs_fdb_nhg_in_vlan() {
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::InstallFdbNhg {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: Some(10),
+                group_key: linux_key(100, 7),
+                members: vec![ip("10.0.0.2"), ip("10.0.0.3")],
+                standby: None,
+                convert_from_dst: false,
+            }]
         );
     }
 
@@ -1431,6 +1746,7 @@ mod tests {
                 vni(100),
                 KernelFdbEntry {
                     mac: mac(1),
+                    vlan: None,
                     dst: None,
                     nh_id: Some(0x4000_0001),
                     protocol: None,
@@ -1957,6 +2273,7 @@ mod tests {
             vec![DataplaneOp::InstallFdbNhg {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 group_key: linux_key(100, 7),
                 members: vec![ip("10.0.0.2")],
                 standby: Some(ip("10.0.0.3")),
@@ -2032,6 +2349,7 @@ mod tests {
                 vni(100),
                 KernelFdbEntry {
                     mac: mac(1),
+                    vlan: None,
                     dst: None,
                     nh_id: Some(0x4000_0001),
                     protocol: None,
@@ -2096,6 +2414,7 @@ mod tests {
                 vni(100),
                 KernelFdbEntry {
                     mac: mac(1),
+                    vlan: None,
                     dst: None,
                     nh_id: Some(0x4000_0001),
                     protocol: None,
@@ -2198,6 +2517,7 @@ mod tests {
             vni(100),
             KernelFdbEntry {
                 mac: mac(1),
+                vlan: None,
                 dst: None,
                 nh_id: Some(0x4000_0001),
                 protocol: None,
@@ -2226,10 +2546,12 @@ mod tests {
                 DataplaneOp::RemoveRemoteFdb {
                     vni: vni(100),
                     mac: mac(1),
+                    vlan: None,
                 },
                 DataplaneOp::AddRemoteFdb {
                     vni: vni(100),
                     mac: mac(1),
+                    vlan: None,
                     dst: ip("10.0.0.2"),
                 },
             ],
@@ -2267,6 +2589,7 @@ mod tests {
             vec![DataplaneOp::AddRemoteFdb {
                 vni: vni(100),
                 mac: mac(1),
+                vlan: None,
                 dst: ip("10.0.0.2"),
             }],
         );
@@ -2278,6 +2601,7 @@ mod tests {
     fn nhid_row(m: MacAddress, nh_id: u32) -> KernelFdbEntry {
         KernelFdbEntry {
             mac: m,
+            vlan: None,
             dst: None,
             nh_id: Some(nh_id),
             protocol: None,
@@ -2513,11 +2837,13 @@ mod tests {
                 DataplaneOp::RemoveFdbNhg {
                     vni: vni(100),
                     mac: mac(1),
+                    vlan: None,
                     group_key: linux_key(100, 7),
                 },
                 DataplaneOp::AddRemoteFdb {
                     vni: vni(100),
                     mac: mac(1),
+                    vlan: None,
                     dst: ip("10.0.0.3"),
                 },
             ],

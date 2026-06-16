@@ -85,6 +85,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
     cache: &LinkCache,
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
     nh_id: u32,
 ) -> Result<(), DataplaneError> {
     let vxlan_ifindex = check_cve_guard_and_get_ifindex(cache, vni)?;
@@ -96,7 +97,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
         .neighbours()
         .add_bridge(vxlan_ifindex, &mac.octets())
         .replace();
-    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, nh_id);
+    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, vlan, nh_id);
     req.execute()
         .await
         .map_err(|e| super::fdb::classify_apply_error(&e))?;
@@ -115,7 +116,12 @@ pub(crate) async fn apply_install_fdb_nhg_row(
 /// stamp. Mainline `AF_BRIDGE` parses FDB adds with a NULL attribute
 /// policy and silently drops the stamp — a forward-compatible no-op
 /// that becomes effective once kernel FDB support lands.
-fn build_fdb_nhg_message(vxlan_ifindex: u32, mac: MacAddress, nh_id: u32) -> NeighbourMessage {
+fn build_fdb_nhg_message(
+    vxlan_ifindex: u32,
+    mac: MacAddress,
+    vlan: Option<u16>,
+    nh_id: u32,
+) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
     msg.header.ifindex = vxlan_ifindex;
@@ -130,6 +136,9 @@ fn build_fdb_nhg_message(vxlan_ifindex: u32, mac: MacAddress, nh_id: u32) -> Nei
             NDA_NH_ID,
             nh_id.to_ne_bytes().to_vec(),
         )));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
     msg
@@ -149,6 +158,7 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     cache: &LinkCache,
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
 ) -> Result<(), DataplaneError> {
     let vxlan_ifindex =
         vxlan_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
@@ -162,6 +172,9 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
     msg.attributes
         .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
 
     match handle.neighbours().del(msg).execute().await {
         Ok(()) => Ok(()),
@@ -290,7 +303,7 @@ mod tests {
     #[test]
     fn build_fdb_nhg_message_carries_nh_id_and_ownership_stamp() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_fdb_nhg_message(11, mac, 0x4000_0001);
+        let msg = build_fdb_nhg_message(11, mac, None, 0x4000_0001);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -323,5 +336,17 @@ mod tests {
             msg.attributes
                 .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
         );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, NeighbourAttribute::Vlan(_)))
+        );
+    }
+
+    #[test]
+    fn build_fdb_nhg_message_carries_vlan_when_scoped() {
+        let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_fdb_nhg_message(11, mac, Some(10), 0x4000_0001);
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
     }
 }

@@ -43,9 +43,9 @@ pub(crate) struct BridgeLink {
     /// SVI task can originate Type 2 routes for the bridge's own
     /// address without reaching back into this internal cache.
     pub mac: Option<MacAddress>,
-    /// `true` when the bridge has `vlan_filtering=1`. ADR-0054 §4
-    /// rejects VLAN-aware bridges in Gate 7b — `probe` reports such
-    /// instances `NotReady` rather than guessing a VNI-to-VLAN map.
+    /// `true` when the bridge has `vlan_filtering=1`. Legacy instances
+    /// still reject this shape; ADR-0089 instances with `bridge_vlan`
+    /// validate the bridge/VXLAN VLAN inventory before reporting Ready.
     pub vlan_filtering: bool,
     /// VXLAN port attached to this bridge whose VNI matches the
     /// instance, if exactly one exists. `None` indicates either no
@@ -54,6 +54,13 @@ pub(crate) struct BridgeLink {
     /// ports is detected by [`vxlan_attach_count`], not by
     /// [`Option<KernelVxlanInfo>`] alone.
     pub vxlan: Option<KernelVxlanInfo>,
+    /// Every VXLAN member attached to this bridge. Legacy
+    /// VLAN-unaware readiness still uses [`Self::vxlan`] plus
+    /// [`Self::vxlan_attach_count`] to require exactly one VXLAN
+    /// port; ADR-0089 VLAN-aware readiness selects the member whose
+    /// VNI matches the instance and then verifies VLAN membership on
+    /// that specific port.
+    pub vxlan_ports: Vec<KernelVxlanInfo>,
     /// Number of VXLAN ports attached to this bridge. `1` is the
     /// only legal value for an EVPN-managed bridge; `0` means
     /// missing topology, `>=2` means ambiguous and reports
@@ -184,6 +191,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                             mac,
                             vlan_filtering,
                             vxlan: None,
+                            vxlan_ports: Vec::new(),
                             vxlan_attach_count: 0,
                             ce_port_ifindexes: Vec::new(),
                             vlans: bridge_vlans,
@@ -213,20 +221,17 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         };
         if let Some(bridge) = bridges.get_mut(bridge_name) {
             bridge.vxlan_attach_count = bridge.vxlan_attach_count.saturating_add(1);
-            // Only record the VXLAN port at attach-count 1; subsequent
-            // attaches just bump the counter so probe can detect the
-            // ambiguity. We never re-set the slot to `Some` once it's
-            // been cleared, regardless of count parity.
+            vxlan_ifindex_to_vni.insert(vxlan.info.ifindex, vxlan.info.vni);
+            bridge.vxlan_ports.push(vxlan.info.clone());
+            // Keep the legacy single-port slot only while the bridge has
+            // one VXLAN member. VLAN-aware probing uses `vxlan_ports` to
+            // select the member matching the configured VNI.
             if bridge.vxlan_attach_count == 1 {
-                vxlan_ifindex_to_vni.insert(vxlan.info.ifindex, vxlan.info.vni);
                 bridge.vxlan = Some(vxlan.info);
             } else {
-                // ADR-0054 §4 requires "exactly one VXLAN port for
-                // the instance VNI". Clear the slot so probe sees
-                // None and reports NotReady.
-                if let Some(prev) = bridge.vxlan.take() {
-                    vxlan_ifindex_to_vni.remove(&prev.ifindex);
-                }
+                // Clear the legacy slot so non-VLAN-aware probing reports
+                // NotReady instead of guessing.
+                bridge.vxlan = None;
             }
         }
     }

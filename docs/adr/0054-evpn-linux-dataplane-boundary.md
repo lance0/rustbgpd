@@ -168,11 +168,11 @@ destructive and avoids inventing schema fields for VXLAN device names,
 underlay device selection, MTU, source port ranges, or multicast groups
 before the project has real operator signal.
 
-VLAN-aware bridges are rejected for Gate 7b. The current
-`EvpnInstance` schema has no VLAN field, so accepting a VLAN-filtering
-bridge would force the dataplane crate to guess a VNI-to-VLAN mapping.
-That mapping belongs in a follow-on schema/ADR, likely an additive
-`vlan = N` field on the instance.
+VLAN-aware bridges were rejected for the initial Gate 7b scope. That
+kept the dataplane crate from guessing a VNI-to-VLAN mapping before the
+configuration model existed. ADR-0088/ADR-0089 later add the explicit
+`bridge_vlan` binding for the VLAN-aware, VNI-per-broadcast-domain
+slice while preserving this ADR's non-destructive netdev boundary.
 
 Future ADRs may allow rustbgpd to create netdev topology, but that is a
 separate ownership decision.
