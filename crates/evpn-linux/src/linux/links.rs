@@ -22,7 +22,7 @@ use netlink_packet_route::link::{
 };
 use rtnetlink::Handle;
 
-use rustbgpd_evpn::MacAddress;
+use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
 use crate::error::DataplaneError;
 use crate::snapshot::{
@@ -118,6 +118,55 @@ pub(crate) struct LinkCache {
     /// bridge topology is otherwise `NotReady` (e.g. mid-bring-up),
     /// so a non-DF port is never silently left forwarding.
     pub bridge_ports_by_name: HashMap<String, crate::snapshot::KernelBridgePortInfo>,
+}
+
+/// Resolve the single VXLAN member that owns `vni` in the current bridge
+/// inventory.
+///
+/// ADR-0089 VLAN-aware bridges can attach multiple VXLAN devices to one
+/// bridge, so callers must not rely on the legacy `BridgeLink::vxlan` slot.
+/// Duplicate VNI ownership is fail-closed: picking an arbitrary ifindex could
+/// program a remote FDB row onto the wrong VXLAN device.
+pub(crate) fn unique_vxlan_for_vni(
+    cache: &LinkCache,
+    vni: EvpnInstanceId,
+) -> Result<&KernelVxlanInfo, DataplaneError> {
+    let raw = vni.as_u32();
+    let mut found = None;
+
+    for bridge in cache.bridges.values() {
+        if bridge.vxlan_ports.is_empty() {
+            if let Some(vxlan) = bridge.vxlan.as_ref().filter(|vxlan| vxlan.vni == raw) {
+                record_vxlan_match(&mut found, vxlan, vni)?;
+            }
+            continue;
+        }
+        for vxlan in bridge.vxlan_ports.iter().filter(|vxlan| vxlan.vni == raw) {
+            record_vxlan_match(&mut found, vxlan, vni)?;
+        }
+    }
+
+    found.ok_or_else(|| DataplaneError::LinkNotFound {
+        name: format!("VXLAN port for VNI {vni}"),
+    })
+}
+
+fn record_vxlan_match<'a>(
+    found: &mut Option<&'a KernelVxlanInfo>,
+    candidate: &'a KernelVxlanInfo,
+    vni: EvpnInstanceId,
+) -> Result<(), DataplaneError> {
+    match *found {
+        None => {
+            *found = Some(candidate);
+            Ok(())
+        }
+        Some(existing) if existing.ifindex == candidate.ifindex => Ok(()),
+        Some(existing) => Err(DataplaneError::InvalidArgument(format!(
+            "ambiguous VXLAN port for VNI {vni}: ifindexes {} and {} both match",
+            existing.ifindex, candidate.ifindex
+        ))),
+    }
 }
 
 type BridgeVlanInventory =

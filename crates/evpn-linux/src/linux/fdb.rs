@@ -38,7 +38,7 @@ use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 
-use super::links::LinkCache;
+use super::links::{LinkCache, unique_vxlan_for_vni};
 
 /// `NDA_NH_ID` neighbour attribute (kind = 13). Not exposed as a typed
 /// variant by `netlink-packet-route 0.30`; we read it via the
@@ -356,10 +356,7 @@ pub(crate) async fn apply_op(
         }
     };
 
-    let vxlan_ifindex =
-        vxlan_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
-            name: format!("VXLAN port for VNI {vni}"),
-        })?;
+    let vxlan_ifindex = vxlan_ifindex_for_vni(cache, vni)?;
 
     match op {
         DataplaneOp::AddRemoteFdb { dst, vlan, .. }
@@ -422,13 +419,8 @@ pub(crate) async fn apply_op(
     }
 }
 
-fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
-    let raw = vni.as_u32();
-    cache
-        .vxlan_ifindex_to_vni
-        .iter()
-        .filter_map(|(ifindex, candidate)| (*candidate == raw).then_some(*ifindex))
-        .min()
+fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Result<u32, DataplaneError> {
+    unique_vxlan_for_vni(cache, vni).map(|vxlan| vxlan.ifindex)
 }
 
 /// Classify a netlink error into the right [`DataplaneError`] variant.
@@ -821,12 +813,47 @@ mod tests {
         );
 
         assert_eq!(
-            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()),
-            Some(11)
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap(),
+            11
         );
         assert_eq!(
-            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(200).unwrap()),
-            Some(22)
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(200).unwrap()).unwrap(),
+            22
+        );
+    }
+
+    #[test]
+    fn vxlan_ifindex_lookup_rejects_duplicate_vni_topology() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br-tenant".to_string(),
+            BridgeLink {
+                ifindex: 7,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        let err = vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap_err();
+        assert!(
+            matches!(err, DataplaneError::InvalidArgument(_)),
+            "duplicate-VNI topology must fail closed instead of picking an arbitrary ifindex: {err:?}"
         );
     }
 
