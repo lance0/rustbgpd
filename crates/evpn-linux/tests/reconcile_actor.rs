@@ -20,7 +20,7 @@ use rustbgpd_evpn::ip_vrf::{
     project_ip_prefix_routes,
 };
 use rustbgpd_evpn::{
-    BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
+    BridgeVlan, BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
     EthernetSegmentIdentifier, EthernetTagId, EvpnInstance, EvpnInstanceId, EvpnInstanceTable,
     EvpnIpPrefixValue, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RouteDistinguisher, RouteTarget,
@@ -64,6 +64,11 @@ fn instance(v: u32, bridge: Option<&str>, vtep: &str) -> EvpnInstance {
         false,
     )
     .unwrap()
+}
+
+fn instance_with_bridge_vlan(v: u32, bridge: &str, vlan: u16, vtep: &str) -> EvpnInstance {
+    instance(v, Some(bridge), vtep)
+        .with_bridge_vlan(Some(BridgeVlan::new(u32::from(vlan)).unwrap()))
 }
 
 fn one_instance_table(inst: EvpnInstance) -> EvpnInstanceTable {
@@ -513,6 +518,7 @@ async fn failed_apply_retries_on_backoff_timer() {
     let op = DataplaneOp::AddRemoteFdb {
         vni: vni(100),
         mac: mac(1),
+        vlan: None,
         dst: ipa("10.0.0.2"),
     };
     h.handle.inject_failure_io(Some(op.clone()));
@@ -556,6 +562,7 @@ async fn shutdown_drain_preserves_foreign_static_entry() {
         vni(100),
         KernelFdbEntry {
             mac: mac(99),
+            vlan: None,
             dst: Some(ipa("10.0.0.99")),
             nh_id: None,
             protocol: None,
@@ -726,6 +733,7 @@ async fn permanent_failure_suppression_is_per_op_fingerprint() {
     let target = DataplaneOp::AddRemoteFdb {
         vni: vni(100),
         mac: mac(1),
+        vlan: None,
         dst: ipa("10.0.0.2"),
     };
     h.handle.inject_failure_kernel_too_old(Some(target));
@@ -818,6 +826,7 @@ async fn permanent_failure_does_not_leak_across_keys() {
     let target = DataplaneOp::AddRemoteFdb {
         vni: vni(100),
         mac: mac(1),
+        vlan: None,
         dst: ipa("10.0.0.2"),
     };
     h.handle.inject_failure_kernel_too_old(Some(target));
@@ -1183,6 +1192,7 @@ async fn fdb_nhg_adoption_retains_live_kernel_fdb_refs() {
         vni(100),
         KernelFdbEntry {
             mac: mac(99),
+            vlan: None,
             dst: None,
             nh_id: Some(group_id),
             protocol: None,
@@ -1710,6 +1720,7 @@ async fn drift_recovery_preserves_fdb_row_for_desired_mac() {
         vni(100),
         KernelFdbEntry {
             mac: mac(1),
+            vlan: None,
             dst: None,
             nh_id: Some(stale_nh_id),
             protocol: None,
@@ -1825,6 +1836,7 @@ async fn drift_recovery_permanent_dump_failure_latches_off() {
 fn extern_learn_row(m: MacAddress, dst: &str) -> KernelFdbEntry {
     KernelFdbEntry {
         mac: m,
+        vlan: None,
         dst: Some(ipa(dst)),
         nh_id: None,
         protocol: None,
@@ -2000,6 +2012,7 @@ async fn foreign_rows_never_adopted_or_reaped() {
         vni(100),
         KernelFdbEntry {
             mac: mac(8),
+            vlan: None,
             dst: Some(ipa("10.0.0.8")),
             nh_id: None,
             protocol: None,
@@ -2015,6 +2028,7 @@ async fn foreign_rows_never_adopted_or_reaped() {
         vni(100),
         KernelFdbEntry {
             mac: mac(9),
+            vlan: None,
             dst: None,
             nh_id: None,
             protocol: None,
@@ -2063,6 +2077,7 @@ async fn nhg_tagged_rows_left_to_adr0059_sweep() {
         vni(100),
         KernelFdbEntry {
             mac: mac(5),
+            vlan: None,
             dst: None,
             nh_id: Some(0x4000_0001),
             protocol: None,
@@ -2144,7 +2159,7 @@ async fn double_crash_readoption_is_idempotent() {
     };
     let mut h2 = Harness::spawn(cfg);
     h2.handle.set_probe(vni(100), InstanceProbe::Ready);
-    for (&(v, _), e) in handle1.kernel_snapshot().iter_fdb() {
+    for ((v, _), e) in handle1.kernel_snapshot().iter_fdb() {
         h2.handle.pre_load_fdb(v, e.clone());
     }
     h2.intent_tx
@@ -2216,6 +2231,51 @@ async fn unmanaged_vni_marker_rows_never_adopted_or_reaped() {
     assert!(
         h.handle.kernel_has_fdb(vni(200), mac(7)),
         "unmanaged-VNI marker row must survive — another controller owns it"
+    );
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn other_vlan_marker_rows_on_managed_vni_never_adopted_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut foreign_vlan_row = extern_learn_row(mac(7), "10.0.0.9");
+    foreign_vlan_row.vlan = Some(20);
+    h.handle.pre_load_fdb(vni(100), foreign_vlan_row);
+
+    let inst = one_instance_table(instance_with_bridge_vlan(100, "br100", 10, "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 0,
+        "marker row on another VLAN is foreign to this bridge_vlan binding"
+    );
+    assert_eq!(counters.single_dst_reaped, 0);
+    assert!(
+        h.handle
+            .kernel_snapshot()
+            .find_fdb_in_vlan(vni(100), mac(7), Some(20))
+            .is_some(),
+        "other-VLAN marker row must survive the adoption/reap pass"
     );
 
     h.shutdown().await;
@@ -3250,6 +3310,7 @@ async fn single_active_nhg_row_not_adopted_or_reaped_by_single_dst_sweep() {
         vni(100),
         KernelFdbEntry {
             mac: mac(1),
+            vlan: None,
             dst: None,
             nh_id: Some(group_id),
             protocol: None,
@@ -3662,6 +3723,7 @@ async fn single_active_restart_mid_window_converges_to_swapped_state() {
         vni(100),
         KernelFdbEntry {
             mac: mac(1),
+            vlan: None,
             dst: None,
             nh_id: Some(old_group),
             protocol: None,

@@ -1935,10 +1935,10 @@ default — RR-only deployments leave it empty.
 > and VXLAN port yourself, and the daemon probes them (ADR-0054 §4). See
 > [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe;
 > the `bridge` / `local_vtep_ip` fields below must match. ADR-0088 keeps
-> VLAN-aware bridges and rustbgpd-managed bridge / VXLAN / VRF creation
-> fail-closed until explicit ownership exists; ADR-0089 narrows the first
-> VLAN-aware bridge programming target to a local bridge-VLAN / VNI binding
-> while keeping EVPN Ethernet Tag ID at `0`.
+> rustbgpd-managed bridge / VXLAN / VRF creation fail-closed until explicit
+> ownership exists; ADR-0089 enables the first VLAN-aware bridge programming
+> target through a local bridge-VLAN / VNI binding while keeping EVPN
+> Ethernet Tag ID at `0`.
 
 ```toml
 [[evpn_instances]]
@@ -1965,8 +1965,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `route_targets`       | string[] | yes*     | `[]`    | One or more EVPN Route Targets in the same encodings. Required unless `auto_derive_route_target = true` |
 | `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and `vni` (`2-octet AS only`) |
 | `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
-| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Until the ADR-0089 readiness/FDB slices land, a `Ready` L2VNI still requires a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
-| `bridge_vlan`         | u32      | no       | --      | Local Linux bridge VLAN selector (`1..=4094`) for ADR-0089 VLAN-aware bridge attribution. Valid only with `bridge`; this is **not** an EVPN Ethernet Tag, and EVPN routes still use Ethernet Tag ID `0` |
+| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Without `bridge_vlan`, a `Ready` L2VNI requires a non-VLAN-aware bridge with exactly one VXLAN port carrying `nolearning`; with `bridge_vlan`, it requires a traditional `vlan_filtering=1` bridge whose matching VXLAN member carries the configured VLAN |
+| `bridge_vlan`         | u32      | no       | --      | Local Linux bridge VLAN selector (`1..=4094`) for ADR-0089 VLAN-aware bridge attribution. Valid only with `bridge`; this is **not** an EVPN Ethernet Tag, EVPN routes still use Ethernet Tag ID `0`, and FDB writes for this instance are scoped with `NDA_VLAN` |
 | `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1) when the instance has a Ready bridge report |
 | `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
@@ -1981,9 +1981,11 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   band; rustbgpd does not create/delete netdevs (ADR-0054 §4 and
   ADR-0088).
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
-  `bridge`. It is accepted and surfaced in status output today, but
-  VLAN-aware bridges remain `NotReady` until the later ADR-0089
-  readiness/FDB programming slices land.
+  `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
+  observed bridge must have `vlan_filtering=1`, exactly one VXLAN
+  member for the instance VNI, and the configured VLAN present on both
+  the bridge and that VXLAN member. Without `bridge_vlan`, a
+  `vlan_filtering=1` bridge remains `NotReady`.
 - `advertise_svi_mac = true` is inert until the instance has a Ready
   bridge report with a bridge MAC; configs without `bridge` are accepted
   but originate nothing.

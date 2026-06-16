@@ -259,7 +259,9 @@ programming behavior:
 - unit tests for parsing VLAN-aware bridge and per-port VLAN attributes;
 - fixture coverage for PVID, tagged/untagged, missing VLAN, and
   STP-blocking states where the kernel exposes them;
-- a regression that a VLAN-aware bridge remains `NotReady`.
+- a regression that a VLAN-aware bridge remains `NotReady` unless a later
+  programming PR supplies an explicit binding and full kernel attribution
+  semantics.
 
 VLAN-aware programming PRs must add:
 

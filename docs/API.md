@@ -1715,9 +1715,12 @@ before the first reconcile report or an RR-only / dataplane-disabled
 deployment. `originated_local_macs_count` counts MAC-only Type 2 routes
 currently originated by this daemon for the instance and accepted by the
 RIB. `bridge_vlan` is local Linux attribution only: EVPN Type 2 / Type 3 /
-EAD-per-EVI routes still use Ethernet Tag ID `0`, and a `vlan_filtering=1`
-bridge remains `NotReady` until the ADR-0089 readiness and VLAN-scoped FDB
-programming slices land.
+EAD-per-EVI routes still use Ethernet Tag ID `0`. When present, it
+selects ADR-0089's traditional VNI-per-broadcast-domain VLAN-aware path:
+the probe requires `vlan_filtering=1`, exactly one VXLAN member for the
+instance VNI, and the configured VLAN on both the bridge and that VXLAN
+member; remote-MAC FDB rows are then programmed with `NDA_VLAN`. A
+`vlan_filtering=1` bridge without `bridge_vlan` remains `NotReady`.
 
 ### List EVPN FDB nexthop groups
 

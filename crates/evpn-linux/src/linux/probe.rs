@@ -4,14 +4,18 @@
 //! [`crate::InstanceProbe`] result based on the link cache from
 //! [`crate::linux::links`].
 //!
-//! Per ADR-0054 §4 the probe verifies five properties before it
+//! Per ADR-0054 §4 and ADR-0089 the probe verifies topology before it
 //! reports `Ready`:
 //!
 //! 1. The named bridge exists.
-//! 2. Exactly one VXLAN port for the instance VNI is attached to it.
-//! 3. The VXLAN port's `local` source IP matches `local_vtep_ip`.
-//! 4. The VXLAN port has kernel learning disabled (EVPN owns the FDB).
-//! 5. The bridge is **not** VLAN-aware (Gate 7b explicitly defers).
+//! 2. Legacy instances (`bridge_vlan = None`) use the historical
+//!    one-bridge-one-VXLAN shape and require `vlan_filtering=0`.
+//! 3. ADR-0089 instances (`bridge_vlan = Some(VID)`) require
+//!    `vlan_filtering=1`, a unique VXLAN member whose VNI matches the
+//!    instance, and VLAN membership for `VID` on both the bridge and
+//!    that VXLAN member.
+//! 4. In both shapes, the VXLAN port's `local` source IP matches
+//!    `local_vtep_ip` and kernel learning is disabled.
 //!
 //! Any failed check produces `NotReady` with an operator-facing
 //! reason. Instances with `bridge = None` produce `Unbound` and are
@@ -19,9 +23,11 @@
 
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
 
-use crate::snapshot::{InstanceProbe, InstanceProbes};
+use crate::snapshot::{
+    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelBridgeVlanInfo, KernelVxlanInfo,
+};
 
-use super::links::LinkCache;
+use super::links::{BridgeLink, LinkCache};
 
 pub(crate) fn probe_instances(instances: &EvpnInstanceTable, cache: &LinkCache) -> InstanceProbes {
     let mut probes = InstanceProbes::new();
@@ -51,13 +57,32 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
         };
     };
     if bridge.vlan_filtering {
+        if let Some(bridge_vlan) = inst.bridge_vlan {
+            return probe_vlan_aware_bridge(inst, bridge_name, bridge, bridge_vlan.as_u16());
+        }
         return InstanceProbe::NotReady {
             reason: format!(
                 "bridge {bridge_name} is VLAN-aware (vlan_filtering=1); \
-                 not supported in Gate 7b"
+                 configure bridge_vlan to enable ADR-0089 VLAN-aware readiness"
             ),
         };
     }
+    if let Some(bridge_vlan) = inst.bridge_vlan {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "instance has bridge_vlan={} but bridge {bridge_name} has vlan_filtering=0",
+                bridge_vlan.as_u16()
+            ),
+        };
+    }
+    probe_legacy_bridge(inst, bridge_name, bridge)
+}
+
+fn probe_legacy_bridge(
+    inst: &EvpnInstance,
+    bridge_name: &str,
+    bridge: &BridgeLink,
+) -> InstanceProbe {
     if bridge.vxlan_attach_count != 1 {
         return InstanceProbe::NotReady {
             reason: format!(
@@ -75,6 +100,63 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
             ),
         };
     };
+    probe_vxlan_attrs(inst, bridge_name, vxlan)
+}
+
+fn probe_vlan_aware_bridge(
+    inst: &EvpnInstance,
+    bridge_name: &str,
+    bridge: &BridgeLink,
+    bridge_vlan: u16,
+) -> InstanceProbe {
+    let want_vni = inst.id.as_u32();
+    let matching: Vec<_> = bridge
+        .vxlan_ports
+        .iter()
+        .filter(|port| port.vni == want_vni)
+        .collect();
+    let [port] = matching.as_slice() else {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "bridge {bridge_name} has {} VXLAN ports for VNI {want_vni} \
+                 (require exactly 1 for bridge_vlan={bridge_vlan})",
+                matching.len()
+            ),
+        };
+    };
+    if !vlan_rows_contain(&bridge.vlans, bridge_vlan) {
+        return InstanceProbe::NotReady {
+            reason: format!("bridge {bridge_name} does not carry VLAN {bridge_vlan}"),
+        };
+    }
+    let Some(port_inventory) = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|row| row.ifindex == port.ifindex)
+    else {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "VXLAN port ifindex {} on bridge {bridge_name} has no VLAN inventory",
+                port.ifindex
+            ),
+        };
+    };
+    if !port_vlan_inventory_contains(port_inventory, bridge_vlan) {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "VXLAN port ifindex {} on bridge {bridge_name} does not carry VLAN {bridge_vlan}",
+                port.ifindex
+            ),
+        };
+    }
+    probe_vxlan_attrs(inst, bridge_name, port)
+}
+
+fn probe_vxlan_attrs(
+    inst: &EvpnInstance,
+    bridge_name: &str,
+    vxlan: &KernelVxlanInfo,
+) -> InstanceProbe {
     let want_vni = inst.id.as_u32();
     if vxlan.vni != want_vni {
         return InstanceProbe::NotReady {
@@ -117,18 +199,54 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
     InstanceProbe::Ready
 }
 
+fn port_vlan_inventory_contains(row: &KernelBridgePortVlanInfo, vlan: u16) -> bool {
+    vlan_rows_contain(&row.vlans, vlan)
+}
+
+fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> bool {
+    let mut range_start = None;
+    for row in rows {
+        if row.flags.range_begin {
+            range_start = Some(row.vid);
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.flags.range_end {
+            if let Some(start) = range_start.take()
+                && start <= vlan
+                && vlan <= row.vid
+            {
+                return true;
+            }
+            if row.vid == vlan {
+                return true;
+            }
+            continue;
+        }
+        if row.vid == vlan {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::net::IpAddr;
 
     use rustbgpd_evpn::{
-        EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteDistinguisher, RouteTarget,
+        BridgeVlan, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteDistinguisher,
+        RouteTarget,
     };
 
     use super::super::links::{BridgeLink, LinkCache};
     use super::*;
-    use crate::snapshot::KernelVxlanInfo;
+    use crate::snapshot::{
+        KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo, KernelVxlanInfo,
+    };
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
@@ -155,10 +273,18 @@ mod tests {
         .unwrap()
     }
 
+    fn instance_with_vlan(v: u32, bridge: &str, vtep: &str, vlan: u16) -> EvpnInstance {
+        instance(v, Some(bridge), vtep)
+            .with_bridge_vlan(Some(BridgeVlan::new(u32::from(vlan)).unwrap()))
+    }
+
     fn cache_with(name: &str, link: BridgeLink) -> LinkCache {
         let mut bridges = HashMap::new();
         let mut vxlan_to_vni = HashMap::new();
         if let Some(v) = &link.vxlan {
+            vxlan_to_vni.insert(v.ifindex, v.vni);
+        }
+        for v in &link.vxlan_ports {
             vxlan_to_vni.insert(v.ifindex, v.vni);
         }
         bridges.insert(name.to_string(), link);
@@ -171,18 +297,54 @@ mod tests {
     }
 
     fn ready_link(vni: u32, local: &str) -> BridgeLink {
+        let vxlan = KernelVxlanInfo {
+            ifindex: 200,
+            vni,
+            local_ip: ipa(local),
+            learning_disabled: Some(true),
+        };
         BridgeLink {
             ifindex: 100,
             mac: None,
             vlan_filtering: false,
             vxlan_attach_count: 1,
             ce_port_ifindexes: Vec::new(),
-            vxlan: Some(KernelVxlanInfo {
-                ifindex: 200,
-                vni,
-                local_ip: ipa(local),
-                learning_disabled: Some(true),
-            }),
+            vxlan: Some(vxlan.clone()),
+            vxlan_ports: vec![vxlan],
+            ..BridgeLink::default()
+        }
+    }
+
+    fn vlan_row(vlan: u16) -> KernelBridgeVlanInfo {
+        KernelBridgeVlanInfo {
+            vid: vlan,
+            flags: KernelBridgeVlanFlags::default(),
+        }
+    }
+
+    fn vlan_aware_link(vni: u32, bridge_vlan: u16, local: &str) -> BridgeLink {
+        let vxlan_port = KernelVxlanInfo {
+            ifindex: 200,
+            vni,
+            local_ip: ipa(local),
+            learning_disabled: Some(true),
+        };
+        BridgeLink {
+            ifindex: 100,
+            mac: None,
+            vlan_filtering: true,
+            vxlan: None,
+            vxlan_ports: vec![vxlan_port.clone()],
+            vxlan_attach_count: 1,
+            ce_port_ifindexes: Vec::new(),
+            vlans: vec![vlan_row(bridge_vlan)],
+            port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                ifindex: vxlan_port.ifindex,
+                name: Some("vxlan100".to_string()),
+                is_vxlan: true,
+                vlans: vec![vlan_row(bridge_vlan)],
+                vlan_tunnels: Vec::new(),
+            }],
             ..BridgeLink::default()
         }
     }
@@ -219,6 +381,83 @@ mod tests {
         let cache = cache_with("br100", link);
         match probe_one(&inst, &cache) {
             InstanceProbe::NotReady { reason } => assert!(reason.contains("VLAN-aware")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ready_when_vlan_aware_binding_matches_traditional_vxlan() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let cache = cache_with("br100", vlan_aware_link(100, 10, "10.0.0.1"));
+        assert_eq!(probe_one(&inst, &cache), InstanceProbe::Ready);
+    }
+
+    #[test]
+    fn not_ready_when_bridge_vlan_configured_on_non_vlan_filtering_bridge() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let cache = cache_with("br100", ready_link(100, "10.0.0.1"));
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => assert!(reason.contains("vlan_filtering=0")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_vlan_aware_bridge_lacks_bridge_vlan() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = vlan_aware_link(100, 10, "10.0.0.1");
+        link.vlans.clear();
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("does not carry VLAN 10"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_vlan_missing_on_matching_vxlan_port() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = vlan_aware_link(100, 10, "10.0.0.1");
+        link.port_vlan_inventory[0].vlans.clear();
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("does not carry VLAN 10"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_no_matching_vxlan_for_vlan_aware_binding() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let cache = cache_with("br100", vlan_aware_link(200, 10, "10.0.0.1"));
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => assert!(reason.contains("0 VXLAN ports")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_multiple_matching_vxlan_ports_for_vlan_aware_binding() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = vlan_aware_link(100, 10, "10.0.0.1");
+        let mut second = link.vxlan_ports[0].clone();
+        second.ifindex = 201;
+        link.vxlan_ports.push(second.clone());
+        link.vxlan_attach_count = 2;
+        link.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+            ifindex: second.ifindex,
+            name: Some("vxlan100b".to_string()),
+            is_vxlan: true,
+            vlans: vec![vlan_row(10)],
+            vlan_tunnels: Vec::new(),
+        });
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => assert!(reason.contains("2 VXLAN ports")),
             other => panic!("{other:?}"),
         }
     }

@@ -22,31 +22,35 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN bridge-VLAN schema/status plumbing.** `[[evpn_instances]]` now
   accepts optional `bridge_vlan` values from `1..=4094` when `bridge` is
   set, and `EvpnService.ListEvpnInstances` / `rbgp evpn instances` expose
-  the local binding. This is intentionally status plumbing only:
-  `vlan_filtering=1` bridges remain `NotReady`, no VLAN-scoped FDB write
-  path is enabled yet, and EVPN Type 2 / Type 3 / EAD-per-EVI routes still
-  use Ethernet Tag ID `0`.
+  the local binding. The binding selects the local Linux VLAN scope for
+  ADR-0089's VNI-per-broadcast-domain mode; EVPN Type 2 / Type 3 /
+  EAD-per-EVI routes still use Ethernet Tag ID `0`.
+- **EVPN VLAN-aware bridge readiness and FDB attribution.** L2VNIs with
+  `bridge_vlan` can now become `Ready` on traditional Linux
+  `vlan_filtering=1` bridges when exactly one VXLAN member matches the
+  instance VNI and the configured VLAN is present on both the bridge and
+  that VXLAN member. Single-dst and FDB-NHG remote-MAC writes include
+  `NDA_VLAN`, snapshots / owned-state / adoption-reap bookkeeping are
+  VLAN-scoped, and legacy instances without `bridge_vlan` still reject
+  VLAN-aware bridges fail-closed.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
-  operability gap: VLAN-aware bridges stay `NotReady` until rustbgpd has
-  an explicit EVPN-to-Linux binding, managed bridge / VXLAN / VRF creation
-  stays opt-in and class-scoped, and read-only Linux topology substrate can
-  land before any programming behavior changes. This is a decision document
-  only; it adds no runtime feature.
+  operability gap: VLAN-aware programming requires an explicit
+  EVPN-to-Linux binding, managed bridge / VXLAN / VRF creation stays opt-in
+  and class-scoped, and read-only Linux topology substrate can land before
+  programming behavior changes. This is a decision document only; it adds no
+  runtime feature.
 - **EVPN L2 readiness API/CLI surface.** `EvpnService.ListEvpnInstances`
   and `rbgp evpn instances` now join each configured L2VNI with the
   Linux dataplane reconciler's latest `Ready` / `NotReady` / `Unbound`
   verdict. Bound instances without a report yet show `Unknown`; unbound
   instances are visible even before a dataplane report. `NotReady`
-  rows carry the existing probe reason, including the VLAN-aware bridge
-  fail-closed diagnostic. This is visibility only: VLAN-aware bridges
-  remain unsupported for programming.
+  rows carry the existing probe reason, including missing or ambiguous
+  VLAN-aware bridge attribution.
 - **EVPN read-only VLAN-aware topology substrate.** The Linux EVPN link
   inventory now requests `AF_BRIDGE` compressed bridge-VLAN data and
   snapshots bridge / port VLAN membership plus VLAN tunnel mappings for
-  diagnostics and future ADR-0088 work. This is intentionally read-only:
-  `vlan_filtering=1` bridges still report `NotReady`, rustbgpd still
-  writes no VLAN-scoped bridge state, and managed netdev creation remains
+  diagnostics and ADR-0089 readiness. Managed netdev creation remains
   deferred.
 - **BGP-LS wire codec substrate.** The wire crate now exposes an
   unreachable RFC 9552 BGP-LS NLRI/TLV codec that preserves unknown NLRI

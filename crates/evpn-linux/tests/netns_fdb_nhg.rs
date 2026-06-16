@@ -223,7 +223,7 @@ async fn round_trip_install_and_remove_fdb_nhg() {
 
     // Install an FDB row pointing at the group.
     let test_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]);
-    dp.install_fdb_nhg_row(vni, test_mac, group_id)
+    dp.install_fdb_nhg_row(vni, test_mac, None, group_id)
         .await
         .expect("install_fdb_nhg_row");
 
@@ -250,7 +250,7 @@ async fn round_trip_install_and_remove_fdb_nhg() {
     assert!(matches!(group_entry.kind, KernelNexthopKind::Group { .. }));
 
     // Remove the FDB row, then group, then member (ADR §5 invariant 2 order).
-    dp.remove_fdb_nhg_row(vni, test_mac)
+    dp.remove_fdb_nhg_row(vni, test_mac, None)
         .await
         .expect("remove_fdb_nhg_row");
     dp.del_nexthop(group_id).await.expect("del group");
@@ -277,7 +277,7 @@ async fn round_trip_install_and_remove_fdb_nhg() {
 
     // Idempotent del — re-issuing del returns Ok (slice 3a's
     // classify_remove_apply_error fix).
-    dp.remove_fdb_nhg_row(vni, test_mac)
+    dp.remove_fdb_nhg_row(vni, test_mac, None)
         .await
         .expect("re-remove_fdb_nhg_row idempotent");
     dp.del_nexthop(group_id).await.expect("re-del group");
@@ -353,7 +353,9 @@ async fn cve_guard_blocks_install_when_learning_enabled() {
     // Now attempt the install; expect InvalidArgument referencing
     // CVE-2025-39851 in the message.
     let test_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02]);
-    let result = dp.install_fdb_nhg_row(vni, test_mac, 0x4000_0001).await;
+    let result = dp
+        .install_fdb_nhg_row(vni, test_mac, None, 0x4000_0001)
+        .await;
     match result {
         Err(rustbgpd_evpn_linux::error::DataplaneError::InvalidArgument(msg)) => {
             assert!(

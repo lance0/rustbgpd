@@ -58,7 +58,7 @@ use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
 use crate::error::DataplaneError;
 
-use super::links::LinkCache;
+use super::links::{LinkCache, unique_vxlan_for_vni};
 
 /// `NDA_NH_ID` (kind = 13). Not exposed as a typed variant by
 /// `netlink-packet-route 0.30`; emit via the `Other(DefaultNla)`
@@ -85,6 +85,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
     cache: &LinkCache,
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
     nh_id: u32,
 ) -> Result<(), DataplaneError> {
     let vxlan_ifindex = check_cve_guard_and_get_ifindex(cache, vni)?;
@@ -96,7 +97,7 @@ pub(crate) async fn apply_install_fdb_nhg_row(
         .neighbours()
         .add_bridge(vxlan_ifindex, &mac.octets())
         .replace();
-    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, nh_id);
+    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, vlan, nh_id);
     req.execute()
         .await
         .map_err(|e| super::fdb::classify_apply_error(&e))?;
@@ -115,7 +116,12 @@ pub(crate) async fn apply_install_fdb_nhg_row(
 /// stamp. Mainline `AF_BRIDGE` parses FDB adds with a NULL attribute
 /// policy and silently drops the stamp — a forward-compatible no-op
 /// that becomes effective once kernel FDB support lands.
-fn build_fdb_nhg_message(vxlan_ifindex: u32, mac: MacAddress, nh_id: u32) -> NeighbourMessage {
+fn build_fdb_nhg_message(
+    vxlan_ifindex: u32,
+    mac: MacAddress,
+    vlan: Option<u16>,
+    nh_id: u32,
+) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
     msg.header.ifindex = vxlan_ifindex;
@@ -130,6 +136,9 @@ fn build_fdb_nhg_message(vxlan_ifindex: u32, mac: MacAddress, nh_id: u32) -> Nei
             NDA_NH_ID,
             nh_id.to_ne_bytes().to_vec(),
         )));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
     msg
@@ -149,11 +158,9 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     cache: &LinkCache,
     vni: EvpnInstanceId,
     mac: MacAddress,
+    vlan: Option<u16>,
 ) -> Result<(), DataplaneError> {
-    let vxlan_ifindex =
-        vxlan_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
-            name: format!("VXLAN port for VNI {vni}"),
-        })?;
+    let vxlan_ifindex = vxlan_ifindex_for_vni(cache, vni)?;
 
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
@@ -162,6 +169,9 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
     msg.attributes
         .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
 
     match handle.neighbours().del(msg).execute().await {
         Ok(()) => Ok(()),
@@ -178,20 +188,7 @@ fn check_cve_guard_and_get_ifindex(
     cache: &LinkCache,
     vni: EvpnInstanceId,
 ) -> Result<u32, DataplaneError> {
-    // Find the L2VXLAN bridge entry by VNI; pull learning state.
-    let vni_raw = vni.as_u32();
-    let bridge = cache
-        .bridges
-        .values()
-        .find(|b| b.vxlan.as_ref().is_some_and(|v| v.vni == vni_raw))
-        .ok_or_else(|| DataplaneError::LinkNotFound {
-            name: format!("bridge for VNI {vni}"),
-        })?;
-
-    let vxlan = bridge
-        .vxlan
-        .as_ref()
-        .expect("bridge match guaranteed Some vxlan");
+    let vxlan = unique_vxlan_for_vni(cache, vni)?;
 
     match vxlan.learning_disabled {
         Some(true) => Ok(vxlan.ifindex),
@@ -210,14 +207,8 @@ fn check_cve_guard_and_get_ifindex(
 
 /// Helper: VXLAN ifindex for a given VNI. Mirrors the same logic
 /// `linux::fdb` uses for the single-dst path.
-fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
-    let vni_raw = vni.as_u32();
-    cache.bridges.values().find_map(|b| {
-        b.vxlan
-            .as_ref()
-            .filter(|v| v.vni == vni_raw)
-            .map(|v| v.ifindex)
-    })
+fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Result<u32, DataplaneError> {
+    unique_vxlan_for_vni(cache, vni).map(|vxlan| vxlan.ifindex)
 }
 
 #[cfg(test)]
@@ -256,6 +247,79 @@ mod tests {
     }
 
     #[test]
+    fn cve_guard_selects_matching_member_on_multi_vxlan_bridge() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br-tenant".into(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 200,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        let ifindex =
+            check_cve_guard_and_get_ifindex(&cache, EvpnInstanceId::new(200).unwrap()).unwrap();
+        assert_eq!(ifindex, 22);
+        assert_eq!(
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap(),
+            11
+        );
+    }
+
+    #[test]
+    fn cve_guard_rejects_duplicate_vni_topology() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br-tenant".into(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        let err =
+            check_cve_guard_and_get_ifindex(&cache, EvpnInstanceId::new(100).unwrap()).unwrap_err();
+        assert!(
+            matches!(err, DataplaneError::InvalidArgument(_)),
+            "duplicate-VNI topology must fail closed instead of picking an arbitrary ifindex: {err:?}"
+        );
+    }
+
+    #[test]
     fn cve_guard_blocks_when_learning_enabled() {
         let cache = make_cache(100, Some(false));
         let vni = EvpnInstanceId::new(100).unwrap();
@@ -290,7 +354,7 @@ mod tests {
     #[test]
     fn build_fdb_nhg_message_carries_nh_id_and_ownership_stamp() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_fdb_nhg_message(11, mac, 0x4000_0001);
+        let msg = build_fdb_nhg_message(11, mac, None, 0x4000_0001);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -323,5 +387,17 @@ mod tests {
             msg.attributes
                 .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
         );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, NeighbourAttribute::Vlan(_)))
+        );
+    }
+
+    #[test]
+    fn build_fdb_nhg_message_carries_vlan_when_scoped() {
+        let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_fdb_nhg_message(11, mac, Some(10), 0x4000_0001);
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
     }
 }

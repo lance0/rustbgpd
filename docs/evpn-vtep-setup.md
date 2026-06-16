@@ -47,11 +47,9 @@ LOCAL_IP=10.0.0.1          # must equal [[evpn_instances]].local_vtep_ip
 BRIDGE=br100               # must equal [[evpn_instances]].bridge
 VXLAN=vxlan100
 
-# Bridge for the VNI. Must NOT be VLAN-aware for Ready status today:
-# ADR-0088 keeps vlan_filtering=1 fail-closed, and ADR-0089 scopes the
-# future programming slice to an explicit local bridge-VLAN / VNI binding
-# with EVPN Ethernet Tag ID still 0. Set vlan_filtering explicitly rather
-# than relying on the kernel default.
+# Default legacy bridge for one VNI. Omit bridge_vlan in the rustbgpd
+# config for this shape. Set vlan_filtering explicitly rather than relying
+# on the kernel default.
 ip link add name "${BRIDGE}" type bridge vlan_filtering 0
 ip link set dev "${BRIDGE}" up
 
@@ -67,6 +65,27 @@ ip link set dev "${VXLAN}" master "${BRIDGE}"
 ip link set dev "${VXLAN}" up
 ```
 
+For ADR-0089's VLAN-aware VNI-per-broadcast-domain shape, set
+`bridge_vlan = <VID>` on the instance, create the bridge with
+`vlan_filtering=1`, and make the configured VLAN present on both the
+bridge and the matching VXLAN member:
+
+```bash
+VID=100
+
+ip link add name "${BRIDGE}" type bridge vlan_filtering 1
+ip link set dev "${BRIDGE}" up
+ip link add "${VXLAN}" type vxlan \
+    id "${VNI}" \
+    dstport 4789 \
+    local "${LOCAL_IP}" \
+    nolearning
+ip link set dev "${VXLAN}" master "${BRIDGE}"
+bridge vlan add dev "${BRIDGE}" vid "${VID}" self
+bridge vlan add dev "${VXLAN}" vid "${VID}"
+ip link set dev "${VXLAN}" up
+```
+
 If you **omit** `bridge` from the instance config, that L2VNI is
 control-plane only (RR-style): the probe reports `Unbound` and rustbgpd
 programs no kernel FDB for it. Don't create the bridge in that case.
@@ -79,20 +98,17 @@ instance `Ready` only when all hold (otherwise `NotReady{reason}`):
 | # | Predicate | Satisfied by |
 |---|-----------|--------------|
 | 1 | `bridge` exists in the kernel | `ip link add … type bridge` |
-| 2 | bridge is **not** VLAN-aware (`vlan_filtering=0`) | `type bridge vlan_filtering 0` |
-| 3 | exactly **one** VXLAN port enslaved to the bridge | one `set master ${BRIDGE}` |
-| 4 | VXLAN `IFLA_VXLAN_ID` == instance `vni` | `id ${VNI}` |
-| 5 | VXLAN local IP == instance `local_vtep_ip` | `local ${LOCAL_IP}` |
-| 6 | VXLAN `nolearning` (learning disabled) | `nolearning` |
+| 2a | without `bridge_vlan`: bridge is **not** VLAN-aware (`vlan_filtering=0`) and has exactly one VXLAN port | `type bridge vlan_filtering 0`; one `set master ${BRIDGE}` |
+| 2b | with `bridge_vlan`: bridge is VLAN-aware (`vlan_filtering=1`), exactly one VXLAN member has the instance VNI, and the configured VLAN is present on both bridge and VXLAN member | `type bridge vlan_filtering 1`; `bridge vlan add dev ${BRIDGE} vid ${VID} self`; `bridge vlan add dev ${VXLAN} vid ${VID}` |
+| 3 | VXLAN `IFLA_VXLAN_ID` == instance `vni` | `id ${VNI}` |
+| 4 | VXLAN local IP == instance `local_vtep_ip` | `local ${LOCAL_IP}` |
+| 5 | VXLAN `nolearning` (learning disabled) | `nolearning` |
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 
-The config schema accepts an optional `bridge_vlan` for ADR-0089's local
-Linux attribution model, and the API/CLI status surfaces report it. That
-does **not** change predicate 2 yet: a `vlan_filtering=1` bridge remains
-`NotReady` until the ADR-0089 readiness and VLAN-scoped FDB attribution
-slices land. `bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
-EAD-per-EVI routes remain Ethernet Tag ID `0`.
+`bridge_vlan` is not the EVPN Ethernet Tag; Type 2 / Type 3 /
+EAD-per-EVI routes remain Ethernet Tag ID `0`. It is the local Linux VLAN
+selector used for readiness and for `NDA_VLAN` on remote-MAC FDB writes.
 
 ### MAC+IP origination (ARP/ND suppression)
 
@@ -203,10 +219,10 @@ transition once per state change (not every pass).
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| L2VNI `NotReady` "VLAN-aware" | bridge created with `vlan_filtering=1` | recreate with `vlan_filtering 0` |
+| L2VNI `NotReady` "VLAN-aware" | bridge created with `vlan_filtering=1` but instance has no `bridge_vlan` | set `bridge_vlan` and add the VLAN membership, or recreate with `vlan_filtering 0` |
 | L2VNI `NotReady` "learning enabled" | VXLAN missing `nolearning` | recreate the VXLAN with `nolearning` |
 | L2VNI `NotReady` "local IP …" | `local` ≠ `local_vtep_ip` | match the config |
-| L2VNI `NotReady` ">1 VXLAN port" | multiple VXLANs on one bridge | one VXLAN per VNI bridge |
+| L2VNI `NotReady` ">1 VXLAN port" | legacy instance has multiple VXLANs on one bridge, or `bridge_vlan` instance has multiple VXLANs for the same VNI | legacy: one VXLAN per bridge; VLAN-aware: one VXLAN member per VNI |
 | L2VNI `Unbound` unexpectedly | `bridge` omitted from config | set `bridge` if you want dataplane binding |
 | IP-VRF predicate 6/7 fails | L3VXLAN not enslaved to VRF, or wrong MAC | `set master ${VRF}` / `set address ${RMAC}` |
 | IP-VRF predicate 2 fails | VRF table id ≠ `table_id` | `type vrf table ${TABLE}` |

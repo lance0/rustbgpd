@@ -303,7 +303,7 @@ struct ActorState {
     /// forwarding until either a desired MAC re-claims them through
     /// the diff (claim lands in `owned`, key drops out of this set)
     /// or the reap deadline passes and they're removed.
-    adopted_fdb: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    adopted_fdb: BTreeSet<(EvpnInstanceId, Option<u16>, MacAddress)>,
     /// When adopted-but-unclaimed single-dst rows become reapable.
     /// `None` until the one-shot sweep runs; `Some` doubles as the
     /// "swept" latch and is never reset within a process lifetime —
@@ -677,15 +677,19 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if self.state.fdb_adoption_reap_after.is_none() && !intent.instances.is_empty() {
             self.state.fdb_adoption_reap_after =
                 Some(Instant::now() + self.config.fdb_adoption_reap_deferral);
-            for (&(vni, mac), kernel_entry) in snapshot.iter_fdb() {
-                if intent.instances.get(vni).is_none() {
+            for ((vni, mac), kernel_entry) in snapshot.iter_fdb() {
+                let Some(instance) = intent.instances.get(vni) else {
+                    continue;
+                };
+                let instance_vlan = instance.bridge_vlan.map(rustbgpd_evpn::BridgeVlan::as_u16);
+                if kernel_entry.vlan != instance_vlan {
                     continue;
                 }
                 if kernel_entry.is_extern_learned()
                     && kernel_entry.nh_id.is_none()
                     && !self.state.owned.contains(vni, mac)
                 {
-                    self.state.adopted_fdb.insert((vni, mac));
+                    self.state.adopted_fdb.insert((vni, kernel_entry.vlan, mac));
                     self.state.fdb_nhg_drift_since_report.single_dst_adopted += 1;
                     tracing::info!(
                         ?vni,
@@ -1891,9 +1895,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         //     op naturally; if the row is *also* genuinely stale,
         //     the install path's REPLACE semantics will overwrite
         //     the `nh_id` cleanly.
-        let stale_rows: Vec<(EvpnInstanceId, MacAddress)> = snapshot
+        let stale_rows: Vec<(EvpnInstanceId, Option<u16>, MacAddress)> = snapshot
             .iter_fdb()
-            .filter_map(|(&(vni, mac), entry)| {
+            .filter_map(|((vni, mac), entry)| {
                 let nh_id = entry.nh_id?;
                 if !NhIdAllocator::is_ours(nh_id) {
                     return None;
@@ -1907,11 +1911,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 if desired.get(vni, mac).is_some() {
                     return None;
                 }
-                Some((vni, mac))
+                Some((vni, entry.vlan, mac))
             })
             .collect();
-        for (vni, mac) in stale_rows {
-            match self.dataplane.remove_fdb_nhg_row(vni, mac).await {
+        for (vni, vlan, mac) in stale_rows {
+            match self.dataplane.remove_fdb_nhg_row(vni, mac, vlan).await {
                 Ok(()) => tracing::info!(
                     ?vni,
                     %mac,
@@ -2031,7 +2035,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             let ActorState {
                 adopted_fdb, owned, ..
             } = &mut self.state;
-            adopted_fdb.retain(|&(vni, mac)| !owned.contains(vni, mac));
+            adopted_fdb
+                .retain(|&(vni, vlan, mac)| owned.get(vni, mac).is_none_or(|o| o.vlan != vlan));
         }
         if pass_had_failures {
             return;
@@ -2045,7 +2050,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // Snapshot the keys into a Vec so the loop body can mutate
         // `adopted_fdb`; cheaper than cloning the tree structure.
         let candidates: Vec<_> = self.state.adopted_fdb.iter().copied().collect();
-        for (vni, mac) in candidates {
+        for (vni, vlan, mac) in candidates {
             if instances.get(vni).is_none() {
                 // The VNI dropped out of the intent's instance table
                 // since adoption — its rows are no longer ours to
@@ -2055,13 +2060,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 // claim vs reap.
                 continue;
             }
-            if desired.get(vni, mac).is_some() {
+            let instance_vlan = instances
+                .get(vni)
+                .and_then(|inst| inst.bridge_vlan.map(rustbgpd_evpn::BridgeVlan::as_u16));
+            if desired.get(vni, mac).is_some() && instance_vlan == vlan {
                 // Desired but not yet applied (instance NotReady, or
                 // a retry pending). Never reap a desired MAC — the
                 // eventual claim exempts it.
                 continue;
             }
-            match snapshot.find_fdb(vni, mac) {
+            match snapshot.find_fdb_in_vlan(vni, mac, vlan) {
                 Some(k) if k.is_extern_learned() && k.nh_id.is_none() => {}
                 _ => {
                     // Row vanished, was replaced by a foreign row, or
@@ -2069,14 +2077,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     // ours to reap. (Also avoids a `RemoveRemoteFdb`
                     // that the real dataplane classifies as transient
                     // on ENOENT and would retry forever.)
-                    self.state.adopted_fdb.remove(&(vni, mac));
+                    self.state.adopted_fdb.remove(&(vni, vlan, mac));
                     continue;
                 }
             }
-            let op = DataplaneOp::RemoveRemoteFdb { vni, mac };
+            let op = DataplaneOp::RemoveRemoteFdb { vni, mac, vlan };
             match self.dataplane.apply(&op).await {
                 Ok(()) => {
-                    self.state.adopted_fdb.remove(&(vni, mac));
+                    self.state.adopted_fdb.remove(&(vni, vlan, mac));
                     self.state.fdb_nhg_drift_since_report.single_dst_reaped += 1;
                     tracing::info!(
                         ?vni,
@@ -2339,15 +2347,27 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// schedule resets.
     fn record_success(&mut self, op: &DataplaneOp, desired: &RemoteMacTable) {
         match op {
-            DataplaneOp::AddRemoteFdb { vni, mac, dst }
-            | DataplaneOp::UpdateRemoteFdb { vni, mac, dst } => {
+            DataplaneOp::AddRemoteFdb {
+                vni,
+                mac,
+                vlan,
+                dst,
+            }
+            | DataplaneOp::UpdateRemoteFdb {
+                vni,
+                mac,
+                vlan,
+                dst,
+            } => {
                 let seq = desired.get(*vni, *mac).and_then(|e| e.mobility_sequence);
-                self.state
-                    .owned
-                    .record_applied(*vni, *mac, OwnedEntry::single_dst(*dst, seq));
+                self.state.owned.record_applied(
+                    *vni,
+                    *mac,
+                    OwnedEntry::single_dst_in_vlan(*dst, seq, *vlan),
+                );
                 self.state.retry.record_success((*vni, *mac));
             }
-            DataplaneOp::RemoveRemoteFdb { vni, mac }
+            DataplaneOp::RemoveRemoteFdb { vni, mac, .. }
             | DataplaneOp::RemoveFdbNhg { vni, mac, .. } => {
                 self.state.owned.record_withdrawn(*vni, *mac);
                 self.state.retry.record_success((*vni, *mac));
@@ -2368,13 +2388,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
+                vlan,
                 group_key,
                 ..
             } => {
                 // Record FDB-row ownership via the new group-aware kind.
-                self.state
-                    .owned
-                    .record_applied(*vni, *mac, OwnedEntry::fdb_nhg(*group_key));
+                self.state.owned.record_applied(
+                    *vni,
+                    *mac,
+                    OwnedEntry::fdb_nhg_in_vlan(*group_key, *vlan),
+                );
                 self.state.retry.record_success((*vni, *mac));
             }
             // Gate 9 slice 6c L3 ops have their own owned-set and retry
@@ -2619,18 +2642,21 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // `RemoveRemoteFdb` for FdbNhg-owned MACs — which
             // `Dataplane::apply` rejects with `InvalidArgument` and
             // the kernel group/members stay orphaned across restart.
-            let owned_drain: Vec<(EvpnInstanceId, MacAddress, OwnedEntryKind)> = self
+            let owned_drain: Vec<(EvpnInstanceId, MacAddress, Option<u16>, OwnedEntryKind)> = self
                 .state
                 .owned
                 .iter()
-                .map(|(&(vni, mac), entry)| (vni, mac, entry.kind.clone()))
+                .map(|(&(vni, mac), entry)| (vni, mac, entry.vlan, entry.kind.clone()))
                 .collect();
-            for (vni, mac, kind) in owned_drain {
+            for (vni, mac, vlan, kind) in owned_drain {
                 let op = match kind {
-                    OwnedEntryKind::SingleDst { .. } => DataplaneOp::RemoveRemoteFdb { vni, mac },
+                    OwnedEntryKind::SingleDst { .. } => {
+                        DataplaneOp::RemoveRemoteFdb { vni, mac, vlan }
+                    }
                     OwnedEntryKind::FdbNhg { group_key } => DataplaneOp::RemoveFdbNhg {
                         vni,
                         mac,
+                        vlan,
                         group_key,
                     },
                 };
@@ -2866,6 +2892,7 @@ where
         DataplaneOp::InstallFdbNhg {
             vni,
             mac,
+            vlan,
             group_key,
             members,
             standby,
@@ -2876,6 +2903,7 @@ where
                 state,
                 *vni,
                 *mac,
+                *vlan,
                 *group_key,
                 members,
                 *standby,
@@ -2891,8 +2919,9 @@ where
         DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
+            vlan,
             group_key,
-        } => apply_remove_fdb_nhg(dataplane, state, *vni, *mac, *group_key).await,
+        } => apply_remove_fdb_nhg(dataplane, state, *vni, *mac, *vlan, *group_key).await,
         _ => unreachable!("apply_nhg_op called for non-FDB-NHG op"),
     }
 }
@@ -2908,6 +2937,7 @@ async fn apply_install_fdb_nhg<D>(
     state: &mut ActorState,
     vni: rustbgpd_evpn::EvpnInstanceId,
     mac: rustbgpd_evpn::MacAddress,
+    vlan: Option<u16>,
     group_key: crate::group_state::AliasGroupKey,
     members: &[std::net::IpAddr],
     standby: Option<std::net::IpAddr>,
@@ -3081,7 +3111,7 @@ where
     // one netlink round-trip for this one MAC. `remove_fdb_nhg_row`
     // deletes by MAC regardless of the row's shape and treats ENOENT
     // as ACK, so a row that vanished since the snapshot is harmless.
-    if convert_from_dst && let Err(e) = dataplane.remove_fdb_nhg_row(vni, mac).await {
+    if convert_from_dst && let Err(e) = dataplane.remove_fdb_nhg_row(vni, mac, vlan).await {
         rollback_partial_install(dataplane, state, &new_members, new_group, "install_convert")
             .await;
         return Err(e);
@@ -3089,7 +3119,10 @@ where
     // Step 3: install the FDB row pointing at the group. On failure,
     // roll back the newly-created group (if any) and members — they
     // have no MAC ref yet, so they're true orphans without rollback.
-    if let Err(e) = dataplane.install_fdb_nhg_row(vni, mac, group_id).await {
+    if let Err(e) = dataplane
+        .install_fdb_nhg_row(vni, mac, vlan, group_id)
+        .await
+    {
         rollback_partial_install(dataplane, state, &new_members, new_group, "install_step3").await;
         return Err(e);
     }
@@ -3211,6 +3244,7 @@ async fn apply_remove_fdb_nhg<D>(
     state: &mut ActorState,
     vni: rustbgpd_evpn::EvpnInstanceId,
     mac: rustbgpd_evpn::MacAddress,
+    vlan: Option<u16>,
     group_key: crate::group_state::AliasGroupKey,
 ) -> Result<(), crate::error::DataplaneError>
 where
@@ -3219,7 +3253,7 @@ where
     use crate::group_state::RefDelta;
 
     // FDB row first (ADR §5 invariant 2).
-    dataplane.remove_fdb_nhg_row(vni, mac).await?;
+    dataplane.remove_fdb_nhg_row(vni, mac, vlan).await?;
     match state.groups.record_mac_unref(group_key, vni, mac) {
         RefDelta::GroupStillReferenced => Ok(()),
         RefDelta::GroupShouldDelete {

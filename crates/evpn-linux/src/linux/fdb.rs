@@ -38,7 +38,7 @@ use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 
-use super::links::LinkCache;
+use super::links::{LinkCache, unique_vxlan_for_vni};
 
 /// `NDA_NH_ID` neighbour attribute (kind = 13). Not exposed as a typed
 /// variant by `netlink-packet-route 0.30`; we read it via the
@@ -59,7 +59,7 @@ const NUD_PERMANENT: u16 = 0x80;
 const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 
 /// Dump every bridge FDB entry in the kernel and key them by
-/// `(EvpnInstanceId, MacAddress)`.
+/// `(EvpnInstanceId, Option<VLAN>, MacAddress)`.
 ///
 /// Each FDB entry's `header.ifindex` points at the **VXLAN port** for
 /// bridge-family neighbours. We map that ifindex back to a VNI via
@@ -84,8 +84,9 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 pub(crate) async fn dump_fdb(
     handle: &Handle,
     cache: &LinkCache,
-) -> Result<HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>, DataplaneError> {
-    let mut out: HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry> = HashMap::new();
+) -> Result<HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>, DataplaneError> {
+    let mut out: HashMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry> =
+        HashMap::new();
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -138,10 +139,9 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     existing.flags.self_flag |= incoming.flags.self_flag;
 }
 
-fn parse_fdb_entry(
-    msg: &NeighbourMessage,
-    cache: &LinkCache,
-) -> Option<((EvpnInstanceId, MacAddress), KernelFdbEntry)> {
+type FdbSnapshotRow = ((EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry);
+
+fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnapshotRow> {
     if msg.header.family != AddressFamily::Bridge {
         return None;
     }
@@ -157,6 +157,7 @@ fn parse_fdb_entry(
     let mut dst: Option<std::net::IpAddr> = None;
     let mut nh_id: Option<u32> = None;
     let mut protocol: Option<u8> = None;
+    let mut vlan: Option<u16> = None;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -188,6 +189,7 @@ fn parse_fdb_entry(
             // `rtm_protocol` byte — the snapshot types are
             // platform-independent and don't see netlink enums.
             NeighbourAttribute::Protocol(p) => protocol = Some(u8::from(*p)),
+            NeighbourAttribute::Vlan(v) => vlan = Some(*v),
             _ => {}
         }
     }
@@ -210,9 +212,10 @@ fn parse_fdb_entry(
     decode_state(msg.header.state, &mut flags);
 
     Some((
-        (vni, mac),
+        (vni, vlan, mac),
         KernelFdbEntry {
             mac,
+            vlan,
             dst,
             nh_id,
             protocol,
@@ -270,7 +273,12 @@ fn decode_state(state: NeighbourState, flags: &mut KernelFdbFlags) {
 /// on current kernels, exactly FRR's posture: when bridge/vxlan
 /// support merges, already-deployed daemons start writing effective
 /// stamps with no upgrade.
-fn build_remote_fdb_message(vxlan_ifindex: u32, mac: MacAddress, dst: IpAddr) -> NeighbourMessage {
+fn build_remote_fdb_message(
+    vxlan_ifindex: u32,
+    mac: MacAddress,
+    dst: IpAddr,
+    vlan: Option<u16>,
+) -> NeighbourMessage {
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
     msg.header.ifindex = vxlan_ifindex;
@@ -285,6 +293,9 @@ fn build_remote_fdb_message(vxlan_ifindex: u32, mac: MacAddress, dst: IpAddr) ->
             IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
             IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
         }));
+    if let Some(vlan) = vlan {
+        msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
     msg.attributes
         .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
     msg
@@ -323,7 +334,7 @@ pub(crate) async fn apply_op(
     let (vni, mac) = match op {
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
-        | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
+        | DataplaneOp::RemoveRemoteFdb { vni, mac, .. } => (*vni, *mac),
         DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
@@ -345,13 +356,11 @@ pub(crate) async fn apply_op(
         }
     };
 
-    let vxlan_ifindex =
-        vxlan_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
-            name: format!("VXLAN port for VNI {vni}"),
-        })?;
+    let vxlan_ifindex = vxlan_ifindex_for_vni(cache, vni)?;
 
     match op {
-        DataplaneOp::AddRemoteFdb { dst, .. } | DataplaneOp::UpdateRemoteFdb { dst, .. } => {
+        DataplaneOp::AddRemoteFdb { dst, vlan, .. }
+        | DataplaneOp::UpdateRemoteFdb { dst, vlan, .. } => {
             // Single message matching what iproute2 sends for
             // `bridge fdb add MAC dev vxlanX master dst R self
             // extern_learn` (verified via strace on FRR's exact wire
@@ -365,11 +374,11 @@ pub(crate) async fn apply_op(
                 .neighbours()
                 .add_bridge(vxlan_ifindex, &mac.octets())
                 .replace();
-            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst);
+            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst, *vlan);
             req.execute().await.map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
-        DataplaneOp::RemoveRemoteFdb { .. } => {
+        DataplaneOp::RemoveRemoteFdb { vlan, .. } => {
             // Delete the same row we programmed: single NTF_SELF |
             // NTF_MASTER message on the VXLAN port. Kernel cleans
             // up both the bridge-FDB row and the VXLAN-encap row.
@@ -380,12 +389,13 @@ pub(crate) async fn apply_op(
             msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
             msg.attributes
                 .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
-            handle
-                .neighbours()
-                .del(msg)
-                .execute()
-                .await
-                .map_err(|e| classify_apply_error(&e))?;
+            if let Some(vlan) = vlan {
+                msg.attributes.push(NeighbourAttribute::Vlan(*vlan));
+            }
+            match handle.neighbours().del(msg).execute().await {
+                Ok(()) => Ok(()),
+                Err(e) => classify_remove_apply_error(&e),
+            }?;
             Ok(())
         }
         DataplaneOp::SetBumPortFlags { .. }
@@ -407,13 +417,8 @@ pub(crate) async fn apply_op(
     }
 }
 
-fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
-    let raw = vni.as_u32();
-    cache
-        .bridges
-        .values()
-        .filter(|b| b.vxlan_attach_count == 1)
-        .find_map(|b| b.vxlan.as_ref().filter(|v| v.vni == raw).map(|v| v.ifindex))
+fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Result<u32, DataplaneError> {
+    unique_vxlan_for_vni(cache, vni).map(|vxlan| vxlan.ifindex)
 }
 
 /// Classify a netlink error into the right [`DataplaneError`] variant.
@@ -467,11 +472,17 @@ pub(super) fn is_einval(err: &rtnetlink::Error) -> bool {
 pub(super) fn classify_remove_apply_error(err: &rtnetlink::Error) -> Result<(), DataplaneError> {
     if let rtnetlink::Error::NetlinkError(msg) = err {
         let errno = i32::try_from(msg.raw_code().unsigned_abs()).unwrap_or(0);
-        if errno == libc::ENOENT {
-            return Ok(());
-        }
+        let detail = msg.to_io().to_string();
+        return errno_to_remove_apply_result(errno, &detail);
     }
     Err(classify_apply_error(err))
+}
+
+fn errno_to_remove_apply_result(errno: i32, detail: &str) -> Result<(), DataplaneError> {
+    if errno == libc::ENOENT {
+        return Ok(());
+    }
+    Err(errno_to_dataplane_error(errno, detail))
 }
 
 /// Pure-function map from a positive errno to a [`DataplaneError`].
@@ -506,6 +517,8 @@ mod tests {
 
     use super::*;
     use crate::FailureClass;
+    use crate::linux::links::BridgeLink;
+    use crate::snapshot::KernelVxlanInfo;
 
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -537,6 +550,7 @@ mod tests {
     fn fdb_row(dst: Option<&str>, f: KernelFdbFlags) -> KernelFdbEntry {
         KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: dst.map(ipa),
             nh_id: None,
             protocol: None,
@@ -634,6 +648,7 @@ mod tests {
         };
         let mut acc = KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: None,
             nh_id: None,
             protocol: None,
@@ -641,6 +656,7 @@ mod tests {
         };
         let nhg_row = KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            vlan: None,
             dst: None,
             nh_id: Some(0x4000_0001),
             protocol: None,
@@ -731,7 +747,7 @@ mod tests {
     #[test]
     fn build_remote_fdb_message_shape_includes_ownership_stamp() {
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         assert_eq!(msg.header.family, AddressFamily::Bridge);
         assert_eq!(msg.header.ifindex, 11);
         assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
@@ -756,6 +772,93 @@ mod tests {
             msg.attributes
                 .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
         );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, NeighbourAttribute::Vlan(_)))
+        );
+    }
+
+    #[test]
+    fn build_remote_fdb_message_carries_vlan_when_scoped() {
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), Some(10));
+        assert!(msg.attributes.contains(&NeighbourAttribute::Vlan(10)));
+    }
+
+    #[test]
+    fn vxlan_ifindex_lookup_supports_multi_vxlan_vlan_aware_bridge() {
+        let mut cache = LinkCache::default();
+        cache.vxlan_ifindex_to_vni.insert(11, 100);
+        cache.vxlan_ifindex_to_vni.insert(22, 200);
+        cache.bridges.insert(
+            "br-tenant".to_string(),
+            BridgeLink {
+                ifindex: 7,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 200,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        assert_eq!(
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap(),
+            11
+        );
+        assert_eq!(
+            vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(200).unwrap()).unwrap(),
+            22
+        );
+    }
+
+    #[test]
+    fn vxlan_ifindex_lookup_rejects_duplicate_vni_topology() {
+        let mut cache = LinkCache::default();
+        cache.bridges.insert(
+            "br-tenant".to_string(),
+            BridgeLink {
+                ifindex: 7,
+                vlan_filtering: true,
+                vxlan: None,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 11,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 22,
+                        vni: 100,
+                        local_ip: ipa("10.0.0.1"),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                ..BridgeLink::default()
+            },
+        );
+
+        let err = vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap_err();
+        assert!(
+            matches!(err, DataplaneError::InvalidArgument(_)),
+            "duplicate-VNI topology must fail closed instead of picking an arbitrary ifindex: {err:?}"
+        );
     }
 
     #[test]
@@ -765,13 +868,13 @@ mod tests {
         // Round-trip our own encode shape through the parser, as a
         // future FDB-storing kernel would echo it back.
         let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
-        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         let (_, entry) = parse_fdb_entry(&msg, &cache).unwrap();
         assert_eq!(entry.protocol, Some(186));
         assert!(entry.is_extern_learned());
 
         // Current kernels return no protocol attribute at all.
-        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None);
         unstamped
             .attributes
             .retain(|a| !matches!(a, NeighbourAttribute::Protocol(_)));
@@ -802,6 +905,18 @@ mod tests {
     #[test]
     fn errno_einval_is_invalid_argument_permanent() {
         let dp_err = errno_to_dataplane_error(libc::EINVAL, "Invalid argument");
+        assert!(matches!(dp_err, DataplaneError::InvalidArgument(_)));
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn remove_errno_enoent_is_idempotent_success() {
+        assert!(errno_to_remove_apply_result(libc::ENOENT, "No such file or directory").is_ok());
+    }
+
+    #[test]
+    fn remove_errno_einval_stays_invalid_argument() {
+        let dp_err = errno_to_remove_apply_result(libc::EINVAL, "Invalid argument").unwrap_err();
         assert!(matches!(dp_err, DataplaneError::InvalidArgument(_)));
         assert_eq!(dp_err.class(), FailureClass::Permanent);
     }
