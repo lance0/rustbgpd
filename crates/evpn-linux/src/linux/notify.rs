@@ -567,7 +567,8 @@ pub(crate) fn classify_route(msg: &RouteMessage, _kind: RouteEventKind) -> bool 
 #[must_use]
 pub(crate) fn classify_fdb_drift(msg: &NeighbourMessage, cache: &LinkCache) -> bool {
     matches!(msg.header.family, AddressFamily::Bridge)
-        && cache.vxlan_ifindex_to_vni.contains_key(&msg.header.ifindex)
+        && (cache.vxlan_ifindex_to_vni.contains_key(&msg.header.ifindex)
+            || cache.svd_vxlan_ifindexes.contains(&msg.header.ifindex))
 }
 
 /// `RTM_NEWLINK` / `RTM_DELLINK` drift classifier — should the
@@ -606,6 +607,7 @@ pub(crate) fn classify_fdb_drift(msg: &NeighbourMessage, cache: &LinkCache) -> b
 pub(crate) fn classify_link_event(msg: &LinkMessage, cache: &LinkCache) -> bool {
     let ifindex = msg.header.index;
     if cache.vxlan_ifindex_to_vni.contains_key(&ifindex)
+        || cache.svd_vxlan_ifindexes.contains(&ifindex)
         || cache.bridge_port_to_vni.contains_key(&ifindex)
     {
         return true;
@@ -714,6 +716,7 @@ mod tests {
         LinkCache {
             bridges,
             vxlan_ifindex_to_vni,
+            svd_vxlan_ifindexes: HashSet::new(),
             bridge_port_to_vni,
             local_mac_vlan_bindings: HashMap::new(),
             bridge_port_vlan_to_vni: HashMap::new(),
@@ -1637,6 +1640,19 @@ mod tests {
         assert!(classify_fdb_drift(&msg, &cache));
     }
 
+    #[test]
+    fn fdb_drift_wakes_on_delete_on_known_svd_vxlan_port() {
+        let mut cache = cache_for(100, /* vxlan */ 11, /* eth0 */ 22);
+        cache.svd_vxlan_ifindexes.insert(33);
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            33,
+            NeighbourFlags::ExtLearned,
+            Some(vec![0xaa; 6]),
+        );
+        assert!(classify_fdb_drift(&msg, &cache));
+    }
+
     /// A delete on a local AC port is a kernel age-out, already
     /// surfaced as `LocalMacObservation::Aged` to the originator —
     /// not programmed-state drift, so no reconcile wake.
@@ -1696,6 +1712,13 @@ mod tests {
         let cache = cache_for(100, /* vxlan */ 11, /* eth0 */ 22);
         assert!(classify_link_event(&link_msg(22, Some(99), None), &cache));
         assert!(classify_link_event(&link_msg(11, Some(99), None), &cache));
+    }
+
+    #[test]
+    fn link_event_wakes_on_known_svd_vxlan_port() {
+        let mut cache = cache_for(100, /* vxlan */ 11, /* eth0 */ 22);
+        cache.svd_vxlan_ifindexes.insert(33);
+        assert!(classify_link_event(&link_msg(33, Some(99), None), &cache));
     }
 
     /// Changes on the VNI-resolved bridge itself (ifindex 99 in the

@@ -46,6 +46,11 @@ pub struct KernelLinkInfo {
     /// exactly one is found. `None` indicates a missing or ambiguous
     /// VXLAN port and reports the instance `NotReady`.
     pub vxlan: Option<KernelVxlanInfo>,
+    /// Collect-metadata / SVD VXLAN ports attached to the bridge. These
+    /// are observed as topology substrate only in LAN-64 PR1; readiness
+    /// remains fail-closed until the FDB VNI programming contract is
+    /// proven and enabled.
+    pub svd_vxlan_ports: Vec<KernelSvdVxlanInfo>,
     /// Non-VXLAN bridge-member ifindexes observed under this bridge.
     /// These are the CE-facing candidates Gate 8b will target for
     /// BUM suppression once the kernel primitive is selected.
@@ -198,6 +203,28 @@ pub struct KernelVxlanInfo {
     /// at all. `None` means the kernel didn't report it (older kernel
     /// or unusual driver) — the probe must fail closed in that case
     /// rather than assume `nolearning`.
+    pub learning_disabled: Option<bool>,
+}
+
+/// Properties of a collect-metadata / Single VXLAN Device (SVD) port.
+///
+/// SVD VXLAN devices carry multiple VNIs over one ifindex, so they
+/// intentionally do not fit the fixed-VNI [`KernelVxlanInfo`] model.
+/// LAN-64 PR1 records them for diagnostics and fail-closed readiness
+/// only; a later tranche must prove and enable explicit FDB VNI
+/// programming before these ports can become `Ready`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelSvdVxlanInfo {
+    /// Kernel ifindex of the VXLAN port itself.
+    pub ifindex: u32,
+    /// `VXLAN_F_VNIFILTER` / `ip link ... vnifilter` state.
+    pub vnifilter: bool,
+    /// Local source IP when the kernel reports one. Normal external /
+    /// collect-metadata VXLAN devices may omit this because metadata
+    /// supplies tunnel attributes per packet or per programmed FDB row.
+    pub local_ip: Option<IpAddr>,
+    /// Observed `IFLA_VXLAN_LEARNING` value, inverted to match
+    /// [`KernelVxlanInfo`]. `None` means the kernel did not report it.
     pub learning_disabled: Option<bool>,
 }
 

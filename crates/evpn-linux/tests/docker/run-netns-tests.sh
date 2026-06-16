@@ -52,6 +52,8 @@
 #        flood-flag non-clobber proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
 #       (ADR-0089 VLAN-scoped single-dst FDB add/remove proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
+#       (LAN-64 SVD collect-metadata explicit FDB VNI proof)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -68,7 +70,8 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # runtime tests (ADR-0061 FIB / ADR-0067 BFD). `bgp_unnumbered` runs the
 # ADR-0069 evpn-linux integration proof; `link_carrier` runs the
 # ADR-0085 RTNLGRP_LINK carrier monitor proof; `dataplane_vlan_fdb`
-# runs the ADR-0089 VLAN-scoped FDB proof.
+# runs the ADR-0089 VLAN-scoped FDB proof; `svd_fdb_vni` runs the
+# LAN-64 collect-metadata VXLAN explicit-FDB-VNI proof.
 TEST_BIN="netns_bum_filter"
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
@@ -86,8 +89,9 @@ case "${1:-all}" in
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
+    svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_detected_and_explicit_src_vni_fdb_rows_parse" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, svd_fdb_vni" >&2
         exit 2
         ;;
 esac
