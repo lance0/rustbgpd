@@ -45,6 +45,14 @@ updates:
       # Workspace-internal crates are path deps; updates land via the
       # release process, not Dependabot.
       - dependency-name: "rustbgpd-*"
+      # netlink-packet-route 0.31 is code-compatible (proven in PR #538) but
+      # cannot merge until upstream rtnetlink moves off netlink-packet-route
+      # ^0.30 — crates.io rtnetlink 0.21.0 still pins ^0.30, so a lone bump
+      # creates a duplicate-version tree. Ignore 0.31+ until rtnetlink catches
+      # up (0.30.x security patches still flow). REMOVE this when bumping the
+      # pair together — see ROADMAP "netlink-packet-route 0.31 upgrade" + #452.
+      - dependency-name: "netlink-packet-route"
+        versions: [">= 0.31"]
 
   # Wire crate: published to crates.io; its dependencies must stay
   # current independently because external consumers pin against it.
