@@ -10,22 +10,26 @@
 //! origination ever drifts (label, ESI, gateway field, missing-RMAC),
 //! the route stops resolving here.
 //!
-//! ESI overlay-index origination is outbound-only in this slice: the
-//! receive-side projection carries the Type 5 ESI only to drop it
-//! fail-closed until protected EAD recursion is implemented. The ESI
-//! case below therefore pins the standards wire shape directly instead
-//! of pretending it can exercise protected recursion locally.
+//! ESI overlay-index receive v1 deliberately accepts only the shape
+//! the current dataplane can install: one single-active EAD-per-EVI
+//! protected-recursion candidate in an L2VNI linked to the matched
+//! IP-VRF. The ESI case below feeds a natively-originated ESI Type 5
+//! back through that receive helper with matching EAD input, while the
+//! all-active/multipath case remains fail-closed in the pure projection
+//! unit tests.
 
 use std::net::IpAddr;
 
 use rustbgpd_evpn::ip_vrf::{
-    IpVrf, IpVrfId, IpVrfTable, LocalIpRoute, OverlayIndexMode, ProjectedIpPrefixRoute,
-    ProjectedOverlayIndexRoute, originate_ip_prefix_route,
+    IpVrf, IpVrfId, IpVrfTable, LocalIpRoute, OverlayIndexMode, ProjectedEsiOverlayEadPerEvi,
+    ProjectedIpPrefixRoute, ProjectedOverlayIndexRoute, originate_ip_prefix_route,
+    project_ip_prefix_routes_with_overlay_and_esi_index,
     project_ip_prefix_routes_with_overlay_index,
 };
 use rustbgpd_evpn::{EvpnInstanceId, RouteTarget};
 use rustbgpd_wire::{
-    EthernetSegmentIdentifier, EvpnRoute, Ipv4Prefix, MacAddress, PathAttribute, RouteDistinguisher,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnRoute, Ipv4Prefix, MacAddress, PathAttribute,
+    RouteDistinguisher,
 };
 
 fn ip(s: &str) -> IpAddr {
@@ -233,6 +237,52 @@ fn natively_originated_esi_type5_has_rfc9136_overlay_index_shape() {
         vec![overlay_mac().octets()],
         "ESI overlay-index routes carry the configured virtual/transit Router MAC"
     );
+}
+
+#[test]
+fn natively_originated_esi_type5_resolves_through_single_active_ead_projection() {
+    const L2VNI: u32 = 100;
+    let vrfs = esi_vrf_table(L2VNI);
+    let vrf = vrfs.get("tenant-blue").unwrap();
+    let local = LocalIpRoute::v4(Ipv4Prefix::new("192.168.50.0".parse().unwrap(), 24))
+        .with_gateway(Some(ip("10.1.1.5")));
+    let originated = originate_ip_prefix_route(vrf, &local).unwrap();
+    let projected =
+        originated_to_projected(&originated.route, &originated.attributes, ip("10.0.0.9"));
+    let ead = ProjectedEsiOverlayEadPerEvi {
+        l2vni: EvpnInstanceId::new(L2VNI).unwrap(),
+        esi: esi(),
+        ethernet_tag: EthernetTagId(0),
+        next_hop: ip("10.0.0.9"),
+        single_active: true,
+    };
+
+    let table = project_ip_prefix_routes_with_overlay_and_esi_index(
+        &vrfs,
+        vec![projected],
+        Vec::new(),
+        vec![ead],
+    );
+
+    assert!(
+        table.drops().is_empty(),
+        "the natively-originated ESI route must resolve through single-active EAD, got drops: {:?}",
+        table.drops(),
+    );
+    let entries: Vec<_> = table.for_vrf(IpVrfId::new(5000).unwrap()).collect();
+    assert_eq!(entries.len(), 1, "exactly one resolved ESI prefix");
+    let entry = entries[0].1;
+    assert_eq!(
+        entry.next_hop,
+        ip("10.0.0.9"),
+        "resolved next hop is the protected EAD candidate",
+    );
+    assert_eq!(
+        entry.router_mac,
+        overlay_mac(),
+        "resolved inner MAC is the Type 5 Router MAC extcomm",
+    );
+    assert_eq!(entry.l3vni, 5000);
 }
 
 #[test]

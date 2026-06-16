@@ -1207,6 +1207,11 @@ async fn build_intent_tables(
     // `.collect()` would make this nondeterministic across duplicate or
     // transient (e.g. RD-changing) EAD-per-ES rows for the same key.
     let ead_per_es_modes = fold_ead_per_es_modes(&routes);
+    // Strict unanimous fold for the RFC 9136 §4.3 Type 5 overlay-index
+    // import decision only — fail-closed on conflicting redundancy signals.
+    // The OR-folded `ead_per_es_modes` above stays the L2 aliasing contract
+    // and feeds every L2 consumer below unchanged.
+    let ead_per_es_modes_esi_type5 = fold_ead_per_es_modes_for_esi_type5_import(&routes);
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
@@ -1289,10 +1294,22 @@ async fn build_intent_tables(
             .iter()
             .filter_map(|route| project_overlay_index(route, instances))
             .collect();
-        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes_with_overlay_index(
+        let esi_overlay_ead: Vec<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> = routes
+            .iter()
+            .filter_map(|route| {
+                project_esi_overlay_ead_per_evi(
+                    route,
+                    &local_vtep_ips,
+                    instances,
+                    &ead_per_es_modes_esi_type5,
+                )
+            })
+            .collect();
+        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes_with_overlay_and_esi_index(
             ip_vrfs,
             projected_t5,
             overlay_index_t2,
+            esi_overlay_ead,
         )
     };
     let remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
@@ -1430,6 +1447,31 @@ fn fold_ead_per_es_modes(
     modes
 }
 
+/// Strict (unanimous) `(next-hop, ESI)` mode fold for the RFC 9136 §4.3
+/// ESI overlay-index Type 5 **import** decision. A pair is single-active
+/// only if EVERY EAD-per-ES signal for it says single-active; any
+/// all-active or conflicting (mixed) signal folds to non-single-active,
+/// which the Type 5 receive path then drops fail-closed.
+///
+/// This deliberately differs from [`fold_ead_per_es_modes`]: the OR-fold
+/// there is the L2 aliasing-suppression contract ("if anything says
+/// single-active, suppress all-active aliasing"), which is the safer L2
+/// behavior. An *import* decision must instead bias toward NOT importing
+/// on ambiguity, so it must not collapse a conflicting pair to
+/// single-active and admit the route (which OR-folding would, e.g. under
+/// future Add-Path duplicates).
+fn fold_ead_per_es_modes_for_esi_type5_import(
+    routes: &[EvpnRibRoute],
+) -> std::collections::BTreeMap<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier), bool>
+{
+    let mut modes = std::collections::BTreeMap::new();
+    for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
+        let entry = modes.entry(key).or_insert(true);
+        *entry = *entry && single_active;
+    }
+    modes
+}
+
 fn project_ead_per_es_reachability(
     route: &EvpnRibRoute,
 ) -> Option<(
@@ -1485,6 +1527,40 @@ fn project_ead_per_evi(
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         next_hop: route.next_hop,
+    })
+}
+
+/// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the scoped
+/// resolver input used by ESI overlay-index Type 5 receive. The row is
+/// usable only when it is remote, its label names a configured local
+/// L2VNI, and a matching EAD-per-ES row supplied the ES redundancy
+/// mode. Both single-active and all-active rows are passed through so
+/// the Type 5 projection can import the former and fail closed on the
+/// latter with a precise drop reason.
+fn project_esi_overlay_ead_per_evi(
+    route: &EvpnRibRoute,
+    local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+    instances: &EvpnInstanceTable,
+    ead_per_es_modes: &std::collections::BTreeMap<
+        (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+        bool,
+    >,
+) -> Option<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> {
+    let EvpnRoute::EadPerEvi(ead) = &route.route else {
+        return None;
+    };
+    if local_vtep_ips.contains(&route.next_hop) {
+        return None;
+    }
+    let l2vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
+    instances.get(l2vni)?;
+    let single_active = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
+    Some(rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi {
+        l2vni,
+        esi: ead.esi,
+        ethernet_tag: ead.ethernet_tag,
+        next_hop: route.next_hop,
+        single_active,
     })
 }
 
@@ -1829,12 +1905,21 @@ mod tests {
         ethernet_tag: u32,
         next_hop: &str,
     ) -> EvpnRibRoute {
+        evpn_ead_per_evi_route_with_label(esi, ethernet_tag, ethernet_tag, next_hop)
+    }
+
+    fn evpn_ead_per_evi_route_with_label(
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: u32,
+        label: u32,
+        next_hop: &str,
+    ) -> EvpnRibRoute {
         EvpnRibRoute {
             route: EvpnRoute::EadPerEvi(EvpnEadPerEvi {
                 rd: RouteDistinguisher::ZERO,
                 esi,
                 ethernet_tag: EthernetTagId(ethernet_tag),
-                label: MplsLabel::new(ethernet_tag),
+                label: MplsLabel::new(label),
             }),
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
@@ -1846,6 +1931,31 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    fn type5_with_esi_and_router_mac(
+        prefix: &str,
+        next_hop: &str,
+        l3vni: u32,
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: u32,
+        router_mac: [u8; 6],
+    ) -> EvpnRibRoute {
+        let mut route = evpn_ip_prefix_route(prefix, "0.0.0.0", next_hop, l3vni);
+        let EvpnRoute::IpPrefix(ip_prefix) = &mut route.route else {
+            panic!("helper must build Type 5");
+        };
+        ip_prefix.esi = esi;
+        ip_prefix.ethernet_tag = EthernetTagId(ethernet_tag);
+        route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+            RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: l3vni,
+            }
+            .to_extended_community(),
+            ExtendedCommunity::router_mac(router_mac),
+        ])]);
+        route
     }
 
     #[test]
@@ -2288,6 +2398,46 @@ mod tests {
     }
 
     #[test]
+    fn project_esi_overlay_ead_per_evi_carries_l2vni_tag_and_mode() {
+        let esi = EthernetSegmentIdentifier::new([8; 10]);
+        let local_vteps = BTreeSet::new();
+        let instances = local_instance_table(100, Some("br100"));
+        let ead = evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2");
+        let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), false)]);
+        let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), true)]);
+
+        let all_active_projected =
+            project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &all_active)
+                .expect("all-active still feeds the fail-closed Type 5 resolver");
+        assert_eq!(all_active_projected.l2vni, vni(100));
+        assert_eq!(all_active_projected.ethernet_tag, EthernetTagId(42));
+        assert_eq!(all_active_projected.next_hop, ipa("10.0.0.2"));
+        assert!(!all_active_projected.single_active);
+
+        let single_active_projected =
+            project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &single_active)
+                .expect("single-active feeds the import-capable Type 5 resolver");
+        assert!(single_active_projected.single_active);
+
+        let self_originated = BTreeSet::from([ipa("10.0.0.2")]);
+        assert!(
+            project_esi_overlay_ead_per_evi(&ead, &self_originated, &instances, &single_active)
+                .is_none(),
+            "self-originated EAD rows must not become resolver candidates"
+        );
+        assert!(
+            project_esi_overlay_ead_per_evi(
+                &ead,
+                &local_vteps,
+                &EvpnInstanceTable::new(),
+                &single_active,
+            )
+            .is_none(),
+            "EAD label must name a configured local L2VNI"
+        );
+    }
+
+    #[test]
     fn project_ead_per_es_reachability_decodes_single_active_flag() {
         let esi = EthernetSegmentIdentifier::new([9; 10]);
         let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
@@ -2305,10 +2455,13 @@ mod tests {
 
     #[test]
     fn fold_ead_per_es_modes_or_folds_single_active_across_duplicates() {
-        // Two EAD-per-ES rows for the SAME (next-hop, ESI): one all-active, one
-        // single-active (e.g. a transient RD-changing duplicate). The OR-fold
-        // must yield single-active regardless of arrival order, so the receiver
-        // deterministically suppresses all-active aliasing ECMP.
+        // L2 ALIASING-SUPPRESSION contract only. Two EAD-per-ES rows for the
+        // SAME (next-hop, ESI): one all-active, one single-active (e.g. a
+        // transient RD-changing duplicate). The OR-fold must yield
+        // single-active regardless of arrival order, so the receiver
+        // deterministically suppresses all-active aliasing ECMP. The RFC 9136
+        // §4.3 Type 5 *import* path does NOT use this fold — it uses the strict
+        // unanimous fold (see the test below), which fails closed on conflict.
         let esi = EthernetSegmentIdentifier::new([9; 10]);
         let nh = ipa("10.0.0.2");
         let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
@@ -2325,6 +2478,39 @@ mod tests {
                 "single-active must win the (next-hop, ESI) fold"
             );
         }
+    }
+
+    #[test]
+    fn fold_ead_per_es_modes_for_esi_type5_import_fails_closed_on_conflict() {
+        // The Type 5 import fold is the STRICT mirror of the L2 OR-fold above.
+        // For the SAME (next-hop, ESI) with conflicting duplicate signals (one
+        // all-active, one single-active), it must yield NON-single-active
+        // regardless of arrival order, so the Type 5 receive path drops the
+        // route fail-closed instead of admitting it (which OR-folding would).
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        let nh = ipa("10.0.0.2");
+        let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
+        let single_active = evpn_ead_per_es_route(esi, "10.0.0.2", true);
+
+        for routes in [
+            vec![all_active.clone(), single_active.clone()],
+            vec![single_active.clone(), all_active.clone()],
+        ] {
+            let modes = fold_ead_per_es_modes_for_esi_type5_import(&routes);
+            assert_eq!(
+                modes.get(&(nh, esi)),
+                Some(&false),
+                "conflicting signal must fail closed (non-single-active) for Type 5 import"
+            );
+        }
+
+        // Unanimous single-active still resolves to single-active.
+        let unanimous = vec![single_active.clone(), single_active];
+        assert_eq!(
+            fold_ead_per_es_modes_for_esi_type5_import(&unanimous).get(&(nh, esi)),
+            Some(&true),
+            "unanimous single-active must remain single-active"
+        );
     }
 
     #[tokio::test]
@@ -2799,6 +2985,136 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
         assert_eq!(entries[0].1.router_mac, MacAddress::new([0xaa; 6]));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_resolves_single_active_esi_overlay_type5_through_ead() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 58]);
+        let overlay_mac = [0x02, 0x58, 0, 0, 0, 1];
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.58.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        42,
+                        overlay_mac,
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        let entries: Vec<_> = tables
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
+        assert_eq!(entries[0].1.router_mac, MacAddress::new(overlay_mac));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_drops_all_active_esi_overlay_type5() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.59.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        0,
+                        [0x02, 0x59, 0, 0, 0, 1],
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(tables.remote_ip_prefixes.is_empty());
+        assert!(matches!(
+            tables.remote_ip_prefixes.drops()[0],
+            rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {
+                ref vrf,
+                candidates: 1,
+                ..
+            } if vrf == "blue"
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_drops_conflicting_esi_overlay_type5_fail_closed() {
+        // Conflicting duplicate EAD-per-ES signals for the SAME (next-hop, ESI):
+        // one single-active, one all-active. The strict Type 5 import fold must
+        // collapse this to non-single-active and drop the Type 5 fail-closed.
+        // (The L2 OR-fold would instead treat the pair as single-active — this
+        // test guards that the import path does NOT inherit that, e.g. under
+        // future Add-Path duplicates.)
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
+                    type5_with_esi_and_router_mac(
+                        "10.59.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        0,
+                        [0x02, 0x59, 0, 0, 0, 1],
+                    ),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables =
+            build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
+                .await
+                .unwrap();
+        assert!(
+            tables.remote_ip_prefixes.is_empty(),
+            "conflicting redundancy signals must not import a Type 5 overlay route"
+        );
+        assert!(matches!(
+            tables.remote_ip_prefixes.drops()[0],
+            rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {
+                ref vrf,
+                candidates: 1,
+                ..
+            } if vrf == "blue"
+        ));
     }
 
     #[test]

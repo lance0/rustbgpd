@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped (ADR-0087, FRR consume-side M68 for GW-IP; ESI protected-recursion interop still pending) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped (ADR-0087, FRR consume-side M68 for GW-IP; all-active ESI receive + ESI interop proof still pending) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -220,13 +220,12 @@ has it, no broad performance sprints without profile evidence.
   `overlay_index_mode = "esi"` emits RT-5 with non-zero ESI, zero Gateway
   Address, L3VNI label, and the configured virtual/transit Router MAC, with
   config validation tying the selected ESI to a linked local L2VNI. The
-  remaining ESI tail is receive-side protected recursion / real-peer interop,
-  not outbound encoding. That receive path should not be treated as a trivial
-  extension of the shipped GW-IP resolver: rustbgpd now carries the
-  receive-side substrate (Type-5 ESI and Ethernet Tag metadata plus a
-  L2VNI-scoped EAD-per-EVI resolver index), but still needs an explicit
-  decision between all-active L3 multipath/NHG support and a documented
-  single-active-only v1 before importing non-zero-ESI RT-5s. The
+  receive side now ships a deliberately bounded single-active v1: non-zero-ESI
+  RT-5s import only when scoped EAD-per-EVI state in a linked L2VNI yields
+  exactly one single-active remote VTEP, using the RT-5 Router MAC as the inner
+  destination MAC. All-active ESI RT-5s and ambiguous candidates stay
+  fail-closed until L3 multipath/NHG programming exists; a real-peer ESI
+  protected-recursion interop proof is still pending. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
