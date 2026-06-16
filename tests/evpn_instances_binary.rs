@@ -174,6 +174,10 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     assert_eq!(rows[0]["route_targets"], serde_json::json!(["65000:100"]));
     assert_eq!(rows[0]["local_vtep_ip"], "10.0.0.10");
     assert_eq!(optional_json_string(&rows[0], "bridge"), "");
+    assert!(
+        rows[0].as_object().unwrap().contains_key("bridge_vlan"),
+        "bridge_vlan must be present even when absent in config"
+    );
     assert!(rows[0]["bridge_vlan"].is_null());
     assert_eq!(rows[0]["advertise_svi_mac"], false);
     assert_eq!(rows[0]["readiness"], "unbound");

@@ -1022,7 +1022,7 @@ pub struct AsPathPrependConfig {
 ///   must be a unicast address (rejects unspecified / multicast /
 ///   loopback).
 /// - `bridge` — optional Linux bridge name this EVI is bound to.
-///   Kernel reconciliation requires the named bridge to exist.
+///   Kernel reconciliation reports `NotReady` until the named bridge exists.
 /// - `bridge_vlan` — optional local Linux bridge VLAN selector
 ///   (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN
 ///   Ethernet Tag ID `0`, so this is not a wire-protocol tag.
