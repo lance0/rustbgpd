@@ -10,7 +10,7 @@
 //! membership relationships. Statistics, MTU, neighbor tables, etc.
 //! are out of scope.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::net::IpAddr;
 
 use futures::stream::TryStreamExt;
@@ -120,10 +120,19 @@ pub(crate) struct LinkCache {
     /// configured `bridge_vlan` instances whose observed topology has
     /// exactly one matching VXLAN member carrying the same VLAN.
     pub bridge_port_vlan_to_vni: HashMap<(u32, u16), u32>,
+    /// Non-VXLAN bridge ports on bridges with at least one configured
+    /// `bridge_vlan` binding. These ports must never fall back to legacy
+    /// ifindex-only classification; if the VLAN-specific map has no entry,
+    /// observation fails closed.
+    pub bridge_ports_requiring_vlan_attribution: HashSet<u32>,
     /// VLAN-aware VXLAN-port attribution for remote-takeover echoes:
     /// `(vxlan_ifindex, bridge_vlan) -> VNI`. This prevents a remote row
     /// in one bridge VLAN from withdrawing a local claim in another VNI.
     pub vxlan_port_vlan_to_vni: HashMap<(u32, u16), u32>,
+    /// VXLAN ports on bridges with at least one configured `bridge_vlan`
+    /// binding. Mirrors `bridge_ports_requiring_vlan_attribution` for
+    /// remote-takeover echo classification.
+    pub vxlan_ports_requiring_vlan_attribution: HashSet<u32>,
     /// Non-VXLAN ports of **any** known bridge, by link name, with
     /// the observed `IFLA_BRPORT_STATE` from the port's
     /// `IFLA_INFO_PORT_DATA` slave info. Unlike `bridge_port_to_vni`
@@ -214,11 +223,26 @@ impl LinkCache {
     fn rebuild_local_mac_vlan_attribution(&mut self) {
         let mut bridge_port_vlan_to_vni = HashMap::new();
         let mut vxlan_port_vlan_to_vni = HashMap::new();
+        let mut bridge_ports_requiring_vlan_attribution = HashSet::new();
+        let mut vxlan_ports_requiring_vlan_attribution = HashSet::new();
         for ((bridge_name, vlan), vni) in &self.local_mac_vlan_bindings {
-            let Some(vni) = *vni else {
+            let Some(bridge) = self.bridges.get(bridge_name) else {
                 continue;
             };
-            let Some(bridge) = self.bridges.get(bridge_name) else {
+            for port in &bridge.port_vlan_inventory {
+                if port.is_vxlan {
+                    vxlan_ports_requiring_vlan_attribution.insert(port.ifindex);
+                } else {
+                    bridge_ports_requiring_vlan_attribution.insert(port.ifindex);
+                }
+            }
+            for ifindex in &bridge.ce_port_ifindexes {
+                bridge_ports_requiring_vlan_attribution.insert(*ifindex);
+            }
+            for vxlan in &bridge.vxlan_ports {
+                vxlan_ports_requiring_vlan_attribution.insert(vxlan.ifindex);
+            }
+            let Some(vni) = *vni else {
                 continue;
             };
             if !bridge.vlan_filtering || !vlan_rows_contain(&bridge.vlans, *vlan) {
@@ -251,7 +275,9 @@ impl LinkCache {
             }
         }
         self.bridge_port_vlan_to_vni = bridge_port_vlan_to_vni;
+        self.bridge_ports_requiring_vlan_attribution = bridge_ports_requiring_vlan_attribution;
         self.vxlan_port_vlan_to_vni = vxlan_port_vlan_to_vni;
+        self.vxlan_ports_requiring_vlan_attribution = vxlan_ports_requiring_vlan_attribution;
     }
 }
 
@@ -426,7 +452,9 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         bridge_port_to_vni,
         local_mac_vlan_bindings: HashMap::new(),
         bridge_port_vlan_to_vni: HashMap::new(),
+        bridge_ports_requiring_vlan_attribution: HashSet::new(),
         vxlan_port_vlan_to_vni: HashMap::new(),
+        vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
     })
 }
@@ -994,12 +1022,15 @@ mod tests {
 
         assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 10)), Some(&100));
         assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 20)), Some(&200));
+        assert!(cache.bridge_ports_requiring_vlan_attribution.contains(&30));
         assert!(
             !cache.bridge_port_vlan_to_vni.contains_key(&(30, 99)),
             "extra topology VLAN without configured bridge_vlan must not become observable"
         );
         assert_eq!(cache.vxlan_port_vlan_to_vni.get(&(20, 10)), Some(&100));
         assert_eq!(cache.vxlan_port_vlan_to_vni.get(&(21, 20)), Some(&200));
+        assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&20));
+        assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&21));
         assert!(!cache.vxlan_port_vlan_to_vni.contains_key(&(20, 99)));
     }
 
@@ -1046,5 +1077,7 @@ mod tests {
 
         assert!(cache.bridge_port_vlan_to_vni.is_empty());
         assert!(cache.vxlan_port_vlan_to_vni.is_empty());
+        assert!(cache.bridge_ports_requiring_vlan_attribution.contains(&30));
+        assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&20));
     }
 }

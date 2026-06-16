@@ -274,7 +274,10 @@ fn resolve_vxlan_observation_vni(
     ifindex: u32,
     vlan: Option<u16>,
 ) -> Option<u32> {
-    if has_vlan_attribution_for_ifindex(&cache.vxlan_port_vlan_to_vni, ifindex) {
+    if cache
+        .vxlan_ports_requiring_vlan_attribution
+        .contains(&ifindex)
+    {
         return vlan.and_then(|vid| cache.vxlan_port_vlan_to_vni.get(&(ifindex, vid)).copied());
     }
     cache.vxlan_ifindex_to_vni.get(&ifindex).copied()
@@ -285,17 +288,13 @@ fn resolve_bridge_port_observation_vni(
     ifindex: u32,
     vlan: Option<u16>,
 ) -> Option<u32> {
-    if has_vlan_attribution_for_ifindex(&cache.bridge_port_vlan_to_vni, ifindex) {
+    if cache
+        .bridge_ports_requiring_vlan_attribution
+        .contains(&ifindex)
+    {
         return vlan.and_then(|vid| cache.bridge_port_vlan_to_vni.get(&(ifindex, vid)).copied());
     }
     cache.bridge_port_to_vni.get(&ifindex).copied()
-}
-
-fn has_vlan_attribution_for_ifindex(
-    map: &std::collections::HashMap<(u32, u16), u32>,
-    ifindex: u32,
-) -> bool {
-    map.keys().any(|(idx, _)| *idx == ifindex)
 }
 
 /// `AF_INET` / `AF_INET6` classifier — kernel learns an `(IP, MAC)`
@@ -676,7 +675,7 @@ fn extract_ip(msg: &NeighbourMessage) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use netlink_packet_route::{
         AddressFamily,
@@ -718,7 +717,9 @@ mod tests {
             bridge_port_to_vni,
             local_mac_vlan_bindings: HashMap::new(),
             bridge_port_vlan_to_vni: HashMap::new(),
+            bridge_ports_requiring_vlan_attribution: HashSet::new(),
             vxlan_port_vlan_to_vni: HashMap::new(),
+            vxlan_ports_requiring_vlan_attribution: HashSet::new(),
             bridge_ports_by_name: HashMap::new(),
         }
     }
@@ -729,8 +730,11 @@ mod tests {
         cache.bridge_port_to_vni.clear();
         cache.bridge_port_vlan_to_vni.insert((22, 10), 100);
         cache.bridge_port_vlan_to_vni.insert((22, 20), 200);
+        cache.bridge_ports_requiring_vlan_attribution.insert(22);
         cache.vxlan_port_vlan_to_vni.insert((11, 10), 100);
         cache.vxlan_port_vlan_to_vni.insert((33, 20), 200);
+        cache.vxlan_ports_requiring_vlan_attribution.insert(11);
+        cache.vxlan_ports_requiring_vlan_attribution.insert(33);
         cache
     }
 
@@ -842,6 +846,26 @@ mod tests {
     }
 
     #[test]
+    fn classify_vlan_aware_local_bridge_port_does_not_fallback_when_map_missing() {
+        let mut cache = cache_for(100, /* vxlan */ 11, /* swp */ 22);
+        cache.bridge_ports_requiring_vlan_attribution.insert(22);
+        let msg = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                22,
+                NeighbourFlags::Controller,
+                Some(vec![0xaa; 6]),
+            ),
+            10,
+        );
+
+        assert!(
+            classify_neigh(NeighEventKind::New, &msg, &cache).is_none(),
+            "VLAN-aware bridge port with missing attribution map must not use legacy ifindex fallback"
+        );
+    }
+
+    #[test]
     fn classify_drops_ext_learned_echo() {
         let cache = cache_for(100, 11, 22);
         let msg = neigh_msg(
@@ -912,6 +936,26 @@ mod tests {
             10,
         );
         assert!(classify_neigh(NeighEventKind::New, &wrong_vlan, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_vlan_aware_vxlan_port_does_not_fallback_when_map_missing() {
+        let mut cache = cache_for(100, /* vxlan */ 11, /* swp */ 22);
+        cache.vxlan_ports_requiring_vlan_attribution.insert(11);
+        let msg = with_vlan(
+            neigh_msg(
+                AddressFamily::Bridge,
+                11,
+                NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+                Some(vec![0xaa; 6]),
+            ),
+            10,
+        );
+
+        assert!(
+            classify_neigh(NeighEventKind::New, &msg, &cache).is_none(),
+            "VLAN-aware VXLAN port with missing attribution map must not use legacy ifindex fallback"
+        );
     }
 
     /// Same shape without `NTF_EXT_LEARNED` — a foreign controller's
