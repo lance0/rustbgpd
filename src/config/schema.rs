@@ -1027,8 +1027,8 @@ pub struct AsPathPrependConfig {
 ///   (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN
 ///   Ethernet Tag ID `0`, so this is not a wire-protocol tag.
 /// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
-///   own MAC address (RFC 9135 §6.1). Off by default. Wired through to
-///   origination once Type 2 origination lands.
+///   own MAC address (RFC 9135 §6.1). Off by default. Origination is
+///   gated on dataplane readiness for the instance.
 /// - `sticky_macs` — list of MAC addresses (`aa:bb:cc:dd:ee:ff` form)
 ///   that, when learned by the local kernel, are originated with the
 ///   RFC 7432 §15.4 "sticky" bit set in the MAC Mobility extended
@@ -1050,9 +1050,9 @@ pub struct EvpnInstanceConfig {
     pub auto_derive_route_target: bool,
     /// VXLAN tunnel source IP for this EVI.
     pub local_vtep_ip: String,
-    /// Optional Linux bridge name this EVI is bound to. Reserved for
-    /// kernel reconciliation; carried on the schema today so the field
-    /// doesn't churn between phases.
+    /// Optional Linux bridge name this EVI is bound to for kernel
+    /// dataplane probing, readiness reporting, and local origination
+    /// that depends on observed bridge state.
     #[serde(default)]
     pub bridge: Option<String>,
     /// Optional local Linux bridge VLAN selector for ADR-0089
