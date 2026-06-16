@@ -27,7 +27,7 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 use crate::error::DataplaneError;
 use crate::snapshot::{
     KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
-    KernelBridgeVlanTunnelInfo, KernelVxlanInfo,
+    KernelBridgeVlanTunnelInfo, KernelVxlanInfo, vlan_rows_contain,
 };
 
 /// One bridge link the inventory cared about.
@@ -296,35 +296,6 @@ fn insert_unique_binding(
             }
         }
     }
-}
-
-fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> bool {
-    let mut range_start = None;
-    for row in rows {
-        if row.flags.range_begin {
-            range_start = Some(row.vid);
-            if row.vid == vlan {
-                return true;
-            }
-            continue;
-        }
-        if row.flags.range_end {
-            if let Some(start) = range_start.take()
-                && start <= vlan
-                && vlan <= row.vid
-            {
-                return true;
-            }
-            if row.vid == vlan {
-                return true;
-            }
-            continue;
-        }
-        if row.vid == vlan {
-            return true;
-        }
-    }
-    false
 }
 
 type BridgeVlanInventory =

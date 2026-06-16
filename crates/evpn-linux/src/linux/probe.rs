@@ -24,7 +24,7 @@
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
 
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelBridgeVlanInfo, KernelVxlanInfo,
+    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelVxlanInfo, vlan_rows_contain,
 };
 
 use super::links::{BridgeLink, LinkCache};
@@ -201,35 +201,6 @@ fn probe_vxlan_attrs(
 
 fn port_vlan_inventory_contains(row: &KernelBridgePortVlanInfo, vlan: u16) -> bool {
     vlan_rows_contain(&row.vlans, vlan)
-}
-
-fn vlan_rows_contain(rows: &[KernelBridgeVlanInfo], vlan: u16) -> bool {
-    let mut range_start = None;
-    for row in rows {
-        if row.flags.range_begin {
-            range_start = Some(row.vid);
-            if row.vid == vlan {
-                return true;
-            }
-            continue;
-        }
-        if row.flags.range_end {
-            if let Some(start) = range_start.take()
-                && start <= vlan
-                && vlan <= row.vid
-            {
-                return true;
-            }
-            if row.vid == vlan {
-                return true;
-            }
-            continue;
-        }
-        if row.vid == vlan {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
