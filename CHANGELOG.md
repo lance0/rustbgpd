@@ -52,6 +52,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaves VLAN20 intact. The proof keeps Ethernet Tag ID `0` and deliberately
   does not enable SVD, managed netdev creation, or RFC VLAN-Aware Bundle
   service.
+- **EVPN SVD / collect-metadata substrate proof.** The Linux EVPN link
+  inventory now detects collect-metadata VXLAN devices and `vnifilter` state
+  separately from traditional fixed-VNI VXLAN ports, keeps matching SVD
+  `bridge_vlan` topologies fail-closed with an explicit NotReady reason, and
+  parses `src_vni` / explicit-VNI FDB rows on known SVD ifindexes without
+  pretending one ifindex owns one VNI. A new privileged `svd_fdb_vni` netns
+  selector proves the kernel shape: `src_vni` provides the VNI attribution
+  for the SVD FDB row, while the tested kernel does not round-trip
+  `NDA_VLAN` / `NDA_DST` on that self row. Operator-ready SVD programming
+  remains a follow-up; this slice does not enable SVD Ready.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware programming requires an explicit
