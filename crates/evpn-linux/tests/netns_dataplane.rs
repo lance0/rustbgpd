@@ -138,6 +138,75 @@ fn table_with_vlan_instances(local_ip: &str) -> EvpnInstanceTable {
     table
 }
 
+fn setup_vlan_aware_vxlan_topology(ns: &NetnsFixture, local_ip: &str) {
+    ns.exec(
+        "ip",
+        &["addr", "add", &format!("{local_ip}/32"), "dev", "lo"],
+    );
+    ns.exec(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "brvlan",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+            "vlan_default_pvid",
+            "0",
+        ],
+    );
+    ns.exec("ip", &["link", "set", "brvlan", "up"]);
+    for (vxlan, vni, vlan) in [("vxlan100", "100", "10"), ("vxlan200", "200", "20")] {
+        ns.exec(
+            "ip",
+            &[
+                "link",
+                "add",
+                "name",
+                vxlan,
+                "type",
+                "vxlan",
+                "id",
+                vni,
+                "local",
+                local_ip,
+                "dstport",
+                "4789",
+                "nolearning",
+            ],
+        );
+        ns.exec("ip", &["link", "set", vxlan, "master", "brvlan"]);
+        ns.exec("ip", &["link", "set", vxlan, "up"]);
+        ns.exec(
+            "bridge",
+            &["vlan", "add", "vid", vlan, "dev", "brvlan", "self"],
+        );
+        ns.exec("bridge", &["vlan", "add", "vid", vlan, "dev", vxlan]);
+    }
+}
+
+fn setup_vlan_access_port(ns: &NetnsFixture) {
+    ns.exec(
+        "ip",
+        &[
+            "link", "add", "swp1", "type", "veth", "peer", "name", "host1",
+        ],
+    );
+    ns.exec("ip", &["link", "set", "swp1", "master", "brvlan"]);
+    ns.exec("ip", &["link", "set", "swp1", "up"]);
+    ns.exec("ip", &["link", "set", "host1", "up"]);
+    ns.exec(
+        "bridge",
+        &["vlan", "add", "vid", "30", "dev", "brvlan", "self"],
+    );
+    for vlan in ["10", "20", "30"] {
+        ns.exec("bridge", &["vlan", "add", "vid", vlan, "dev", "swp1"]);
+    }
+}
+
 async fn expect_learned(
     rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>,
     want_vni: u32,
@@ -176,6 +245,71 @@ async fn expect_no_observation(rx: &mut tokio::sync::mpsc::Receiver<LocalMacObse
     }
 }
 
+fn fdb_dump_for_dev(dev: &str) -> String {
+    let out = run("bridge", &["fdb", "show", "dev", dev]).stdout;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn fdb_rows_for_mac(dump: &str, mac: MacAddress) -> Vec<&str> {
+    let mac_string = mac_str(mac);
+    dump.lines()
+        .filter(|line| line.to_lowercase().contains(&mac_string))
+        .collect()
+}
+
+fn row_has_key_value(row: &str, key: &str, value: &str) -> bool {
+    let mut tokens = row.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == key && tokens.next() == Some(value) {
+            return true;
+        }
+    }
+    false
+}
+
+fn row_has_vlan(row: &str, vlan: u16) -> bool {
+    row_has_key_value(row, "vlan", &vlan.to_string())
+}
+
+fn row_has_ownership_marker(row: &str) -> bool {
+    row.contains("extern_learn") || row.contains("offload")
+}
+
+fn assert_vlan_remote_fdb_present(dev: &str, mac: MacAddress, vlan: u16, dst: &str) {
+    let dump = fdb_dump_for_dev(dev);
+    let rows = fdb_rows_for_mac(&dump, mac);
+    assert!(
+        !rows.is_empty(),
+        "programmed MAC missing from bridge fdb show dev {dev}:\n{dump}"
+    );
+
+    assert!(
+        rows.iter().any(|row| row_has_vlan(row, vlan)),
+        "programmed MAC rows on {dev} are missing vlan {vlan}:\n{dump}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("master")
+            && row_has_vlan(row, vlan)
+            && row_has_ownership_marker(row)),
+        "programmed MAC missing bridge-master row in vlan {vlan} on {dev}:\n{dump}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("self")
+            && row_has_key_value(row, "dst", dst)
+            && row_has_ownership_marker(row)),
+        "programmed MAC missing VXLAN-self+dst row on {dev} (dst={dst}):\n{dump}"
+    );
+}
+
+fn assert_vlan_remote_fdb_absent(dev: &str, mac: MacAddress, vlan: u16) {
+    let dump = fdb_dump_for_dev(dev);
+    let rows = fdb_rows_for_mac(&dump, mac);
+    assert!(
+        rows.is_empty(),
+        "removed MAC still present on {dev} after vlan {vlan} delete:\n{dump}"
+    );
+}
+
 #[tokio::test]
 async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     if !netns_gate() {
@@ -186,7 +320,7 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     let ns = NetnsFixture::create("program");
     let bridge = "br100";
     let vxlan = "vxlan100";
-    let local_ip = "127.0.0.10";
+    let local_ip = "10.255.0.10";
     let remote_ip = "127.0.0.20";
 
     // Topology: dummy "lo" address binding for VXLAN local source +
@@ -372,6 +506,97 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
 }
 
 #[tokio::test]
+async fn linux_dataplane_programs_vlan_scoped_remote_mac_add_remove() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("vlan-fdb") {
+        linux_dataplane_programs_vlan_scoped_remote_mac_add_remove_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("vlan-fdb");
+    let local_ip = "10.255.0.10";
+    setup_vlan_aware_vxlan_topology(&ns, local_ip);
+
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "linux_dataplane_programs_vlan_scoped_remote_mac_add_remove";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "vlan-fdb")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn linux_dataplane_programs_vlan_scoped_remote_mac_add_remove_inner() {
+    let local_ip = "10.255.0.10";
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let table = table_with_vlan_instances(local_ip);
+    let probes = dp.probe(&table).await;
+    for raw_vni in [100, 200] {
+        let vni = EvpnInstanceId::new(raw_vni).unwrap();
+        match probes.get(vni) {
+            Some(InstanceProbe::Ready) => {}
+            Some(other) => panic!("VNI {raw_vni} not Ready in real netns: {other:?}"),
+            None => panic!("probe returned no result for VNI {raw_vni}"),
+        }
+    }
+
+    let shared_mac = mac(0x72);
+    let dst_vlan10 = "127.0.0.20";
+    let dst_vlan20 = "127.0.0.30";
+
+    dp.apply(&DataplaneOp::AddRemoteFdb {
+        vni: EvpnInstanceId::new(100).unwrap(),
+        mac: shared_mac,
+        vlan: Some(10),
+        dst: dst_vlan10.parse().unwrap(),
+    })
+    .await
+    .expect("AddRemoteFdb vlan 10");
+    assert_vlan_remote_fdb_present("vxlan100", shared_mac, 10, dst_vlan10);
+
+    dp.apply(&DataplaneOp::AddRemoteFdb {
+        vni: EvpnInstanceId::new(200).unwrap(),
+        mac: shared_mac,
+        vlan: Some(20),
+        dst: dst_vlan20.parse().unwrap(),
+    })
+    .await
+    .expect("AddRemoteFdb vlan 20");
+    assert_vlan_remote_fdb_present("vxlan200", shared_mac, 20, dst_vlan20);
+
+    dp.apply(&DataplaneOp::RemoveRemoteFdb {
+        vni: EvpnInstanceId::new(100).unwrap(),
+        mac: shared_mac,
+        vlan: Some(10),
+    })
+    .await
+    .expect("RemoveRemoteFdb vlan 10");
+
+    assert_vlan_remote_fdb_absent("vxlan100", shared_mac, 10);
+    assert_vlan_remote_fdb_present("vxlan200", shared_mac, 20, dst_vlan20);
+
+    dp.apply(&DataplaneOp::RemoveRemoteFdb {
+        vni: EvpnInstanceId::new(200).unwrap(),
+        mac: shared_mac,
+        vlan: Some(20),
+    })
+    .await
+    .expect("RemoveRemoteFdb vlan 20");
+    assert_vlan_remote_fdb_absent("vxlan200", shared_mac, 20);
+}
+
+#[tokio::test]
 async fn linux_dataplane_attributes_vlan_local_mac_observations() {
     if !netns_gate() {
         eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
@@ -385,68 +610,9 @@ async fn linux_dataplane_attributes_vlan_local_mac_observations() {
     }
 
     let ns = NetnsFixture::create("vlan-local-mac");
-    let local_ip = "127.0.0.10";
-
-    ns.exec(
-        "ip",
-        &["addr", "add", &format!("{local_ip}/32"), "dev", "lo"],
-    );
-    ns.exec(
-        "ip",
-        &[
-            "link",
-            "add",
-            "name",
-            "brvlan",
-            "type",
-            "bridge",
-            "vlan_filtering",
-            "1",
-            "vlan_default_pvid",
-            "0",
-        ],
-    );
-    ns.exec("ip", &["link", "set", "brvlan", "up"]);
-    for (vxlan, vni) in [("vxlan100", "100"), ("vxlan200", "200")] {
-        ns.exec(
-            "ip",
-            &[
-                "link",
-                "add",
-                "name",
-                vxlan,
-                "type",
-                "vxlan",
-                "id",
-                vni,
-                "local",
-                local_ip,
-                "dstport",
-                "4789",
-                "nolearning",
-            ],
-        );
-        ns.exec("ip", &["link", "set", vxlan, "master", "brvlan"]);
-        ns.exec("ip", &["link", "set", vxlan, "up"]);
-    }
-    ns.exec(
-        "ip",
-        &[
-            "link", "add", "swp1", "type", "veth", "peer", "name", "host1",
-        ],
-    );
-    ns.exec("ip", &["link", "set", "swp1", "master", "brvlan"]);
-    ns.exec("ip", &["link", "set", "swp1", "up"]);
-    ns.exec("ip", &["link", "set", "host1", "up"]);
-    for vlan in ["10", "20", "30"] {
-        ns.exec(
-            "bridge",
-            &["vlan", "add", "vid", vlan, "dev", "brvlan", "self"],
-        );
-        ns.exec("bridge", &["vlan", "add", "vid", vlan, "dev", "swp1"]);
-    }
-    ns.exec("bridge", &["vlan", "add", "vid", "10", "dev", "vxlan100"]);
-    ns.exec("bridge", &["vlan", "add", "vid", "20", "dev", "vxlan200"]);
+    let local_ip = "10.255.0.10";
+    setup_vlan_aware_vxlan_topology(&ns, local_ip);
+    setup_vlan_access_port(&ns);
 
     let exe = std::env::current_exe().expect("self-exe");
     let test_name = "linux_dataplane_attributes_vlan_local_mac_observations";
@@ -462,7 +628,7 @@ async fn linux_dataplane_attributes_vlan_local_mac_observations() {
 }
 
 async fn linux_dataplane_attributes_vlan_local_mac_observations_inner() {
-    let local_ip = "127.0.0.10";
+    let local_ip = "10.255.0.10";
     let mut dp = LinuxDataplane::connect()
         .await
         .expect("netlink connect inside netns");
