@@ -1154,17 +1154,23 @@ branch is between features.
   deliberately differ: cargo-deny warns (not fails) on unsound-class
   advisories, so only the unmaintained `paste` entry needs a deny.toml
   ignore while `.cargo/audit.toml` also carries the rand unsoundness entry.
-- [ ] **`netlink-packet-route` 0.31 upgrade — blocked on rtnetlink lockstep.**
-  0.31.0 has two breaking changes (`InfoIpTunnel::CollectMetadata`,
-  `InfoVxlan::Df`) that we don't use, so the bump itself is safe — but
-  `rtnetlink` (latest 0.21.0) pins `netlink-packet-route ^0.30`, and our code
-  feeds `netlink_packet_route` types straight into `rtnetlink::Handle`, so a
-  lone bump produces a duplicate-version tree and ~31 type-mismatch errors
-  (this is why dependabot #452 is red). **Revisit when `rtnetlink` 0.22 (or
-  later) lands with 0.31 support**, then bump the pair together in one PR; the
-  raw `IFLA_PROTINFO` AC-gate encode and `link_carrier` flag reads are the
-  surfaces to re-verify. Until then #452 stays open as the upstream-watch
-  tracker. Verified during the FIB route-drift eventing work (#482).
+- [ ] **`netlink-packet-route` 0.31 upgrade — proven ready, blocked on rtnetlink
+  lockstep.** 0.31.0's two breaking changes (`InfoIpTunnel::CollectMetadata`,
+  `InfoVxlan::Df`) don't affect us — rustbgpd compiles clean against 0.31 with no
+  source changes. The blocker is upstream: `rtnetlink` (latest crates.io 0.21.0)
+  pins `netlink-packet-route ^0.30`, and our code feeds `netlink_packet_route`
+  types straight into `rtnetlink::Handle`, so a lone bump produces a
+  duplicate-version tree and ~31 type-mismatch errors. **Readiness is proven** —
+  draft PR #538 validates the upgrade against a git-pinned upstream `rtnetlink`
+  revision already on 0.31: workspace check/clippy/test/doc, the privileged netns
+  selectors, and M42/M50/M58/M70 containerlab receipts all green. To stop the
+  un-mergeable nag, Dependabot now **ignores `netlink-packet-route` `>= 0.31`**
+  (0.30.x security patches still flow). **Revisit when `rtnetlink` 0.22+ lands on
+  crates.io with 0.31 support**: drop the Dependabot ignore + the
+  `[patch.crates-io]` pin, bump the pair together in one PR, rerun the #538 matrix
+  (raw `IFLA_PROTINFO` AC-gate encode + `link_carrier` flag reads are the surfaces
+  to re-verify), and merge. #452 stays the upstream-watch tracker. Verified during
+  the FIB route-drift eventing work (#482).
 - [ ] **Workspace `cargo doc` warning posture.** CI runs
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
   as the standing local pre-flight expectation so broken intra-doc links surface
