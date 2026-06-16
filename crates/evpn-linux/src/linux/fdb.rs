@@ -392,12 +392,10 @@ pub(crate) async fn apply_op(
             if let Some(vlan) = vlan {
                 msg.attributes.push(NeighbourAttribute::Vlan(*vlan));
             }
-            handle
-                .neighbours()
-                .del(msg)
-                .execute()
-                .await
-                .map_err(|e| classify_apply_error(&e))?;
+            match handle.neighbours().del(msg).execute().await {
+                Ok(()) => Ok(()),
+                Err(e) => classify_remove_apply_error(&e),
+            }?;
             Ok(())
         }
         DataplaneOp::SetBumPortFlags { .. }
@@ -474,11 +472,17 @@ pub(super) fn is_einval(err: &rtnetlink::Error) -> bool {
 pub(super) fn classify_remove_apply_error(err: &rtnetlink::Error) -> Result<(), DataplaneError> {
     if let rtnetlink::Error::NetlinkError(msg) = err {
         let errno = i32::try_from(msg.raw_code().unsigned_abs()).unwrap_or(0);
-        if errno == libc::ENOENT {
-            return Ok(());
-        }
+        let detail = msg.to_io().to_string();
+        return errno_to_remove_apply_result(errno, &detail);
     }
     Err(classify_apply_error(err))
+}
+
+fn errno_to_remove_apply_result(errno: i32, detail: &str) -> Result<(), DataplaneError> {
+    if errno == libc::ENOENT {
+        return Ok(());
+    }
+    Err(errno_to_dataplane_error(errno, detail))
 }
 
 /// Pure-function map from a positive errno to a [`DataplaneError`].
@@ -901,6 +905,18 @@ mod tests {
     #[test]
     fn errno_einval_is_invalid_argument_permanent() {
         let dp_err = errno_to_dataplane_error(libc::EINVAL, "Invalid argument");
+        assert!(matches!(dp_err, DataplaneError::InvalidArgument(_)));
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn remove_errno_enoent_is_idempotent_success() {
+        assert!(errno_to_remove_apply_result(libc::ENOENT, "No such file or directory").is_ok());
+    }
+
+    #[test]
+    fn remove_errno_einval_stays_invalid_argument() {
+        let dp_err = errno_to_remove_apply_result(libc::EINVAL, "Invalid argument").unwrap_err();
         assert!(matches!(dp_err, DataplaneError::InvalidArgument(_)));
         assert_eq!(dp_err.class(), FailureClass::Permanent);
     }
