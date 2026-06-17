@@ -41,7 +41,7 @@ use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 
-use super::links::{LinkCache, unique_vxlan_for_vni};
+use super::links::{LinkCache, matching_svd_vxlan_ports, unique_fdb_vxlan_target_for_vni};
 
 /// `NDA_NH_ID` neighbour attribute (kind = 13). Not exposed as a typed
 /// variant by `netlink-packet-route 0.30`; we read it via the
@@ -199,20 +199,33 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
             // this entry belongs to"; accept `vni` too for kernels /
             // iproute2 paths that echo the destination-VNI attribute
             // on dump.
-            NeighbourAttribute::SourceVni(v) | NeighbourAttribute::Vni(v) => {
-                explicit_vni = Some(*v);
-            }
+            NeighbourAttribute::SourceVni(v) | NeighbourAttribute::Vni(v) => match explicit_vni {
+                Some(existing) if existing != *v => return None,
+                Some(_) => {}
+                None => explicit_vni = Some(*v),
+            },
             _ => {}
         }
     }
     let mac = mac?;
+    let from_svd;
     let vni_raw = if let Some(vni) = cache.vxlan_ifindex_to_vni.get(&port_ifindex) {
+        if let Some(explicit) = explicit_vni
+            && explicit != *vni
+        {
+            return None;
+        }
+        from_svd = false;
         *vni
     } else if cache.svd_vxlan_ifindexes.contains(&port_ifindex) {
+        from_svd = true;
         explicit_vni?
     } else {
         return None;
     };
+    if from_svd && vlan.is_none() {
+        vlan = infer_svd_bridge_vlan(cache, port_ifindex, vni_raw);
+    }
     let vni = EvpnInstanceId::new(vni_raw).ok()?;
 
     let mut flags = KernelFdbFlags::default();
@@ -242,6 +255,30 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
             flags,
         },
     ))
+}
+
+fn infer_svd_bridge_vlan(cache: &LinkCache, ifindex: u32, vni: u32) -> Option<u16> {
+    let mut found = None;
+    for ((bridge_name, bridge_vlan), bound_vni) in &cache.local_mac_vlan_bindings {
+        if *bound_vni != Some(vni) {
+            continue;
+        }
+        let Some(bridge) = cache.bridges.get(bridge_name) else {
+            continue;
+        };
+        if !matching_svd_vxlan_ports(bridge, *bridge_vlan, vni)
+            .iter()
+            .any(|svd| svd.ifindex == ifindex)
+        {
+            continue;
+        }
+        match found {
+            None => found = Some(*bridge_vlan),
+            Some(existing) if existing == *bridge_vlan => {}
+            Some(_) => return None,
+        }
+    }
+    found
 }
 
 /// Decode an `ndm_state` value into the flag fields we care about.
@@ -381,7 +418,7 @@ pub(crate) async fn apply_op(
         }
     };
 
-    let vxlan_ifindex = vxlan_ifindex_for_vni(cache, vni)?;
+    let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
 
     match op {
         DataplaneOp::AddRemoteFdb { dst, vlan, .. }
@@ -397,9 +434,10 @@ pub(crate) async fn apply_op(
             // function so it unit-tests without a netlink socket.
             let mut req = handle
                 .neighbours()
-                .add_bridge(vxlan_ifindex, &mac.octets())
+                .add_bridge(target.ifindex, &mac.octets())
                 .replace();
-            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst, *vlan, None);
+            *req.message_mut() =
+                build_remote_fdb_message(target.ifindex, mac, *dst, *vlan, target.source_vni);
             req.execute().await.map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
@@ -409,13 +447,17 @@ pub(crate) async fn apply_op(
             // up both the bridge-FDB row and the VXLAN-encap row.
             let mut msg = NeighbourMessage::default();
             msg.header.family = AddressFamily::Bridge;
-            msg.header.ifindex = vxlan_ifindex;
+            msg.header.ifindex = target.ifindex;
             msg.header.kind = RouteType::Unspec;
             msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
             msg.attributes
                 .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
             if let Some(vlan) = vlan {
                 msg.attributes.push(NeighbourAttribute::Vlan(*vlan));
+            }
+            if let Some(vni) = target.source_vni {
+                msg.attributes
+                    .push(NeighbourAttribute::SourceVni(vni.as_u32()));
             }
             match handle.neighbours().del(msg).execute().await {
                 Ok(()) => Ok(()),
@@ -442,8 +484,9 @@ pub(crate) async fn apply_op(
     }
 }
 
+#[cfg(test)]
 fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Result<u32, DataplaneError> {
-    unique_vxlan_for_vni(cache, vni).map(|vxlan| vxlan.ifindex)
+    unique_fdb_vxlan_target_for_vni(cache, vni).map(|target| target.ifindex)
 }
 
 /// Classify a netlink error into the right [`DataplaneError`] variant.
@@ -543,10 +586,56 @@ mod tests {
     use super::*;
     use crate::FailureClass;
     use crate::linux::links::BridgeLink;
-    use crate::snapshot::KernelVxlanInfo;
+    use crate::snapshot::{
+        KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+        KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo,
+    };
 
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    fn vlan_row(vid: u16) -> KernelBridgeVlanInfo {
+        KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags::default(),
+        }
+    }
+
+    fn svd_cache_with_binding(raw_vni: u32, bridge_vlan: u16) -> LinkCache {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(11);
+        cache
+            .local_mac_vlan_bindings
+            .insert(("br100".to_string(), bridge_vlan), Some(raw_vni));
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                svd_vxlan_ports: vec![KernelSvdVxlanInfo {
+                    ifindex: 11,
+                    vnifilter: true,
+                    local_ip: None,
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 1,
+                vlans: vec![vlan_row(bridge_vlan)],
+                port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                    ifindex: 11,
+                    name: Some("vxlan-svd".to_string()),
+                    is_vxlan: true,
+                    vlans: vec![vlan_row(bridge_vlan)],
+                    vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                        tunnel_id: Some(raw_vni),
+                        vid: Some(bridge_vlan),
+                        flags: KernelBridgeVlanFlags::default(),
+                    }],
+                }],
+                ..BridgeLink::default()
+            },
+        );
+        cache
     }
 
     /// Bit-flag bundle used by the merge tests. Centralizes the
@@ -934,6 +1023,44 @@ mod tests {
         );
         let (key, entry) = parse_fdb_entry(&msg, &cache).unwrap();
 
+        assert_eq!(key.0, EvpnInstanceId::new(200).unwrap());
+        assert_eq!(key.1, Some(10));
+        assert_eq!(entry.vlan, Some(10));
+    }
+
+    #[test]
+    fn parse_fdb_entry_drops_conflicting_explicit_vni_attrs() {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(11);
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let mut msg = build_remote_fdb_message(
+            11,
+            mac,
+            ipa("10.0.0.2"),
+            Some(10),
+            Some(EvpnInstanceId::new(200).unwrap()),
+        );
+        msg.attributes.push(NeighbourAttribute::Vni(201));
+
+        assert!(
+            parse_fdb_entry(&msg, &cache).is_none(),
+            "conflicting NDA_SRC_VNI/NDA_VNI values must fail closed"
+        );
+    }
+
+    #[test]
+    fn parse_fdb_entry_infers_configured_vlan_for_svd_row_when_kernel_omits_vlan() {
+        let cache = svd_cache_with_binding(200, 10);
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(
+            11,
+            mac,
+            ipa("10.0.0.2"),
+            None,
+            Some(EvpnInstanceId::new(200).unwrap()),
+        );
+
+        let (key, entry) = parse_fdb_entry(&msg, &cache).unwrap();
         assert_eq!(key.0, EvpnInstanceId::new(200).unwrap());
         assert_eq!(key.1, Some(10));
         assert_eq!(entry.vlan, Some(10));

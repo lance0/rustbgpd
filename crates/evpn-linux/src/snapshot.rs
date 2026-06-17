@@ -47,9 +47,9 @@ pub struct KernelLinkInfo {
     /// VXLAN port and reports the instance `NotReady`.
     pub vxlan: Option<KernelVxlanInfo>,
     /// Collect-metadata / SVD VXLAN ports attached to the bridge. These
-    /// are observed as topology substrate only in LAN-64 PR1; readiness
-    /// remains fail-closed until the FDB VNI programming contract is
-    /// proven and enabled.
+    /// can satisfy ADR-0089 readiness when a configured `bridge_vlan`
+    /// maps unambiguously to the instance VNI via bridge VLAN tunnel
+    /// inventory; FDB programming then carries explicit `NDA_SRC_VNI`.
     pub svd_vxlan_ports: Vec<KernelSvdVxlanInfo>,
     /// Non-VXLAN bridge-member ifindexes observed under this bridge.
     /// These are the CE-facing candidates Gate 8b will target for
@@ -210,9 +210,9 @@ pub struct KernelVxlanInfo {
 ///
 /// SVD VXLAN devices carry multiple VNIs over one ifindex, so they
 /// intentionally do not fit the fixed-VNI [`KernelVxlanInfo`] model.
-/// LAN-64 PR1 records them for diagnostics and fail-closed readiness
-/// only; a later tranche must prove and enable explicit FDB VNI
-/// programming before these ports can become `Ready`.
+/// ADR-0089 readiness selects them only through an explicit
+/// `(bridge_vlan, tunnel_id/VNI)` binding, and FDB programming must
+/// include `NDA_SRC_VNI` so one ifindex never implies one VNI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelSvdVxlanInfo {
     /// Kernel ifindex of the VXLAN port itself.

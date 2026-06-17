@@ -756,11 +756,17 @@ fn handle_existing_kernel_entry(
             });
             return;
         }
-        if last_applied
-            .get(vni, mac)
-            .is_some_and(|owned| owned.vlan == desired_vlan)
+        if let Some(owned) = last_applied.get(vni, mac)
+            && owned.vlan == desired_vlan
         {
-            if kernel_entry.dst != Some(desired_dst) {
+            let dst_matches = match &owned.kind {
+                OwnedEntryKind::SingleDst { dst, .. } => {
+                    kernel_entry.dst == Some(desired_dst)
+                        || (kernel_entry.dst.is_none() && *dst == desired_dst)
+                }
+                OwnedEntryKind::FdbNhg { .. } => kernel_entry.dst == Some(desired_dst),
+            };
+            if !dst_matches {
                 updates.push(DataplaneOp::UpdateRemoteFdb {
                     vni,
                     mac,
@@ -963,6 +969,70 @@ mod tests {
             &EvpnInstanceTable::new(),
         );
         assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
+    }
+
+    #[test]
+    fn noop_when_owned_svd_echo_omits_dst_but_owned_dst_matches() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        e.dst = None;
+        e.vlan = Some(10);
+        snapshot.insert_fdb(vni(100), e);
+        let mut applied = OwnedSet::new();
+        applied.record_applied(
+            vni(100),
+            mac(1),
+            OwnedEntry::single_dst_in_vlan(ip("10.0.0.2"), None, Some(10)),
+        );
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+        assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
+    }
+
+    #[test]
+    fn update_when_owned_svd_echo_omits_dst_but_desired_dst_changes() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.3", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        e.dst = None;
+        e.vlan = Some(10);
+        snapshot.insert_fdb(vni(100), e);
+        let mut applied = OwnedSet::new();
+        applied.record_applied(
+            vni(100),
+            mac(1),
+            OwnedEntry::single_dst_in_vlan(ip("10.0.0.2"), None, Some(10)),
+        );
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_with_vlan(10, &[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                vlan: Some(10),
+                dst: ip("10.0.0.3"),
+            }]
+        );
     }
 
     // 3. Mobility — same `(VNI, MAC)`, dst changed → UpdateRemoteFdb.

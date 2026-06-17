@@ -174,11 +174,12 @@ The probe must remain fail-closed when:
 - the kernel reports a state that rustbgpd cannot attribute to exactly
   one `(bridge, bridge_vlan, VNI)` binding.
 
-### 5. Defer SVD / collect-metadata VXLAN as a compatible follow-up
+### 5. Stage SVD / collect-metadata VXLAN as a compatible follow-up
 
 Single VXLAN Device (SVD) / collect-metadata VXLAN with `vnifilter` is an
 important operator topology and is the likely long-term Linux EVPN
-default. It is intentionally not the first v1 programming slice.
+default. It was intentionally not the first v1 programming slice, but the
+schema and route model below are compatible with it.
 
 SVD requires additional topology attribution:
 
@@ -190,18 +191,19 @@ SVD requires additional topology attribution:
 - ensuring one SVD can serve multiple rustbgpd EVPN instances without
   cross-VNI FDB ownership leaks.
 
-The `bridge_vlan` schema is deliberately compatible with that follow-up:
+The `bridge_vlan` schema is deliberately compatible with this follow-up:
 SVD changes how the Linux binding is observed and programmed, not the
 EVPN wire model.
 
-The first LAN-64 follow-up landed only the safe substrate/proof slice:
-rustbgpd detects collect-metadata VXLAN devices and `vnifilter`, reports a
-matching SVD `bridge_vlan` topology as NotReady with an explicit reason, and
-parses explicit-VNI FDB rows on known SVD ifindexes. The privileged
-`svd_fdb_vni` netns proof established the tested kernel/iproute2 contract:
-`src_vni` round-trips as the VNI attribution for an SVD FDB row, while that
-self row does not round-trip `NDA_VLAN` / `NDA_DST`. SVD therefore remains
-fail-closed until a later programming tranche accounts for that row shape.
+The LAN-64 follow-up landed this compatible SVD path: rustbgpd detects
+collect-metadata VXLAN devices and `vnifilter`, accepts an unambiguous
+`(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
+programs single-dst and FDB-NHG rows on the shared ifindex with
+`NDA_SRC_VNI`, parses explicit-VNI FDB rows on known SVD ifindexes, and
+handles sparse tested-kernel echoes by inferring the configured VLAN and
+using owned state for convergence when `NDA_DST` is absent. The privileged
+`svd_fdb_vni` netns proof covers Ready + add + same-MAC two-VNI isolation +
+scoped delete on one SVD device.
 
 ### 6. Defer non-zero Ethernet Tag service models
 
@@ -245,14 +247,12 @@ class of ownership.
   keyed by `(VNI, MAC)`.
 - The staged code slices are concrete: config binding, probe readiness,
   VLAN-scoped FDB writes, local-MAC VLAN attribution, and netns proof.
-- The design remains compatible with SVD as a follow-up because
-  `bridge_vlan` is a local Linux selector, not an EVPN service-interface
-  commitment.
+- SVD / collect-metadata support remains inside the same EVPN service
+  model because `bridge_vlan` is a local Linux selector, not an EVPN
+  service-interface commitment.
 
 ### Negative
 
-- Operators using SVD / collect-metadata VXLAN still need a follow-up
-  implementation after the traditional multi-VXLAN-device slice.
 - Operators wanting true RFC VLAN-Aware Bundle interop with non-zero
   Ethernet Tags still have no runtime support.
 - The daemon must carry a second Linux L2 readiness shape while keeping
@@ -290,8 +290,8 @@ class of ownership.
    and one M-series interop smoke against FRR or another Linux EVPN
    implementation.
 7. **SVD follow-up.** Add collect-metadata / `vnifilter` support only
-   after the traditional topology is green and the same test matrix can
-   prove no cross-VNI FDB ownership leaks.
+   after the traditional topology is green and prove no cross-VNI FDB
+   ownership leaks on one shared VXLAN device.
 
 ## Rejected Alternatives
 
@@ -345,6 +345,6 @@ The first programming PR must add:
 - a netns or M-series smoke with at least two VLANs on one bridge and at
   least one non-matching VLAN/VNI pair.
 
-SVD follow-up PRs must additionally prove collect-metadata VXLAN /
-`vnifilter` discovery, bridge VLAN tunnel mapping attribution, and
-multi-VNI ownership isolation on one VXLAN device.
+SVD follow-up PRs additionally prove collect-metadata VXLAN / `vnifilter`
+discovery, bridge VLAN tunnel mapping attribution, and multi-VNI ownership
+isolation on one VXLAN device.
