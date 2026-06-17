@@ -254,7 +254,7 @@ fn natively_originated_esi_type5_resolves_through_single_active_ead_projection()
         esi: esi(),
         ethernet_tag: EthernetTagId(0),
         next_hop: ip("10.0.0.9"),
-        single_active: true,
+        mode: rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::SingleActive,
     };
 
     let table = project_ip_prefix_routes_with_overlay_and_esi_index(

@@ -163,14 +163,6 @@ pub enum EsiOverlayRedundancyMode {
 }
 
 impl EsiOverlayRedundancyMode {
-    const fn from_single_active(single_active: bool) -> Self {
-        if single_active {
-            Self::SingleActive
-        } else {
-            Self::AllActive
-        }
-    }
-
     const fn fold(self, other: Self) -> Self {
         match (self, other) {
             (Self::Conflicting, _) | (_, Self::Conflicting) => Self::Conflicting,
@@ -201,11 +193,12 @@ pub struct ProjectedEsiOverlayEadPerEvi {
     pub ethernet_tag: EthernetTagId,
     /// Remote VTEP next hop for the EAD-per-EVI route.
     pub next_hop: IpAddr,
-    /// Whether the EAD route belongs to a single-active Ethernet
-    /// Segment. The resolver folds this wire-facing boolean into
-    /// [`EsiOverlayRedundancyMode`] so all-active and conflicting
-    /// duplicate signals stay distinguishable.
-    pub single_active: bool,
+    /// Redundancy mode resolved for the EAD-per-EVI next-hop.
+    ///
+    /// Callers must fold EAD-per-ES duplicates before constructing
+    /// this DTO so conflicting redundancy signals stay visible to
+    /// the Type 5 resolver instead of collapsing into all-active.
+    pub mode: EsiOverlayRedundancyMode,
 }
 
 /// Candidate remote VTEP for one scoped ESI overlay-index lookup.
@@ -374,12 +367,11 @@ impl EsiOverlayEadIndex {
             if route.esi == EthernetSegmentIdentifier::ZERO {
                 continue;
             }
-            let mode = EsiOverlayRedundancyMode::from_single_active(route.single_active);
             tmp.entry((route.l2vni, route.esi, route.ethernet_tag))
                 .or_default()
                 .entry(route.next_hop)
-                .and_modify(|existing| *existing = existing.fold(mode))
-                .or_insert(mode);
+                .and_modify(|existing| *existing = existing.fold(route.mode))
+                .or_insert(route.mode);
         }
         Self {
             by_key: tmp
@@ -939,7 +931,7 @@ where
                 });
                 continue;
             }
-            let (next_hop, router_mac) = match resolve_prefix_for_vrf(
+            let (targets, router_mac) = match resolve_prefix_for_vrf(
                 vrfs,
                 vrf,
                 &route,
@@ -954,10 +946,11 @@ where
                     continue;
                 }
             };
+            let next_hop = targets.representative_next_hop();
             let entry = RemoteIpPrefixEntry {
                 prefix: route.prefix,
                 next_hop,
-                targets: RemoteIpPrefixTargets::single(next_hop),
+                targets,
                 l3vni: vrf.id.as_u32(),
                 router_mac,
             };
@@ -1010,7 +1003,7 @@ fn resolve_prefix_for_vrf(
     overlay_gateway: bool,
     overlay_index: &OverlayIndexMap,
     esi_overlay_mode: EsiOverlayIndexMode<'_>,
-) -> Result<(IpAddr, MacAddress), DropReason> {
+) -> Result<(RemoteIpPrefixTargets, MacAddress), DropReason> {
     match resolution {
         PrefixResolution::UnsupportedEsiOverlayIndex => {
             Err(DropReason::UnsupportedEsiOverlayIndex {
@@ -1020,8 +1013,12 @@ fn resolve_prefix_for_vrf(
             })
         }
         PrefixResolution::OverlayIndex => {
-            resolve_overlay_index_gateway(vrfs, vrf, route, overlay_index)
-                .map(|resolved| (resolved.next_hop, resolved.mac))
+            resolve_overlay_index_gateway(vrfs, vrf, route, overlay_index).map(|resolved| {
+                (
+                    RemoteIpPrefixTargets::single(resolved.next_hop),
+                    resolved.mac,
+                )
+            })
         }
         PrefixResolution::EsiOverlayIndex => {
             if overlay_gateway {
@@ -1042,10 +1039,20 @@ fn resolve_prefix_for_vrf(
             let EsiOverlayIndexMode::Enabled(esi_overlay_index) = esi_overlay_mode else {
                 unreachable!("ESI overlay resolution only selected in enabled mode");
             };
-            resolve_esi_overlay_index(vrfs, vrf, route, esi_overlay_index)
-                .map(|resolved| (resolved, router_mac))
+            resolve_esi_overlay_index_targets(vrfs, vrf, route, esi_overlay_index).map(|resolved| {
+                match resolved {
+                    EsiOverlayResolvedTargets::SingleActive { next_hop } => {
+                        (RemoteIpPrefixTargets::single(next_hop), router_mac)
+                    }
+                    EsiOverlayResolvedTargets::AllActive(targets) => {
+                        (RemoteIpPrefixTargets::AllActive(targets), router_mac)
+                    }
+                }
+            })
         }
-        PrefixResolution::InterfaceLess(router_mac) => Ok((route.next_hop, router_mac)),
+        PrefixResolution::InterfaceLess(router_mac) => {
+            Ok((RemoteIpPrefixTargets::single(route.next_hop), router_mac))
+        }
     }
 }
 
@@ -1152,25 +1159,6 @@ fn overlay_index_matches(
         }
     }
     matches
-}
-
-fn resolve_esi_overlay_index(
-    vrfs: &crate::ip_vrf::IpVrfTable,
-    vrf: &crate::ip_vrf::IpVrf,
-    route: &ProjectedIpPrefixRoute,
-    esi_overlay_index: &EsiOverlayEadIndex,
-) -> Result<IpAddr, DropReason> {
-    match resolve_esi_overlay_index_targets(vrfs, vrf, route, esi_overlay_index)? {
-        EsiOverlayResolvedTargets::SingleActive { next_hop } => Ok(next_hop),
-        EsiOverlayResolvedTargets::AllActive(targets) => {
-            Err(DropReason::UnsupportedAllActiveEsiOverlayIndex {
-                prefix: route.prefix,
-                next_hop: route.next_hop,
-                vrf: vrf.name.clone(),
-                candidates: targets.len(),
-            })
-        }
-    }
 }
 
 fn resolve_esi_overlay_index_targets(
@@ -1383,7 +1371,11 @@ mod tests {
             esi,
             ethernet_tag: EthernetTagId(ethernet_tag),
             next_hop: next_hop.parse().unwrap(),
-            single_active,
+            mode: if single_active {
+                EsiOverlayRedundancyMode::SingleActive
+            } else {
+                EsiOverlayRedundancyMode::AllActive
+            },
         }
     }
 
@@ -1402,35 +1394,35 @@ mod tests {
                 esi,
                 ethernet_tag: EthernetTagId(0),
                 next_hop: "10.0.0.2".parse().unwrap(),
-                single_active: true,
+                mode: EsiOverlayRedundancyMode::SingleActive,
             },
             ProjectedEsiOverlayEadPerEvi {
                 l2vni: l2vni(100),
                 esi,
                 ethernet_tag: EthernetTagId(0),
                 next_hop: "10.0.0.2".parse().unwrap(),
-                single_active: true,
+                mode: EsiOverlayRedundancyMode::SingleActive,
             },
             ProjectedEsiOverlayEadPerEvi {
                 l2vni: l2vni(200),
                 esi,
                 ethernet_tag: EthernetTagId(0),
                 next_hop: "10.0.0.3".parse().unwrap(),
-                single_active: true,
+                mode: EsiOverlayRedundancyMode::SingleActive,
             },
             ProjectedEsiOverlayEadPerEvi {
                 l2vni: l2vni(100),
                 esi,
                 ethernet_tag: EthernetTagId(42),
                 next_hop: "10.0.0.4".parse().unwrap(),
-                single_active: true,
+                mode: EsiOverlayRedundancyMode::SingleActive,
             },
             ProjectedEsiOverlayEadPerEvi {
                 l2vni: l2vni(100),
                 esi: EthernetSegmentIdentifier::ZERO,
                 ethernet_tag: EthernetTagId(0),
                 next_hop: "10.0.0.5".parse().unwrap(),
-                single_active: true,
+                mode: EsiOverlayRedundancyMode::SingleActive,
             },
         ]);
 
@@ -1770,7 +1762,7 @@ mod tests {
     }
 
     #[test]
-    fn esi_overlay_index_type5_drops_all_active_until_l3_multipath_exists() {
+    fn esi_overlay_index_type5_imports_all_active_target_set_for_l3_writer() {
         let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
         vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
         let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 11]);
@@ -1784,16 +1776,16 @@ mod tests {
             vec![esi_ead(100, esi, 0, "10.0.0.2", false)],
         );
 
-        assert!(table.is_empty());
+        assert!(table.drops().is_empty());
+        let ((_id, prefix), entry) = table.iter().next().expect("route imported");
+        assert_eq!(*prefix, v4([10, 3, 0, 0], 24));
+        let expected = ["10.0.0.2".parse::<IpAddr>().unwrap()];
         assert!(matches!(
-            table.drops()[0],
-            DropReason::UnsupportedAllActiveEsiOverlayIndex { ref vrf, candidates: 1, .. }
-                if vrf == "blue"
+            &entry.targets,
+            RemoteIpPrefixTargets::AllActive(targets)
+                if targets.next_hops() == expected
         ));
-        assert_eq!(
-            table.drops()[0].reason_label(),
-            "unsupported_all_active_esi_overlay_index"
-        );
+        assert_eq!(entry.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
     }
 
     #[test]

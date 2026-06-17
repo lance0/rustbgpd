@@ -797,13 +797,21 @@ Shipped pieces (v0.18.0):
   L2VNI linked to the matched IP-VRF, and imports only the installable v1
   shape: exactly one single-active remote VTEP. Missing scope, missing
   Router MAC, unresolved EAD, dual GW-IP+ESI overlay indexes,
-  all-active EAD candidates, and ambiguous single-active candidates stay
-  fail-closed and are counted through the existing remote-prefix drop
-  surface. M71 proves the single-active receive path against a GoBGP route
-  source. ADR-0090 defines the all-active receive contract; all-active ESI
-  receive is still deferred until the L3 writer and M72 real-peer proof land.
-  The projection model and Linux ownership substrate are present, but production
-  import still fails closed.
+  and ambiguous single-active candidates stay fail-closed and are counted
+  through the existing remote-prefix drop surface. M71 proves the single-active
+  receive path against a GoBGP route source.
+- RFC 9136 §4.3 all-active ESI overlay-index Type 5 receive:
+  ADR-0090 defines the all-active receive contract. Projection carries
+  deterministic all-active remote-VTEP target sets, the Linux L3 writer installs
+  valid two-or-more-member target sets as route-level ECMP over the L3VXLAN with
+  per-VTEP L3 neighbors and an L3VXLAN Router-MAC FDB-NHG row, and the actor
+  cleans up the route, neighbors, FDB row, and L3-tagged nexthop objects on
+  withdraw or all-active-to-single collapse. Single-member all-active target
+  sets, mixed single-active/all-active signals, family mismatches, and
+  incompatible Router-MAC target-set claims stay fail-closed. The
+  `l3_all_active_writer` netns selector proves the production writer path
+  against a real kernel; M72 remains the real-peer proof before the all-active
+  receive arc is considered complete.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -822,10 +830,10 @@ Still ahead:
   gRPC / CLI status, native GW-IP origination (ADR-0087), ESI origination,
   single-active ESI receive recursion, and the FRR consume-side M68 GW-IP
   proof now ship; M71 adds the real-peer single-active ESI
-  protected-recursion proof. ADR-0090 now pins the next standards-tail slice:
-  all-active ESI receive must use deterministic target sets, route-level ECMP,
-  L3VXLAN FDB-NHG for the shared Router MAC, and an M72 all-active proof before
-  it is claimed as implemented. Broader service-provider EVPN route families
+  protected-recursion proof, and the ADR-0090 all-active L3 writer now installs
+  valid all-active target sets through route-level ECMP plus L3VXLAN FDB-NHG.
+  M72 remains the cross-vendor / real-peer all-active proof before the receive
+  arc is considered complete. Broader service-provider EVPN route families
   remain demand-shaped.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
@@ -853,8 +861,8 @@ demand.
 
 | Area | Status | First reviewable slice | Proof gate |
 |------|--------|------------------------|------------|
-| RFC 9136 ESI overlay-index Type 5 origination + single-active receive | Shipped (bounded v1) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC; receive-side recursion imports exactly one single-active EAD-per-EVI candidate scoped by linked L2VNI and Ethernet Tag | Pure origination/projection + daemon tests plus M71 GoBGP real-peer receive proof; all-active receive remains fail-closed |
-| ADR-0090 all-active ESI overlay-index Type 5 receive | Projection + L3 diff boundary + L3 ownership substrate landed; writer pending | Extend the M71 shape to all-active ESI recursion with deterministic remote-VTEP target sets, route-level ECMP, per-VTEP L3 neighbors, and L3VXLAN FDB-NHG for the shared Router MAC. The model now distinguishes single-active, all-active, and conflicting EAD redundancy signals, the Linux L3 diff validates all-active target-set intent before fail-closing it at the current scalar writer boundary, and the dataplane has partitioned L3 NHID / Router-MAC FDB-NHG ownership state, but production import still fails closed until the writer lands | M72 real-peer proof: unresolved before EAD, then VRF ECMP route + `nhid` Router-MAC FDB row, then deterministic withdraw/collapse cleanup |
+| RFC 9136 ESI overlay-index Type 5 origination + single-active receive | Shipped (bounded v1) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC; receive-side recursion imports exactly one single-active EAD-per-EVI candidate scoped by linked L2VNI and Ethernet Tag | Pure origination/projection + daemon tests plus M71 GoBGP real-peer receive proof |
+| ADR-0090 all-active ESI overlay-index Type 5 receive | Writer shipped; M72 proof pending | Extends the M71 shape to all-active ESI recursion with deterministic remote-VTEP target sets, route-level ECMP, per-VTEP L3 neighbors, and L3VXLAN FDB-NHG for the shared Router MAC. The model distinguishes single-active, all-active, and conflicting EAD redundancy signals; invalid one-member/mixed/family-conflict/Router-MAC-conflict shapes fail closed; valid all-active target sets install through the production L3 writer | `l3_all_active_writer` same-host netns proof is CI-gated; M72 real-peer proof remains: unresolved before EAD, then VRF ECMP route + `nhid` Router-MAC FDB row, then deterministic withdraw/collapse cleanup |
 | VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; ADR-0088 boundary accepted; ADR-0089 v1 VNI-per-broadcast-domain slice landed for traditional multi-VXLAN bridges and SVD / collect-metadata VXLAN: `bridge_vlan` schema/status, observed VLAN topology validation, `NDA_VLAN` remote-MAC FDB attribution for fixed-VNI devices, `NDA_SRC_VNI` attribution for SVD devices, AF_BRIDGE local-MAC VLAN attribution, M70 FRR interop proving same-MAC two-VNI isolation on a traditional rustbgpd-owned `vlan_filtering=1` bridge, and `svd_fdb_vni` proving SVD Ready + add + same-MAC two-VNI isolation + scoped delete on a real kernel. Ethernet Tag ID stays `0`; unattributable VLAN observations fail closed as normal "not ours" classifier outcomes, downstream observation backpressure is metered, and startup link-cache/probe priming bounds the boot window | MAC+IP VLAN attribution remains kernel-evidence-gated; true VLAN-aware bundle / non-zero Ethernet Tag needs a separate ADR; managed netdev creation stays a separate ergonomics track | Unit tests, hosted/gated local kernel netns tests including `dataplane_vlan_fdb` and `svd_fdb_vni`, and hosted M70 FRR containerlab receipt |
 | rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics; boundary accepted in ADR-0088 | Add opt-in ownership for one netdev class at a time, with crash-restart adoption/reap and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
 | BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |

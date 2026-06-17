@@ -61,6 +61,26 @@ use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum L3OpKey {
+    Route {
+        vrf_id: IpVrfId,
+        prefix: EvpnIpPrefixValue,
+    },
+    Neighbor {
+        l3vxlan_ifindex: u32,
+        next_hop: IpAddr,
+    },
+    Fdb {
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+    },
+    Group {
+        group_key: crate::group_state::L3NhgKey,
+        prefix: EvpnIpPrefixValue,
+    },
+}
+
 /// Tunable cadence for the reconcile loop. Production values come from
 /// ADR-0054 §6; tests construct `Self::for_tests()` for a tighter
 /// rhythm under `tokio::time::pause()`.
@@ -274,6 +294,11 @@ struct ActorState {
     /// only on successful kernel apply; a failed op leaves the
     /// in-memory state unchanged so the next reconcile pass retries.
     l3_owned: crate::l3_diff::L3OwnedState,
+    /// Per-op-fingerprint suppression for permanent L3 writer
+    /// failures. Same shape-equality contract as FDB suppression:
+    /// retry when the desired op changes, suppress when the exact
+    /// permanent-failed op recurs.
+    l3_permanent_failures: BTreeMap<L3OpKey, DataplaneOp>,
     /// ADR-0059 slice 3b: NHID allocator + per-group refcount state
     /// for FDB nexthop groups. Constructed empty; populated during
     /// the first reconcile pass by the startup-adoption helper, then
@@ -284,6 +309,11 @@ struct ActorState {
     /// Coordinator updates this on every apply; `compute_diff` reads it
     /// to decide whether a `UpdateFdbNhgMembers` is needed.
     groups: crate::group_state::GroupOwnedMap,
+    /// L3VXLAN FDB nexthop group + per-VTEP NH refcount map for
+    /// all-active ESI overlay-index Type 5 receive. Kept separate
+    /// from `groups` so L2 adoption/drift/release logic cannot see
+    /// L3 NHID tag ranges.
+    l3_groups: crate::group_state::L3FdbNhgOwnedMap,
     /// IDs the startup-adoption pass reserved from the kernel dump but
     /// has not yet matched against a `GroupOwnedMap` entry. After the
     /// first successful reconcile, the cleanup phase walks this set
@@ -418,9 +448,11 @@ impl ActorState {
             last_bum_plan: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
+            l3_permanent_failures: BTreeMap::new(),
             event_stream_open: true,
             nh_id_alloc: crate::nh_id_alloc::NhIdAllocator::new(),
             groups: crate::group_state::GroupOwnedMap::new(),
+            l3_groups: crate::group_state::L3FdbNhgOwnedMap::new(),
             adopted_unreferenced: BTreeMap::new(),
             adoption_done: false,
             adopted_fdb: BTreeSet::new(),
@@ -1185,6 +1217,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             let l3_plan = crate::l3_diff::compute_l3_diff(
                 intent.remote_ip_prefixes.as_ref(),
                 &self.state.l3_owned,
+                &self.state.l3_groups,
                 &ready_l3vxlan_ifindex,
                 intent.ip_vrfs.as_ref(),
             );
@@ -1209,6 +1242,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 std::collections::HashSet::new();
             let mut failed_fdb_keys: std::collections::HashSet<(u32, MacAddress)> =
                 std::collections::HashSet::new();
+            let mut failed_l3_group_keys: std::collections::HashSet<crate::group_state::L3NhgKey> =
+                std::collections::HashSet::new();
             // ADR-0079: did this L3 pass fully converge? Any apply
             // failure — including a skipped route whose prerequisite
             // resolution add failed, since that route never made it
@@ -1217,6 +1252,24 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // mode (same gate as the slice-2 FDB reap).
             let mut l3_pass_had_failures = false;
             for op in &l3_plan.ops {
+                let l3_key = l3_op_key(op);
+                if let Some(key) = l3_key.as_ref()
+                    && check_permanent_suppression(
+                        &mut self.state.l3_permanent_failures,
+                        key,
+                        op,
+                        "L3",
+                    )
+                {
+                    record_l3_prerequisite_failure(
+                        op,
+                        &mut failed_neighbor_keys,
+                        &mut failed_fdb_keys,
+                        &mut failed_l3_group_keys,
+                    );
+                    l3_pass_had_failures = true;
+                    continue;
+                }
                 if let crate::dataplane::DataplaneOp::AddRemoteIpRoute {
                     l3vxlan_ifindex,
                     next_hop,
@@ -1238,7 +1291,43 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         continue;
                     }
                 }
-                match self.dataplane.apply(op).await {
+                if let crate::dataplane::DataplaneOp::AddRemoteIpRouteEcmp {
+                    vrf_id,
+                    prefix,
+                    l3vxlan_ifindex,
+                    next_hops,
+                    router_mac,
+                    ..
+                } = op
+                {
+                    let neigh_failed = next_hops.iter().any(|next_hop| {
+                        failed_neighbor_keys.contains(&(*l3vxlan_ifindex, *next_hop))
+                    });
+                    let group_key =
+                        crate::group_state::L3NhgKey::new(*vrf_id, *l3vxlan_ifindex, *router_mac);
+                    let group_failed = failed_l3_group_keys.contains(&group_key);
+                    let route = (*vrf_id, *prefix);
+                    let group_missing = self.state.l3_groups.route_group(&route) != Some(group_key);
+                    if neigh_failed || group_failed || group_missing {
+                        tracing::warn!(
+                            ?op,
+                            neigh_failed,
+                            group_failed,
+                            group_missing,
+                            "skipping AddRemoteIpRouteEcmp — prerequisite L3 all-active resolution add failed in this pass; next reconcile will retry"
+                        );
+                        l3_pass_had_failures = true;
+                        continue;
+                    }
+                }
+                let res = match op {
+                    crate::dataplane::DataplaneOp::InstallL3FdbNhg { .. }
+                    | crate::dataplane::DataplaneOp::RemoveL3FdbNhg { .. } => {
+                        apply_l3_nhg_op(&mut self.dataplane, &mut self.state, op).await
+                    }
+                    _ => self.dataplane.apply(op).await,
+                };
+                match res {
                     Ok(()) => {
                         crate::l3_diff::record_l3_success(
                             &mut self.state.l3_owned,
@@ -1247,6 +1336,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             intent.ip_vrfs.as_ref(),
                             intent.remote_ip_prefixes.as_ref(),
                         );
+                        if let Some(key) = l3_key.as_ref() {
+                            self.state.l3_permanent_failures.remove(key);
+                        }
                         // ADR-0079 claim: a successful add over an
                         // adopted key replaced the crash leftover
                         // (every L3 add is a netlink REPLACE) — the
@@ -1254,6 +1346,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         // never be reaped.
                         match op {
                             crate::dataplane::DataplaneOp::AddRemoteIpRoute {
+                                vrf_id,
+                                prefix,
+                                ..
+                            }
+                            | crate::dataplane::DataplaneOp::AddRemoteIpRouteEcmp {
                                 vrf_id,
                                 prefix,
                                 ..
@@ -1282,28 +1379,24 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         }
                     }
                     Err(e) => {
+                        let class = e.class();
                         tracing::warn!(
+                            ?class,
                             error = %e,
                             ?op,
                             "L3 op failed; preserving owned state for next reconcile retry"
                         );
                         l3_pass_had_failures = true;
-                        match op {
-                            crate::dataplane::DataplaneOp::AddL3Neighbor {
-                                l3vxlan_ifindex,
-                                next_hop,
-                                ..
-                            } => {
-                                failed_neighbor_keys.insert((*l3vxlan_ifindex, *next_hop));
-                            }
-                            crate::dataplane::DataplaneOp::AddL3VxlanFdb {
-                                l3vxlan_ifindex,
-                                router_mac,
-                                ..
-                            } => {
-                                failed_fdb_keys.insert((*l3vxlan_ifindex, *router_mac));
-                            }
-                            _ => {}
+                        record_l3_prerequisite_failure(
+                            op,
+                            &mut failed_neighbor_keys,
+                            &mut failed_fdb_keys,
+                            &mut failed_l3_group_keys,
+                        );
+                        if class == FailureClass::Permanent
+                            && let Some(key) = l3_key
+                        {
+                            self.state.l3_permanent_failures.insert(key, op.clone());
                         }
                     }
                 }
@@ -2418,10 +2511,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // `record_success_l3`.
             DataplaneOp::AddRemoteIpRoute { .. }
             | DataplaneOp::RemoveRemoteIpRoute { .. }
+            | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+            | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
             | DataplaneOp::AddL3Neighbor { .. }
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
+            | DataplaneOp::RemoveL3VxlanFdb { .. }
+            | DataplaneOp::InstallL3FdbNhg { .. }
+            | DataplaneOp::RemoveL3FdbNhg { .. } => {}
         }
     }
 
@@ -2578,13 +2675,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // We use the actor's current `intent_rx` ip_vrfs view so the
         // cached identities on installs still resolve correctly even
         // if the upstream supervisor has cleared its own table.
-        let l3_drain_plan = if self.state.l3_owned.is_empty() {
+        let l3_drain_plan = if self.state.l3_owned.is_empty() && self.state.l3_groups.is_empty() {
             crate::l3_diff::L3Plan::default()
         } else {
             let intent_snapshot = self.intent_rx.borrow().clone();
             crate::l3_diff::compute_l3_diff(
                 &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new(),
                 &self.state.l3_owned,
+                &self.state.l3_groups,
                 &std::collections::BTreeMap::new(),
                 intent_snapshot.ip_vrfs.as_ref(),
             )
@@ -2923,6 +3021,243 @@ where
             group_key,
         } => apply_remove_fdb_nhg(dataplane, state, *vni, *mac, *vlan, *group_key).await,
         _ => unreachable!("apply_nhg_op called for non-FDB-NHG op"),
+    }
+}
+
+/// ADR-0090 L3 all-active coordinator. Mirrors the L2 FDB-NHG
+/// ordering, but uses the L3 NHID tag ranges and a direct L3VXLAN
+/// FDB row keyed by ifindex rather than VNI/link-cache lookup.
+async fn apply_l3_nhg_op<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    op: &DataplaneOp,
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    match op {
+        DataplaneOp::InstallL3FdbNhg {
+            vrf_id,
+            prefix,
+            group_key,
+            router_mac,
+            l3vxlan_ifindex,
+            members,
+        } => {
+            apply_install_l3_fdb_nhg(
+                dataplane,
+                state,
+                (*vrf_id, *prefix),
+                *group_key,
+                *router_mac,
+                *l3vxlan_ifindex,
+                members,
+            )
+            .await
+        }
+        DataplaneOp::RemoveL3FdbNhg {
+            vrf_id,
+            prefix,
+            group_key,
+            router_mac,
+            l3vxlan_ifindex,
+        } => {
+            apply_remove_l3_fdb_nhg(
+                dataplane,
+                state,
+                (*vrf_id, *prefix),
+                *group_key,
+                *router_mac,
+                *l3vxlan_ifindex,
+            )
+            .await
+        }
+        _ => unreachable!("apply_l3_nhg_op called for non-L3-FDB-NHG op"),
+    }
+}
+
+async fn apply_install_l3_fdb_nhg<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    route: crate::group_state::L3RouteKey,
+    group_key: crate::group_state::L3NhgKey,
+    router_mac: rustbgpd_evpn::MacAddress,
+    l3vxlan_ifindex: u32,
+    members: &[std::net::IpAddr],
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    use std::collections::BTreeSet;
+
+    if members.len() < 2 {
+        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+            "ADR-0090: L3 FDB-NHG install for {group_key:?} requires at least two members"
+        )));
+    }
+
+    let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
+    for ip in members {
+        if state.l3_groups.vtep_nh(ip).is_none() {
+            let id = match state.nh_id_alloc.alloc_l3_vtep_nh() {
+                Ok(id) => id,
+                Err(e) => {
+                    rollback_l3_partial_install(dataplane, state, &new_members, None).await;
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "ADR-0090: L3 VTEP NH alloc failed: {e}"
+                    )));
+                }
+            };
+            if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
+                state.nh_id_alloc.release_l3(id);
+                rollback_l3_partial_install(dataplane, state, &new_members, None).await;
+                return Err(e);
+            }
+            state.l3_groups.record_member_install(*ip, id);
+            new_members.push((*ip, id));
+        }
+    }
+
+    let member_ids: Vec<u32> = members
+        .iter()
+        .map(|ip| state.l3_groups.vtep_nh(ip).expect("just installed").id)
+        .collect();
+    let existing = state
+        .l3_groups
+        .group(&group_key)
+        .map(|g| (g.id, g.members.clone()));
+    let mut new_group: Option<(crate::group_state::L3NhgKey, u32)> = None;
+    let group_id = if let Some((id, old_members)) = existing {
+        let new_members_set: BTreeSet<_> = members.iter().copied().collect();
+        if old_members != new_members_set {
+            if let Err(e) = dataplane.add_nexthop_group(id, &member_ids).await {
+                rollback_l3_partial_install(dataplane, state, &new_members, None).await;
+                return Err(e);
+            }
+            let removed = state
+                .l3_groups
+                .record_group_member_change(group_key, new_members_set);
+            for ip in removed {
+                if state.l3_groups.vtep_nh_is_orphan(&ip)
+                    && let Some(member_id) = state.l3_groups.drop_vtep_nh(&ip)
+                {
+                    try_del_and_release_l3_alloc(dataplane, state, member_id, "l3_member_drift")
+                        .await;
+                }
+            }
+        }
+        id
+    } else {
+        let id = match state.nh_id_alloc.alloc_l3_nhg() {
+            Ok(id) => id,
+            Err(e) => {
+                rollback_l3_partial_install(dataplane, state, &new_members, None).await;
+                return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                    "ADR-0090: L3 NHG alloc failed: {e}"
+                )));
+            }
+        };
+        if let Err(e) = dataplane.add_nexthop_group(id, &member_ids).await {
+            state.nh_id_alloc.release_l3(id);
+            rollback_l3_partial_install(dataplane, state, &new_members, None).await;
+            return Err(e);
+        }
+        state
+            .l3_groups
+            .record_group_install(group_key, id, members.iter().copied().collect());
+        new_group = Some((group_key, id));
+        id
+    };
+
+    if let Err(e) = dataplane
+        .install_l3_fdb_nhg_row(l3vxlan_ifindex, router_mac, group_id)
+        .await
+    {
+        rollback_l3_partial_install(dataplane, state, &new_members, new_group).await;
+        return Err(e);
+    }
+
+    if let Some(delta) = state.l3_groups.record_route_ref(group_key, route) {
+        cleanup_l3_ref_delta(dataplane, state, delta).await;
+    }
+    Ok(())
+}
+
+async fn apply_remove_l3_fdb_nhg<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    route: crate::group_state::L3RouteKey,
+    group_key: crate::group_state::L3NhgKey,
+    router_mac: rustbgpd_evpn::MacAddress,
+    l3vxlan_ifindex: u32,
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    let Some(group) = state.l3_groups.group(&group_key).cloned() else {
+        state
+            .l3_groups
+            .record_route_unref_from_group(group_key, route);
+        return Ok(());
+    };
+    let last_ref = group.ref_routes.len() <= 1 && group.ref_routes.contains(&route);
+    if !last_ref {
+        state
+            .l3_groups
+            .record_route_unref_from_group(group_key, route);
+        return Ok(());
+    }
+
+    dataplane
+        .remove_l3_fdb_nhg_row(l3vxlan_ifindex, router_mac)
+        .await?;
+    dataplane.del_nexthop(group.id).await?;
+    state.nh_id_alloc.release_l3(group.id);
+    let delta = state
+        .l3_groups
+        .record_route_unref_from_group(group_key, route);
+    cleanup_l3_ref_delta(dataplane, state, delta).await;
+    Ok(())
+}
+
+async fn cleanup_l3_ref_delta<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    delta: crate::group_state::L3RefDelta,
+) where
+    D: crate::dataplane::NexthopOps,
+{
+    let crate::group_state::L3RefDelta::GroupShouldDelete { members, .. } = delta else {
+        return;
+    };
+    for ip in members {
+        if state.l3_groups.vtep_nh_is_orphan(&ip)
+            && let Some(id) = state.l3_groups.drop_vtep_nh(&ip)
+        {
+            try_del_and_release_l3_alloc(dataplane, state, id, "l3_group_unref").await;
+        }
+    }
+}
+
+async fn rollback_l3_partial_install<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    new_members: &[(std::net::IpAddr, u32)],
+    new_group: Option<(crate::group_state::L3NhgKey, u32)>,
+) where
+    D: crate::dataplane::NexthopOps,
+{
+    if let Some((group_key, expected_id)) = new_group
+        && let Some((tracked_id, _members)) = state.l3_groups.drop_unreferenced_group(&group_key)
+    {
+        debug_assert_eq!(tracked_id, expected_id, "L3 rollback ID mismatch");
+        try_del_and_release_l3_alloc(dataplane, state, tracked_id, "l3_rollback_group").await;
+    }
+    for (ip, id) in new_members.iter().rev() {
+        if state.l3_groups.vtep_nh_is_orphan(ip) {
+            state.l3_groups.drop_vtep_nh(ip);
+            try_del_and_release_l3_alloc(dataplane, state, *id, "l3_rollback_member").await;
+        }
     }
 }
 
@@ -3330,6 +3665,82 @@ fn check_permanent_suppression<K: Ord>(
     }
 }
 
+fn l3_op_key(op: &DataplaneOp) -> Option<L3OpKey> {
+    match op {
+        DataplaneOp::AddRemoteIpRoute { vrf_id, prefix, .. }
+        | DataplaneOp::RemoveRemoteIpRoute { vrf_id, prefix, .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { vrf_id, prefix, .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { vrf_id, prefix, .. } => Some(L3OpKey::Route {
+            vrf_id: *vrf_id,
+            prefix: *prefix,
+        }),
+        DataplaneOp::AddL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        }
+        | DataplaneOp::RemoveL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => Some(L3OpKey::Neighbor {
+            l3vxlan_ifindex: *l3vxlan_ifindex,
+            next_hop: *next_hop,
+        }),
+        DataplaneOp::AddL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        }
+        | DataplaneOp::RemoveL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => Some(L3OpKey::Fdb {
+            l3vxlan_ifindex: *l3vxlan_ifindex,
+            router_mac: *router_mac,
+        }),
+        DataplaneOp::InstallL3FdbNhg {
+            group_key, prefix, ..
+        }
+        | DataplaneOp::RemoveL3FdbNhg {
+            group_key, prefix, ..
+        } => Some(L3OpKey::Group {
+            group_key: *group_key,
+            prefix: *prefix,
+        }),
+        _ => None,
+    }
+}
+
+fn record_l3_prerequisite_failure(
+    op: &DataplaneOp,
+    failed_neighbor_keys: &mut std::collections::HashSet<(u32, IpAddr)>,
+    failed_fdb_keys: &mut std::collections::HashSet<(u32, MacAddress)>,
+    failed_l3_group_keys: &mut std::collections::HashSet<crate::group_state::L3NhgKey>,
+) {
+    match op {
+        DataplaneOp::AddL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => {
+            failed_neighbor_keys.insert((*l3vxlan_ifindex, *next_hop));
+        }
+        DataplaneOp::AddL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => {
+            failed_fdb_keys.insert((*l3vxlan_ifindex, *router_mac));
+        }
+        DataplaneOp::InstallL3FdbNhg { group_key, .. } => {
+            failed_l3_group_keys.insert(*group_key);
+        }
+        _ => {}
+    }
+}
+
 /// Roll back per-VTEP members and (optionally) a group that were
 /// newly created during a partial `InstallFdbNhg` /
 /// `UpdateFdbNhgMembers` execution. Called when a later step fails
@@ -3451,13 +3862,36 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
-        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => {
             // VNI 0 is invalid in the domain type, so VNI 1 is the
             // harmless report placeholder for non-L2-FDB ops.
             rustbgpd_evpn::EvpnInstanceId::new(1).expect("VNI 1 is always valid")
+        }
+    }
+}
+
+async fn try_del_and_release_l3_alloc<D: crate::dataplane::NexthopOps>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    id: u32,
+    site: &'static str,
+) {
+    match dataplane.del_nexthop(id).await {
+        Ok(()) => state.nh_id_alloc.release_l3(id),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                id = format_args!("0x{id:08x}"),
+                site,
+                "L3 FDB-NHG GC: del_nexthop failed; allocator slot retained"
+            );
         }
     }
 }
@@ -3477,10 +3911,14 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
-        | DataplaneOp::RemoveL3VxlanFdb { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
     }
 }
 
@@ -3508,10 +3946,14 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         // apply_plan, so this arm is structurally unreachable.
         DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
-        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => {
             unreachable!("L3 ops use a separate AppliedL3Op accounting path")
         }
         // ADR-0059 slice 3 FDB-NHG ops have their own kind variants

@@ -123,17 +123,39 @@ struct State {
 
 /// One in-memory kernel route row (the value half of
 /// `(table_id, prefix)`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InMemoryL3Route {
     /// Output device.
     pub l3vxlan_ifindex: u32,
-    /// Gateway.
+    /// Representative gateway kept for ADR-0079 scalar adoption and
+    /// older tests. For ECMP rows this is the first canonical
+    /// next-hop.
     pub next_hop: IpAddr,
+    /// Full route target set.
+    pub targets: InMemoryL3RouteTargets,
     /// True when the row carries the ADR-0079 marker pair
     /// (`proto bgp` + onlink). Rows written through `apply` are
     /// always marked — the real apply path always writes the markers
     /// — while `pre_load_l3_route` lets tests stage foreign rows.
     pub marked: bool,
+}
+
+/// In-memory route target shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemoryL3RouteTargets {
+    /// Scalar route via one remote VTEP.
+    Single { next_hop: IpAddr },
+    /// Route-level ECMP over the L3VXLAN device.
+    Ecmp { next_hops: Vec<IpAddr> },
+}
+
+impl InMemoryL3RouteTargets {
+    fn representative_next_hop(&self) -> IpAddr {
+        match self {
+            Self::Single { next_hop } => *next_hop,
+            Self::Ecmp { next_hops } => next_hops[0],
+        }
+    }
 }
 
 /// One in-memory L3 neighbor row.
@@ -146,12 +168,21 @@ pub struct InMemoryL3Neighbor {
 }
 
 /// One in-memory L3VXLAN FDB row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InMemoryL3VxlanFdb {
-    /// Tunnel destination the MAC maps to.
-    pub next_hop: IpAddr,
+    /// FDB target shape.
+    pub target: InMemoryL3VxlanFdbTarget,
     /// True when the row carries the permanent `extern_learn` marker.
     pub marked: bool,
+}
+
+/// In-memory L3VXLAN FDB target shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemoryL3VxlanFdbTarget {
+    /// Scalar `dst` row.
+    SingleDst { next_hop: IpAddr },
+    /// `nhid` row pointing at an FDB nexthop group.
+    Nhg { nh_id: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -412,12 +443,39 @@ impl InMemoryDataplane {
                     InMemoryL3Route {
                         l3vxlan_ifindex: *l3vxlan_ifindex,
                         next_hop: *next_hop,
+                        targets: InMemoryL3RouteTargets::Single {
+                            next_hop: *next_hop,
+                        },
+                        marked: true,
+                    },
+                );
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::AddRemoteIpRouteEcmp {
+                prefix,
+                table_id,
+                l3vxlan_ifindex,
+                next_hops,
+                ..
+            } => {
+                let targets = InMemoryL3RouteTargets::Ecmp {
+                    next_hops: next_hops.clone(),
+                };
+                state.l3_routes.insert(
+                    (*table_id, *prefix),
+                    InMemoryL3Route {
+                        l3vxlan_ifindex: *l3vxlan_ifindex,
+                        next_hop: targets.representative_next_hop(),
+                        targets,
                         marked: true,
                     },
                 );
                 state.l3_op_log.push(op.clone());
             }
             DataplaneOp::RemoveRemoteIpRoute {
+                prefix, table_id, ..
+            }
+            | DataplaneOp::RemoveRemoteIpRouteEcmp {
                 prefix, table_id, ..
             } => {
                 state.l3_routes.remove(&(*table_id, *prefix));
@@ -455,7 +513,9 @@ impl InMemoryDataplane {
                 state.l3_vxlan_fdb.insert(
                     (*l3vxlan_ifindex, *router_mac),
                     InMemoryL3VxlanFdb {
-                        next_hop: *next_hop,
+                        target: InMemoryL3VxlanFdbTarget::SingleDst {
+                            next_hop: *next_hop,
+                        },
                         marked: true,
                     },
                 );
@@ -478,7 +538,9 @@ impl InMemoryDataplane {
             // suppresses rather than backoff-retrying forever.
             DataplaneOp::InstallFdbNhg { .. }
             | DataplaneOp::UpdateFdbNhgMembers { .. }
-            | DataplaneOp::RemoveFdbNhg { .. } => {
+            | DataplaneOp::RemoveFdbNhg { .. }
+            | DataplaneOp::InstallL3FdbNhg { .. }
+            | DataplaneOp::RemoveL3FdbNhg { .. } => {
                 return Err(crate::error::DataplaneError::InvalidArgument(
                     "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
                      not Dataplane::apply"
@@ -546,6 +608,9 @@ impl InMemoryDataplane {
             if !row.marked {
                 continue;
             }
+            let InMemoryL3VxlanFdbTarget::SingleDst { .. } = row.target else {
+                continue;
+            };
             let Some(vrf_id) = managed.get(&ifindex).copied() else {
                 continue;
             };
@@ -664,6 +729,39 @@ impl NexthopOps for InMemoryDataplane {
         // Idempotent — slice 3b coordinator may issue this on
         // already-removed rows during stale cleanup.
         state.kernel.remove_fdb_in_vlan(vni, mac, vlan);
+        Ok(())
+    }
+
+    async fn install_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+        nh_id: u32,
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        state.l3_vxlan_fdb.insert(
+            (l3vxlan_ifindex, router_mac),
+            InMemoryL3VxlanFdb {
+                target: InMemoryL3VxlanFdbTarget::Nhg { nh_id },
+                marked: true,
+            },
+        );
+        Ok(())
+    }
+
+    async fn remove_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        state.l3_vxlan_fdb.remove(&(l3vxlan_ifindex, router_mac));
         Ok(())
     }
 
@@ -959,6 +1057,7 @@ impl InMemoryHandle {
             InMemoryL3Route {
                 l3vxlan_ifindex,
                 next_hop,
+                targets: InMemoryL3RouteTargets::Single { next_hop },
                 marked,
             },
         );
@@ -990,7 +1089,10 @@ impl InMemoryHandle {
     ) {
         self.state.lock().expect("poisoned").l3_vxlan_fdb.insert(
             (l3vxlan_ifindex, router_mac),
-            InMemoryL3VxlanFdb { next_hop, marked },
+            InMemoryL3VxlanFdb {
+                target: InMemoryL3VxlanFdbTarget::SingleDst { next_hop },
+                marked,
+            },
         );
     }
 
@@ -1024,6 +1126,26 @@ impl InMemoryHandle {
             .expect("poisoned")
             .l3_vxlan_fdb
             .contains_key(&(l3vxlan_ifindex, router_mac))
+    }
+
+    /// Read the `nh_id` field of an L3VXLAN FDB row at
+    /// `(l3vxlan_ifindex, router_mac)`, if the row exists and is an
+    /// FDB-NHG row.
+    #[must_use]
+    pub fn kernel_l3_vxlan_fdb_nh_id(
+        &self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+    ) -> Option<u32> {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3_vxlan_fdb
+            .get(&(l3vxlan_ifindex, router_mac))
+            .and_then(|row| match row.target {
+                InMemoryL3VxlanFdbTarget::Nhg { nh_id } => Some(nh_id),
+                InMemoryL3VxlanFdbTarget::SingleDst { .. } => None,
+            })
     }
 
     /// Snapshot the kernel L3 route map. Double-crash tests copy

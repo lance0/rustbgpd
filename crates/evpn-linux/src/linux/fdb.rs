@@ -401,13 +401,17 @@ pub(crate) async fn apply_op(
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
         | DataplaneOp::RemoveL3VxlanFdb { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
-        | DataplaneOp::RemoveFdbNhg { .. } => {
+        | DataplaneOp::RemoveFdbNhg { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => {
             // BUM port-flag ops are routed through `linux::bum_filter`,
             // AC-gate ops through `linux::ac_gate`, L3 ops through
             // `linux::l3`, and ADR-0059 FDB-NHG ops through the
@@ -469,13 +473,17 @@ pub(crate) async fn apply_op(
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
         | DataplaneOp::RemoveL3VxlanFdb { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
-        | DataplaneOp::RemoveFdbNhg { .. } => {
+        | DataplaneOp::RemoveFdbNhg { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => {
             // Unreachable: the early-return at the top of `apply_op`
             // already handled non-single-dst-FDB ops. Arms exist so
             // the compiler can prove exhaustiveness.

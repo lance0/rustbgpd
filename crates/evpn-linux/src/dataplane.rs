@@ -231,6 +231,76 @@ pub enum DataplaneOp {
         /// Remote PE's router MAC.
         router_mac: MacAddress,
     },
+    /// Install an all-active ESI overlay-index Type 5 route into the
+    /// IP-VRF's `table_id` as route-level ECMP over the L3 VXLAN
+    /// device. The reconcile actor only emits this after the
+    /// companion L3 neighbor rows and L3VXLAN FDB-NHG row are in
+    /// place, so forwarding has a complete recursive path.
+    AddRemoteIpRouteEcmp {
+        /// IP-VRF the prefix belongs to.
+        vrf_id: IpVrfId,
+        /// Prefix to install.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Kernel VRF route table id.
+        table_id: u32,
+        /// L3 VXLAN ifindex every ECMP next-hop uses as output
+        /// device.
+        l3vxlan_ifindex: u32,
+        /// Canonical sorted+deduped remote VTEP next-hops.
+        next_hops: Vec<IpAddr>,
+        /// Remote PE Router MAC used by the prerequisite L3VXLAN
+        /// FDB-NHG row.
+        router_mac: MacAddress,
+    },
+    /// Remove an all-active ECMP route previously installed by
+    /// [`Self::AddRemoteIpRouteEcmp`].
+    RemoveRemoteIpRouteEcmp {
+        /// IP-VRF the prefix belongs to.
+        vrf_id: IpVrfId,
+        /// Prefix to remove.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Kernel VRF route table id.
+        table_id: u32,
+        /// L3 VXLAN ifindex every ECMP next-hop uses as output
+        /// device.
+        l3vxlan_ifindex: u32,
+        /// Canonical sorted+deduped remote VTEP next-hops.
+        next_hops: Vec<IpAddr>,
+    },
+    /// Install or replace the L3VXLAN Router-MAC FDB-NHG path for an
+    /// all-active ESI overlay-index Type 5 target set. The reconcile
+    /// actor's coordinator decomposes this into per-VTEP L3 FDB
+    /// nexthops, an L3 FDB nexthop group, and a direct L3VXLAN FDB
+    /// row with `NDA_NH_ID`.
+    InstallL3FdbNhg {
+        /// IP-VRF the group serves.
+        vrf_id: IpVrfId,
+        /// Route whose all-active target set references this group.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Dataplane-owned group identity.
+        group_key: crate::group_state::L3NhgKey,
+        /// Remote PE Router MAC programmed in the L3VXLAN FDB row.
+        router_mac: MacAddress,
+        /// L3 VXLAN ifindex where the Router-MAC FDB row lives.
+        l3vxlan_ifindex: u32,
+        /// Canonical sorted+deduped remote VTEP members.
+        members: Vec<IpAddr>,
+    },
+    /// Remove one all-active route's reference to an L3 FDB-NHG
+    /// group and garbage-collect the group/member objects if it was
+    /// the last route using them.
+    RemoveL3FdbNhg {
+        /// IP-VRF the group served.
+        vrf_id: IpVrfId,
+        /// Route whose all-active target set referenced this group.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Dataplane-owned group identity.
+        group_key: crate::group_state::L3NhgKey,
+        /// Remote PE Router MAC programmed in the L3VXLAN FDB row.
+        router_mac: MacAddress,
+        /// L3 VXLAN ifindex where the Router-MAC FDB row lives.
+        l3vxlan_ifindex: u32,
+    },
     /// Install an FDB-NHG row for `(vni, mac)` pointing at the kernel
     /// nexthop group keyed by `group_key`. The reconcile actor's
     /// coordinator decomposes this into the actual netlink sequence:
@@ -526,6 +596,24 @@ pub trait NexthopOps: Send {
         vni: EvpnInstanceId,
         mac: MacAddress,
         vlan: Option<u16>,
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Install an L3VXLAN FDB row for `router_mac` that points at an
+    /// L3 FDB nexthop group via `NDA_NH_ID`. Unlike the L2 helper,
+    /// this is keyed directly by the L3VXLAN ifindex and carries only
+    /// the `self`/extern-learn FDB shape.
+    fn install_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+        nh_id: u32,
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Remove the L3VXLAN FDB-NHG row for `router_mac`.
+    fn remove_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
     ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
 
     /// Dump rustbgpd-owned L2 FDB-NHG kernel nexthops (filtered by

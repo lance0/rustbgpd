@@ -42,6 +42,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FI
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni # LAN-64 SVD explicit FDB VNI proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath # LAN-70 L3VNI multipath/FDB-NHG proof
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_all_active_writer # LAN-76 all-active Type 5 L3 writer proof
 ```
 
 `--cap-add=NET_ADMIN` is required for `bridge link set ... flood off`
@@ -71,6 +72,7 @@ caches across runs.
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
 | `l3_multipath` | `l3vxlan_all_active_multipath_kernel_shape` | LAN-70 L3VNI route multipath acceptance, same-MAC FDB collapse, and FDB-NHG lifecycle |
+| `l3_all_active_writer` | `linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer` | LAN-76 production actor all-active Type 5 writer install + withdraw proof |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,

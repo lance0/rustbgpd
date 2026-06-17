@@ -532,6 +532,11 @@ impl L3FdbNhgOwnedMap {
         self.route_refs.get(route).copied()
     }
 
+    /// Iterate route-to-group refs in deterministic route order.
+    pub fn iter_route_refs(&self) -> impl Iterator<Item = (&L3RouteKey, &L3NhgKey)> {
+        self.route_refs.iter()
+    }
+
     /// `true` if no L3 groups, per-VTEP NHs, or route refs are tracked.
     #[must_use]
     pub fn is_empty(&self) -> bool {
