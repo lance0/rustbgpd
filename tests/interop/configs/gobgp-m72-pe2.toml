@@ -1,0 +1,15 @@
+# M72 PE2 (GoBGP) — second all-active EAD candidate.
+
+[global.config]
+as = 65000
+router-id = "10.0.2.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.2.1"
+peer-as = 65000
+description = "rustbgpd-m72-vtep"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"

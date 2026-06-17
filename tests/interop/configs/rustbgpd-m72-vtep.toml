@@ -1,0 +1,59 @@
+# M72 VTEP (rustbgpd) — receive-side RFC 9136 §4.3 ESI overlay-index
+# Type 5 all-active recursion.
+#
+# rustbgpd is the device under test. pe1 injects the Type 5, and pe1 +
+# pe2 inject all-active EAD-per-ES / EAD-per-EVI rows for the same ESI.
+# The valid all-active target set imports into vrf1 as route-level ECMP
+# over l3vxlan100 and uses an L3VXLAN Router-MAC FDB-NHG row.
+
+[global]
+asn = 65000
+router_id = "10.0.1.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65000
+description = "gobgp-m72-pe1"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65000
+description = "gobgp-m72-pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+# Linked L2VNI. EAD-per-EVI rows use label 10, so this instance scopes
+# ESI overlay-index protected recursion into vrf1.
+[[evpn_instances]]
+vni = 10
+rd = "65000:10"
+route_targets = ["65000:10"]
+local_vtep_ip = "10.0.1.1"
+bridge = "br10"
+advertise_svi_mac = false
+ip_vrf = "vrf1"
+
+# IP-VRF / L3VNI for the imported Type 5.
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.1.1"
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100
+
+[security.grpc]
+enforcement = "legacy"

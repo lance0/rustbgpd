@@ -439,6 +439,26 @@ jobs:
           topology: tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml
           script: tests/interop/scripts/test-m71-evpn-esi-overlay-type5-receive-gobgp.sh
 
+  m72:
+    name: M72 — RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive (GoBGP 3.x)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # rustbgpd is the receive-side DUT; two GoBGP PEs are route
+      # sources. This extends M71's exact ESI-overlay Type 5/EAD
+      # command shape to the all-active success path: route-level ECMP
+      # over l3vxlan100 plus a Router-MAC FDB-NHG row.
+      - name: Build gobgp:interop image
+        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+      - name: Run M72 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M72
+          topology: tests/interop/m72-evpn-esi-overlay-type5-all-active-gobgp.clab.yml
+          script: tests/interop/scripts/test-m72-evpn-esi-overlay-type5-all-active-gobgp.sh
+
   m66:
     name: M66 — ADR-0084 ES drain service handover (rustbgpd ×3)
     runs-on: ubuntu-latest
