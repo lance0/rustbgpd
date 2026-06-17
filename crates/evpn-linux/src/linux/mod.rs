@@ -838,6 +838,15 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
             .await
             .map_err(map_nexthop_error)
     }
+
+    async fn dump_owned_l3_nexthops(
+        &mut self,
+    ) -> Result<Vec<crate::dataplane::KernelNexthop>, DataplaneError> {
+        self.nexthop_socket
+            .dump_owned_l3()
+            .await
+            .map_err(map_nexthop_error)
+    }
 }
 
 /// Map `NexthopError` (slice-2 socket-layer typed failure) into the

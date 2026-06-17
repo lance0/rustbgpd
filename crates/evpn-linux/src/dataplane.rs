@@ -528,19 +528,32 @@ pub trait NexthopOps: Send {
         vlan: Option<u16>,
     ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
 
-    /// Dump rustbgpd-owned kernel nexthops (filtered by the
-    /// `0x3000_0000` / `0x4000_0000` tag bits). Used at startup for
-    /// allocator collision avoidance (ADR-0059 review callout #3 /
-    /// slice 3 startup adoption).
+    /// Dump rustbgpd-owned L2 FDB-NHG kernel nexthops (filtered by
+    /// the `0x3000_0000` / `0x4000_0000` tag bits). Used at startup
+    /// for allocator collision avoidance (ADR-0059 review callout
+    /// #3 / slice 3 startup adoption).
     fn dump_owned_nexthops(
         &mut self,
     ) -> impl Future<Output = Result<Vec<KernelNexthop>, DataplaneError>> + Send;
+
+    /// Dump rustbgpd-owned L3VXLAN FDB-NHG kernel nexthops (filtered
+    /// by the `0x5000_0000` / `0x6000_0000` tag bits). This is the
+    /// all-active ESI Type-5 substrate surface; it is intentionally
+    /// separate from [`Self::dump_owned_nexthops`] so the existing
+    /// L2 startup adoption path cannot adopt or reap L3 IDs.
+    fn dump_owned_l3_nexthops(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<KernelNexthop>, DataplaneError>> + Send {
+        async { Ok(Vec::new()) }
+    }
 }
 
-/// One nexthop entry surfaced by [`NexthopOps::dump_owned_nexthops`].
+/// One nexthop entry surfaced by [`NexthopOps::dump_owned_nexthops`]
+/// or [`NexthopOps::dump_owned_l3_nexthops`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelNexthop {
-    /// Tagged kernel nexthop ID (high nibble `0x3` or `0x4`).
+    /// Tagged kernel nexthop ID (one of rustbgpd's L2 or L3 NHID
+    /// ownership ranges).
     pub id: u32,
     /// Kind: per-VTEP (single gateway) or group (list of member IDs).
     pub kind: KernelNexthopKind,

@@ -26,6 +26,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   touching Linux programming. Runtime import behavior is intentionally unchanged:
   all-active ESI RT-5s still fail closed until the L3 ECMP / L3VXLAN FDB-NHG
   writer and M72 proof land.
+- **EVPN L3VXLAN FDB-NHG ownership substrate.** The Linux EVPN dataplane now has
+  distinct L3 nexthop-ID ranges, L3 Router-MAC FDB-NHG owned-state/refcount
+  types, and a separate L3 owned-nexthop dump surface so future all-active ESI
+  Type 5 receive cleanup/adoption cannot be conflated with the existing L2
+  aliasing FDB-NHG domain. Production import behavior remains unchanged:
+  all-active ESI RT-5s still fail closed until the L3 writer and M72 proof land.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI

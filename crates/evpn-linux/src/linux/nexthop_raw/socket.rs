@@ -240,9 +240,9 @@ impl NexthopSocket {
             .await
     }
 
-    /// Dump every rustbgpd-tagged FDB nexthop in the kernel,
-    /// filtered client-side by [`NhIdAllocator::is_ours`] +
-    /// presence of `NHA_FDB`. ADR-0059 slice 3b uses this from the
+    /// Dump every rustbgpd-tagged L2 FDB nexthop in the kernel,
+    /// filtered client-side by [`NhIdAllocator::is_ours`] + presence
+    /// of `NHA_FDB`. ADR-0059 slice 3b uses this from the
     /// reconcile actor's first `reconcile_once` pass (via the
     /// `NexthopOps::dump_owned_nexthops` trait method on
     /// `LinuxDataplane`, which forwards here) so the allocator can
@@ -265,6 +265,25 @@ impl NexthopSocket {
     /// - [`NexthopError::Truncated`] / [`NexthopError::UnexpectedMessage`]
     ///   if the multipart parser hits a malformed datagram.
     pub async fn dump_owned(&mut self) -> Result<Vec<KernelNexthop>, NexthopError> {
+        self.dump_owned_with_class(NexthopDumpClass::L2FdbNhg).await
+    }
+
+    /// Dump every rustbgpd-tagged L3VXLAN FDB nexthop in the kernel,
+    /// filtered client-side by [`NhIdAllocator::is_l3_ours`] +
+    /// presence of `NHA_FDB`. This is intentionally separate from
+    /// [`Self::dump_owned`] so L2 adoption cannot see L3 NHID ranges.
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::dump_owned`].
+    pub async fn dump_owned_l3(&mut self) -> Result<Vec<KernelNexthop>, NexthopError> {
+        self.dump_owned_with_class(NexthopDumpClass::L3FdbNhg).await
+    }
+
+    async fn dump_owned_with_class(
+        &mut self,
+        class: NexthopDumpClass,
+    ) -> Result<Vec<KernelNexthop>, NexthopError> {
         let seq = self.next_seq();
         let bytes = encode_dump(seq)?;
         self.socket.send(&bytes).await?;
@@ -274,7 +293,7 @@ impl NexthopSocket {
         // until we see NLMSG_DONE (or NLMSG_ERROR).
         loop {
             let (buf, _addr) = self.socket.recv_from_full().await?;
-            match drain_dump_datagram(&buf, seq, &mut out)? {
+            match drain_dump_datagram_for_class(&buf, seq, class, &mut out)? {
                 DumpProgress::Continue => {}
                 DumpProgress::Done => return Ok(out),
                 DumpProgress::KernelError(e) => return Err(NexthopError::Kernel(e)),
@@ -452,14 +471,33 @@ enum DumpProgress {
 /// `u8` protocol + `u8` resvd + `u32` flags = 8 bytes natural).
 const NHMSG_SIZE: usize = 8;
 
+/// Which rustbgpd NHID ownership domain a dump should return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NexthopDumpClass {
+    /// Existing ADR-0059 L2 FDB-NHG IDs.
+    L2FdbNhg,
+    /// LAN-75 L3VXLAN FDB-NHG IDs.
+    L3FdbNhg,
+}
+
+impl NexthopDumpClass {
+    fn accepts(self, id: u32) -> bool {
+        match self {
+            Self::L2FdbNhg => NhIdAllocator::is_ours(id),
+            Self::L3FdbNhg => NhIdAllocator::is_l3_ours(id),
+        }
+    }
+}
+
 /// Walk `buf` as a sequence of netlink messages. For each
 /// `RTM_NEWNEXTHOP` matching our `seq`, parse it through
-/// [`parse_dump_message`] and append owned entries (filtered by
-/// tag bits + `NHA_FDB`) to `out`. Returns the per-datagram
-/// progress state.
-fn drain_dump_datagram(
+/// [`parse_dump_message_for_class`] and append owned entries
+/// (filtered by tag bits + `NHA_FDB`) to `out`. Returns the
+/// per-datagram progress state.
+fn drain_dump_datagram_for_class(
     buf: &[u8],
     seq: u32,
+    class: NexthopDumpClass,
     out: &mut Vec<KernelNexthop>,
 ) -> Result<DumpProgress, NexthopError> {
     let mut offset = 0;
@@ -497,9 +535,10 @@ fn drain_dump_datagram(
                 return Ok(DumpProgress::KernelError(positive));
             }
             RTM_NEWNEXTHOP => {
-                if let Some(entry) =
-                    parse_dump_message(&buf[offset + NLMSGHDR_SIZE..offset + nlmsg_len])?
-                {
+                if let Some(entry) = parse_dump_message_for_class(
+                    &buf[offset + NLMSGHDR_SIZE..offset + nlmsg_len],
+                    class,
+                )? {
                     out.push(entry);
                 }
                 offset += nla_align(nlmsg_len);
@@ -520,7 +559,10 @@ fn drain_dump_datagram(
 ///
 /// Tolerates unknown attributes including `NHA_GROUP_TYPE` and
 /// `NHA_OP_FLAGS` (research §1).
-fn parse_dump_message(body: &[u8]) -> Result<Option<KernelNexthop>, NexthopError> {
+fn parse_dump_message_for_class(
+    body: &[u8],
+    class: NexthopDumpClass,
+) -> Result<Option<KernelNexthop>, NexthopError> {
     if body.len() < NHMSG_SIZE {
         return Err(NexthopError::Truncated);
     }
@@ -581,9 +623,10 @@ fn parse_dump_message(body: &[u8]) -> Result<Option<KernelNexthop>, NexthopError
         attrs = &attrs[advance..];
     }
 
-    // Filter: must have an ID, must be rustbgpd-tagged, must be FDB.
+    // Filter: must have an ID, must be rustbgpd-tagged in the
+    // selected ownership domain, and must be FDB.
     let Some(nh_id) = id else { return Ok(None) };
-    if !NhIdAllocator::is_ours(nh_id) || !is_fdb {
+    if !class.accepts(nh_id) || !is_fdb {
         return Ok(None);
     }
 
@@ -758,7 +801,9 @@ mod tests {
             (NHA_GATEWAY, vec![10, 0, 0, 2]),
             (NHA_FDB, vec![]),
         ]);
-        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("entry");
         assert_eq!(entry.id, id);
         match entry.kind {
             KernelNexthopKind::Member { gateway } => {
@@ -782,7 +827,9 @@ mod tests {
             (NHA_GROUP, group_payload),
             (NHA_FDB, vec![]),
         ]);
-        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("entry");
         assert_eq!(entry.id, id);
         match entry.kind {
             KernelNexthopKind::Group { member_ids } => {
@@ -804,7 +851,9 @@ mod tests {
             (NHA_GATEWAY, vec![10, 0, 0, 9]),
             (NHA_FDB, vec![]),
         ]);
-        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("entry");
         assert!(matches!(entry.kind, KernelNexthopKind::Member { .. }));
     }
 
@@ -816,7 +865,7 @@ mod tests {
         body.extend_from_slice(&NHA_ID.to_ne_bytes());
 
         assert!(matches!(
-            parse_dump_message(&body),
+            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg),
             Err(NexthopError::Truncated)
         ));
     }
@@ -835,7 +884,7 @@ mod tests {
             (NHA_FDB, vec![]),
         ]);
         assert!(matches!(
-            parse_dump_message(&body),
+            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg),
             Err(NexthopError::Truncated)
         ));
     }
@@ -848,7 +897,87 @@ mod tests {
             (NHA_GATEWAY, vec![10, 0, 0, 5]),
             (NHA_FDB, vec![]),
         ]);
-        assert!(parse_dump_message(&body).unwrap().is_none());
+        assert!(
+            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_l2_dump_ignores_l3_tags() {
+        let body = build_dump_body(&[
+            (NHA_ID, 0x5000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 5]),
+            (NHA_FDB, vec![]),
+        ]);
+        assert!(
+            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+                .unwrap()
+                .is_none(),
+            "legacy L2 dump must not adopt L3 member IDs"
+        );
+
+        let mut group_payload = Vec::new();
+        group_payload.extend_from_slice(&0x5000_0001u32.to_ne_bytes());
+        group_payload.extend_from_slice(&[0u8, 0, 0, 0]);
+        let group_body = build_dump_body(&[
+            (NHA_ID, 0x6000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GROUP, group_payload),
+            (NHA_FDB, vec![]),
+        ]);
+        assert!(
+            parse_dump_message_for_class(&group_body, NexthopDumpClass::L2FdbNhg)
+                .unwrap()
+                .is_none(),
+            "legacy L2 dump must not adopt L3 group IDs"
+        );
+    }
+
+    #[test]
+    fn parse_l3_dump_accepts_only_l3_tags() {
+        let l3_member_body = build_dump_body(&[
+            (NHA_ID, 0x5000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 5]),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message_for_class(&l3_member_body, NexthopDumpClass::L3FdbNhg)
+            .unwrap()
+            .expect("l3 member");
+        assert_eq!(entry.id, 0x5000_0001);
+        assert!(matches!(entry.kind, KernelNexthopKind::Member { .. }));
+
+        let l2_member_body = build_dump_body(&[
+            (NHA_ID, 0x3000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 2]),
+            (NHA_FDB, vec![]),
+        ]);
+        assert!(
+            parse_dump_message_for_class(&l2_member_body, NexthopDumpClass::L3FdbNhg)
+                .unwrap()
+                .is_none(),
+            "L3 dump must not adopt L2 member IDs"
+        );
+
+        let mut group_payload = Vec::new();
+        for member_id in [0x5000_0001u32, 0x5000_0002] {
+            group_payload.extend_from_slice(&member_id.to_ne_bytes());
+            group_payload.extend_from_slice(&[0u8, 0, 0, 0]);
+        }
+        let l3_group_body = build_dump_body(&[
+            (NHA_ID, 0x6000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GROUP, group_payload),
+            (NHA_FDB, vec![]),
+        ]);
+        let group = parse_dump_message_for_class(&l3_group_body, NexthopDumpClass::L3FdbNhg)
+            .unwrap()
+            .expect("l3 group");
+        match group.kind {
+            KernelNexthopKind::Group { member_ids } => {
+                assert_eq!(member_ids, vec![0x5000_0001, 0x5000_0002]);
+            }
+            KernelNexthopKind::Member { .. } => panic!("expected Group, got Member"),
+        }
     }
 
     #[test]
@@ -858,7 +987,11 @@ mod tests {
             (NHA_ID, 0x3000_0001u32.to_ne_bytes().to_vec()),
             (NHA_GATEWAY, vec![10, 0, 0, 2]),
         ]);
-        assert!(parse_dump_message(&body).unwrap().is_none());
+        assert!(
+            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -873,7 +1006,8 @@ mod tests {
         buf.extend_from_slice(&nlmsg_done(42));
 
         let mut out = Vec::new();
-        let progress = drain_dump_datagram(&buf, 42, &mut out).unwrap();
+        let progress =
+            drain_dump_datagram_for_class(&buf, 42, NexthopDumpClass::L2FdbNhg, &mut out).unwrap();
         assert!(matches!(progress, DumpProgress::Done));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, id);
@@ -888,7 +1022,8 @@ mod tests {
         ]);
         let buf = wrap_dump_msg(&entry_body);
         let mut out = Vec::new();
-        let progress = drain_dump_datagram(&buf, 42, &mut out).unwrap();
+        let progress =
+            drain_dump_datagram_for_class(&buf, 42, NexthopDumpClass::L2FdbNhg, &mut out).unwrap();
         assert!(matches!(progress, DumpProgress::Continue));
         assert_eq!(out.len(), 1);
     }
