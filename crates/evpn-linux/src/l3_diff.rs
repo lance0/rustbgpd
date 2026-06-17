@@ -320,6 +320,54 @@ pub enum L3Drop {
     },
 }
 
+impl L3Drop {
+    /// Operator-facing, bounded Prometheus/status reason label for
+    /// this install-time drop. Prefixes, next-hops, Router MACs, and
+    /// other unbounded values deliberately stay out of the label.
+    #[must_use]
+    pub fn reason_label(&self) -> &'static str {
+        match self {
+            Self::NotReady { .. } => "ip_vrf_not_ready",
+            Self::FamilyMismatch { .. } => "family_mismatch",
+            Self::RouterMacConflict { .. } => "router_mac_conflict",
+            Self::UnsupportedAllActiveTargetSet { .. } => "unsupported_all_active_target_set",
+        }
+    }
+
+    #[must_use]
+    fn vrf_id(&self) -> IpVrfId {
+        match self {
+            Self::NotReady { vrf_id, .. }
+            | Self::FamilyMismatch { vrf_id, .. }
+            | Self::RouterMacConflict { vrf_id, .. }
+            | Self::UnsupportedAllActiveTargetSet { vrf_id, .. } => *vrf_id,
+        }
+    }
+}
+
+/// Count install-time remote-prefix drops by bounded `(vrf, reason)`
+/// labels for Prometheus. These are distinct from projection-layer
+/// drops in `rustbgpd-evpn`: the route resolved to a desired L3
+/// prefix, then the Linux writer rejected the install shape.
+#[must_use]
+pub fn drop_counts_by_vrf_reason(
+    drops: &[L3Drop],
+    ip_vrfs: &IpVrfTable,
+) -> BTreeMap<(String, String), u64> {
+    let mut counts = BTreeMap::new();
+    for drop in drops {
+        let vrf_id = drop.vrf_id();
+        let vrf_label = ip_vrfs
+            .iter()
+            .find(|vrf| vrf.id == vrf_id)
+            .map_or_else(|| vrf_id.as_u32().to_string(), |vrf| vrf.name.clone());
+        *counts
+            .entry((vrf_label, drop.reason_label().to_string()))
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
 /// Output of one L3 diff pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct L3Plan {
@@ -1551,6 +1599,37 @@ mod tests {
             plan.drops.as_slice(),
             [L3Drop::UnsupportedAllActiveTargetSet { candidates: 1, .. }]
         ));
+    }
+
+    #[test]
+    fn install_drop_counts_use_bounded_vrf_reason_labels() {
+        let prefix = v4([198, 51, 103, 0], 24);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let intent = all_active_intent(vrf_id, prefix, vec![ip4(10, 0, 0, 2)], rmac);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+
+        let plan = compute_l3_diff(
+            &intent,
+            &L3OwnedState::default(),
+            &L3FdbNhgOwnedMap::new(),
+            &ready,
+            &ip_vrfs,
+        );
+        let counts = drop_counts_by_vrf_reason(&plan.drops, &ip_vrfs);
+
+        assert_eq!(
+            counts.get(&(
+                "vrf101".to_string(),
+                "unsupported_all_active_target_set".to_string(),
+            )),
+            Some(&1),
+        );
+        assert_eq!(
+            plan.drops[0].reason_label(),
+            "unsupported_all_active_target_set"
+        );
     }
 
     /// Target-set conflict detection runs before unsupported

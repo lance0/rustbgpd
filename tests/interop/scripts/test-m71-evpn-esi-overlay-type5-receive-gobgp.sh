@@ -16,10 +16,11 @@
 #   Phase 2 (single-active resolves): EAD-per-ES (single-active) +
 #     EAD-per-EVI let rustbgpd import the prefix into vrf1 — kernel
 #     route via the PE VTEP, the unresolved drop gauge falls to 0.
-#   Phase 3 (all-active fail-closed): advertising the same EAD-per-ES
-#     without the Single-Active flag withdraws the import.
-#     `...{reason="unsupported_all_active_esi_overlay_index"}` >= 1,
-#     kernel route gone.
+#   Phase 3 (single-PE all-active fail-closed): advertising the same
+#     EAD-per-ES without the Single-Active flag withdraws the import.
+#     The all-active writer refuses a target set with fewer than two
+#     candidates, so `...{reason="unsupported_all_active_target_set"}` >= 1
+#     and the kernel route is gone.
 #   Phase 4 (withdraw): deleting the Type 5 leaves vrf1 clean.
 #
 # Why GoBGP and not FRR: the proof needs byte-exact, independent
@@ -212,8 +213,9 @@ pe_del_ead_per_es() {
 }
 
 # EAD-per-ES advertised as ALL-ACTIVE (no single-active flag). The
-# receive path folds any all-active signal to non-single-active and the
-# Type 5 import drops fail-closed.
+# receive path projects an all-active target set; with only one PE in
+# M71, the L3 writer refuses it fail-closed instead of downgrading it
+# to the scalar single-active path.
 pe_add_ead_per_es_all_active() {
     pe_rib add -a evpn a-d "${ESI_GOBGP[@]}" etag 4294967295 label 0 \
         rd "$RD_L2" rt "$RT_L2" encap vxlan esi-label 0 \
@@ -336,10 +338,10 @@ else
 fi
 
 log "[phase 3] rustbgpd must withdraw the import and fail closed"
-if wait_until 60 drop_gauge_at_least_1 "unsupported_all_active_esi_overlay_index"; then
-    ok "drop gauge unsupported_all_active_esi_overlay_index >= 1 (= $(drop_gauge unsupported_all_active_esi_overlay_index))"
+if wait_until 60 drop_gauge_at_least_1 "unsupported_all_active_target_set"; then
+    ok "drop gauge unsupported_all_active_target_set >= 1 (= $(drop_gauge unsupported_all_active_target_set))"
 else
-    fail "drop gauge unsupported_all_active_esi_overlay_index never reached >= 1"
+    fail "drop gauge unsupported_all_active_target_set never reached >= 1"
     prom_scrape "$VTEP" | grep '^evpn_ip_vrf_remote_prefix_drops' >&2 || true
 fi
 

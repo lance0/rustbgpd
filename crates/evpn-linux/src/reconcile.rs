@@ -294,6 +294,9 @@ struct ActorState {
     /// only on successful kernel apply; a failed op leaves the
     /// in-memory state unchanged so the next reconcile pass retries.
     l3_owned: crate::l3_diff::L3OwnedState,
+    /// L3 install-policy drop counts from the most recent diff pass.
+    /// Reported as bounded per-VRF Prometheus labels by the daemon.
+    last_l3_drop_counts: std::collections::BTreeMap<(String, String), u64>,
     /// Per-op-fingerprint suppression for permanent L3 writer
     /// failures. Same shape-equality contract as FDB suppression:
     /// retry when the desired op changes, suppress when the exact
@@ -448,6 +451,7 @@ impl ActorState {
             last_bum_plan: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
+            last_l3_drop_counts: std::collections::BTreeMap::new(),
             l3_permanent_failures: BTreeMap::new(),
             event_stream_open: true,
             nh_id_alloc: crate::nh_id_alloc::NhIdAllocator::new(),
@@ -1224,6 +1228,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             for drop in &l3_plan.drops {
                 tracing::debug!(?drop, "L3 install drop");
             }
+            self.state.last_l3_drop_counts =
+                crate::l3_diff::drop_counts_by_vrf_reason(&l3_plan.drops, intent.ip_vrfs.as_ref());
             // Apply-time fail-stop: an `AddRemoteIpRoute` whose
             // prerequisite `AddL3Neighbor` or `AddL3VxlanFdb` failed
             // earlier in this pass MUST NOT proceed — otherwise the
@@ -1413,6 +1419,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 l3_pass_had_failures,
             )
             .await;
+        } else {
+            self.state.last_l3_drop_counts.clear();
         }
 
         let status = build_instance_status(&intent.instances, &probes);
@@ -2602,7 +2610,6 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let fdb_nhg_drift_counters = std::mem::take(&mut self.state.fdb_nhg_drift_since_report);
         let l3_adoption_counters = std::mem::take(&mut self.state.l3_adoption_since_report);
         let single_active_counters = std::mem::take(&mut self.state.single_active_since_report);
-
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
             reconcile_generation: self.state.reconcile_generation,
@@ -2613,6 +2620,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             ip_vrf_status,
             ip_vrf_routes,
             ip_vrf_installed_routes,
+            ip_vrf_install_drop_counts: self.state.last_l3_drop_counts.clone(),
             fdb_nexthops: build_fdb_nexthop_status(&self.state),
             fdb_nhg_drift_counters,
             l3_adoption_counters,

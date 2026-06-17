@@ -249,9 +249,9 @@ fn build_ip_route_ecmp_message(
     l3vxlan_ifindex: u32,
     next_hops: &[IpAddr],
 ) -> Result<RouteMessage, DataplaneError> {
-    if next_hops.is_empty() {
+    if next_hops.len() < 2 {
         return Err(DataplaneError::InvalidArgument(
-            "all-active Type 5 ECMP route requires at least one next-hop".into(),
+            "all-active Type 5 ECMP route requires at least two next-hops".into(),
         ));
     }
     let prefix_family = match prefix {
@@ -285,7 +285,7 @@ fn build_ip_route_ecmp_message(
         protocol: RouteProtocol::Bgp,
         scope: RouteScope::Universe,
         kind: RouteType::Unicast,
-        flags: RouteFlags::empty(),
+        flags: RouteFlags::Onlink,
     };
     msg.attributes.push(RouteAttribute::Table(table_id));
     msg.attributes
@@ -673,6 +673,33 @@ mod tests {
         let nh = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
         let err = build_ip_route_message(prefix, 100, 42, nh).unwrap_err();
         assert!(matches!(err, DataplaneError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn build_ecmp_route_requires_two_next_hops() {
+        let prefix = v4_prefix([198, 51, 100, 0], 24);
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let err = build_ip_route_ecmp_message(prefix, 100, 42, &[nh]).unwrap_err();
+        assert!(matches!(
+            err,
+            DataplaneError::InvalidArgument(message)
+                if message.contains("requires at least two next-hops")
+        ));
+    }
+
+    #[test]
+    fn build_ecmp_route_carries_onlink_marker_for_adoption() {
+        let prefix = v4_prefix([198, 51, 100, 0], 24);
+        let hops = [
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        ];
+        let msg = build_ip_route_ecmp_message(prefix, 100, 42, &hops).unwrap();
+        assert_eq!(msg.header.protocol, RouteProtocol::Bgp);
+        assert!(
+            msg.header.flags.contains(RouteFlags::Onlink),
+            "ECMP routes must carry the same RTPROT_BGP + onlink ownership marker as scalar routes",
+        );
     }
 
     fn protocol_attr(msg: &NeighbourMessage) -> Option<RouteProtocol> {

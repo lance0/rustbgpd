@@ -528,10 +528,16 @@ where
         let report_tx = report_broadcast_tx.clone();
         let metrics = metrics.clone();
         tokio::spawn(async move {
+            let mut last_ip_prefix_install_drop_counts = BTreeMap::new();
             while let Some(report) = report_mpsc_rx.recv().await {
                 record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
                 record_l3_adoption_metrics(&metrics, report.l3_adoption_counters);
                 record_single_active_metrics(&metrics, report.single_active_counters);
+                record_remote_prefix_install_drop_metrics(
+                    &metrics,
+                    &mut last_ip_prefix_install_drop_counts,
+                    report.ip_vrf_install_drop_counts.clone(),
+                );
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -636,6 +642,34 @@ fn record_remote_prefix_drop_metrics(
         .collect();
     for (vrf, reason) in stale {
         metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, reason, 0);
+    }
+    for ((vrf, reason), count) in &current {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(
+            vrf,
+            reason,
+            i64::try_from(*count).unwrap_or(i64::MAX),
+        );
+    }
+    *previous = current;
+    true
+}
+
+fn record_remote_prefix_install_drop_metrics(
+    metrics: &BgpMetrics,
+    previous: &mut BTreeMap<(String, String), u64>,
+    current: BTreeMap<(String, String), u64>,
+) -> bool {
+    if *previous == current {
+        return false;
+    }
+
+    let stale: Vec<(String, String)> = previous
+        .keys()
+        .filter(|key| !current.contains_key(*key))
+        .cloned()
+        .collect();
+    for (vrf, reason) in stale {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, &reason, 0);
     }
     for ((vrf, reason), count) in &current {
         metrics.set_evpn_ip_vrf_remote_prefix_drops(
@@ -2025,6 +2059,46 @@ mod tests {
         assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
         assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
         assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
+    }
+
+    #[test]
+    fn l3_install_drop_report_snapshot_feeds_and_clears_metrics() {
+        let metrics = BgpMetrics::new();
+        let mut previous = BTreeMap::new();
+
+        record_remote_prefix_install_drop_metrics(
+            &metrics,
+            &mut previous,
+            BTreeMap::from([(
+                (
+                    "vrf1".to_string(),
+                    "unsupported_all_active_target_set".to_string(),
+                ),
+                1,
+            )]),
+        );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"unsupported_all_active_target_set\",vrf=\"vrf1\"} 1"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"vrf1\",reason=\"unsupported_all_active_target_set\"} 1"
+            ),
+            "missing install-drop gauge in metrics text: {text}"
+        );
+
+        record_remote_prefix_install_drop_metrics(&metrics, &mut previous, BTreeMap::new());
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"unsupported_all_active_target_set\",vrf=\"vrf1\"} 0"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"vrf1\",reason=\"unsupported_all_active_target_set\"} 0"
+            ),
+            "stale install-drop gauge should be reset in metrics text: {text}"
+        );
     }
 
     #[tokio::test]

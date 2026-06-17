@@ -236,7 +236,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (2) adding the single-active EAD-per-ES + EAD-per-EVI imports the prefix
   into vrf1 with a kernel route via the PE VTEP, (3) advertising the
   same EAD-per-ES without the Single-Active flag withdraws the import and fails closed
-  (`...{reason="unsupported_all_active_esi_overlay_index"}`), and
+  as a one-candidate all-active target set
+  (`...{reason="unsupported_all_active_target_set"}`), and
   (4) withdrawing the Type 5 leaves vrf1 clean. GoBGP rather than FRR
   because the proof needs byte-exact, independent control over the
   EAD-per-ES Single-Active vs All-Active ESI Label flag, which FRR's

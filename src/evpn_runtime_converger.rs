@@ -9789,6 +9789,7 @@ table_id = 6000
             ip_vrf_status: vec![],
             ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),
             ip_vrf_installed_routes: std::collections::HashMap::new(),
+            ip_vrf_install_drop_counts: std::collections::BTreeMap::new(),
             fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
             fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
             l3_adoption_counters: rustbgpd_evpn::L3AdoptionCounters::default(),

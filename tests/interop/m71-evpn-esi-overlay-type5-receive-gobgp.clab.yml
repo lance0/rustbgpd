@@ -23,9 +23,10 @@
 #   2. Single-active resolves: EAD-per-ES (single-active) + EAD-per-EVI
 #      let rustbgpd import the prefix into vrf1 (kernel route via the PE
 #      VTEP, drop gauge back to 0).
-#   3. All-active fail-closed: advertising the same EAD-per-ES without
-#      the Single-Active flag withdraws the import
-#      (`...{reason="unsupported_all_active_esi_overlay_index"}` >= 1).
+#   3. Single-PE all-active fail-closed: advertising the same EAD-per-ES
+#      without the Single-Active flag withdraws the import; the L3 writer
+#      refuses the one-candidate target set
+#      (`...{reason="unsupported_all_active_target_set"}` >= 1).
 #   4. Withdraw: deleting the Type 5 leaves the VRF clean.
 #
 # Usage:
