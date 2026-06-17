@@ -245,12 +245,14 @@ has it, no broad performance sprints without profile evidence.
   viable object model for the ADR-0090 all-active receive design. The pure
   projection substrate also landed: Type 5 ESI resolution now distinguishes
   single-active, all-active, and conflicting EAD redundancy signals and can
-  model deterministic all-active remote-VTEP target sets. The Linux dataplane
-  also has the L3 ownership substrate for that writer: distinct L3 NHID ranges,
-  a separate L3 owned-nexthop dump surface, and Router-MAC FDB-NHG refcount
-  state that stays partitioned from ADR-0059's L2 aliasing domain. Production
-  dataplane behavior is still unchanged until the L3 ECMP / L3VXLAN FDB-NHG
-  writer and M72 proof land. The
+  model deterministic all-active remote-VTEP target sets. The L3 diff boundary
+  now carries that target-set shape far enough to validate family and Router-MAC
+  conflicts, then fails all-active target-set intent closed before emitting any
+  scalar route / neighbor / FDB ops, and the Linux dataplane has the L3
+  ownership substrate for that writer: distinct L3 NHID ranges, a separate L3
+  owned-nexthop dump surface, and Router-MAC FDB-NHG refcount state partitioned
+  from ADR-0059's L2 aliasing domain. Production dataplane behavior is still
+  unchanged until the L3 ECMP / L3VXLAN FDB-NHG writer and M72 proof land. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal

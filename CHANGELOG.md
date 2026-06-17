@@ -32,6 +32,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Type 5 receive cleanup/adoption cannot be conflated with the existing L2
   aliasing FDB-NHG domain. Production import behavior remains unchanged:
   all-active ESI RT-5s still fail closed until the L3 writer and M72 proof land.
+- **EVPN all-active ESI Type 5 L3 diff boundary.** The daemon-facing remote
+  IP-prefix model now carries an explicit single-target vs. all-active
+  target-set shape, and the `evpn-linux` L3 diff validates those target sets
+  before the scalar writer boundary. All-active target-set intent is kept
+  fail-closed with an install-time drop and emits no scalar route / neighbor /
+  FDB ops until the LAN-73 Linux writer lands; incompatible target sets sharing
+  one Router MAC now fail closed together instead of letting a scalar row
+  survive beside a future multipath claim.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI
