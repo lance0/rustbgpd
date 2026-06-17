@@ -11,9 +11,11 @@
 //! 2. Legacy instances (`bridge_vlan = None`) use the historical
 //!    one-bridge-one-VXLAN shape and require `vlan_filtering=0`.
 //! 3. ADR-0089 instances (`bridge_vlan = Some(VID)`) require
-//!    `vlan_filtering=1`, a unique VXLAN member whose VNI matches the
-//!    instance, and VLAN membership for `VID` on both the bridge and
-//!    that VXLAN member.
+//!    `vlan_filtering=1`, and either:
+//!    - a unique fixed-VNI VXLAN member whose VNI matches the instance, or
+//!    - a unique collect-metadata / SVD VXLAN member whose bridge VLAN
+//!      tunnel mapping ties `VID` to the instance VNI.
+//!      The bridge and selected VXLAN member must both carry `VID`.
 //! 4. In both shapes, the VXLAN port's `local` source IP matches
 //!    `local_vtep_ip` and kernel learning is disabled.
 //!
@@ -28,7 +30,7 @@ use crate::snapshot::{
     vlan_rows_contain,
 };
 
-use super::links::{BridgeLink, LinkCache};
+use super::links::{BridgeLink, LinkCache, matching_svd_vxlan_ports};
 
 pub(crate) fn probe_instances(instances: &EvpnInstanceTable, cache: &LinkCache) -> InstanceProbes {
     let mut probes = InstanceProbes::new();
@@ -116,14 +118,32 @@ fn probe_vlan_aware_bridge(
             reason: format!("bridge {bridge_name} does not carry VLAN {bridge_vlan}"),
         };
     }
-    if let Some(reason) = svd_not_ready_reason(bridge, bridge_name, bridge_vlan, want_vni) {
-        return InstanceProbe::NotReady { reason };
-    }
     let matching: Vec<_> = bridge
         .vxlan_ports
         .iter()
         .filter(|port| port.vni == want_vni)
         .collect();
+    let matching_svd = matching_svd_vxlan_ports(bridge, bridge_vlan, want_vni);
+    if !matching.is_empty() && !matching_svd.is_empty() {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "bridge {bridge_name} has both fixed-VNI and collect-metadata VXLAN \
+                 targets for bridge_vlan={bridge_vlan}/VNI {want_vni}; require exactly one target"
+            ),
+        };
+    }
+    if let [svd] = matching_svd.as_slice() {
+        return probe_svd_vxlan_attrs(inst, bridge_name, svd);
+    }
+    if matching_svd.len() > 1 {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "bridge {bridge_name} has {} collect-metadata VXLAN ports for \
+                 bridge_vlan={bridge_vlan}/VNI {want_vni} (require exactly 1)",
+                matching_svd.len()
+            ),
+        };
+    }
     let [port] = matching.as_slice() else {
         return InstanceProbe::NotReady {
             reason: format!(
@@ -203,53 +223,56 @@ fn probe_vxlan_attrs(
     InstanceProbe::Ready
 }
 
+fn probe_svd_vxlan_attrs(
+    inst: &EvpnInstance,
+    bridge_name: &str,
+    svd: &KernelSvdVxlanInfo,
+) -> InstanceProbe {
+    let want_vni = inst.id.as_u32();
+    if !svd.vnifilter {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "bridge {bridge_name} has collect-metadata VXLAN ifindex {} for \
+                 VNI {want_vni}, but vnifilter is disabled",
+                svd.ifindex
+            ),
+        };
+    }
+    if let Some(local_ip) = svd.local_ip
+        && local_ip != inst.local_vtep_ip
+    {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "collect-metadata VXLAN local IP {local_ip} does not match \
+                 instance local_vtep_ip {}",
+                inst.local_vtep_ip
+            ),
+        };
+    }
+    match svd.learning_disabled {
+        Some(true) => {}
+        Some(false) => {
+            return InstanceProbe::NotReady {
+                reason: format!(
+                    "collect-metadata VXLAN port on bridge {bridge_name} has learning enabled; \
+                     EVPN requires `nolearning`"
+                ),
+            };
+        }
+        None => {
+            return InstanceProbe::NotReady {
+                reason: format!(
+                    "collect-metadata VXLAN port on bridge {bridge_name} did not report \
+                     IFLA_VXLAN_LEARNING; cannot verify nolearning"
+                ),
+            };
+        }
+    }
+    InstanceProbe::Ready
+}
+
 fn port_vlan_inventory_contains(row: &KernelBridgePortVlanInfo, vlan: u16) -> bool {
     vlan_rows_contain(&row.vlans, vlan)
-}
-
-fn svd_not_ready_reason(
-    bridge: &BridgeLink,
-    bridge_name: &str,
-    bridge_vlan: u16,
-    want_vni: u32,
-) -> Option<String> {
-    let mut matches = bridge.svd_vxlan_ports.iter().filter(|svd| {
-        bridge
-            .port_vlan_inventory
-            .iter()
-            .any(|row| svd_inventory_matches(row, svd, bridge_vlan, want_vni))
-    });
-    let first = matches.next()?;
-    if !first.vnifilter {
-        return Some(format!(
-            "bridge {bridge_name} has collect-metadata VXLAN ifindex {} for \
-             bridge_vlan={bridge_vlan}/VNI {want_vni}, but vnifilter is disabled; \
-             LAN-64 SVD readiness requires vnifilter",
-            first.ifindex
-        ));
-    }
-    let extra = matches.count();
-    let count = extra + 1;
-    Some(format!(
-        "bridge {bridge_name} has {count} collect-metadata VXLAN port(s) for \
-         bridge_vlan={bridge_vlan}/VNI {want_vni}; SVD topology is detected \
-         but remains NotReady until LAN-64 enables explicit FDB VNI programming"
-    ))
-}
-
-fn svd_inventory_matches(
-    row: &KernelBridgePortVlanInfo,
-    svd: &KernelSvdVxlanInfo,
-    bridge_vlan: u16,
-    want_vni: u32,
-) -> bool {
-    row.is_vxlan
-        && row.ifindex == svd.ifindex
-        && vlan_rows_contain(&row.vlans, bridge_vlan)
-        && row
-            .vlan_tunnels
-            .iter()
-            .any(|t| t.vid == Some(bridge_vlan) && t.tunnel_id == Some(want_vni))
 }
 
 #[cfg(test)]
@@ -499,16 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn not_ready_when_svd_topology_matches_vlan_binding() {
+    fn ready_when_svd_topology_matches_vlan_binding() {
         let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
         let cache = cache_with("br100", svd_vlan_aware_link(100, 10, true));
-        match probe_one(&inst, &cache) {
-            InstanceProbe::NotReady { reason } => {
-                assert!(reason.contains("collect-metadata VXLAN"));
-                assert!(reason.contains("explicit FDB VNI programming"));
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(probe_one(&inst, &cache), InstanceProbe::Ready);
     }
 
     #[test]
@@ -518,6 +535,46 @@ mod tests {
         match probe_one(&inst, &cache) {
             InstanceProbe::NotReady { reason } => {
                 assert!(reason.contains("vnifilter is disabled"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_svd_topology_learning_enabled() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = svd_vlan_aware_link(100, 10, true);
+        link.svd_vxlan_ports[0].learning_disabled = Some(false);
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("learning enabled"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_fixed_and_svd_both_match_vlan_binding() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = svd_vlan_aware_link(100, 10, true);
+        link.vxlan_ports.push(KernelVxlanInfo {
+            ifindex: 200,
+            vni: 100,
+            local_ip: ipa("10.0.0.1"),
+            learning_disabled: Some(true),
+        });
+        link.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+            ifindex: 200,
+            name: Some("vxlan100".to_string()),
+            is_vxlan: true,
+            vlans: vec![vlan_row(10)],
+            vlan_tunnels: Vec::new(),
+        });
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("both fixed-VNI and collect-metadata"));
             }
             other => panic!("{other:?}"),
         }

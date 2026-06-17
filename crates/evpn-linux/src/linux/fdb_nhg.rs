@@ -58,7 +58,7 @@ use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
 use crate::error::DataplaneError;
 
-use super::links::{LinkCache, unique_vxlan_for_vni};
+use super::links::{FdbVxlanTarget, LinkCache, unique_fdb_vxlan_target_for_vni};
 
 /// `NDA_NH_ID` (kind = 13). Not exposed as a typed variant by
 /// `netlink-packet-route 0.30`; emit via the `Other(DefaultNla)`
@@ -88,16 +88,16 @@ pub(crate) async fn apply_install_fdb_nhg_row(
     vlan: Option<u16>,
     nh_id: u32,
 ) -> Result<(), DataplaneError> {
-    let vxlan_ifindex = check_cve_guard_and_get_ifindex(cache, vni)?;
+    let target = check_cve_guard_and_get_target(cache, vni)?;
 
     // `add_bridge` only supplies the transport; the full message
     // shape comes from the pure builder so it unit-tests without a
     // netlink socket.
     let mut req = handle
         .neighbours()
-        .add_bridge(vxlan_ifindex, &mac.octets())
+        .add_bridge(target.ifindex, &mac.octets())
         .replace();
-    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, vlan, nh_id, None);
+    *req.message_mut() = build_fdb_nhg_message(target.ifindex, mac, vlan, nh_id, target.source_vni);
     req.execute()
         .await
         .map_err(|e| super::fdb::classify_apply_error(&e))?;
@@ -165,17 +165,21 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     mac: MacAddress,
     vlan: Option<u16>,
 ) -> Result<(), DataplaneError> {
-    let vxlan_ifindex = vxlan_ifindex_for_vni(cache, vni)?;
+    let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
 
     let mut msg = NeighbourMessage::default();
     msg.header.family = AddressFamily::Bridge;
-    msg.header.ifindex = vxlan_ifindex;
+    msg.header.ifindex = target.ifindex;
     msg.header.kind = RouteType::Unspec;
     msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
     msg.attributes
         .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
     if let Some(vlan) = vlan {
         msg.attributes.push(NeighbourAttribute::Vlan(vlan));
+    }
+    if let Some(vni) = target.source_vni {
+        msg.attributes
+            .push(NeighbourAttribute::SourceVni(vni.as_u32()));
     }
 
     match handle.neighbours().del(msg).execute().await {
@@ -189,14 +193,14 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
 /// upstream readiness probe is the primary check; this function is
 /// belt-and-suspenders for the case where link state changes between
 /// the probe pass and the apply pass.
-fn check_cve_guard_and_get_ifindex(
+fn check_cve_guard_and_get_target(
     cache: &LinkCache,
     vni: EvpnInstanceId,
-) -> Result<u32, DataplaneError> {
-    let vxlan = unique_vxlan_for_vni(cache, vni)?;
+) -> Result<FdbVxlanTarget, DataplaneError> {
+    let target = unique_fdb_vxlan_target_for_vni(cache, vni)?;
 
-    match vxlan.learning_disabled {
-        Some(true) => Ok(vxlan.ifindex),
+    match target.learning_disabled {
+        Some(true) => Ok(target),
         Some(false) => Err(DataplaneError::InvalidArgument(format!(
             "CVE-2025-39851 guard: FDB-NHG install refused on VNI {vni} \
              because L2VXLAN port has learning enabled. Set `nolearning` \
@@ -212,15 +216,19 @@ fn check_cve_guard_and_get_ifindex(
 
 /// Helper: VXLAN ifindex for a given VNI. Mirrors the same logic
 /// `linux::fdb` uses for the single-dst path.
+#[cfg(test)]
 fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Result<u32, DataplaneError> {
-    unique_vxlan_for_vni(cache, vni).map(|vxlan| vxlan.ifindex)
+    unique_fdb_vxlan_target_for_vni(cache, vni).map(|target| target.ifindex)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::linux::links::BridgeLink;
-    use crate::snapshot::KernelVxlanInfo;
+    use crate::snapshot::{
+        KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
+        KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo,
+    };
 
     fn make_cache(vni: u32, learning_disabled: Option<bool>) -> LinkCache {
         let mut cache = LinkCache::default();
@@ -243,12 +251,56 @@ mod tests {
         cache
     }
 
+    fn vlan_row(vid: u16) -> KernelBridgeVlanInfo {
+        KernelBridgeVlanInfo {
+            vid,
+            flags: KernelBridgeVlanFlags::default(),
+        }
+    }
+
+    fn make_svd_cache(raw_vni: u32, vlan: u16) -> LinkCache {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(44);
+        cache
+            .local_mac_vlan_bindings
+            .insert(("br-svd".to_string(), vlan), Some(raw_vni));
+        cache.bridges.insert(
+            "br-svd".into(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                svd_vxlan_ports: vec![KernelSvdVxlanInfo {
+                    ifindex: 44,
+                    vnifilter: true,
+                    local_ip: None,
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 1,
+                vlans: vec![vlan_row(vlan)],
+                port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                    ifindex: 44,
+                    name: Some("vxlan-svd".to_string()),
+                    is_vxlan: true,
+                    vlans: vec![vlan_row(vlan)],
+                    vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                        tunnel_id: Some(raw_vni),
+                        vid: Some(vlan),
+                        flags: KernelBridgeVlanFlags::default(),
+                    }],
+                }],
+                ..BridgeLink::default()
+            },
+        );
+        cache
+    }
+
     #[test]
     fn cve_guard_passes_when_learning_disabled_true() {
         let cache = make_cache(100, Some(true));
         let vni = EvpnInstanceId::new(100).unwrap();
-        let ifindex = check_cve_guard_and_get_ifindex(&cache, vni).unwrap();
-        assert_eq!(ifindex, 11);
+        let target = check_cve_guard_and_get_target(&cache, vni).unwrap();
+        assert_eq!(target.ifindex, 11);
+        assert_eq!(target.source_vni, None);
     }
 
     #[test]
@@ -279,12 +331,34 @@ mod tests {
             },
         );
 
-        let ifindex =
-            check_cve_guard_and_get_ifindex(&cache, EvpnInstanceId::new(200).unwrap()).unwrap();
-        assert_eq!(ifindex, 22);
+        let target =
+            check_cve_guard_and_get_target(&cache, EvpnInstanceId::new(200).unwrap()).unwrap();
+        assert_eq!(target.ifindex, 22);
         assert_eq!(
             vxlan_ifindex_for_vni(&cache, EvpnInstanceId::new(100).unwrap()).unwrap(),
             11
+        );
+    }
+
+    #[test]
+    fn cve_guard_passes_for_svd_target_and_preserves_source_vni() {
+        let cache = make_svd_cache(100, 10);
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let target = check_cve_guard_and_get_target(&cache, vni).unwrap();
+        assert_eq!(target.ifindex, 44);
+        assert_eq!(target.source_vni, Some(vni));
+
+        let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_fdb_nhg_message(
+            target.ifindex,
+            mac,
+            Some(10),
+            0x4000_0001,
+            target.source_vni,
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::SourceVni(vni.as_u32()))
         );
     }
 
@@ -317,7 +391,7 @@ mod tests {
         );
 
         let err =
-            check_cve_guard_and_get_ifindex(&cache, EvpnInstanceId::new(100).unwrap()).unwrap_err();
+            check_cve_guard_and_get_target(&cache, EvpnInstanceId::new(100).unwrap()).unwrap_err();
         assert!(
             matches!(err, DataplaneError::InvalidArgument(_)),
             "duplicate-VNI topology must fail closed instead of picking an arbitrary ifindex: {err:?}"
@@ -328,7 +402,7 @@ mod tests {
     fn cve_guard_blocks_when_learning_enabled() {
         let cache = make_cache(100, Some(false));
         let vni = EvpnInstanceId::new(100).unwrap();
-        let err = check_cve_guard_and_get_ifindex(&cache, vni).unwrap_err();
+        let err = check_cve_guard_and_get_target(&cache, vni).unwrap_err();
         let msg = format!("{err:?}");
         assert!(
             msg.contains("CVE-2025-39851"),
@@ -340,7 +414,7 @@ mod tests {
     fn cve_guard_blocks_when_learning_state_unknown() {
         let cache = make_cache(100, None);
         let vni = EvpnInstanceId::new(100).unwrap();
-        let err = check_cve_guard_and_get_ifindex(&cache, vni).unwrap_err();
+        let err = check_cve_guard_and_get_target(&cache, vni).unwrap_err();
         let msg = format!("{err:?}");
         assert!(
             msg.contains("CVE-2025-39851"),
@@ -352,7 +426,7 @@ mod tests {
     fn cve_guard_errors_when_no_bridge_for_vni() {
         let cache = make_cache(100, Some(true));
         let vni = EvpnInstanceId::new(999).unwrap();
-        let err = check_cve_guard_and_get_ifindex(&cache, vni).unwrap_err();
+        let err = check_cve_guard_and_get_target(&cache, vni).unwrap_err();
         assert!(matches!(err, DataplaneError::LinkNotFound { .. }));
     }
 

@@ -89,7 +89,7 @@ case "${1:-all}" in
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
-    svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_detected_and_explicit_src_vni_fdb_rows_parse" ;;
+    svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
     *)
         echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, svd_fdb_vni" >&2
         exit 2

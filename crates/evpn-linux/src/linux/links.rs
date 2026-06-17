@@ -62,8 +62,10 @@ pub(crate) struct BridgeLink {
     /// that specific port.
     pub vxlan_ports: Vec<KernelVxlanInfo>,
     /// Collect-metadata / SVD VXLAN members attached to this bridge.
-    /// LAN-64 PR1 observes them and keeps readiness fail-closed; runtime
-    /// FDB programming still uses fixed-VNI [`Self::vxlan_ports`].
+    /// These can become Ready for `bridge_vlan` instances only when
+    /// the bridge VLAN tunnel inventory maps the configured VLAN to
+    /// the instance VNI unambiguously; runtime FDB programming then
+    /// targets this shared ifindex with an explicit `NDA_SRC_VNI`.
     pub svd_vxlan_ports: Vec<KernelSvdVxlanInfo>,
     /// Number of VXLAN ports attached to this bridge. Legacy
     /// VLAN-unaware readiness still requires exactly one; ADR-0089
@@ -122,9 +124,8 @@ pub(crate) struct LinkCache {
     /// ifindex for bridge FDB entries, not the bridge itself).
     pub vxlan_ifindex_to_vni: HashMap<u32, u32>,
     /// Collect-metadata VXLAN ifindexes. These do not imply one VNI per
-    /// ifindex; FDB parsing may use an explicit `NDA_VNI` / `NDA_SRC_VNI`
-    /// attribute for rows on these ports, but runtime programming remains
-    /// fail-closed until LAN-64 enables SVD Ready.
+    /// ifindex; FDB parsing uses an explicit `NDA_VNI` / `NDA_SRC_VNI`
+    /// attribute for rows on these ports.
     pub svd_vxlan_ifindexes: HashSet<u32>,
     /// **Non-VXLAN** bridge port ifindex -> VNI of the bridge it is
     /// enslaved to. Populated by walking every link's Controller
@@ -167,17 +168,23 @@ pub(crate) struct LinkCache {
     pub bridge_ports_by_name: HashMap<String, crate::snapshot::KernelBridgePortInfo>,
 }
 
-/// Resolve the single VXLAN member that owns `vni` in the current bridge
-/// inventory.
-///
-/// ADR-0089 VLAN-aware bridges can attach multiple VXLAN devices to one
-/// bridge, so callers must not rely on the legacy `BridgeLink::vxlan` slot.
-/// Duplicate VNI ownership is fail-closed: picking an arbitrary ifindex could
-/// program a remote FDB row onto the wrong VXLAN device.
-pub(crate) fn unique_vxlan_for_vni(
+/// Kernel target for programming one remote-MAC FDB row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FdbVxlanTarget {
+    /// VXLAN device ifindex to use as `ndm_ifindex`.
+    pub ifindex: u32,
+    /// Explicit `NDA_SRC_VNI` required by collect-metadata / SVD
+    /// VXLAN devices. `None` means a traditional fixed-VNI VXLAN
+    /// device where the ifindex itself identifies the VNI.
+    pub source_vni: Option<EvpnInstanceId>,
+    /// Observed VXLAN learning state for the CVE-2025-39851 guard.
+    pub learning_disabled: Option<bool>,
+}
+
+fn find_unique_vxlan_for_vni(
     cache: &LinkCache,
     vni: EvpnInstanceId,
-) -> Result<&KernelVxlanInfo, DataplaneError> {
+) -> Result<Option<&KernelVxlanInfo>, DataplaneError> {
     let raw = vni.as_u32();
     let mut found = None;
 
@@ -193,9 +200,48 @@ pub(crate) fn unique_vxlan_for_vni(
         }
     }
 
-    found.ok_or_else(|| DataplaneError::LinkNotFound {
-        name: format!("VXLAN port for VNI {vni}"),
-    })
+    Ok(found)
+}
+
+/// Resolve the kernel FDB programming target for `vni`.
+///
+/// Traditional fixed-VNI VXLAN devices are selected by their configured
+/// VNI. SVD / collect-metadata VXLAN devices are selected only through
+/// explicit `bridge_vlan` configuration plus bridge VLAN tunnel
+/// inventory. If both shapes match, or if multiple SVD ports match, the
+/// topology is ambiguous and programming fails closed.
+pub(crate) fn unique_fdb_vxlan_target_for_vni(
+    cache: &LinkCache,
+    vni: EvpnInstanceId,
+) -> Result<FdbVxlanTarget, DataplaneError> {
+    let fixed = find_unique_vxlan_for_vni(cache, vni)?;
+    let svd = find_unique_svd_vxlan_target_for_vni(cache, vni)?;
+
+    match (fixed, svd) {
+        (
+            Some(fixed),
+            Some(SvdVxlanTarget {
+                ifindex: svd_ifindex,
+                ..
+            }),
+        ) if fixed.ifindex != svd_ifindex => Err(DataplaneError::InvalidArgument(format!(
+            "ambiguous VXLAN target for VNI {vni}: fixed-VNI ifindex {} and SVD ifindex {svd_ifindex} both match",
+            fixed.ifindex
+        ))),
+        (Some(fixed), _) => Ok(FdbVxlanTarget {
+            ifindex: fixed.ifindex,
+            source_vni: None,
+            learning_disabled: fixed.learning_disabled,
+        }),
+        (None, Some(svd)) => Ok(FdbVxlanTarget {
+            ifindex: svd.ifindex,
+            source_vni: Some(vni),
+            learning_disabled: svd.learning_disabled,
+        }),
+        (None, None) => Err(DataplaneError::LinkNotFound {
+            name: format!("VXLAN target for VNI {vni}"),
+        }),
+    }
 }
 
 fn record_vxlan_match<'a>(
@@ -214,6 +260,93 @@ fn record_vxlan_match<'a>(
             existing.ifindex, candidate.ifindex
         ))),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SvdVxlanTarget {
+    ifindex: u32,
+    learning_disabled: Option<bool>,
+}
+
+fn find_unique_svd_vxlan_target_for_vni(
+    cache: &LinkCache,
+    vni: EvpnInstanceId,
+) -> Result<Option<SvdVxlanTarget>, DataplaneError> {
+    let raw = vni.as_u32();
+    let mut found = None;
+    for ((bridge_name, bridge_vlan), bound_vni) in &cache.local_mac_vlan_bindings {
+        if *bound_vni != Some(raw) {
+            continue;
+        }
+        let Some(bridge) = cache.bridges.get(bridge_name) else {
+            continue;
+        };
+        if !bridge.vlan_filtering || !vlan_rows_contain(&bridge.vlans, *bridge_vlan) {
+            continue;
+        }
+        for svd in matching_svd_vxlan_ports(bridge, *bridge_vlan, raw) {
+            let candidate = SvdVxlanTarget {
+                ifindex: svd.ifindex,
+                learning_disabled: svd.learning_disabled,
+            };
+            record_svd_match(&mut found, candidate, vni)?;
+        }
+    }
+    Ok(found)
+}
+
+fn record_svd_match(
+    found: &mut Option<SvdVxlanTarget>,
+    candidate: SvdVxlanTarget,
+    vni: EvpnInstanceId,
+) -> Result<(), DataplaneError> {
+    match *found {
+        None => {
+            *found = Some(candidate);
+            Ok(())
+        }
+        Some(existing) if existing.ifindex == candidate.ifindex => Ok(()),
+        Some(existing) => Err(DataplaneError::InvalidArgument(format!(
+            "ambiguous SVD VXLAN target for VNI {vni}: ifindexes {} and {} both match",
+            existing.ifindex, candidate.ifindex
+        ))),
+    }
+}
+
+/// SVD / collect-metadata VXLAN ports whose bridge VLAN tunnel
+/// inventory maps `bridge_vlan` to `want_vni`.
+pub(crate) fn matching_svd_vxlan_ports(
+    bridge: &BridgeLink,
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> Vec<&KernelSvdVxlanInfo> {
+    bridge
+        .svd_vxlan_ports
+        .iter()
+        .filter(|svd| {
+            bridge
+                .port_vlan_inventory
+                .iter()
+                .any(|row| svd_inventory_matches(row, svd, bridge_vlan, want_vni))
+        })
+        .collect()
+}
+
+/// Return whether one bridge-member VLAN row proves that `svd`
+/// carries `bridge_vlan` with tunnel ID / VNI `want_vni`.
+pub(crate) fn svd_inventory_matches(
+    row: &KernelBridgePortVlanInfo,
+    svd: &KernelSvdVxlanInfo,
+    bridge_vlan: u16,
+    want_vni: u32,
+) -> bool {
+    row.is_vxlan
+        && row.ifindex == svd.ifindex
+        && vlan_rows_contain(&row.vlans, bridge_vlan)
+        && row
+            .vlan_tunnels
+            .iter()
+            .any(|t| t.vid == Some(bridge_vlan) && t.tunnel_id == Some(want_vni))
 }
 
 impl LinkCache {
@@ -272,25 +405,32 @@ impl LinkCache {
             if !bridge.vlan_filtering || !vlan_rows_contain(&bridge.vlans, *vlan) {
                 continue;
             }
+            let mut vxlan_ifindex = None;
             let matching_vxlan: Vec<_> = bridge
                 .vxlan_ports
                 .iter()
                 .filter(|port| port.vni == vni)
                 .collect();
-            let [vxlan] = matching_vxlan.as_slice() else {
-                continue;
-            };
-            let Some(vxlan_inventory) = bridge
-                .port_vlan_inventory
-                .iter()
-                .find(|row| row.is_vxlan && row.ifindex == vxlan.ifindex)
-            else {
-                continue;
-            };
-            if !vlan_rows_contain(&vxlan_inventory.vlans, *vlan) {
-                continue;
+            if let [vxlan] = matching_vxlan.as_slice()
+                && let Some(vxlan_inventory) = bridge
+                    .port_vlan_inventory
+                    .iter()
+                    .find(|row| row.is_vxlan && row.ifindex == vxlan.ifindex)
+                && vlan_rows_contain(&vxlan_inventory.vlans, *vlan)
+            {
+                vxlan_ifindex = Some(vxlan.ifindex);
             }
-            vxlan_port_vlan_to_vni.insert((vxlan.ifindex, *vlan), vni);
+            let matching_svd = matching_svd_vxlan_ports(bridge, *vlan, vni);
+            if let [svd] = matching_svd.as_slice() {
+                if vxlan_ifindex.is_some() {
+                    continue;
+                }
+                vxlan_ifindex = Some(svd.ifindex);
+            }
+            let Some(vxlan_ifindex) = vxlan_ifindex else {
+                continue;
+            };
+            vxlan_port_vlan_to_vni.insert((vxlan_ifindex, *vlan), vni);
             for row in &bridge.port_vlan_inventory {
                 if row.is_vxlan || !vlan_rows_contain(&row.vlans, *vlan) {
                     continue;
@@ -850,6 +990,10 @@ mod tests {
         }
     }
 
+    fn vni(raw: u32) -> EvpnInstanceId {
+        EvpnInstanceId::new(raw).unwrap()
+    }
+
     fn instance(vni: u32, bridge: &str, vlan: u16) -> EvpnInstance {
         EvpnInstance::new(
             EvpnInstanceId::new(vni).unwrap(),
@@ -1234,5 +1378,115 @@ mod tests {
         assert!(cache.vxlan_port_vlan_to_vni.is_empty());
         assert!(cache.bridge_ports_requiring_vlan_attribution.contains(&30));
         assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&20));
+    }
+
+    #[test]
+    fn unique_fdb_vxlan_target_resolves_svd_binding() {
+        let mut cache = LinkCache::default();
+        cache.svd_vxlan_ifindexes.insert(40);
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                svd_vxlan_ports: vec![KernelSvdVxlanInfo {
+                    ifindex: 40,
+                    vnifilter: true,
+                    local_ip: None,
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 1,
+                vlans: vec![vlan_row(10)],
+                port_vlan_inventory: vec![
+                    KernelBridgePortVlanInfo {
+                        ifindex: 40,
+                        name: Some("vxlan-svd".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                            tunnel_id: Some(100),
+                            vid: Some(10),
+                            flags: KernelBridgeVlanFlags::default(),
+                        }],
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 30,
+                        name: Some("swp1".to_string()),
+                        is_vxlan: false,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                ],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        let target = unique_fdb_vxlan_target_for_vni(&cache, vni(100)).unwrap();
+        assert_eq!(target.ifindex, 40);
+        assert_eq!(target.source_vni, Some(vni(100)));
+        assert_eq!(target.learning_disabled, Some(true));
+        assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 10)), Some(&100));
+        assert_eq!(cache.vxlan_port_vlan_to_vni.get(&(40, 10)), Some(&100));
+    }
+
+    #[test]
+    fn unique_fdb_vxlan_target_rejects_fixed_and_svd_ambiguity() {
+        let mut cache = LinkCache::default();
+        cache.vxlan_ifindex_to_vni.insert(20, 100);
+        cache.svd_vxlan_ifindexes.insert(40);
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan_ports: vec![KernelVxlanInfo {
+                    ifindex: 20,
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    learning_disabled: Some(true),
+                }],
+                svd_vxlan_ports: vec![KernelSvdVxlanInfo {
+                    ifindex: 40,
+                    vnifilter: true,
+                    local_ip: None,
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 2,
+                vlans: vec![vlan_row(10)],
+                port_vlan_inventory: vec![
+                    KernelBridgePortVlanInfo {
+                        ifindex: 20,
+                        name: Some("vxlan100".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 40,
+                        name: Some("vxlan-svd".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: vec![KernelBridgeVlanTunnelInfo {
+                            tunnel_id: Some(100),
+                            vid: Some(10),
+                            flags: KernelBridgeVlanFlags::default(),
+                        }],
+                    },
+                ],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        let err = unique_fdb_vxlan_target_for_vni(&cache, vni(100)).unwrap_err();
+        assert!(
+            matches!(err, DataplaneError::InvalidArgument(_)),
+            "ambiguous fixed+SVD topology must fail closed: {err:?}"
+        );
     }
 }

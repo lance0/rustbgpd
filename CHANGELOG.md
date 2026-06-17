@@ -50,18 +50,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   VNIs; rustbgpd programs `NDA_VLAN`-scoped rows on `vxlan100 vlan 10` and
   `vxlan200 vlan 20`, then a VNI100 withdraw removes only the VLAN10 row and
   leaves VLAN20 intact. The proof keeps Ethernet Tag ID `0` and deliberately
-  does not enable SVD, managed netdev creation, or RFC VLAN-Aware Bundle
-  service.
-- **EVPN SVD / collect-metadata substrate proof.** The Linux EVPN link
-  inventory now detects collect-metadata VXLAN devices and `vnifilter` state
-  separately from traditional fixed-VNI VXLAN ports, keeps matching SVD
-  `bridge_vlan` topologies fail-closed with an explicit NotReady reason, and
-  parses `src_vni` / explicit-VNI FDB rows on known SVD ifindexes without
-  pretending one ifindex owns one VNI. A new privileged `svd_fdb_vni` netns
-  selector proves the kernel shape: `src_vni` provides the VNI attribution
-  for the SVD FDB row, while the tested kernel does not round-trip
-  `NDA_VLAN` / `NDA_DST` on that self row. Operator-ready SVD programming
-  remains a follow-up; this slice does not enable SVD Ready.
+  uses the traditional fixed-VNI VXLAN shape; managed netdev creation and RFC
+  VLAN-Aware Bundle service remain separate gates.
+- **EVPN SVD / collect-metadata Ready and FDB programming.** L2VNIs with
+  `bridge_vlan` can now become `Ready` on a shared `external` /
+  collect-metadata VXLAN device when `vnifilter`, `nolearning`, bridge VLAN
+  membership, and an unambiguous `bridge vlan ... tunnel_info id <VNI>`
+  mapping all line up. Single-dst and FDB-NHG remote-MAC writes target the
+  shared ifindex with `NDA_SRC_VNI`; FDB snapshots parse explicit-VNI rows,
+  infer the configured VLAN when the tested kernel omits `NDA_VLAN`, and use
+  owned state to avoid churn when the tested SVD echo omits `NDA_DST`. The
+  privileged `svd_fdb_vni` netns selector now proves Ready + add + same-MAC
+  two-VNI isolation + scoped delete on a real kernel. True RFC VLAN-aware
+  bundle / non-zero-Ethernet-Tag service and managed netdev creation remain
+  separate gates.
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware programming requires an explicit

@@ -197,14 +197,15 @@ has it, no broad performance sprints without profile evidence.
   EVPN over Linux `vlan_filtering=1` bridges, with a local bridge-VLAN
   binding, `NDA_VLAN` remote-MAC FDB attribution, AF_BRIDGE local-MAC VLAN
   attribution, and Ethernet Tag ID still `0`; true RFC VLAN-aware bundle /
-  non-zero-Ethernet-Tag service stays deferred. **LAN-64's first SVD /
-  collect-metadata slice landed as substrate/proof:** rustbgpd now detects
-  `external` / `vnifilter` VXLAN devices, reports matching SVD bridge-VLAN
-  topologies as explicit NotReady, and parses explicit-VNI FDB rows on known
-  SVD ifindexes. The `svd_fdb_vni` netns proof established that `src_vni`
-  gives VNI attribution while the tested SVD self row does not round-trip
-  `NDA_VLAN` / `NDA_DST`; operator-ready SVD programming remains the next
-  LAN-64 slice. Service-provider EVPN breadth
+  non-zero-Ethernet-Tag service stays deferred. **LAN-64 SVD /
+  collect-metadata Ready/programming landed:** rustbgpd now detects
+  `external` / `vnifilter` VXLAN devices, accepts an unambiguous
+  `(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
+  programs single-dst and FDB-NHG rows with `NDA_SRC_VNI`, and parses
+  explicit-VNI rows on known SVD ifindexes. The `svd_fdb_vni` netns proof
+  covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
+  kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
+  inference plus owned-state convergence. Service-provider EVPN breadth
   (route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation) stays out
   of the current lane until operator demand justifies a new ADR. **Native
@@ -299,12 +300,11 @@ has it, no broad performance sprints without profile evidence.
   origination. **Cross-vendor receipt landed:** M70 has FRR originate the same
   MAC in VNI100 and VNI200 while rustbgpd programs and withdraws only the
   matching VLAN-scoped FDB row on one `vlan_filtering=1` bridge. **SVD /
-  collect-metadata substrate/proof landed:** link inventory records
-  `external` / `vnifilter`, probe keeps matching SVD topologies explicitly
-  NotReady, and `src_vni` FDB rows parse by explicit VNI on known SVD
-  ifindexes. The concrete next VLAN-aware feature slice is SVD
-  Ready/programming against that row shape; true RFC VLAN-aware bundle /
-  non-zero Ethernet Tag
+  collect-metadata Ready/programming landed:** link inventory records
+  `external` / `vnifilter`, probe accepts unambiguous bridge-VLAN tunnel
+  mappings as Ready, single-dst and FDB-NHG rows program `NDA_SRC_VNI`, and
+  `svd_fdb_vni` proves same-MAC two-VNI isolation plus scoped delete against a
+  real kernel. True RFC VLAN-aware bundle / non-zero Ethernet Tag
   remains a separate ADR gate, MAC+IP ARP/ND VLAN attribution is
   kernel-evidence-gated, and managed netdev creation stays separate operator
   ergonomics work. A dedicated counter for unattributable-VLAN local-MAC
