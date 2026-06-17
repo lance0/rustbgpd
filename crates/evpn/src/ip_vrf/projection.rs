@@ -250,7 +250,8 @@ impl EsiOverlayAllActiveTargetSet {
         self.next_hops.len()
     }
 
-    /// True when the target set has no remote VTEPs.
+    /// Always false for resolver-built target sets; provided with
+    /// [`Self::len`] for collection-like API symmetry.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.next_hops.is_empty()
