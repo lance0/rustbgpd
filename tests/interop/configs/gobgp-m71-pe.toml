@@ -1,0 +1,20 @@
+# M71 PE (GoBGP) — the ESI overlay-index Type 5 route source.
+#
+# The test driver injects the routes via the gobgp CLI: an ESI
+# overlay-index Type 5 (non-zero ESI, Router-MAC extcomm, Gateway
+# Address 0.0.0.0) plus the Type 1 EAD-per-ES / EAD-per-EVI rows that
+# the rustbgpd VTEP recursively resolves it through. GoBGP only speaks
+# BGP here; it has no EVPN dataplane.
+[global.config]
+as = 65000
+router-id = "10.0.0.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.0.1"
+peer-as = 65000
+description = "rustbgpd-m71-vtep"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"

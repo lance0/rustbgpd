@@ -1,0 +1,67 @@
+# M71 VTEP (rustbgpd) — receive-side RFC 9136 §4.3 ESI overlay-index
+# Type 5 single-active recursion (PR #541).
+#
+# rustbgpd is the device under test: it imports a GoBGP-originated ESI
+# overlay-index Type 5 into vrf1 by recursively resolving the route's
+# ESI through the linked L2VNI's Type 1 EAD-per-EVI state, but only when
+# the matching EAD-per-ES advertises Single-Active. All-active or
+# missing EAD state must fail closed with a precise drop reason.
+#
+# Topology:
+#   - One IP-VRF (vrf1) bound to L3VNI 100, RT 65000:100. The
+#     operator-managed VRF + L3VXLAN devices are created by
+#     start-rustbgpd-m71-vtep.sh before the daemon boots so the
+#     readiness probe lands Ready and an imported Type 5 installs a
+#     kernel route in table 100.
+#   - One L2VNI (vni 10, RT 65000:10) linked to vrf1 via `ip_vrf`. The
+#     received EAD-per-EVI rows scope by this L2VNI (their label names
+#     vni 10), so the instance must exist for the resolver to accept
+#     them. `overlay_index_mode` is irrelevant on the receive side.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "gobgp-pe"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+# Linked L2VNI. Its presence lets the receive path accept EAD-per-EVI
+# rows whose label names vni 10 and tie the matched IP-VRF to that
+# L2VNI for ESI overlay-index protected recursion.
+[[evpn_instances]]
+vni = 10
+rd = "65000:10"
+route_targets = ["65000:10"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br10"
+advertise_svi_mac = false
+ip_vrf = "vrf1"
+
+# IP-VRF / L3VNI for the imported Type 5. The Router MAC is the inner
+# destination MAC the kernel needs for the recursive lookup; the VRF +
+# L3VXLAN devices are created out of band by the start script.
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100
+
+[security.grpc]
+enforcement = "legacy"
