@@ -9,7 +9,7 @@
 //!   `NUD_PERMANENT` so the entry is non-expiring.
 //! - `links` — bridge + VXLAN inventory via `LinkHandle::get`. Used
 //!   by `probe` to resolve bridge names to ifindex, validate VXLAN
-//!   port attachment, and reject VLAN-aware bridges (ADR-0054 §4).
+//!   port attachment, and validate ADR-0089 VLAN-aware bridge bindings.
 //! - `probe` — per-instance readiness checks. Returns
 //!   [`crate::InstanceProbe::Ready`] only when the operator-built
 //!   topology matches the [`rustbgpd_evpn::EvpnInstance`] expectations.

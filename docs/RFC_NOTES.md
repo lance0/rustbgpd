@@ -846,8 +846,9 @@ implemented per ADR-0040.
   smoke) and Type 5 gRPC injection (v0.25.0, M45). Hosted
   kernel-dataplane CI gates M36–M43 incl. M39b.
 - **Shipped after Gate 9:** receive-side overlay-index recursion for imported
-  Type 5 routes and native GW-IP overlay-index Type 5 origination (ADR-0087).
-  Remaining overlay-index work is ESI-overlay origination and broader
+  Type 5 routes, native GW-IP + ESI overlay-index Type 5 origination
+  (ADR-0087), and single-active ESI overlay-index Type 5 receive.
+  Remaining overlay-index work is all-active ESI receive and broader
   recursion-path interop.
 
 ---
@@ -898,9 +899,10 @@ implemented per ADR-0040.
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
   M39 hosted smoke against FRR 10.3.1.
 - **Shipped after Gate 9:** receive-side overlay-index recursion,
-  auto-derived Route Targets per RFC 8365 §5.1.2.1, and native GW-IP
-  overlay-index Type 5 origination (ADR-0087). Remaining overlay-index work is
-  ESI-overlay origination and broader recursion-path interop.
+  auto-derived Route Targets per RFC 8365 §5.1.2.1, native GW-IP +
+  ESI overlay-index Type 5 origination (ADR-0087), and single-active
+  ESI overlay-index Type 5 receive. Remaining overlay-index work is
+  all-active ESI receive and broader recursion-path interop.
 
 ---
 

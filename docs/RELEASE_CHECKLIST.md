@@ -323,8 +323,9 @@ and M37 (upward, Gate 7b+1) before tagging. If it touches the
 **ADR-0079 adoption/reap sweep** (`crates/evpn-linux/src/reconcile.rs`),
 M60 (kill-and-restart FDB adoption sweep) and M61 (kill-and-restart
 L3 adoption sweep) run in the hosted `Kernel Dataplane` workflow and
-can be reproduced manually the same way. Both M36 and M37 are **local-only, privileged smokes** — they
-require `CAP_NET_ADMIN` or a privileged runner and are not in PR-CI:
+can be reproduced manually the same way. M36 and M37 run in the hosted
+`Kernel Dataplane` workflow; manual reproduction still requires
+`CAP_NET_ADMIN` or a privileged runner:
 
 ```bash
 # Build the daemon image (bidirectional VTEP needs CAP_NET_ADMIN)
@@ -355,7 +356,9 @@ to validate DF election + Type 1/4 origination against a peer running
 the same code. If the release touches **Gate 9 / ADR-0059 / ADR-0087**
 (IP-VRF, Type 5, L3 FIB programming, overlay-index recursion/origination,
 aliasing ECMP, or FDB nexthop groups), run the hosted `Kernel Dataplane`
-workflow for M39, M40, and/or M68 as appropriate. They can still be
+workflow for M39, M40, M68, and/or M71 as appropriate. If it touches
+**ADR-0089 VLAN-aware bridge or SVD programming**, also require M70 plus
+the `dataplane_vlan_fdb` and `svd_fdb_vni` netns selectors. They can still be
 reproduced manually with:
 
 ```bash
@@ -383,6 +386,16 @@ containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
 containerlab deploy -t tests/interop/m68-evpn-type5-gwip-overlay-index-frr.clab.yml
 bash tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 containerlab destroy -t tests/interop/m68-evpn-type5-gwip-overlay-index-frr.clab.yml
+
+# M70 — ADR-0089 VLAN-aware bridge FDB attribution consumed from FRR
+containerlab deploy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml
+bash tests/interop/scripts/test-m70-evpn-vlan-aware-bridge-frr.sh
+containerlab destroy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml --cleanup
+
+# M71 — RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive
+containerlab deploy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml
+bash tests/interop/scripts/test-m71-evpn-esi-overlay-type5-receive-gobgp.sh
+containerlab destroy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml --cleanup
 ```
 
 If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**

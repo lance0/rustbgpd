@@ -805,14 +805,16 @@ Be honest about where rustbgpd isn't the right tool:
 	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
 	  including non-zero Gateway Address, receive-side RFC 9135
 	  overlay-index recursion, native GW-IP overlay-index Type 5
-	  origination, duplicate-MAC remote suppression +
+	  origination, single-active ESI overlay-index Type 5 receive
+	  with M71 GoBGP proof, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
 	  have also shipped. **Still missing for full VTEP parity:**
-	  ESI overlay-index receive-side protected recursion /
+	  all-active ESI overlay-index receive-side protected recursion /
 	  broader recursion-path interop,
 	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
 	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
-	  ESI overlay-index or MPLS/PBB requirements, rustbgpd is a fit today.
+	  all-active ESI overlay-index or MPLS/PBB requirements, rustbgpd is a
+	  fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

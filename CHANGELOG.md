@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-06-17
+
 ### Added
 
 - **ADR-0089 EVPN VNI-per-broadcast-domain VLAN-aware bridge support.**
@@ -98,6 +100,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identity. This does not enable VPNv4/VPNv6 negotiation, UPDATE
   dispatch, RIB storage, policy, API/CLI exposure, interop, label
   allocation, next-hop-self label rewrite, or MPLS dataplane behavior.
+- **`rustbgpd-wire` 0.11.0 → 0.12.0 (additive).** The BGP-LS and
+  VPNv4/VPNv6 codec substrates add public modules, round-trip helpers,
+  proptest coverage, and fuzz targets without enabling those families in
+  the daemon.
 - **M67 link-driven Ethernet Segment drain churn soak harness.** New
   `tests/soak/m67-link-drain-soak.clab.yml`,
   `tests/soak/run-m67-link-drain-churn-soak.sh`, and
@@ -171,7 +177,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the resolved EAD next hop becomes the FIB next hop, and existing
   interface-less / GW-IP overlay-index behavior is unchanged. All-active
   and ambiguous ESI candidates stay fail-closed with bounded drop reasons
-  until L3 multipath/NHG support and a real-peer interop proof exist.
+  until L3 multipath/NHG support and an all-active real-peer proof exist.
 - **M71 GoBGP interop proof for ESI overlay-index Type 5 single-active
   receive.** The hosted kernel-dataplane suite now drives the RFC 9136
   §4.3 receive path against a real GoBGP route source: rustbgpd is the

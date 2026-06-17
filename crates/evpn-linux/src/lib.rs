@@ -46,8 +46,11 @@
 //!
 //! ## Out of scope
 //!
-//! - Creating or deleting bridge / VXLAN netdevs (ADR-0054 §4).
-//! - VLAN-aware bridges (ADR-0054 §4 — needs schema extension).
+//! - Creating or deleting bridge / VXLAN netdevs (ADR-0054 §4, ADR-0088).
+//! - True RFC VLAN-aware bundle / non-zero Ethernet Tag service. ADR-0089
+//!   supports VNI-per-broadcast-domain Linux VLAN-aware bridge topologies,
+//!   including SVD / collect-metadata VXLAN, while keeping EVPN Ethernet Tag
+//!   ID `0`.
 //! - Full RFC 9135 overlay-index IRB (Gate 9 ships the
 //!   Interface-less variant per RFC 9136 §4.4.2).
 //! - EVPN duplicate-MAC quarantine action.

@@ -464,8 +464,9 @@ controller-driven injection for Type 2 / Type 3. What remains:
   originator from a 5 s poll to a push-notified RIB broadcast for
   sub-second mobility convergence. Later EVPN work added remote
   duplicate-MAC suppression + manual clear, native GW-IP overlay-index
-  Type 5 origination, and receive-side overlay-index recursion, so the
-  remaining VTEP tail is ESI overlay-index receive-side protected recursion,
+  Type 5 origination, single-active ESI overlay-index Type 5 receive
+  (M71), and receive-side overlay-index recursion, so the remaining VTEP
+  tail is all-active ESI overlay-index receive-side protected recursion,
   broader recursion-path interop, and standards features outside the
   Linux/VXLAN alpha boundary.
 - **Multi-homing execution:** EVPN multi-homing (ESI, Type-1/Type-4) plus

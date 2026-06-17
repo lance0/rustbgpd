@@ -799,9 +799,9 @@ Shipped pieces (v0.18.0):
   Router MAC, unresolved EAD, dual GW-IP+ESI overlay indexes,
   all-active EAD candidates, and ambiguous single-active candidates stay
   fail-closed and are counted through the existing remote-prefix drop
-  surface. All-active ESI receive is still deferred until L3
-  multipath/NHG programming exists, and there is not yet a real-peer
-  interop proof for the ESI protected-recursion path.
+  surface. M71 proves the single-active receive path against a GoBGP route
+  source. All-active ESI receive is still deferred until L3 multipath/NHG
+  programming and an all-active real-peer proof exist.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -819,10 +819,10 @@ Still ahead:
   bounded drop metrics, aggregated per-VRF / per-reason drop counts in
   gRPC / CLI status, native GW-IP origination (ADR-0087), ESI origination,
   single-active ESI receive recursion, and the FRR consume-side M68 GW-IP
-  proof now ship. The next standards-tail slices are all-active ESI receive
-  (which needs L3 multipath/NHG semantics) and a real-peer ESI
-  protected-recursion interop proof; broader service-provider EVPN route
-  families remain demand-shaped.
+  proof now ship; M71 adds the real-peer single-active ESI
+  protected-recursion proof. The next standards-tail slice is all-active ESI
+  receive, which needs L3 multipath/NHG semantics and an all-active real-peer
+  proof. Broader service-provider EVPN route families remain demand-shaped.
 - Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
@@ -837,7 +837,7 @@ Still ahead:
 
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 /
-M60 / M61 / M65 / M66 / M67 / M68 / M69 / M70 — #130 closed. Non-EVPN kernel
+M60 / M61 / M65 / M66 / M67 / M68 / M69 / M70 / M71 — #130 closed. Non-EVPN kernel
 dataplane, BFD, and TCP-AO coverage is catalogued in `INTEROP.md` and
 `kernel-dataplane-runner.md`.)
 
@@ -849,8 +849,8 @@ demand.
 
 | Area | Status | First reviewable slice | Proof gate |
 |------|--------|------------------------|------------|
-| RFC 9136 ESI overlay-index Type 5 origination + single-active receive | Shipped (bounded v1) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC; receive-side recursion imports exactly one single-active EAD-per-EVI candidate scoped by linked L2VNI and Ethernet Tag | Pure origination/projection + daemon tests; all-active receive and real-peer protected-recursion interop remain pending |
-| Broader overlay-index protected recursion | Near-term candidate | Extend the M68-style proof beyond the current GW-IP happy path, especially ESI recursion and all-active behavior, without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion EAD / Type 2 state appears |
+| RFC 9136 ESI overlay-index Type 5 origination + single-active receive | Shipped (bounded v1) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC; receive-side recursion imports exactly one single-active EAD-per-EVI candidate scoped by linked L2VNI and Ethernet Tag | Pure origination/projection + daemon tests plus M71 GoBGP real-peer receive proof; all-active receive remains pending |
+| Broader overlay-index protected recursion | Near-term candidate | Extend the M71 shape to all-active ESI recursion without changing defaults | FRR or GoBGP receiver keeps unresolved routes out of the VRF until the companion EAD / Type 2 state appears |
 | VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; ADR-0088 boundary accepted; ADR-0089 v1 VNI-per-broadcast-domain slice landed for traditional multi-VXLAN bridges and SVD / collect-metadata VXLAN: `bridge_vlan` schema/status, observed VLAN topology validation, `NDA_VLAN` remote-MAC FDB attribution for fixed-VNI devices, `NDA_SRC_VNI` attribution for SVD devices, AF_BRIDGE local-MAC VLAN attribution, M70 FRR interop proving same-MAC two-VNI isolation on a traditional rustbgpd-owned `vlan_filtering=1` bridge, and `svd_fdb_vni` proving SVD Ready + add + same-MAC two-VNI isolation + scoped delete on a real kernel. Ethernet Tag ID stays `0`; unattributable VLAN observations fail closed as normal "not ours" classifier outcomes, downstream observation backpressure is metered, and startup link-cache/probe priming bounds the boot window | MAC+IP VLAN attribution remains kernel-evidence-gated; true VLAN-aware bundle / non-zero Ethernet Tag needs a separate ADR; managed netdev creation stays a separate ergonomics track | Unit tests, hosted/gated local kernel netns tests including `dataplane_vlan_fdb` and `svd_fdb_vni`, and hosted M70 FRR containerlab receipt |
 | rustbgpd-managed bridge / VXLAN / VRF netdev creation | Demand-shaped operator ergonomics; boundary accepted in ADR-0088 | Add opt-in ownership for one netdev class at a time, with crash-restart adoption/reap and foreign-state preservation | Kernel unit tests plus deployment doc receipt |
 | BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |

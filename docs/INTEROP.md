@@ -59,6 +59,23 @@ real BIRD 3.2.1 TCP-AO topology. The workflow still probes the selected
 runner kernel first; a future runner without TCP-AO support reports a warning
 and skips only that topology.
 
+#### M-series proof quality contract
+
+A `Tested (Mxx)` receipt is only as strong as the evidence its driver asserts.
+Proof-critical checks should be target-scoped to the exact peer, prefix or MAC,
+VNI or VLAN, VRF or table, protocol or metric, next hop, or kernel object under
+test. Broad text scans are acceptable for diagnostics and liveness checks, but
+not as the decisive proof for route, FDB, nexthop, or programming state.
+
+If a row claims kernel dataplane proof, the pass condition must include kernel
+evidence such as route, FDB, nexthop, VLAN/VNI, or netns state. It must not
+fall back to control-plane-only BGP or gRPC evidence when the receipt claims
+kernel programming. Drivers should be rerunnable and cleanup-safe: setup and
+teardown must not leave owned routes, FDB rows, nexthops, prober files, or
+stale topology state behind. Each proof should include a non-vacuity sentinel:
+first show the negative, unresolved, or uniquely injected target state, then
+prove the positive state and final withdrawal or cleanup.
+
 The remaining interop scripts are local / manual gates because they
 need substantial wall-clock (M11/M16 GR/LLGR, M33 scale soak),
 additional fixtures (StayRTR / mock RTR v2 server), or

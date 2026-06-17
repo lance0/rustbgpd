@@ -350,10 +350,13 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   tenant teardown, `ip_vrf` relink, and L2VNI-only mixed compositions live,
   while L3VNI/device/table IP-VRF identity changes (restart-required) and
   ES/IP-VRF row mixed edits fail closed ([#268](https://github.com/lance0/rustbgpd/issues/268));
-  ESI overlay-index origination now ships; broader protected recursion-path
-  interop remains the nearest standards-tail item. VLAN-aware bridges
-  and bridge / VXLAN / VRF netdev creation remain operator-provisioned
-  and fail-closed by [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
+  ESI overlay-index origination and single-active ESI overlay-index receive
+  now ship, with M71 proving the receive path against a GoBGP route source;
+  all-active protected recursion remains the nearest standards-tail item.
+  VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
+  topologies, including SVD / collect-metadata VXLAN; bridge / VXLAN / VRF
+  netdev creation remains operator-provisioned by
+  [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
   [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
   scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain
   service with Ethernet Tag ID `0`.
@@ -397,12 +400,12 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.39.0) |
+| **Maturity** | Public alpha (v0.40.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, ESI overlay-index protected-recursion interop / receive-side recursion, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, all-active ESI overlay-index protected recursion, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, rustbgpd-managed bridge / VXLAN / VRF netdev creation, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation

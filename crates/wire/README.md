@@ -3,6 +3,7 @@
 BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
 NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
 MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
+VPNv4/VPNv6 labeled NLRI substrate, BGP-LS/BGP-LS-VPN codec substrate,
 Add-Path, Extended Messages, Outbound Route Filtering (RFC 5291/5292), BGP
 Roles + Only-to-Customer (RFC 9234), and more.
 
@@ -22,6 +23,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
 | 4360 | Extended communities (route target, route origin, 4-byte AS) |
 | 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
+| 4364 / 4659 / 8277 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
 | 4486 | NOTIFICATION subcodes |
 | 4724 | Graceful restart capability |
@@ -54,6 +56,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV substrate with opaque preservation of unknown NLRI types and TLVs. No daemon BGP-LS family negotiation or topology API by itself |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
 
@@ -125,6 +128,10 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §5.2 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
+- **`vpn` module** — VPNv4/VPNv6 labeled NLRI substrate, including label-stack
+  validation, Route Distinguisher, and IPv4/IPv6 prefix payloads
+- **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV substrate, preserving
+  unknown object types and TLVs for future family support
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
@@ -141,13 +148,15 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 
 ## Fuzz tested
 
-Six fuzz targets exercise the codec continuously in CI:
+Eight fuzz targets exercise the codec continuously in CI:
 
 - `decode_message` — full BGP message framing
 - `decode_update` — UPDATE parsing with Add-Path and MP-BGP variants
 - `decode_flowspec` — FlowSpec NLRI component decoding
 - `decode_evpn` — EVPN NLRI (Types 1–5) decoding
 - `encode_evpn` — EVPN NLRI encode round-trip
+- `decode_vpn` — VPNv4/VPNv6 labeled NLRI decode + successful decode round-trip
+- `decode_bgpls` — BGP-LS/BGP-LS-VPN NLRI and TLV decode + successful decode round-trip
 - `parse_rd` — `RouteDistinguisher` `FromStr` parsing
 
 ## License

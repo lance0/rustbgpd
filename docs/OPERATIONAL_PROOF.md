@@ -66,6 +66,8 @@ operator-facing index that answers "what has actually been proved?"
 
 When adding a new proof point, update the detailed source document first and
 this roll-up second. Keep this page short enough that operators can scan it.
+New M-series receipts should also satisfy the proof-quality contract in
+[`INTEROP.md`](INTEROP.md#m-series-proof-quality-contract).
 
 Useful commands and entry points:
 

@@ -1390,10 +1390,12 @@ session machinery:
 > recovery, and homogeneous IPv6 alias members. Production-default
 > multi-homing enforcement, auto-derived RTs, partial ADR-0063 live
 > EVPN runtime mutation, receive-side RFC 9135 overlay-index recursion,
-> and controller Gateway Address Type 5 injection have since shipped.
-> Still ahead: remaining ADR-0063 shapes, ESI overlay-index
-> receive-side protected recursion / broader recursion-path interop,
-> and deeper cross-vendor/scale
+> native GW-IP + ESI overlay-index Type 5 origination, single-active
+> ESI overlay-index Type 5 receive, and controller Gateway Address Type 5
+> injection have since shipped.
+> Still ahead: remaining ADR-0063 shapes, all-active ESI overlay-index
+> receive-side protected recursion / broader recursion-path interop, and
+> deeper cross-vendor/scale
 > validation. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
