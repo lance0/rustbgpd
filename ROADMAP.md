@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped (ADR-0087, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI overlay-index recursion; all-active ESI receive still pending) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped (ADR-0087, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI overlay-index recursion; ADR-0090 scopes the still-pending all-active ESI receive work) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -227,20 +227,23 @@ has it, no broad performance sprints without profile evidence.
   RT-5s import only when scoped EAD-per-EVI state in a linked L2VNI yields
   exactly one single-active remote VTEP, using the RT-5 Router MAC as the inner
   destination MAC. All-active ESI RT-5s and ambiguous candidates stay
-  fail-closed until L3 multipath/NHG programming exists. The single-active
-  receive path now has a real-peer ESI protected-recursion interop proof,
+  fail-closed until L3 multipath/NHG programming exists. ADR-0090 now owns the
+  all-active receive contract: deterministic remote-VTEP target sets,
+  route-level ECMP over the L3VXLAN device, per-VTEP L3 neighbors, L3VXLAN
+  FDB-NHG for the shared Router MAC, and M72 as the success proof. The
+  single-active receive path now has a real-peer ESI protected-recursion interop proof,
   M71: a hosted GoBGP route source injects an ESI overlay-index Type 5 plus
   the resolving EAD-per-ES (single-active) / EAD-per-EVI, and rustbgpd holds
   it unresolved without the EADs, imports it into vrf1 once they arrive
   (kernel route via the PE VTEP), and re-fails-closed when the EAD-per-ES is
   advertised without the Single-Active flag. An all-active ESI protected-recursion proof
-  remains pending behind the L3 multipath/NHG receive work. **LAN-70's kernel
+  remains pending behind the ADR-0090 projection/dataplane work. **LAN-70's kernel
   mechanism receipt landed:** the privileged `l3_multipath` netns selector
   proves that Linux accepts VRF-table route multipath over one L3VXLAN, that
   duplicate single-dst FDB rows for one Router MAC collapse to one destination,
   and that FDB nexthop groups work on the L3VXLAN device. That proves the
-  viable object model for the all-active receive design, but does not yet
-  change projection or production dataplane behavior. The
+  viable object model for the ADR-0090 all-active receive design, but does not
+  yet change projection or production dataplane behavior. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal

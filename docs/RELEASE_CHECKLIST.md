@@ -353,10 +353,11 @@ in `crates/evpn/src/origination_es.rs`, DF election in
 aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
 `crates/evpn/src/mass_withdraw.rs`, or BUM-port enforcement), run M38
 to validate DF election + Type 1/4 origination against a peer running
-the same code. If the release touches **Gate 9 / ADR-0059 / ADR-0087**
-(IP-VRF, Type 5, L3 FIB programming, overlay-index recursion/origination,
-aliasing ECMP, or FDB nexthop groups), run the hosted `Kernel Dataplane`
-workflow for M39, M40, M68, and/or M71 as appropriate. If it touches
+the same code. If the release touches **Gate 9 / ADR-0059 / ADR-0087 /
+ADR-0090** (IP-VRF, Type 5, L3 FIB programming, overlay-index
+recursion/origination, aliasing ECMP, or FDB nexthop groups), run the hosted
+`Kernel Dataplane` workflow for M39, M40, M68, M71, and future M72 as
+appropriate. If it touches
 **ADR-0089 VLAN-aware bridge or SVD programming**, also require M70 plus
 the `dataplane_vlan_fdb` and `svd_fdb_vni` netns selectors. They can still be
 reproduced manually with:
