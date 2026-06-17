@@ -18,7 +18,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   L3VXLAN device, program per-VTEP L3 neighbors, and use an L3VXLAN FDB
   nexthop-group for the shared Router MAC. This is documentation only; current
   runtime behavior is unchanged and all-active ESI RT-5s still fail closed until
-  the projection/dataplane implementation and M72 proof land.
+  the remaining dataplane writer and M72 proof land.
+- **EVPN all-active ESI Type 5 projection model substrate.** The IP-VRF
+  projection layer now distinguishes single-active, all-active, and conflicting
+  EAD redundancy signals for RFC 9136 §4.3 ESI overlay-index Type 5 receive,
+  and can model deterministic all-active remote-VTEP target sets without
+  touching Linux programming. Runtime import behavior is intentionally unchanged:
+  all-active ESI RT-5s still fail closed until the L3 ECMP / L3VXLAN FDB-NHG
+  writer and M72 proof land.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI

@@ -242,8 +242,12 @@ has it, no broad performance sprints without profile evidence.
   proves that Linux accepts VRF-table route multipath over one L3VXLAN, that
   duplicate single-dst FDB rows for one Router MAC collapse to one destination,
   and that FDB nexthop groups work on the L3VXLAN device. That proves the
-  viable object model for the ADR-0090 all-active receive design, but does not
-  yet change projection or production dataplane behavior. The
+  viable object model for the ADR-0090 all-active receive design. The pure
+  projection substrate also landed: Type 5 ESI resolution now distinguishes
+  single-active, all-active, and conflicting EAD redundancy signals and can
+  model deterministic all-active remote-VTEP target sets. Production dataplane
+  behavior is still unchanged until the L3 ECMP / L3VXLAN FDB-NHG writer and
+  M72 proof land. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal

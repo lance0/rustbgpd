@@ -151,6 +151,38 @@ pub struct ProjectedOverlayIndexRoute {
     pub mobility_sequence: Option<u32>,
 }
 
+/// Redundancy mode resolved for one ESI overlay-index Type 5 EAD candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EsiOverlayRedundancyMode {
+    /// Every signal for the candidate says single-active.
+    SingleActive,
+    /// Every signal for the candidate says all-active.
+    AllActive,
+    /// Duplicate or cross-scope signals disagree; fail closed.
+    Conflicting,
+}
+
+impl EsiOverlayRedundancyMode {
+    const fn from_single_active(single_active: bool) -> Self {
+        if single_active {
+            Self::SingleActive
+        } else {
+            Self::AllActive
+        }
+    }
+
+    const fn fold(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Conflicting, _) | (_, Self::Conflicting) => Self::Conflicting,
+            (Self::SingleActive, Self::SingleActive) => Self::SingleActive,
+            (Self::AllActive, Self::AllActive) => Self::AllActive,
+            (Self::SingleActive, Self::AllActive) | (Self::AllActive, Self::SingleActive) => {
+                Self::Conflicting
+            }
+        }
+    }
+}
+
 /// Trimmed EAD-per-EVI row usable as the future RFC 9136 §4.3
 /// receive-side resolver input for ESI overlay-index Type 5 routes.
 ///
@@ -170,9 +202,9 @@ pub struct ProjectedEsiOverlayEadPerEvi {
     /// Remote VTEP next hop for the EAD-per-EVI route.
     pub next_hop: IpAddr,
     /// Whether the EAD route belongs to a single-active Ethernet
-    /// Segment. LAN-58 v1 accepts only single-active protected
-    /// recursion; all-active needs L3 multipath/NHG semantics before it
-    /// can import.
+    /// Segment. The resolver folds this wire-facing boolean into
+    /// [`EsiOverlayRedundancyMode`] so all-active and conflicting
+    /// duplicate signals stay distinguishable.
     pub single_active: bool,
 }
 
@@ -181,18 +213,67 @@ pub struct ProjectedEsiOverlayEadPerEvi {
 pub struct EsiOverlayEadCandidate {
     /// Remote VTEP next hop from the matching EAD-per-EVI route.
     pub next_hop: IpAddr,
-    /// Whether the remote ES is single-active according to its
-    /// EAD-per-ES reachability row.
-    pub single_active: bool,
+    /// Redundancy mode resolved from the candidate's EAD state.
+    pub mode: EsiOverlayRedundancyMode,
+}
+
+/// Deterministic remote-VTEP target set for all-active ESI Type 5 receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsiOverlayAllActiveTargetSet {
+    next_hops: Vec<IpAddr>,
+}
+
+impl EsiOverlayAllActiveTargetSet {
+    fn from_next_hops<I>(next_hops: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
+        next_hops.sort();
+        next_hops.dedup();
+        if next_hops.is_empty() {
+            None
+        } else {
+            Some(Self { next_hops })
+        }
+    }
+
+    /// Remote VTEPs in deterministic order.
+    #[must_use]
+    pub fn next_hops(&self) -> &[IpAddr] {
+        &self.next_hops
+    }
+
+    /// Number of remote VTEPs in the target set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.next_hops.len()
+    }
+
+    /// True when the target set has no remote VTEPs.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.next_hops.is_empty()
+    }
+}
+
+/// Model result for ESI overlay-index Type 5 protected recursion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EsiOverlayResolvedTargets {
+    /// Existing single-active receive path: one remote VTEP.
+    SingleActive { next_hop: IpAddr },
+    /// Future all-active receive path: one or more remote VTEPs.
+    AllActive(EsiOverlayAllActiveTargetSet),
 }
 
 /// Scoped resolver index for ESI overlay-index Type 5 receive.
 ///
 /// It preserves the load-bearing lookup key `(local L2VNI, ESI,
 /// Ethernet Tag)` and a deterministic set of candidate VTEP next hops.
-/// LAN-58 v1 imports only an exactly-one single-active candidate; the
-/// all-active case remains fail-closed until the L3 dataplane gains
-/// multipath/NHG semantics.
+/// The production table still imports only an exactly-one single-active
+/// candidate, but ADR-0090's projection model can now distinguish
+/// all-active target sets from conflicting redundancy signals before the
+/// L3 dataplane writer is upgraded.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EsiOverlayEadIndex {
     by_key: BTreeMap<
@@ -220,26 +301,18 @@ impl EsiOverlayEadIndex {
     {
         let mut tmp: BTreeMap<
             (EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId),
-            BTreeMap<IpAddr, bool>,
+            BTreeMap<IpAddr, EsiOverlayRedundancyMode>,
         > = BTreeMap::new();
         for route in routes {
             if route.esi == EthernetSegmentIdentifier::ZERO {
                 continue;
             }
-            let entry = tmp
-                .entry((route.l2vni, route.esi, route.ethernet_tag))
+            let mode = EsiOverlayRedundancyMode::from_single_active(route.single_active);
+            tmp.entry((route.l2vni, route.esi, route.ethernet_tag))
                 .or_default()
                 .entry(route.next_hop)
-                .or_insert(true);
-            // AND-fold (defense in depth): a candidate is single-active only
-            // if every duplicate signal for it agrees. Any all-active or
-            // conflicting signal forces non-single-active, so the Type 5
-            // import drops fail-closed. An import decision biases toward NOT
-            // importing on ambiguity — unlike the L2 aliasing OR-fold, whose
-            // contract is "if anything says single-active, suppress all-active
-            // aliasing". The daemon also feeds this path a strict (unanimous)
-            // EAD-per-ES mode fold; see `fold_ead_per_es_modes_for_esi_type5_import`.
-            *entry = *entry && route.single_active;
+                .and_modify(|existing| *existing = existing.fold(mode))
+                .or_insert(mode);
         }
         Self {
             by_key: tmp
@@ -249,10 +322,7 @@ impl EsiOverlayEadIndex {
                         key,
                         next_hops
                             .into_iter()
-                            .map(|(next_hop, single_active)| EsiOverlayEadCandidate {
-                                next_hop,
-                                single_active,
-                            })
+                            .map(|(next_hop, mode)| EsiOverlayEadCandidate { next_hop, mode })
                             .collect(),
                     )
                 })
@@ -480,9 +550,9 @@ pub enum DropReason {
         next_hop: IpAddr,
         vrf: String,
     },
-    /// The route resolved at least one all-active EAD candidate. LAN-58
-    /// v1 deliberately keeps all-active or mixed candidate sets
-    /// fail-closed until L3 multipath/NHG programming exists.
+    /// The route resolved at least one all-active EAD candidate, or a
+    /// mixed/conflicting redundancy set. Production import deliberately
+    /// keeps these fail-closed until L3 multipath/NHG programming exists.
     UnsupportedAllActiveEsiOverlayIndex {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
@@ -839,7 +909,7 @@ fn resolve_prefix_for_vrf(
                 unreachable!("ESI overlay resolution only selected in enabled mode");
             };
             resolve_esi_overlay_index(vrfs, vrf, route, esi_overlay_index)
-                .map(|resolved| (resolved.next_hop, router_mac))
+                .map(|resolved| (resolved, router_mac))
         }
         PrefixResolution::InterfaceLess(router_mac) => Ok((route.next_hop, router_mac)),
     }
@@ -955,7 +1025,26 @@ fn resolve_esi_overlay_index(
     vrf: &crate::ip_vrf::IpVrf,
     route: &ProjectedIpPrefixRoute,
     esi_overlay_index: &EsiOverlayEadIndex,
-) -> Result<EsiOverlayEadCandidate, DropReason> {
+) -> Result<IpAddr, DropReason> {
+    match resolve_esi_overlay_index_targets(vrfs, vrf, route, esi_overlay_index)? {
+        EsiOverlayResolvedTargets::SingleActive { next_hop } => Ok(next_hop),
+        EsiOverlayResolvedTargets::AllActive(targets) => {
+            Err(DropReason::UnsupportedAllActiveEsiOverlayIndex {
+                prefix: route.prefix,
+                next_hop: route.next_hop,
+                vrf: vrf.name.clone(),
+                candidates: targets.len(),
+            })
+        }
+    }
+}
+
+fn resolve_esi_overlay_index_targets(
+    vrfs: &crate::ip_vrf::IpVrfTable,
+    vrf: &crate::ip_vrf::IpVrf,
+    route: &ProjectedIpPrefixRoute,
+    esi_overlay_index: &EsiOverlayEadIndex,
+) -> Result<EsiOverlayResolvedTargets, DropReason> {
     let Some(linked_l2vnis) = vrfs
         .referenced_l2vnis(&vrf.name)
         .filter(|vnis| !vnis.is_empty())
@@ -974,7 +1063,10 @@ fn resolve_esi_overlay_index(
             vrf: vrf.name.clone(),
         });
     }
-    if candidates.iter().any(|candidate| !candidate.single_active) {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.mode == EsiOverlayRedundancyMode::Conflicting)
+    {
         return Err(DropReason::UnsupportedAllActiveEsiOverlayIndex {
             prefix: route.prefix,
             next_hop: route.next_hop,
@@ -982,13 +1074,43 @@ fn resolve_esi_overlay_index(
             candidates: candidates.len(),
         });
     }
-    match candidates.as_slice() {
-        [candidate] => Ok(*candidate),
-        _ => Err(DropReason::AmbiguousEsiOverlayIndex {
+    let has_single_active = candidates
+        .iter()
+        .any(|candidate| candidate.mode == EsiOverlayRedundancyMode::SingleActive);
+    let has_all_active = candidates
+        .iter()
+        .any(|candidate| candidate.mode == EsiOverlayRedundancyMode::AllActive);
+    match (has_single_active, has_all_active) {
+        (true, true) => Err(DropReason::UnsupportedAllActiveEsiOverlayIndex {
             prefix: route.prefix,
             next_hop: route.next_hop,
             vrf: vrf.name.clone(),
             candidates: candidates.len(),
+        }),
+        (true, false) => match candidates.as_slice() {
+            [candidate] => Ok(EsiOverlayResolvedTargets::SingleActive {
+                next_hop: candidate.next_hop,
+            }),
+            _ => Err(DropReason::AmbiguousEsiOverlayIndex {
+                prefix: route.prefix,
+                next_hop: route.next_hop,
+                vrf: vrf.name.clone(),
+                candidates: candidates.len(),
+            }),
+        },
+        (false, true) => EsiOverlayAllActiveTargetSet::from_next_hops(
+            candidates.iter().map(|candidate| candidate.next_hop),
+        )
+        .map(EsiOverlayResolvedTargets::AllActive)
+        .ok_or(DropReason::UnresolvedEsiOverlayIndex {
+            prefix: route.prefix,
+            next_hop: route.next_hop,
+            vrf: vrf.name.clone(),
+        }),
+        (false, false) => Err(DropReason::UnresolvedEsiOverlayIndex {
+            prefix: route.prefix,
+            next_hop: route.next_hop,
+            vrf: vrf.name.clone(),
         }),
     }
 }
@@ -998,17 +1120,23 @@ fn esi_overlay_matches(
     route: &ProjectedIpPrefixRoute,
     esi_overlay_index: &EsiOverlayEadIndex,
 ) -> Vec<EsiOverlayEadCandidate> {
-    let mut matches = Vec::new();
+    let mut by_next_hop: BTreeMap<IpAddr, EsiOverlayRedundancyMode> = BTreeMap::new();
     for vni in linked_l2vnis {
         if let Some(candidates) =
             esi_overlay_index.candidates_for(*vni, route.esi, route.ethernet_tag)
         {
-            matches.extend(candidates.iter().copied());
+            for candidate in candidates {
+                by_next_hop
+                    .entry(candidate.next_hop)
+                    .and_modify(|mode| *mode = mode.fold(candidate.mode))
+                    .or_insert(candidate.mode);
+            }
         }
     }
-    matches.sort_by_key(|candidate| (candidate.next_hop, candidate.single_active));
-    matches.dedup();
-    matches
+    by_next_hop
+        .into_iter()
+        .map(|(next_hop, mode)| EsiOverlayEadCandidate { next_hop, mode })
+        .collect()
 }
 
 /// Intersection test: at least one RT in common.
@@ -1178,7 +1306,7 @@ mod tests {
             Some(
                 &[EsiOverlayEadCandidate {
                     next_hop: "10.0.0.2".parse().unwrap(),
-                    single_active: true,
+                    mode: EsiOverlayRedundancyMode::SingleActive,
                 }][..]
             )
         );
@@ -1187,7 +1315,7 @@ mod tests {
             Some(
                 &[EsiOverlayEadCandidate {
                     next_hop: "10.0.0.3".parse().unwrap(),
-                    single_active: true,
+                    mode: EsiOverlayRedundancyMode::SingleActive,
                 }][..]
             )
         );
@@ -1196,7 +1324,7 @@ mod tests {
             Some(
                 &[EsiOverlayEadCandidate {
                     next_hop: "10.0.0.4".parse().unwrap(),
-                    single_active: true,
+                    mode: EsiOverlayRedundancyMode::SingleActive,
                 }][..]
             )
         );
@@ -1208,6 +1336,123 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn esi_overlay_ead_index_preserves_conflicting_duplicate_mode() {
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 8]);
+        let index = EsiOverlayEadIndex::build(vec![
+            esi_ead(100, esi, 0, "10.0.0.2", true),
+            esi_ead(100, esi, 0, "10.0.0.2", false),
+        ]);
+
+        assert_eq!(
+            index.candidates_for(l2vni(100), esi, EthernetTagId(0)),
+            Some(
+                &[EsiOverlayEadCandidate {
+                    next_hop: "10.0.0.2".parse().unwrap(),
+                    mode: EsiOverlayRedundancyMode::Conflicting,
+                }][..]
+            )
+        );
+    }
+
+    #[test]
+    fn esi_overlay_index_type5_models_all_active_target_set_deterministically() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let vrf = vrfs.iter().next().unwrap();
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.esi = esi;
+        r.ethernet_tag = EthernetTagId(42);
+        let index = EsiOverlayEadIndex::build(vec![
+            esi_ead(100, esi, 42, "10.0.0.3", false),
+            esi_ead(100, esi, 42, "10.0.0.2", false),
+            esi_ead(100, esi, 42, "10.0.0.3", false),
+        ]);
+
+        let resolved = resolve_esi_overlay_index_targets(&vrfs, vrf, &r, &index).unwrap();
+
+        match resolved {
+            EsiOverlayResolvedTargets::AllActive(targets) => assert_eq!(
+                targets.next_hops(),
+                &[
+                    "10.0.0.2".parse::<IpAddr>().unwrap(),
+                    "10.0.0.3".parse::<IpAddr>().unwrap()
+                ]
+            ),
+            EsiOverlayResolvedTargets::SingleActive { next_hop } => {
+                panic!("expected all-active target set, got single-active {next_hop}")
+            }
+        }
+    }
+
+    #[test]
+    fn esi_overlay_index_type5_models_single_survivor_all_active_target_set() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let vrf = vrfs.iter().next().unwrap();
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 10]);
+        let mut r = route(v4([10, 2, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.esi = esi;
+        let index = EsiOverlayEadIndex::build(vec![esi_ead(100, esi, 0, "10.0.0.2", false)]);
+
+        let resolved = resolve_esi_overlay_index_targets(&vrfs, vrf, &r, &index).unwrap();
+
+        match resolved {
+            EsiOverlayResolvedTargets::AllActive(targets) => assert_eq!(
+                targets.next_hops(),
+                &["10.0.0.2".parse::<IpAddr>().unwrap()]
+            ),
+            EsiOverlayResolvedTargets::SingleActive { next_hop } => {
+                panic!("expected all-active target set, got single-active {next_hop}")
+            }
+        }
+    }
+
+    #[test]
+    fn esi_overlay_index_type5_model_fails_closed_on_mixed_modes() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let vrf = vrfs.iter().next().unwrap();
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 11]);
+        let mut r = route(v4([10, 3, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.esi = esi;
+        let index = EsiOverlayEadIndex::build(vec![
+            esi_ead(100, esi, 0, "10.0.0.2", true),
+            esi_ead(100, esi, 0, "10.0.0.3", false),
+        ]);
+
+        let err = resolve_esi_overlay_index_targets(&vrfs, vrf, &r, &index).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DropReason::UnsupportedAllActiveEsiOverlayIndex { ref vrf, candidates: 2, .. }
+                if vrf == "blue"
+        ));
+    }
+
+    #[test]
+    fn esi_overlay_index_type5_model_fails_closed_on_duplicate_mode_conflict() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let vrf = vrfs.iter().next().unwrap();
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 12]);
+        let mut r = route(v4([10, 4, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.esi = esi;
+        let index = EsiOverlayEadIndex::build(vec![
+            esi_ead(100, esi, 0, "10.0.0.2", true),
+            esi_ead(100, esi, 0, "10.0.0.2", false),
+        ]);
+
+        let err = resolve_esi_overlay_index_targets(&vrfs, vrf, &r, &index).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DropReason::UnsupportedAllActiveEsiOverlayIndex { ref vrf, candidates: 1, .. }
+                if vrf == "blue"
+        ));
     }
 
     #[test]
