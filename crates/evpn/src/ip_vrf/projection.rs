@@ -541,12 +541,16 @@ impl RemoteIpPrefixTable {
     /// Projection helpers are the normal production entry point. This
     /// method exists for future staged projection paths and for
     /// dataplane-model tests that need to exercise target-set shapes
-    /// before the production projector imports them.
+    /// before the production projector imports them. The legacy scalar
+    /// `next_hop` is normalized from the authoritative target shape
+    /// before storage so older display/status callers cannot observe a
+    /// stale representative.
     pub fn insert_resolved(
         &mut self,
         vrf_id: IpVrfId,
-        entry: RemoteIpPrefixEntry,
+        mut entry: RemoteIpPrefixEntry,
     ) -> Option<RemoteIpPrefixEntry> {
+        entry.next_hop = entry.targets.representative_next_hop();
         self.entries.insert((vrf_id, entry.prefix), entry)
     }
 
@@ -1539,6 +1543,39 @@ mod tests {
                 panic!("expected all-active target set, got single-active {next_hop}")
             }
         }
+    }
+
+    #[test]
+    fn insert_resolved_normalizes_legacy_next_hop_from_targets() {
+        let vrf_id = IpVrfId::new(5000).unwrap();
+        let prefix = v4([10, 20, 0, 0], 24);
+        let targets = RemoteIpPrefixTargets::all_active([
+            "10.0.0.3".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+        ])
+        .unwrap();
+        let mut table = RemoteIpPrefixTable::new();
+
+        table.insert_resolved(
+            vrf_id,
+            RemoteIpPrefixEntry {
+                prefix,
+                next_hop: "10.0.0.99".parse().unwrap(),
+                targets,
+                l3vni: 5000,
+                router_mac: mac(),
+            },
+        );
+
+        let (_, stored) = table.iter().next().unwrap();
+        assert_eq!(stored.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            stored.targets.next_hops(),
+            &[
+                "10.0.0.2".parse::<IpAddr>().unwrap(),
+                "10.0.0.3".parse().unwrap()
+            ]
+        );
     }
 
     #[test]
