@@ -46,8 +46,17 @@ runs:
         # linux-modules-extra for the running kernel only when it's missing
         # (a no-op on runners that already have it, e.g. a self-hosted host).
         if ! sudo modprobe vrf 2>/dev/null; then
-          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || \
-            echo "::warning::linux-modules-extra-$(uname -r) unavailable; vrf-dependent tests may fail"
+          # Bound the ~50 MB modules-extra fetch: a stalled Azure apt mirror
+          # must fail this step fast (warning + recoverable rerun), never hang
+          # the whole job for ~30 min until the job timeout. The apt retry /
+          # connection timeouts ride out a brief mirror blip; `timeout` caps a
+          # full stall.
+          sudo timeout 240 apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y "linux-modules-extra-$(uname -r)" || \
+            echo "::warning::linux-modules-extra-$(uname -r) unavailable or slow; vrf-dependent tests may fail"
           sudo modprobe vrf || echo "::warning::vrf module still not loadable"
         fi
         sudo modprobe vxlan bridge bonding || true
