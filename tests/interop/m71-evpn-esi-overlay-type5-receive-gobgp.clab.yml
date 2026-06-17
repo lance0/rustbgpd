@@ -1,0 +1,76 @@
+# Containerlab topology: rustbgpd VTEP ← GoBGP PE, receive-side
+# RFC 9136 §4.3 ESI overlay-index Type 5 SINGLE-ACTIVE recursion
+# proof (M71 — PR #541).
+#
+# rustbgpd is the device under test (receive side / VTEP) with a full
+# L3 VRF datapath (vrf1 + L3VNI 100 + linked L2VNI 10). GoBGP is the
+# route source: it injects an ESI overlay-index Type 5 (non-zero ESI,
+# Router-MAC extcomm, Gateway Address 0.0.0.0) plus the Type 1
+# EAD-per-ES / EAD-per-EVI rows that resolve it.
+#
+# GoBGP — not FRR — because the proof needs byte-exact control over the
+# Type 1 EAD route shape (the EAD-per-ES Single-Active vs All-Active
+# ESI Label flag) injected and withdrawn independently of the Type 5,
+# and FRR's EVPN multi-homing is all-active only (it cannot originate a
+# single-active EAD-per-ES). GoBGP's `global rib add/del -a evpn a-d`
+# emits exactly the RFC 7432 §7.5 / RFC 9136 §4.3 wire shape this
+# receive path resolves.
+#
+# Phased control-plane + RIB/kernel proof (no CE/HR/ping):
+#   1. Fail-closed before any EAD: the ESI overlay Type 5 is held
+#      unresolved (`evpn_ip_vrf_remote_prefix_drops{reason=
+#      "unresolved_esi_overlay_index"}` >= 1, no kernel route).
+#   2. Single-active resolves: EAD-per-ES (single-active) + EAD-per-EVI
+#      let rustbgpd import the prefix into vrf1 (kernel route via the PE
+#      VTEP, drop gauge back to 0).
+#   3. All-active fail-closed: advertising the same EAD-per-ES without
+#      the Single-Active flag withdraws the import
+#      (`...{reason="unsupported_all_active_esi_overlay_index"}` >= 1).
+#   4. Withdraw: deleting the Type 5 leaves the VRF clean.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m71-evpn-esi-overlay-type5-receive-gobgp.sh
+#   containerlab destroy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml
+
+name: m71-evpn-esi-overlay-type5-receive-gobgp
+
+topology:
+  nodes:
+    vtep:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m71-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m71-vtep.sh:/usr/local/bin/start-rustbgpd-m71-vtep.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug,rustbgpd::evpn_l3_originator=debug
+
+    pe:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m71-pe.toml:/config/gobgp.toml:ro
+        - ./scripts/start-gobgp-m71-pe.sh:/usr/local/bin/start-gobgp-m71-pe.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-gobgp-m71-pe.sh
+
+  links:
+    - endpoints: ["vtep:eth1", "pe:eth1"]
+
+# Underlay: 10.0.0.0/24. vtep (rustbgpd) 10.0.0.1, pe (GoBGP) 10.0.0.2,
+# both AS 65000 (iBGP L2VPN/EVPN). L3VNI 100 / vrf1 and linked L2VNI 10
+# are configured on the rustbgpd VTEP only; GoBGP just speaks BGP. The
+# injected ESI overlay-index Type 5 carries prefix 203.0.113.0/24,
+# RD 65000:100, RT 65000:100, L3VNI 100, ESI 00:..:01, Router-MAC
+# 02:00:00:00:71:01, Gateway Address 0.0.0.0, next-hop 10.0.0.2.

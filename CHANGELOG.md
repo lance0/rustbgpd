@@ -170,6 +170,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface-less / GW-IP overlay-index behavior is unchanged. All-active
   and ambiguous ESI candidates stay fail-closed with bounded drop reasons
   until L3 multipath/NHG support and a real-peer interop proof exist.
+- **M71 GoBGP interop proof for ESI overlay-index Type 5 single-active
+  receive.** The hosted kernel-dataplane suite now drives the RFC 9136
+  §4.3 receive path against a real GoBGP route source: rustbgpd is the
+  receive-side DUT with a full L3 datapath (vrf1 / L3VNI 100 + linked
+  L2VNI 10), and GoBGP injects an ESI overlay-index Type 5 plus the
+  Type 1 EAD-per-ES / EAD-per-EVI rows that resolve it. The four phases
+  assert (1) the Type 5 alone is held unresolved
+  (`evpn_ip_vrf_remote_prefix_drops{reason="unresolved_esi_overlay_index"}`),
+  (2) adding the single-active EAD-per-ES + EAD-per-EVI imports the prefix
+  into vrf1 with a kernel route via the PE VTEP, (3) advertising the
+  same EAD-per-ES without the Single-Active flag withdraws the import and fails closed
+  (`...{reason="unsupported_all_active_esi_overlay_index"}`), and
+  (4) withdrawing the Type 5 leaves vrf1 clean. GoBGP rather than FRR
+  because the proof needs byte-exact, independent control over the
+  EAD-per-ES Single-Active vs All-Active ESI Label flag, which FRR's
+  all-active-only multi-homing cannot originate. All-active ESI overlay
+  receive remains deferred (fail-closed by design).
 
 ### Changed
 
@@ -203,7 +220,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   comparison matrix, EVPN enablement guide, and ADR-0087 now distinguish the
   near-term VXLAN/Linux alpha gaps (notably overlay-index protected-recursion
   interop beyond the shipped GW-IP proof; ESI origination and single-active
-  receive now ship, while all-active ESI receive and ESI interop remain)
+  receive now ship, the single-active receive path now has the M71 GoBGP
+  interop proof, while all-active ESI receive remains)
   from demand-shaped
   service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
@@ -215,8 +233,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still drop fail-closed after ESI origination and single-active receive
   shipped. The receive-side substrate carries Type-5 ESI and Ethernet Tag
   metadata and exposes a L2VNI-scoped EAD-per-EVI resolver index; the
-  remaining work is L3 multipath/NHG receive policy plus a real-peer interop
-  proof before rustbgpd can claim full RFC 9136 §4.3 protected recursion.
+  single-active receive path now has the M71 real-peer interop proof, and
+  the remaining work is L3 multipath/NHG receive policy for the all-active
+  case before rustbgpd can claim full RFC 9136 §4.3 protected recursion.
 - **Tightened the ADR-0077 route-family substrate boundary.** Future
   BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
   review rule: substrate-only PRs must remain unreachable from peers and

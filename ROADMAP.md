@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped (ADR-0087, FRR consume-side M68 for GW-IP; all-active ESI receive + ESI interop proof still pending) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped (ADR-0087, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI overlay-index recursion; all-active ESI receive still pending) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -185,8 +185,10 @@ has it, no broad performance sprints without profile evidence.
   NIST-BRIO ASPA vectors when they are easy to automate.
 - **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
   intentionally bounded. Native RFC 9136 GW-IP and ESI overlay-index Type 5
-  origination now ship; near-term standards work is broader protected-recursion
-  interop, especially the ESI path; demand-shaped
+  origination now ship, and the single-active ESI overlay-index receive path
+  now has a real-peer interop proof (M71, GoBGP route source); near-term
+  standards work is broader protected-recursion interop, especially the
+  all-active ESI path; demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
   bridge / VXLAN / VRF netdev creation. **ADR-0088 records that boundary:**
   VLAN-aware bridges require an explicit EVPN-to-Linux binding, and managed
@@ -224,8 +226,14 @@ has it, no broad performance sprints without profile evidence.
   RT-5s import only when scoped EAD-per-EVI state in a linked L2VNI yields
   exactly one single-active remote VTEP, using the RT-5 Router MAC as the inner
   destination MAC. All-active ESI RT-5s and ambiguous candidates stay
-  fail-closed until L3 multipath/NHG programming exists; a real-peer ESI
-  protected-recursion interop proof is still pending. The
+  fail-closed until L3 multipath/NHG programming exists. The single-active
+  receive path now has a real-peer ESI protected-recursion interop proof,
+  M71: a hosted GoBGP route source injects an ESI overlay-index Type 5 plus
+  the resolving EAD-per-ES (single-active) / EAD-per-EVI, and rustbgpd holds
+  it unresolved without the EADs, imports it into vrf1 once they arrive
+  (kernel route via the PE VTEP), and re-fails-closed when the EAD-per-ES is
+  advertised without the Single-Active flag. An all-active ESI protected-recursion proof
+  remains pending behind the L3 multipath/NHG receive work. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
