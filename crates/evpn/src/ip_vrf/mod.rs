@@ -24,7 +24,8 @@ pub use projection::{
     EsiOverlayAllActiveTargetSet, EsiOverlayEadCandidate, EsiOverlayEadIndex,
     EsiOverlayRedundancyMode, EsiOverlayResolvedTargets, ProjectedEsiOverlayEadPerEvi,
     ProjectedIpPrefixRoute, ProjectedOverlayIndexRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable,
-    project_ip_prefix_routes, project_ip_prefix_routes_with_overlay_and_esi_index,
+    RemoteIpPrefixTargets, project_ip_prefix_routes,
+    project_ip_prefix_routes_with_overlay_and_esi_index,
     project_ip_prefix_routes_with_overlay_index,
 };
 pub use readiness::{

@@ -224,7 +224,11 @@ pub struct EsiOverlayAllActiveTargetSet {
 }
 
 impl EsiOverlayAllActiveTargetSet {
-    fn from_next_hops<I>(next_hops: I) -> Option<Self>
+    /// Build a deterministic non-empty target set.
+    ///
+    /// Returns `None` when the input is empty after collection.
+    #[must_use]
+    pub fn from_next_hops<I>(next_hops: I) -> Option<Self>
     where
         I: IntoIterator<Item = IpAddr>,
     {
@@ -255,6 +259,68 @@ impl EsiOverlayAllActiveTargetSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.next_hops.is_empty()
+    }
+}
+
+/// Resolved dataplane next-hop shape for one remote IP prefix.
+///
+/// The long-shipped Type 5 path is single-target. ADR-0090's
+/// all-active ESI overlay-index receive path needs a deterministic
+/// target set for the same `(IP-VRF, prefix)` route. Keeping the shape
+/// explicit here lets the L3 diff model reason about all-active routes
+/// without overloading the legacy scalar `next_hop` convenience field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteIpPrefixTargets {
+    /// Single remote VTEP target.
+    Single { next_hop: IpAddr },
+    /// All-active ESI overlay-index target set. Non-empty and
+    /// deterministic by construction.
+    AllActive(EsiOverlayAllActiveTargetSet),
+}
+
+impl RemoteIpPrefixTargets {
+    /// Build the single-target shape.
+    #[must_use]
+    pub const fn single(next_hop: IpAddr) -> Self {
+        Self::Single { next_hop }
+    }
+
+    /// Build an all-active target set.
+    ///
+    /// Returns `None` when the supplied target set is empty.
+    #[must_use]
+    pub fn all_active<I>(next_hops: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        EsiOverlayAllActiveTargetSet::from_next_hops(next_hops).map(Self::AllActive)
+    }
+
+    /// Representative next-hop for legacy display/status surfaces.
+    ///
+    /// For all-active target sets this is the first deterministic
+    /// member, not a forwarding tie-break.
+    #[must_use]
+    pub fn representative_next_hop(&self) -> IpAddr {
+        match self {
+            Self::Single { next_hop } => *next_hop,
+            Self::AllActive(targets) => targets.next_hops()[0],
+        }
+    }
+
+    /// Deterministic next-hop members.
+    #[must_use]
+    pub fn next_hops(&self) -> &[IpAddr] {
+        match self {
+            Self::Single { next_hop } => std::slice::from_ref(next_hop),
+            Self::AllActive(targets) => targets.next_hops(),
+        }
+    }
+
+    /// True for the all-active target-set shape.
+    #[must_use]
+    pub const fn is_all_active(&self) -> bool {
+        matches!(self, Self::AllActive(_))
     }
 }
 
@@ -388,8 +454,13 @@ pub struct RemoteIpPrefixEntry {
     /// The FIB nexthop — what the recursive lookup terminates on
     /// after VXLAN encap. For interface-less Type 5 this is the Type 5
     /// originator VTEP; for overlay-index Type 5 it is the resolved
-    /// Type 2 MAC/IP route's VTEP.
+    /// Type 2 MAC/IP route's VTEP. For all-active target sets this is
+    /// the deterministic representative member retained for legacy
+    /// display/status callers; dataplane code must inspect
+    /// [`Self::targets`] before treating it as a single egress.
     pub next_hop: IpAddr,
+    /// Resolved dataplane target shape.
+    pub targets: RemoteIpPrefixTargets,
     /// L3VNI to wrap encapsulated frames with.
     pub l3vni: u32,
     /// Inner destination MAC the kernel needs for the recursive
@@ -397,6 +468,49 @@ pub struct RemoteIpPrefixEntry {
     /// MAC extcomm; for overlay-index Type 5 it is the MAC of the
     /// resolved Type 2 MAC/IP route.
     pub router_mac: MacAddress,
+}
+
+impl RemoteIpPrefixEntry {
+    /// Build a legacy single-target entry.
+    #[must_use]
+    pub const fn single(
+        prefix: EvpnIpPrefixValue,
+        next_hop: IpAddr,
+        l3vni: u32,
+        router_mac: MacAddress,
+    ) -> Self {
+        Self {
+            prefix,
+            next_hop,
+            targets: RemoteIpPrefixTargets::single(next_hop),
+            l3vni,
+            router_mac,
+        }
+    }
+
+    /// Build an all-active target-set entry.
+    ///
+    /// Returns `None` when the supplied target set is empty.
+    #[must_use]
+    pub fn all_active<I>(
+        prefix: EvpnIpPrefixValue,
+        next_hops: I,
+        l3vni: u32,
+        router_mac: MacAddress,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        let targets = RemoteIpPrefixTargets::all_active(next_hops)?;
+        let next_hop = targets.representative_next_hop();
+        Some(Self {
+            prefix,
+            next_hop,
+            targets,
+            l3vni,
+            router_mac,
+        })
+    }
 }
 
 /// Per-IP-VRF imported prefix table. Keyed by `(IpVrfId, prefix)` so
@@ -420,6 +534,24 @@ impl RemoteIpPrefixTable {
         &self,
     ) -> impl Iterator<Item = (&(IpVrfId, EvpnIpPrefixValue), &RemoteIpPrefixEntry)> {
         self.entries.iter()
+    }
+
+    /// Insert an already-resolved entry for one IP-VRF.
+    ///
+    /// Projection helpers are the normal production entry point. This
+    /// method exists for future staged projection paths and for
+    /// dataplane-model tests that need to exercise target-set shapes
+    /// before the production projector imports them. The legacy scalar
+    /// `next_hop` is normalized from the authoritative target shape
+    /// before storage so older display/status callers cannot observe a
+    /// stale representative.
+    pub fn insert_resolved(
+        &mut self,
+        vrf_id: IpVrfId,
+        mut entry: RemoteIpPrefixEntry,
+    ) -> Option<RemoteIpPrefixEntry> {
+        entry.next_hop = entry.targets.representative_next_hop();
+        self.entries.insert((vrf_id, entry.prefix), entry)
     }
 
     /// Entries scoped to one IP-VRF.
@@ -825,6 +957,7 @@ where
             let entry = RemoteIpPrefixEntry {
                 prefix: route.prefix,
                 next_hop,
+                targets: RemoteIpPrefixTargets::single(next_hop),
                 l3vni: vrf.id.as_u32(),
                 router_mac,
             };
@@ -1410,6 +1543,39 @@ mod tests {
                 panic!("expected all-active target set, got single-active {next_hop}")
             }
         }
+    }
+
+    #[test]
+    fn insert_resolved_normalizes_legacy_next_hop_from_targets() {
+        let vrf_id = IpVrfId::new(5000).unwrap();
+        let prefix = v4([10, 20, 0, 0], 24);
+        let targets = RemoteIpPrefixTargets::all_active([
+            "10.0.0.3".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+        ])
+        .unwrap();
+        let mut table = RemoteIpPrefixTable::new();
+
+        table.insert_resolved(
+            vrf_id,
+            RemoteIpPrefixEntry {
+                prefix,
+                next_hop: "10.0.0.99".parse().unwrap(),
+                targets,
+                l3vni: 5000,
+                router_mac: mac(),
+            },
+        );
+
+        let (_, stored) = table.iter().next().unwrap();
+        assert_eq!(stored.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            stored.targets.next_hops(),
+            &[
+                "10.0.0.2".parse::<IpAddr>().unwrap(),
+                "10.0.0.3".parse().unwrap()
+            ]
+        );
     }
 
     #[test]

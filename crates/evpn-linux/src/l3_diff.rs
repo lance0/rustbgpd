@@ -53,9 +53,11 @@
 //!
 //! The kernel-side FDB row is `(l3vxlan_ifindex, router_mac) → dst`.
 //! Two `want` prefixes carrying the same `router_mac` but different
-//! `next_hop` values would have the second `AddL3VxlanFdb` overwrite
-//! the first via `.replace()`, silently misforwarding the first
-//! prefix's traffic. The diff detects this as
+//! target sets would have the second `AddL3VxlanFdb` overwrite the
+//! first via `.replace()` in the scalar case, or would require one
+//! Router-MAC FDB-NHG row to mean two different member sets in the
+//! future all-active case. Either silently misforwards one prefix's
+//! traffic. The diff detects this as
 //! [`L3Drop::RouterMacConflict`] and drops *every* conflicting
 //! prefix (operator misconfig — fail loud).
 //!
@@ -95,7 +97,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
+use rustbgpd_evpn::ip_vrf::{
+    IpVrf, IpVrfTable, RemoteIpPrefixEntry, RemoteIpPrefixTable, RemoteIpPrefixTargets,
+};
 use rustbgpd_evpn::{EvpnIpPrefixValue, IpVrfId, MacAddress};
 
 use crate::dataplane::DataplaneOp;
@@ -162,6 +166,44 @@ pub struct InstallState {
     pub l3vxlan_ifindex: u32,
     /// Kernel VRF route table id.
     pub table_id: u32,
+}
+
+/// L3 route target shape tracked by the evpn-linux diff model.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum L3RouteTargetSet {
+    /// Existing single-VTEP route install.
+    Single { next_hop: IpAddr },
+    /// Future all-active route install. Members are sorted and
+    /// de-duplicated by the EVPN projection layer.
+    AllActive { next_hops: Vec<IpAddr> },
+}
+
+impl L3RouteTargetSet {
+    fn from_entry(entry: &rustbgpd_evpn::ip_vrf::RemoteIpPrefixEntry) -> Self {
+        match &entry.targets {
+            RemoteIpPrefixTargets::Single { next_hop } => Self::Single {
+                next_hop: *next_hop,
+            },
+            RemoteIpPrefixTargets::AllActive(targets) => Self::AllActive {
+                next_hops: targets.next_hops().to_vec(),
+            },
+        }
+    }
+
+    fn next_hops(&self) -> &[IpAddr] {
+        match self {
+            Self::Single { next_hop } => std::slice::from_ref(next_hop),
+            Self::AllActive { next_hops } => next_hops,
+        }
+    }
+
+    fn representative_next_hop(&self) -> IpAddr {
+        self.next_hops()[0]
+    }
+
+    fn is_all_active(&self) -> bool {
+        matches!(self, Self::AllActive { .. })
+    }
 }
 
 impl L3OwnedState {
@@ -248,18 +290,29 @@ pub enum L3Drop {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
     },
-    /// Two or more `want` prefixes share an
+    /// Two or more desired prefixes share an
     /// `(l3vxlan_ifindex, router_mac)` key but advertise different
-    /// `next_hop` values. The kernel FDB can only store one
-    /// destination per `(idx, mac)` key, so installing both would
-    /// silently misforward one prefix's traffic to the other's
-    /// VTEP. Drop all conflicting prefixes — operator must
-    /// reconfigure.
+    /// normalized target sets. The current scalar kernel FDB can only
+    /// store one destination per `(idx, mac)` key, and the future
+    /// FDB-NHG row can only name one member set, so installing both
+    /// would silently misforward one prefix. Drop all conflicting
+    /// prefixes — operator must reconfigure.
     RouterMacConflict {
         vrf_id: IpVrfId,
         prefix: EvpnIpPrefixValue,
         router_mac: MacAddress,
         conflicting_next_hop: IpAddr,
+    },
+    /// The desired route carried an all-active target set, but the
+    /// current L3 writer can only program a scalar route + scalar
+    /// L3VXLAN FDB row. Drop before emitting any scalar ops so an
+    /// accidental target-set intent cannot partially program
+    /// forwarding state.
+    UnsupportedAllActiveTargetSet {
+        vrf_id: IpVrfId,
+        prefix: EvpnIpPrefixValue,
+        router_mac: MacAddress,
+        candidates: usize,
     },
 }
 
@@ -291,6 +344,26 @@ impl Target {
             && self.router_mac == install.router_mac
             && self.l3vxlan_ifindex == install.l3vxlan_ifindex
             && self.table_id == install.table_id
+    }
+}
+
+#[derive(Debug)]
+struct Candidate {
+    vrf_id: IpVrfId,
+    prefix: EvpnIpPrefixValue,
+    router_mac: MacAddress,
+    l3vxlan_ifindex: u32,
+    table_id: u32,
+    targets: L3RouteTargetSet,
+}
+
+impl Candidate {
+    fn fdb_key(&self) -> (u32, MacAddress) {
+        (self.l3vxlan_ifindex, self.router_mac)
+    }
+
+    fn representative_next_hop(&self) -> IpAddr {
+        self.targets.representative_next_hop()
     }
 }
 
@@ -498,7 +571,7 @@ fn build_want(
     ready_l3vxlan_ifindex: &BTreeMap<IpVrfId, u32>,
     plan: &mut L3Plan,
 ) -> BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target> {
-    let mut want: BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target> = BTreeMap::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for ((vrf_id, prefix), entry) in intent.iter() {
         let Some(vrf) = ip_vrfs.iter().find(|v| v.id == *vrf_id) else {
             // Projection produced an entry for an unknown VRF; drop
@@ -513,69 +586,126 @@ fn build_want(
             });
             continue;
         };
-        if !family_matches(*prefix, entry.next_hop) || !family_matches(*prefix, vrf.local_vtep_ip) {
-            plan.drops.push(L3Drop::FamilyMismatch {
-                vrf_id: *vrf_id,
-                prefix: *prefix,
-                next_hop: entry.next_hop,
-            });
-            continue;
+        if let Some(candidate) = build_candidate(*vrf_id, *prefix, entry, vrf, ifindex, plan) {
+            candidates.push(candidate);
         }
-        want.insert(
-            (*vrf_id, *prefix),
-            Target {
-                next_hop: entry.next_hop,
-                router_mac: entry.router_mac,
-                l3vxlan_ifindex: ifindex,
-                table_id: vrf.table_id,
-            },
-        );
-        let _ = entry; // suppress accidental clippy::used-binding noise
     }
 
     // ── Router MAC conflict detection ──────────────────────────
     //
-    // The kernel FDB row is `(l3vxlan_ifindex, router_mac) → dst`.
-    // If two `want` entries claim the same `(idx, router_mac)` but
-    // map it to different next-hops, the last `AddL3VxlanFdb` to
-    // win the race would silently misforward the other prefix's
-    // traffic. Drop every conflicting entry (operator misconfig —
-    // fail loud).
-    let mut by_mac: BTreeMap<(u32, MacAddress), BTreeSet<IpAddr>> = BTreeMap::new();
-    for target in want.values() {
-        by_mac
-            .entry((target.l3vxlan_ifindex, target.router_mac))
-            .or_default()
-            .insert(target.next_hop);
-    }
-    let conflicting: BTreeSet<(u32, MacAddress)> = by_mac
-        .iter()
-        .filter(|(_, hops)| hops.len() > 1)
-        .map(|(k, _)| *k)
-        .collect();
-    if !conflicting.is_empty() {
-        let conflict_keys: Vec<(IpVrfId, EvpnIpPrefixValue, MacAddress, IpAddr)> = want
-            .iter()
-            .filter_map(|((vrf_id, prefix), t)| {
-                if conflicting.contains(&(t.l3vxlan_ifindex, t.router_mac)) {
-                    Some((*vrf_id, *prefix, t.router_mac, t.next_hop))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for (vrf_id, prefix, router_mac, conflicting_next_hop) in conflict_keys {
-            want.remove(&(vrf_id, prefix));
-            plan.drops.push(L3Drop::RouterMacConflict {
-                vrf_id,
-                prefix,
-                router_mac,
-                conflicting_next_hop,
-            });
-        }
+    // The kernel FDB row is `(l3vxlan_ifindex, router_mac) → dst` in
+    // the scalar writer and `(l3vxlan_ifindex, router_mac) → NHG
+    // members` in the future all-active writer. If two desired
+    // entries claim the same key but map it to different normalized
+    // target sets, one kernel row would silently misforward the other
+    // prefix's traffic. Drop every conflicting entry (operator
+    // misconfig — fail loud).
+    // The current writer is scalar, but conflict detection is already
+    // target-set-aware: a single-target claim and an all-active claim
+    // sharing the same `(idx, router_mac)` are compatible only when
+    // their normalized target members are identical.
+    let conflicting = conflicting_fdb_keys(&candidates);
+    let mut want: BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target> = BTreeMap::new();
+    for candidate in &candidates {
+        admit_candidate(candidate, &conflicting, plan, &mut want);
     }
 
     want
+}
+
+fn build_candidate(
+    vrf_id: IpVrfId,
+    prefix: EvpnIpPrefixValue,
+    entry: &RemoteIpPrefixEntry,
+    vrf: &IpVrf,
+    l3vxlan_ifindex: u32,
+    plan: &mut L3Plan,
+) -> Option<Candidate> {
+    let targets = L3RouteTargetSet::from_entry(entry);
+    let mismatched_next_hop = targets
+        .next_hops()
+        .iter()
+        .copied()
+        .find(|next_hop| !family_matches(prefix, *next_hop));
+    if let Some(next_hop) = mismatched_next_hop {
+        plan.drops.push(L3Drop::FamilyMismatch {
+            vrf_id,
+            prefix,
+            next_hop,
+        });
+        return None;
+    }
+    if !family_matches(prefix, vrf.local_vtep_ip) {
+        plan.drops.push(L3Drop::FamilyMismatch {
+            vrf_id,
+            prefix,
+            next_hop: vrf.local_vtep_ip,
+        });
+        return None;
+    }
+    Some(Candidate {
+        vrf_id,
+        prefix,
+        router_mac: entry.router_mac,
+        l3vxlan_ifindex,
+        table_id: vrf.table_id,
+        targets,
+    })
+}
+
+fn conflicting_fdb_keys(candidates: &[Candidate]) -> BTreeSet<(u32, MacAddress)> {
+    let mut by_mac: BTreeMap<(u32, MacAddress), BTreeSet<Vec<IpAddr>>> = BTreeMap::new();
+    for candidate in candidates {
+        by_mac
+            .entry(candidate.fdb_key())
+            .or_default()
+            .insert(candidate.targets.next_hops().to_vec());
+    }
+    by_mac
+        .iter()
+        .filter(|(_, target_sets)| target_sets.len() > 1)
+        .map(|(key, _)| *key)
+        .collect()
+}
+
+fn admit_candidate(
+    candidate: &Candidate,
+    conflicting: &BTreeSet<(u32, MacAddress)>,
+    plan: &mut L3Plan,
+    want: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target>,
+) {
+    if conflicting.contains(&candidate.fdb_key()) {
+        plan.drops.push(L3Drop::RouterMacConflict {
+            vrf_id: candidate.vrf_id,
+            prefix: candidate.prefix,
+            router_mac: candidate.router_mac,
+            conflicting_next_hop: candidate.representative_next_hop(),
+        });
+        return;
+    }
+
+    if candidate.targets.is_all_active() {
+        plan.drops.push(L3Drop::UnsupportedAllActiveTargetSet {
+            vrf_id: candidate.vrf_id,
+            prefix: candidate.prefix,
+            router_mac: candidate.router_mac,
+            candidates: candidate.targets.next_hops().len(),
+        });
+        return;
+    }
+
+    let L3RouteTargetSet::Single { next_hop } = &candidate.targets else {
+        unreachable!("all-active candidates returned above");
+    };
+    want.insert(
+        (candidate.vrf_id, candidate.prefix),
+        Target {
+            next_hop: *next_hop,
+            router_mac: candidate.router_mac,
+            l3vxlan_ifindex: candidate.l3vxlan_ifindex,
+            table_id: candidate.table_id,
+        },
+    );
 }
 
 /// Find an owner install for a neighbor key we're about to remove.
@@ -729,7 +859,9 @@ fn family_matches(prefix: EvpnIpPrefixValue, addr: IpAddr) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use rustbgpd_evpn::ip_vrf::{IpVrf, ProjectedIpPrefixRoute, project_ip_prefix_routes};
+    use rustbgpd_evpn::ip_vrf::{
+        IpVrf, ProjectedIpPrefixRoute, RemoteIpPrefixEntry, project_ip_prefix_routes,
+    };
     use rustbgpd_evpn::{EthernetSegmentIdentifier, Ipv4Prefix};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -805,6 +937,19 @@ mod tests {
             route_targets: vec![format!("65000:{vni}").parse().unwrap()],
             router_mac: Some(rmac),
         }
+    }
+
+    fn all_active_intent(
+        vrf_id: IpVrfId,
+        prefix: EvpnIpPrefixValue,
+        next_hops: Vec<IpAddr>,
+        rmac: MacAddress,
+    ) -> RemoteIpPrefixTable {
+        let mut intent = RemoteIpPrefixTable::new();
+        let entry = RemoteIpPrefixEntry::all_active(prefix, next_hops, vrf_id.as_u32(), rmac)
+            .expect("test all-active target set must be non-empty");
+        intent.insert_resolved(vrf_id, entry);
+        intent
     }
 
     /// Cold start with one prefix → three ops in canonical phase
@@ -1155,6 +1300,132 @@ mod tests {
                 .iter()
                 .all(|op| !matches!(op, DataplaneOp::AddRemoteIpRoute { .. })),
         );
+    }
+
+    /// All-active target-set intent can now reach the L3 diff model,
+    /// but PR4 must not partially translate it into scalar route /
+    /// neighbor / FDB ops. It stays observable as an install-time
+    /// drop until the LAN-73 writer PR adds route ECMP + L3VXLAN
+    /// FDB-NHG support.
+    #[test]
+    fn all_active_target_set_intent_emits_no_scalar_l3_ops() {
+        let prefix = v4([198, 51, 102, 0], 24);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let intent = all_active_intent(
+            vrf_id,
+            prefix,
+            vec![ip4(10, 0, 0, 3), ip4(10, 0, 0, 2), ip4(10, 0, 0, 3)],
+            rmac,
+        );
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+
+        let plan = compute_l3_diff(&intent, &L3OwnedState::default(), &ready, &ip_vrfs);
+
+        assert!(
+            plan.ops.is_empty(),
+            "unsupported all-active target sets must not emit scalar ops: {:?}",
+            plan.ops
+        );
+        assert!(matches!(
+            plan.drops.as_slice(),
+            [L3Drop::UnsupportedAllActiveTargetSet {
+                vrf_id: id,
+                prefix: p,
+                router_mac,
+                candidates: 2
+            }] if *id == vrf_id && *p == prefix && *router_mac == rmac
+        ));
+    }
+
+    /// A one-member all-active set is still an all-active policy
+    /// shape, not a single-active route. Downgrading it to the scalar
+    /// path would make later member growth change route ownership
+    /// semantics under the same prefix.
+    #[test]
+    fn one_member_all_active_target_set_stays_unsupported_not_scalar() {
+        let prefix = v4([198, 51, 103, 0], 24);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let intent = all_active_intent(vrf_id, prefix, vec![ip4(10, 0, 0, 2)], rmac);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+
+        let plan = compute_l3_diff(&intent, &L3OwnedState::default(), &ready, &ip_vrfs);
+
+        assert!(plan.ops.is_empty());
+        assert!(matches!(
+            plan.drops.as_slice(),
+            [L3Drop::UnsupportedAllActiveTargetSet { candidates: 1, .. }]
+        ));
+    }
+
+    /// Target-set conflict detection runs before unsupported
+    /// all-active suppression. If two prefixes need the same
+    /// Router-MAC row with different future member sets, dropping only
+    /// the all-active one would leave a scalar route programming an
+    /// incompatible row. Drop both.
+    #[test]
+    fn scalar_and_all_active_router_mac_conflict_drops_both_prefixes() {
+        let prefix_a = v4([198, 51, 104, 0], 24);
+        let prefix_b = v4([198, 51, 105, 0], 24);
+        let nh_a = ip4(10, 0, 0, 2);
+        let nh_b = ip4(10, 0, 0, 3);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut intent = intent_with(&ip_vrfs, vec![t5(prefix_a, nh_a, 101, rmac)]);
+        let all_active =
+            RemoteIpPrefixEntry::all_active(prefix_b, vec![nh_a, nh_b], 101, rmac).unwrap();
+        intent.insert_resolved(vrf_id, all_active);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+
+        let plan = compute_l3_diff(&intent, &L3OwnedState::default(), &ready, &ip_vrfs);
+
+        let conflict_drops = plan
+            .drops
+            .iter()
+            .filter(|drop| matches!(drop, L3Drop::RouterMacConflict { .. }))
+            .count();
+        assert_eq!(conflict_drops, 2, "both incompatible claims must drop");
+        assert!(
+            plan.ops.is_empty(),
+            "no scalar op should survive the conflict"
+        );
+    }
+
+    #[test]
+    fn different_all_active_target_sets_for_router_mac_drop_all_claims() {
+        let prefix_a = v4([198, 51, 106, 0], 24);
+        let prefix_b = v4([198, 51, 107, 0], 24);
+        let nh_a = ip4(10, 0, 0, 2);
+        let nh_b = ip4(10, 0, 0, 3);
+        let nh_c = ip4(10, 0, 0, 4);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut intent = RemoteIpPrefixTable::new();
+        intent.insert_resolved(
+            vrf_id,
+            RemoteIpPrefixEntry::all_active(prefix_a, vec![nh_a, nh_b], 101, rmac).unwrap(),
+        );
+        intent.insert_resolved(
+            vrf_id,
+            RemoteIpPrefixEntry::all_active(prefix_b, vec![nh_a, nh_c], 101, rmac).unwrap(),
+        );
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+
+        let plan = compute_l3_diff(&intent, &L3OwnedState::default(), &ready, &ip_vrfs);
+
+        assert_eq!(
+            plan.drops
+                .iter()
+                .filter(|drop| matches!(drop, L3Drop::RouterMacConflict { .. }))
+                .count(),
+            2
+        );
+        assert!(plan.ops.is_empty());
     }
 
     /// Regression for review finding #4 (FDB dst drift): the owned
