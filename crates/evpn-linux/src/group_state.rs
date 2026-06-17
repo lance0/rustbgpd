@@ -31,7 +31,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EthernetSegmentIdentifier, EthernetTagId, EvpnInstanceId, MacAddress};
+use rustbgpd_evpn::{
+    EthernetSegmentIdentifier, EthernetTagId, EvpnInstanceId, EvpnIpPrefixValue, IpVrfId,
+    MacAddress,
+};
 
 /// Dataplane-owned group identity. Distinct from the portable
 /// `RemoteMacEntry::alias_group_key` (which is `(ESI, EthernetTag)`
@@ -422,9 +425,331 @@ impl GroupOwnedMap {
     }
 }
 
+/// Dataplane-owned L3 FDB-NHG identity for all-active ESI overlay
+/// Type-5 receive. Distinct from [`AliasGroupKey`]: this state owns
+/// the L3VXLAN Router-MAC group used by one or more VRF routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct L3NhgKey {
+    /// IP-VRF that owns the route table using this group.
+    pub vrf_id: IpVrfId,
+    /// L3VXLAN device ifindex where the FDB-NHG row is programmed.
+    pub l3vxlan_ifindex: u32,
+    /// Remote Router MAC the L3VXLAN FDB row resolves.
+    pub router_mac: MacAddress,
+}
+
+impl L3NhgKey {
+    /// Build a new L3 FDB-NHG key.
+    #[must_use]
+    pub fn new(vrf_id: IpVrfId, l3vxlan_ifindex: u32, router_mac: MacAddress) -> Self {
+        Self {
+            vrf_id,
+            l3vxlan_ifindex,
+            router_mac,
+        }
+    }
+}
+
+/// Route identity that references one L3 FDB-NHG group.
+pub type L3RouteKey = (IpVrfId, EvpnIpPrefixValue);
+
+/// One L3VXLAN FDB nexthop group installed in the kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L3FdbNhgOwned {
+    /// Kernel nexthop group ID tagged via
+    /// [`crate::nh_id_alloc::L3_NHG_TAG`].
+    pub id: u32,
+    /// Canonical sorted+deduped VTEP IP member set, last applied to
+    /// the kernel.
+    pub members: BTreeSet<IpAddr>,
+    /// Routes whose VRF-table ECMP entries depend on this group.
+    pub ref_routes: BTreeSet<L3RouteKey>,
+}
+
+/// One L3VXLAN per-VTEP nexthop installed in the kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L3VtepNh {
+    /// Kernel nexthop ID tagged via
+    /// [`crate::nh_id_alloc::L3_VTEP_NH_TAG`].
+    pub id: u32,
+    /// L3 groups that reference this per-VTEP nexthop.
+    pub ref_groups: BTreeSet<L3NhgKey>,
+}
+
+impl L3VtepNh {
+    /// `true` when no L3 group references this nexthop.
+    #[must_use]
+    pub fn is_unreferenced(&self) -> bool {
+        self.ref_groups.is_empty()
+    }
+}
+
+/// Result of unref'ing a route from an L3 FDB-NHG group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum L3RefDelta {
+    /// The group still has other routes referencing it.
+    GroupStillReferenced,
+    /// Last route unref'd. Caller should delete the group from the
+    /// kernel and then unref each member nexthop.
+    GroupShouldDelete { id: u32, members: Vec<IpAddr> },
+}
+
+/// Coordinated state for L3VXLAN FDB-NHG ownership.
+///
+/// This deliberately mirrors [`GroupOwnedMap`] without sharing its
+/// key space: L2 aliasing groups use `VNI/ESI/EthernetTag` and the
+/// L2 NHID tag ranges, while L3 Type-5 recursion groups use
+/// `VRF/l3vxlan_ifindex/Router-MAC` and the L3 NHID tag ranges.
+#[derive(Debug, Default, Clone)]
+pub struct L3FdbNhgOwnedMap {
+    groups: BTreeMap<L3NhgKey, L3FdbNhgOwned>,
+    vtep_nhs: BTreeMap<IpAddr, L3VtepNh>,
+    route_refs: BTreeMap<L3RouteKey, L3NhgKey>,
+}
+
+impl L3FdbNhgOwnedMap {
+    /// Create an empty L3 FDB-NHG owned-state map.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up an L3 group by key.
+    #[must_use]
+    pub fn group(&self, key: &L3NhgKey) -> Option<&L3FdbNhgOwned> {
+        self.groups.get(key)
+    }
+
+    /// Look up an L3 per-VTEP nexthop by gateway IP.
+    #[must_use]
+    pub fn vtep_nh(&self, ip: &IpAddr) -> Option<&L3VtepNh> {
+        self.vtep_nhs.get(ip)
+    }
+
+    /// Look up the group currently referenced by a route.
+    #[must_use]
+    pub fn route_group(&self, route: &L3RouteKey) -> Option<L3NhgKey> {
+        self.route_refs.get(route).copied()
+    }
+
+    /// `true` if no L3 groups, per-VTEP NHs, or route refs are tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.vtep_nhs.is_empty() && self.route_refs.is_empty()
+    }
+
+    /// Number of tracked L3 groups.
+    #[must_use]
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Number of tracked L3 per-VTEP nexthops.
+    #[must_use]
+    pub fn vtep_nh_count(&self) -> usize {
+        self.vtep_nhs.len()
+    }
+
+    /// Number of route-to-group references.
+    #[must_use]
+    pub fn route_ref_count(&self) -> usize {
+        self.route_refs.len()
+    }
+
+    /// Record a successful L3 per-VTEP nexthop install. Idempotent.
+    pub fn record_member_install(&mut self, ip: IpAddr, id: u32) {
+        self.vtep_nhs.entry(ip).or_insert_with(|| L3VtepNh {
+            id,
+            ref_groups: BTreeSet::new(),
+        });
+    }
+
+    /// Record a successful L3 FDB-NHG group install with its initial
+    /// canonical member set. Each tracked member's `ref_groups` set
+    /// gets `key` added.
+    pub fn record_group_install(&mut self, key: L3NhgKey, id: u32, members: BTreeSet<IpAddr>) {
+        if let Some(old) = self.groups.get(&key) {
+            for ip in &old.members {
+                if !members.contains(ip)
+                    && let Some(vtep) = self.vtep_nhs.get_mut(ip)
+                {
+                    vtep.ref_groups.remove(&key);
+                }
+            }
+        }
+        for ip in &members {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.insert(key);
+            }
+        }
+        let ref_routes = self
+            .groups
+            .get(&key)
+            .map_or_else(BTreeSet::new, |old| old.ref_routes.clone());
+        self.groups.insert(
+            key,
+            L3FdbNhgOwned {
+                id,
+                members,
+                ref_routes,
+            },
+        );
+    }
+
+    /// Record a member-set change for an existing L3 group. Returns
+    /// the IPs removed from the group so the caller can attempt
+    /// per-VTEP NH GC via [`Self::record_member_unref`].
+    pub fn record_group_member_change(
+        &mut self,
+        key: L3NhgKey,
+        new_members: BTreeSet<IpAddr>,
+    ) -> Vec<IpAddr> {
+        let Some(group) = self.groups.get_mut(&key) else {
+            return Vec::new();
+        };
+        let added: Vec<IpAddr> = new_members.difference(&group.members).copied().collect();
+        let removed: Vec<IpAddr> = group.members.difference(&new_members).copied().collect();
+
+        for ip in &added {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.insert(key);
+            }
+        }
+        for ip in &removed {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.remove(&key);
+            }
+        }
+        group.members = new_members;
+        removed
+    }
+
+    /// Record a route referencing an existing L3 group. Idempotent.
+    /// If the route previously referenced a different group, that
+    /// old ref is removed and the old group's cleanup delta is
+    /// returned.
+    pub fn record_route_ref(&mut self, key: L3NhgKey, route: L3RouteKey) -> Option<L3RefDelta> {
+        if !self.groups.contains_key(&key) {
+            return None;
+        }
+        let previous = self.route_refs.insert(route, key);
+        if let Some(group) = self.groups.get_mut(&key) {
+            group.ref_routes.insert(route);
+        }
+        match previous {
+            Some(old_key) if old_key != key => {
+                Some(self.remove_route_ref_from_group(old_key, route))
+            }
+            _ => None,
+        }
+    }
+
+    /// Unref a route by its recorded reverse index.
+    pub fn record_route_unref(&mut self, route: L3RouteKey) -> L3RefDelta {
+        let Some(key) = self.route_refs.remove(&route) else {
+            return L3RefDelta::GroupStillReferenced;
+        };
+        self.remove_route_ref_from_group(key, route)
+    }
+
+    /// Unref a route from a specific group. This is useful for
+    /// rollback paths that already know the group key from the op
+    /// they are undoing.
+    pub fn record_route_unref_from_group(
+        &mut self,
+        key: L3NhgKey,
+        route: L3RouteKey,
+    ) -> L3RefDelta {
+        if self
+            .route_refs
+            .get(&route)
+            .is_some_and(|current| *current == key)
+        {
+            self.route_refs.remove(&route);
+        }
+        self.remove_route_ref_from_group(key, route)
+    }
+
+    fn remove_route_ref_from_group(&mut self, key: L3NhgKey, route: L3RouteKey) -> L3RefDelta {
+        let Some(group) = self.groups.get_mut(&key) else {
+            return L3RefDelta::GroupStillReferenced;
+        };
+        group.ref_routes.remove(&route);
+        if !group.ref_routes.is_empty() {
+            return L3RefDelta::GroupStillReferenced;
+        }
+
+        let id = group.id;
+        let members: Vec<IpAddr> = group.members.iter().copied().collect();
+        self.groups.remove(&key);
+        for ip in &members {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.remove(&key);
+            }
+        }
+        L3RefDelta::GroupShouldDelete { id, members }
+    }
+
+    /// Unref a per-VTEP NH from an L3 group. Returns `Some(id)` if
+    /// the NH became fully unreferenced and can be deleted from the
+    /// kernel; returns `None` if another group still references it.
+    pub fn record_member_unref(&mut self, ip: IpAddr, key: L3NhgKey) -> Option<u32> {
+        let vtep = self.vtep_nhs.get_mut(&ip)?;
+        vtep.ref_groups.remove(&key);
+        if vtep.is_unreferenced() {
+            let id = vtep.id;
+            self.vtep_nhs.remove(&ip);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Check if an L3 per-VTEP NH is currently unreferenced.
+    #[must_use]
+    pub fn vtep_nh_is_orphan(&self, ip: &IpAddr) -> bool {
+        self.vtep_nhs.get(ip).is_some_and(L3VtepNh::is_unreferenced)
+    }
+
+    /// Remove an orphaned L3 per-VTEP NH from tracking.
+    pub fn drop_vtep_nh(&mut self, ip: &IpAddr) -> Option<u32> {
+        self.vtep_nhs.remove(ip).map(|v| v.id)
+    }
+
+    /// Roll back a group that has no live route refs. Removes the
+    /// group from tracking and clears each member's `ref_groups` for
+    /// this key; returns the `(group_id, members)` for kernel cleanup.
+    pub fn drop_unreferenced_group(&mut self, key: &L3NhgKey) -> Option<(u32, Vec<IpAddr>)> {
+        let group = self.groups.get(key)?;
+        if !group.ref_routes.is_empty() {
+            return None;
+        }
+        let id = group.id;
+        let members: Vec<IpAddr> = group.members.iter().copied().collect();
+        for ip in &members {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.remove(key);
+            }
+        }
+        self.groups.remove(key);
+        Some((id, members))
+    }
+
+    /// Iterate all L3 groups in deterministic key order.
+    pub fn iter_groups(&self) -> impl Iterator<Item = (&L3NhgKey, &L3FdbNhgOwned)> {
+        self.groups.iter()
+    }
+
+    /// Iterate all L3 per-VTEP NHs.
+    pub fn iter_vtep_nhs(&self) -> impl Iterator<Item = (&IpAddr, &L3VtepNh)> {
+        self.vtep_nhs.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_evpn::Ipv4Prefix;
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).expect("test VNI")
@@ -886,5 +1211,222 @@ mod tests {
         assert_eq!(members, vec![ipa("10.0.0.2")]);
         assert_eq!(standby, Some(ipa("10.0.0.3")));
         assert!(map.vtep_nh_is_orphan(&ipa("10.0.0.3")));
+    }
+
+    // --- All-active Type-5 L3 FDB-NHG ownership substrate ---------
+
+    fn l3_vrf(n: u32) -> IpVrfId {
+        IpVrfId::new(n).unwrap()
+    }
+
+    fn l3_prefix(octets: [u8; 4], len: u8) -> EvpnIpPrefixValue {
+        EvpnIpPrefixValue::V4(Ipv4Prefix::new(octets.into(), len))
+    }
+
+    fn l3_key(vrf: u32, ifindex: u32, router_mac: u8) -> L3NhgKey {
+        L3NhgKey::new(l3_vrf(vrf), ifindex, mac(router_mac))
+    }
+
+    fn l3_route(vrf: u32, octets: [u8; 4], len: u8) -> L3RouteKey {
+        (l3_vrf(vrf), l3_prefix(octets, len))
+    }
+
+    fn install_l3_one_route_two_members(map: &mut L3FdbNhgOwnedMap) -> L3NhgKey {
+        let k = l3_key(101, 55, 0xaa);
+        map.record_member_install(ipa("10.0.0.2"), 0x5000_0001);
+        map.record_member_install(ipa("10.0.0.3"), 0x5000_0002);
+        let mut members = BTreeSet::new();
+        members.insert(ipa("10.0.0.2"));
+        members.insert(ipa("10.0.0.3"));
+        map.record_group_install(k, 0x6000_0001, members);
+        assert_eq!(
+            map.record_route_ref(k, l3_route(101, [203, 0, 113, 0], 24)),
+            None
+        );
+        k
+    }
+
+    #[test]
+    fn l3_single_route_install_then_remove_tears_down_group() {
+        let mut map = L3FdbNhgOwnedMap::new();
+        let k = install_l3_one_route_two_members(&mut map);
+
+        assert_eq!(map.group_count(), 1);
+        assert_eq!(map.vtep_nh_count(), 2);
+        assert_eq!(map.route_ref_count(), 1);
+        assert_eq!(
+            map.route_group(&l3_route(101, [203, 0, 113, 0], 24)),
+            Some(k)
+        );
+
+        let delta = map.record_route_unref(l3_route(101, [203, 0, 113, 0], 24));
+        match delta {
+            L3RefDelta::GroupShouldDelete { id, ref members } => {
+                assert_eq!(id, 0x6000_0001);
+                assert_eq!(members, &vec![ipa("10.0.0.2"), ipa("10.0.0.3")]);
+            }
+            L3RefDelta::GroupStillReferenced => {
+                panic!("expected GroupShouldDelete, got GroupStillReferenced")
+            }
+        }
+        assert!(map.group(&k).is_none());
+        assert!(map.vtep_nh_is_orphan(&ipa("10.0.0.2")));
+        assert!(map.vtep_nh_is_orphan(&ipa("10.0.0.3")));
+
+        assert_eq!(
+            map.record_member_unref(ipa("10.0.0.2"), k),
+            Some(0x5000_0001)
+        );
+        assert_eq!(
+            map.record_member_unref(ipa("10.0.0.3"), k),
+            Some(0x5000_0002)
+        );
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn l3_two_routes_share_group_first_remove_keeps_group() {
+        let mut map = L3FdbNhgOwnedMap::new();
+        let k = install_l3_one_route_two_members(&mut map);
+        let second = l3_route(101, [203, 0, 114, 0], 24);
+        assert_eq!(map.record_route_ref(k, second), None);
+
+        let delta = map.record_route_unref(l3_route(101, [203, 0, 113, 0], 24));
+        assert_eq!(delta, L3RefDelta::GroupStillReferenced);
+        let group = map.group(&k).expect("group still referenced");
+        assert_eq!(
+            group.ref_routes.iter().copied().collect::<Vec<_>>(),
+            vec![second]
+        );
+        assert_eq!(map.route_ref_count(), 1);
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.2")));
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.3")));
+    }
+
+    #[test]
+    fn l3_route_ref_to_missing_group_does_not_create_ghost_ref() {
+        let mut map = L3FdbNhgOwnedMap::new();
+        let k = l3_key(101, 55, 0xaa);
+        let route = l3_route(101, [203, 0, 113, 0], 24);
+
+        assert_eq!(map.record_route_ref(k, route), None);
+        assert_eq!(map.route_group(&route), None);
+        assert_eq!(map.route_ref_count(), 0);
+        assert!(matches!(
+            map.record_route_unref(route),
+            L3RefDelta::GroupStillReferenced
+        ));
+    }
+
+    #[test]
+    fn l3_member_set_change_keeps_shared_member_pinned() {
+        let mut map = L3FdbNhgOwnedMap::new();
+        let ka = l3_key(101, 55, 0xaa);
+        let kb = l3_key(101, 55, 0xbb);
+        map.record_member_install(ipa("10.0.0.2"), 0x5000_0001);
+        map.record_member_install(ipa("10.0.0.3"), 0x5000_0002);
+
+        let mut members_a = BTreeSet::new();
+        members_a.insert(ipa("10.0.0.2"));
+        members_a.insert(ipa("10.0.0.3"));
+        map.record_group_install(ka, 0x6000_0001, members_a);
+        assert_eq!(
+            map.record_route_ref(ka, l3_route(101, [203, 0, 113, 0], 24)),
+            None
+        );
+
+        let mut members_b = BTreeSet::new();
+        members_b.insert(ipa("10.0.0.2"));
+        map.record_group_install(kb, 0x6000_0002, members_b);
+        assert_eq!(
+            map.record_route_ref(kb, l3_route(101, [203, 0, 114, 0], 24)),
+            None
+        );
+
+        let mut new_members_a = BTreeSet::new();
+        new_members_a.insert(ipa("10.0.0.3"));
+        let removed = map.record_group_member_change(ka, new_members_a);
+        assert_eq!(removed, vec![ipa("10.0.0.2")]);
+        assert_eq!(
+            map.record_member_unref(ipa("10.0.0.2"), ka),
+            None,
+            "member remains pinned by another L3 group"
+        );
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.2")));
+        assert!(map.vtep_nh(&ipa("10.0.0.2")).is_some());
+    }
+
+    #[test]
+    fn l3_route_move_releases_old_group_and_refs_new_group() {
+        let mut map = L3FdbNhgOwnedMap::new();
+        let old = l3_key(101, 55, 0xaa);
+        let new = l3_key(101, 55, 0xbb);
+        let route = l3_route(101, [203, 0, 113, 0], 24);
+
+        map.record_member_install(ipa("10.0.0.2"), 0x5000_0001);
+        map.record_member_install(ipa("10.0.0.3"), 0x5000_0002);
+
+        let mut old_members = BTreeSet::new();
+        old_members.insert(ipa("10.0.0.2"));
+        map.record_group_install(old, 0x6000_0001, old_members);
+        assert_eq!(map.record_route_ref(old, route), None);
+
+        let mut new_members = BTreeSet::new();
+        new_members.insert(ipa("10.0.0.3"));
+        map.record_group_install(new, 0x6000_0002, new_members);
+        let old_delta = map.record_route_ref(new, route);
+        assert_eq!(
+            old_delta,
+            Some(L3RefDelta::GroupShouldDelete {
+                id: 0x6000_0001,
+                members: vec![ipa("10.0.0.2")]
+            })
+        );
+        assert_eq!(map.route_group(&route), Some(new));
+        assert!(map.group(&old).is_none());
+        assert_eq!(
+            map.group(&new)
+                .unwrap()
+                .ref_routes
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![route]
+        );
+        assert!(map.vtep_nh_is_orphan(&ipa("10.0.0.2")));
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.3")));
+    }
+
+    #[test]
+    fn l3_and_l2_owned_maps_are_independent() {
+        let mut l2 = GroupOwnedMap::new();
+        let mut l3 = L3FdbNhgOwnedMap::new();
+        let l2_key = key(100, 7, 0);
+        let l3_key = l3_key(101, 55, 0xaa);
+
+        l2.record_member_install(ipa("10.0.0.2"), 0x3000_0001);
+        l3.record_member_install(ipa("10.0.0.2"), 0x5000_0001);
+
+        let mut l2_members = BTreeSet::new();
+        l2_members.insert(ipa("10.0.0.2"));
+        l2.record_group_install(l2_key, 0x4000_0001, l2_members, None);
+        l2.record_mac_ref(l2_key, vni(100), mac(1));
+
+        let mut l3_members = BTreeSet::new();
+        l3_members.insert(ipa("10.0.0.2"));
+        l3.record_group_install(l3_key, 0x6000_0001, l3_members);
+        assert_eq!(
+            l3.record_route_ref(l3_key, l3_route(101, [203, 0, 113, 0], 24)),
+            None
+        );
+
+        let l3_delta = l3.record_route_unref(l3_route(101, [203, 0, 113, 0], 24));
+        assert!(matches!(l3_delta, L3RefDelta::GroupShouldDelete { .. }));
+        assert!(
+            !l2.vtep_nh_is_orphan(&ipa("10.0.0.2")),
+            "L3 teardown must not mutate the L2 owned map"
+        );
+        assert_eq!(l2.group_count(), 1);
+        assert_eq!(l2.vtep_nh(&ipa("10.0.0.2")).unwrap().id, 0x3000_0001);
     }
 }

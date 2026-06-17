@@ -682,6 +682,19 @@ impl NexthopOps for InMemoryDataplane {
             .cloned()
             .collect())
     }
+
+    async fn dump_owned_l3_nexthops(&mut self) -> Result<Vec<KernelNexthop>, DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        Ok(state
+            .nexthop_ops
+            .values()
+            .filter(|n| NhIdAllocator::is_l3_ours(n.id))
+            .cloned()
+            .collect())
+    }
 }
 
 /// Test-side handle for inspecting / mutating fake state.
@@ -1198,6 +1211,54 @@ mod tests {
         );
         let snap = dp.dump_snapshot().await.unwrap();
         assert!(snap.find_fdb(vni(100), mac(9)).is_some());
+    }
+
+    #[tokio::test]
+    async fn nexthop_dump_partitions_l2_and_l3_tags() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+        h.pre_load_nexthop_op(KernelNexthop {
+            id: 0x3000_0001,
+            kind: KernelNexthopKind::Member {
+                gateway: ip("10.0.0.2"),
+            },
+        });
+        h.pre_load_nexthop_op(KernelNexthop {
+            id: 0x4000_0001,
+            kind: KernelNexthopKind::Group {
+                member_ids: vec![0x3000_0001],
+            },
+        });
+        h.pre_load_nexthop_op(KernelNexthop {
+            id: 0x5000_0001,
+            kind: KernelNexthopKind::Member {
+                gateway: ip("10.0.0.3"),
+            },
+        });
+        h.pre_load_nexthop_op(KernelNexthop {
+            id: 0x6000_0001,
+            kind: KernelNexthopKind::Group {
+                member_ids: vec![0x5000_0001],
+            },
+        });
+
+        let l2: Vec<u32> = dp
+            .dump_owned_nexthops()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|nh| nh.id)
+            .collect();
+        assert_eq!(l2, vec![0x3000_0001, 0x4000_0001]);
+
+        let l3: Vec<u32> = dp
+            .dump_owned_l3_nexthops()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|nh| nh.id)
+            .collect();
+        assert_eq!(l3, vec![0x5000_0001, 0x6000_0001]);
     }
 
     #[tokio::test]
