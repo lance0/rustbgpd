@@ -259,9 +259,9 @@ resolved EAD next hop becomes the FIB next hop. Missing Router MAC,
 missing L2VNI scope, unresolved EAD, dual GW-IP+ESI overlay indexes,
 all-active EAD candidates, and ambiguous single-active candidates all
 drop fail-closed with bounded reason labels. All-active ESI RT-5 receive
-and a real-peer protected-recursion interop proof remain standards-tail
-follow-ups because the current L3 dataplane programs a single next hop,
-not an all-active L3 multipath/NHG set.
+is split out to ADR-0090 because it needs a separate receive-side dataplane
+contract: a deterministic all-active target set, route-level ECMP, L3VXLAN
+FDB-NHG ownership, and an all-active real-peer proof.
 
 ### 7. Out of scope / follow-ups
 
@@ -271,11 +271,11 @@ not an all-active L3 multipath/NHG set.
   then imports it through the Gateway Address. Broader protected
   recursion-path smokes can land later without changing this ADR's
   default `"interface_less"` posture.
-- **All-active ESI receive and real-peer interop** — single-active ESI
-  RT-5 receive now resolves through scoped EAD-per-EVI state, but
-  all-active ESI RT-5s still drop fail-closed until L3 multipath/NHG
-  programming exists. Add an M-series real-peer proof before claiming
-  cross-vendor protected-recursion coverage.
+- **All-active ESI receive and real-peer interop** — ADR-0090 owns the
+  all-active receive policy and dataplane contract. Single-active ESI
+  RT-5 receive now resolves through scoped EAD-per-EVI state, while
+  all-active ESI RT-5s still drop fail-closed until the ADR-0090
+  projection/dataplane slices and M72 proof land.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped

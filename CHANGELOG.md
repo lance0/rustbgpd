@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0090 all-active ESI overlay-index Type 5 receive contract.** The
+  remaining RFC 9136 §4.3 receive-side work now has a dedicated ADR instead of
+  growing ADR-0087 further: all-active RT-5 receive must project a deterministic
+  remote-VTEP target set, install the prefix as route-level ECMP over the
+  L3VXLAN device, program per-VTEP L3 neighbors, and use an L3VXLAN FDB
+  nexthop-group for the shared Router MAC. This is documentation only; current
+  runtime behavior is unchanged and all-active ESI RT-5s still fail closed until
+  the projection/dataplane implementation and M72 proof land.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI
@@ -241,8 +249,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   near-term VXLAN/Linux alpha gaps (notably overlay-index protected-recursion
   interop beyond the shipped GW-IP proof; ESI origination and single-active
   receive now ship, the single-active receive path now has the M71 GoBGP
-  interop proof, while all-active ESI receive remains)
-  from demand-shaped
+  interop proof, while all-active ESI receive remains pending) from demand-shaped
   service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
   multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
   The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:

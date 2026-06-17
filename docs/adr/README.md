@@ -98,6 +98,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0087](0087-evpn-type5-gateway-ip-overlay-index-origination.md) | Native GW-IP overlay-index Type 5 origination (RFC 9136) | Accepted | 2026-06-12 |
 | [0088](0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md) | EVPN VLAN-aware bridge and managed netdev boundary | Accepted | 2026-06-15 |
 | [0089](0089-evpn-vni-per-bd-vlan-aware-bridge-support.md) | EVPN VNI-per-BD VLAN-aware bridge support | Accepted | 2026-06-15 |
+| [0090](0090-evpn-all-active-esi-overlay-index-type5-receive.md) | All-active ESI overlay-index Type 5 receive | Accepted | 2026-06-17 |
 
 ## Template
 

@@ -352,7 +352,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   ES/IP-VRF row mixed edits fail closed ([#268](https://github.com/lance0/rustbgpd/issues/268));
   ESI overlay-index origination and single-active ESI overlay-index receive
   now ship, with M71 proving the receive path against a GoBGP route source;
-  all-active protected recursion remains the nearest standards-tail item.
+  ADR-0090 scopes all-active protected recursion as the nearest
+  standards-tail item.
   VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
   topologies, including SVD / collect-metadata VXLAN; bridge / VXLAN / VRF
   netdev creation remains operator-provisioned by
@@ -405,7 +406,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, all-active ESI overlay-index protected recursion, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, rustbgpd-managed bridge / VXLAN / VRF netdev creation, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, ADR-0090 all-active ESI overlay-index protected recursion, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, rustbgpd-managed bridge / VXLAN / VRF netdev creation, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
