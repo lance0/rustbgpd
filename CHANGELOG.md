@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
+  privileged netns harness now has an `l3_multipath` selector that proves the
+  Linux shape needed before implementing all-active RFC 9136 §4.3 ESI
+  overlay-index Type 5 receive: a VRF-table route accepts multiple `onlink`
+  nexthops through one L3VXLAN device, duplicate single-dst FDB rows for one
+  Router MAC collapse to one destination, and an FDB nexthop-group row with
+  `nhid` works on the L3VXLAN device and cleans up with its member/group
+  objects. This is a proof receipt only; projection and production dataplane
+  behavior remain unchanged.
+
 ## [0.40.0] — 2026-06-17
 
 ### Added

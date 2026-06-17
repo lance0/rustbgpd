@@ -41,6 +41,7 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve # FDB-NHG nol
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FIB runtime
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni # LAN-64 SVD explicit FDB VNI proof
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath # LAN-70 L3VNI multipath/FDB-NHG proof
 ```
 
 `--cap-add=NET_ADMIN` is required for `bridge link set ... flood off`
@@ -69,6 +70,7 @@ caches across runs.
 | `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
+| `l3_multipath` | `l3vxlan_all_active_multipath_kernel_shape` | LAN-70 L3VNI route multipath acceptance, same-MAC FDB collapse, and FDB-NHG lifecycle |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,
@@ -99,6 +101,8 @@ idempotent.
 - A kernel and iproute2 with VXLAN `external` / `vnifilter`, bridge
   VLAN tunnel mapping, and FDB `src_vni` support for the LAN-64
   `svd_fdb_vni` selector.
+- A kernel and iproute2 with VRF, L3 VXLAN, route multipath, and FDB
+  nexthop group support for the LAN-70 `l3_multipath` selector.
 - `CONFIG_NET_NS=y` and `CONFIG_BRIDGE=y` in the host kernel
   (universal on modern Linux).
 
