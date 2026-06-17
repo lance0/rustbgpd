@@ -185,6 +185,9 @@ fn v4_prefix(octets: [u8; 4], len: u8) -> rustbgpd_evpn::EvpnIpPrefixValue {
 const TABLE_ID: u32 = 200;
 const L3VNI: u32 = 100;
 const LOCAL_VTEP: &str = "10.0.0.1";
+const AA_NHID_A: u32 = 805_306_369;
+const AA_NHID_B: u32 = 805_306_370;
+const AA_GROUP_NHID: u32 = 1_073_741_825;
 
 /// Spawn the inner test invocation inside the netns. The outer
 /// process sets up the topology and any pre-loaded foreign state;
@@ -536,6 +539,262 @@ async fn linux_dataplane_route_event_wakes_within_2s() {
     );
 }
 
+/// LAN-70 kernel-mechanism proof for future all-active RFC 9136 §4.3
+/// ESI-overlay Type 5 receive work.
+///
+/// This is intentionally not a production dataplane round-trip yet.
+/// The later ADR/dataplane slices still need to decide how rustbgpd
+/// represents and owns the all-active target set. This test only pins
+/// the Linux object model that decision can build on:
+///
+/// - a VRF-table route can carry multiple `onlink` nexthops through
+///   one L3VXLAN device;
+/// - duplicate single-dst FDB rows for one Router MAC collapse to one
+///   destination, so they are not a multi-target resolution mechanism;
+/// - a VXLAN FDB row with `nhid` works on the L3VXLAN device and can
+///   be cleaned up with its nexthop members/group.
+#[test]
+fn l3vxlan_all_active_multipath_kernel_shape() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged L3 multipath proof");
+        return;
+    }
+
+    let link_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xdd]);
+    if !is_inner() {
+        let ns = NetnsFixture::create("aa-mpath");
+        setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, link_mac);
+        run_inner(&ns, "l3vxlan_all_active_multipath_kernel_shape");
+        return;
+    }
+
+    let router_mac = "02:00:00:00:00:ee";
+    let prefix = "203.0.113.0/24";
+    let nh_a = "10.0.0.2";
+    let nh_b = "10.0.0.3";
+
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            nh_a,
+            "lladdr",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "nud",
+            "permanent",
+            "extern_learn",
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            nh_b,
+            "lladdr",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "nud",
+            "permanent",
+            "extern_learn",
+        ],
+    );
+
+    // Route-level multipath works for the L3VXLAN-direct shape: the
+    // kernel accepts two onlink nexthops through one L3 VXLAN device.
+    run(
+        "ip",
+        &[
+            "route",
+            "replace",
+            prefix,
+            "table",
+            &TABLE_ID.to_string(),
+            "proto",
+            "bgp",
+            "nexthop",
+            "via",
+            nh_a,
+            "dev",
+            "l3vxlan-test",
+            "onlink",
+            "nexthop",
+            "via",
+            nh_b,
+            "dev",
+            "l3vxlan-test",
+            "onlink",
+        ],
+    );
+    let route_dump = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_multipath_route_present(&route_dump, prefix, &[nh_a, nh_b], "l3vxlan-test");
+
+    // Same-MAC duplicate single-dst FDB writes are not an all-active
+    // primitive. Linux keeps one row for the Router MAC and the later
+    // destination wins.
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "replace",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "self",
+            "extern_learn",
+            "dst",
+            nh_a,
+        ],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "replace",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "self",
+            "extern_learn",
+            "dst",
+            nh_b,
+        ],
+    );
+    let collapsed_fdb = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_single_dst_fdb_collapsed(&collapsed_fdb, router_mac, nh_b);
+
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "del",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "self",
+            "dst",
+            nh_b,
+        ],
+    );
+
+    // FDB nexthop groups provide the multi-target FDB resolution for
+    // the shared Router MAC case. The production single-active L2
+    // path already uses this primitive; this proof shows it also works
+    // on the L3VXLAN device needed by Type 5 recursion.
+    run(
+        "ip",
+        &[
+            "nexthop",
+            "add",
+            "id",
+            &AA_NHID_A.to_string(),
+            "via",
+            nh_a,
+            "fdb",
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "nexthop",
+            "add",
+            "id",
+            &AA_NHID_B.to_string(),
+            "via",
+            nh_b,
+            "fdb",
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "nexthop",
+            "add",
+            "id",
+            &AA_GROUP_NHID.to_string(),
+            "group",
+            &format!("{AA_NHID_A}/{AA_NHID_B}"),
+            "fdb",
+        ],
+    );
+    run(
+        "bridge",
+        &[
+            "fdb",
+            "replace",
+            router_mac,
+            "dev",
+            "l3vxlan-test",
+            "self",
+            "extern_learn",
+            "nhid",
+            &AA_GROUP_NHID.to_string(),
+        ],
+    );
+
+    let nexthop_dump = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_member_present(&nexthop_dump, AA_NHID_A, nh_a);
+    assert_nexthop_member_present(&nexthop_dump, AA_NHID_B, nh_b);
+    assert_nexthop_group_present(&nexthop_dump, AA_GROUP_NHID, &[AA_NHID_A, AA_NHID_B]);
+    let nhg_fdb = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_nhid_present(&nhg_fdb, router_mac, AA_GROUP_NHID);
+
+    // Replacement/collapse behavior matters for a future withdraw or
+    // all-active→single-active transition: the same prefix can be
+    // replaced with a single onlink nexthop, then removed cleanly.
+    run(
+        "ip",
+        &[
+            "route",
+            "replace",
+            prefix,
+            "via",
+            nh_a,
+            "dev",
+            "l3vxlan-test",
+            "table",
+            &TABLE_ID.to_string(),
+            "proto",
+            "bgp",
+            "onlink",
+        ],
+    );
+    let collapsed_route = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_owned_route_present(&collapsed_route, prefix, nh_a, "l3vxlan-test");
+    assert!(
+        !collapsed_route.lines().any(|line| line.contains("nexthop")),
+        "collapsed route should not retain multipath nexthop lines:\n{collapsed_route}",
+    );
+
+    run(
+        "ip",
+        &["route", "del", prefix, "table", &TABLE_ID.to_string()],
+    );
+    run(
+        "bridge",
+        &["fdb", "del", router_mac, "dev", "l3vxlan-test", "self"],
+    );
+    run("ip", &["nexthop", "del", "id", &AA_GROUP_NHID.to_string()]);
+    run("ip", &["nexthop", "del", "id", &AA_NHID_B.to_string()]);
+    run("ip", &["nexthop", "del", "id", &AA_NHID_A.to_string()]);
+    run("ip", &["neigh", "del", nh_a, "dev", "l3vxlan-test"]);
+    run("ip", &["neigh", "del", nh_b, "dev", "l3vxlan-test"]);
+
+    let route_after = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_route_absent(&route_after, prefix);
+    let fdb_after = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_absent(&fdb_after, router_mac);
+    let nexthop_after = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_absent(&nexthop_after, &[AA_NHID_A, AA_NHID_B, AA_GROUP_NHID]);
+    let neigh_after = shell_capture("ip", &["neigh", "show", "dev", "l3vxlan-test"]);
+    assert_neighbor_absent(&neigh_after, nh_a);
+    assert_neighbor_absent(&neigh_after, nh_b);
+}
+
 // ── shell helpers ────────────────────────────────────────────────
 
 fn shell_capture(cmd: &str, args: &[&str]) -> String {
@@ -602,6 +861,26 @@ fn assert_route_absent(dump: &str, prefix: &str) {
     );
 }
 
+fn assert_multipath_route_present(dump: &str, prefix: &str, next_hops: &[&str], dev: &str) {
+    assert!(
+        dump.lines()
+            .any(|line| line.starts_with(prefix) && line.contains("proto bgp")),
+        "multipath route `{prefix} proto bgp` missing from dump:\n{dump}",
+    );
+    for next_hop in next_hops {
+        let matched = dump.lines().any(|line| {
+            line.contains("nexthop")
+                && line.contains(&format!("via {next_hop}"))
+                && line.contains(&format!("dev {dev}"))
+                && line.contains("onlink")
+        });
+        assert!(
+            matched,
+            "multipath nexthop `{next_hop} dev {dev} onlink` missing from dump:\n{dump}",
+        );
+    }
+}
+
 fn assert_neighbor_present(dump: &str, addr: &str, lladdr: &str) {
     let matched = dump.lines().any(|line| {
         let lower = line.to_lowercase();
@@ -642,4 +921,67 @@ fn assert_fdb_absent(dump: &str, mac: &str) {
             .any(|line| line.to_lowercase().contains(&mac.to_lowercase())),
         "FDB row for `{mac}` should have been removed:\n{dump}",
     );
+}
+
+fn assert_single_dst_fdb_collapsed(dump: &str, mac: &str, expected_dst: &str) {
+    let mac_l = mac.to_lowercase();
+    let rows = dump
+        .lines()
+        .filter(|line| line.to_lowercase().contains(&mac_l))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.len(),
+        1,
+        "single-dst FDB rows for `{mac}` should collapse to one row:\n{dump}",
+    );
+    let row = rows[0];
+    assert!(
+        row.contains(&format!("dst {expected_dst}")) && row.contains("self"),
+        "collapsed FDB row should point at `{expected_dst}` with `self`:\n{dump}",
+    );
+}
+
+fn assert_fdb_nhid_present(dump: &str, mac: &str, nhid: u32) {
+    let mac_l = mac.to_lowercase();
+    let matched = dump.lines().any(|line| {
+        line.to_lowercase().contains(&mac_l)
+            && line.contains(&format!("nhid {nhid}"))
+            && line.contains("self")
+    });
+    assert!(
+        matched,
+        "FDB NHG row `{mac} nhid {nhid} self` missing from dump:\n{dump}",
+    );
+}
+
+fn assert_nexthop_member_present(dump: &str, id: u32, via: &str) {
+    let matched = dump
+        .lines()
+        .any(|line| line.contains(&format!("id {id}")) && line.contains(&format!("via {via}")));
+    assert!(
+        matched,
+        "FDB nexthop member `id {id} via {via}` missing from dump:\n{dump}",
+    );
+}
+
+fn assert_nexthop_group_present(dump: &str, id: u32, members: &[u32]) {
+    let row = dump
+        .lines()
+        .find(|line| line.contains(&format!("id {id}")) && line.contains("group"))
+        .unwrap_or_else(|| panic!("FDB nexthop group `id {id}` missing from dump:\n{dump}"));
+    for member in members {
+        assert!(
+            row.contains(&member.to_string()),
+            "FDB nexthop group `id {id}` missing member `{member}`:\n{dump}",
+        );
+    }
+}
+
+fn assert_nexthop_absent(dump: &str, ids: &[u32]) {
+    for id in ids {
+        assert!(
+            !dump.lines().any(|line| line.contains(&format!("id {id}"))),
+            "nexthop id `{id}` should have been removed:\n{dump}",
+        );
+    }
 }

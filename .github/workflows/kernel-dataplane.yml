@@ -494,7 +494,7 @@ jobs:
           script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + l3_multipath)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -518,3 +518,6 @@ jobs:
 
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
+
+      - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath

@@ -72,7 +72,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
-- Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`.
+- Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`,
+  `dataplane_vlan_fdb`, `svd_fdb_vni`, and `l3_multipath`.
 
 The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a
 manual (`workflow_dispatch`) on-demand harness for the non-docker direct-`cargo

@@ -234,7 +234,13 @@ has it, no broad performance sprints without profile evidence.
   it unresolved without the EADs, imports it into vrf1 once they arrive
   (kernel route via the PE VTEP), and re-fails-closed when the EAD-per-ES is
   advertised without the Single-Active flag. An all-active ESI protected-recursion proof
-  remains pending behind the L3 multipath/NHG receive work. The
+  remains pending behind the L3 multipath/NHG receive work. **LAN-70's kernel
+  mechanism receipt landed:** the privileged `l3_multipath` netns selector
+  proves that Linux accepts VRF-table route multipath over one L3VXLAN, that
+  duplicate single-dst FDB rows for one Router MAC collapse to one destination,
+  and that FDB nexthop groups work on the L3VXLAN device. That proves the
+  viable object model for the all-active receive design, but does not yet
+  change projection or production dataplane behavior. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
