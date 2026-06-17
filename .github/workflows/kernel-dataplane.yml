@@ -502,8 +502,10 @@ jobs:
 
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
-      # netns never leaks to the host namespace. These selectors do not use the
-      # vrf module, so no extra host setup beyond Docker (preinstalled) is needed.
+      # netns never leaks to the host namespace. All selectors except
+      # l3_multipath are vrf-free and need no host setup beyond Docker
+      # (preinstalled); l3_multipath creates a `vrf` device, so the step below
+      # loads the vrf module on the host kernel the containers share.
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 
@@ -518,6 +520,17 @@ jobs:
 
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
+
+      # l3_multipath creates a `vrf` device; the slim hosted Azure kernel ships
+      # vrf only via linux-modules-extra. Load it on the host so the --cap-add
+      # netns containers can create vrf devices (mirrors setup-dataplane-host).
+      - name: Load vrf kernel module (for l3_multipath)
+        run: |
+          if ! sudo modprobe vrf 2>/dev/null; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || \
+              echo "::warning::linux-modules-extra-$(uname -r) unavailable; l3_multipath may fail"
+            sudo modprobe vrf || echo "::warning::vrf module still not loadable"
+          fi
 
       - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath
