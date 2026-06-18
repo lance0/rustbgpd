@@ -2687,6 +2687,80 @@ async fn l3_all_active_restart_reclaims_existing_l3_nhg_without_new_ids() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn l3_all_active_restart_with_no_ip_vrf_config_preserves_l3_nhg() {
+    // Lifetime 1: create the same all-active writer state as the
+    // configured restart test above, then crash without a graceful
+    // drain.
+    let mut h1 = Harness::spawn(ReconcileActorConfig::for_tests());
+    h1.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h1.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    h1.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h1, 1).await;
+    let prior_group_id = h1
+        .handle
+        .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+        .expect("lifetime 1 installed L3 FDB-NHG row");
+    let prior_nexthops = h1.handle.nexthop_ops();
+    let handle1 = h1.crash();
+
+    // Lifetime 2: no [[evpn_ip_vrfs]] config is available yet. The
+    // actor may reserve L3-tagged NHIDs for allocator safety, but it
+    // must not delete them because no config-gated L3 FDB adoption
+    // pass can prove whether the Router-MAC FDB row still references
+    // the group.
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h2 = Harness::spawn(cfg);
+    copy_l3_kernel_state(&handle1, &h2.handle);
+    h2.intent_tx
+        .send(l3_intent(1, IpVrfTable::new(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h2, 1).await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    h2.intent_tx
+        .send(l3_intent(2, IpVrfTable::new(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let report = wait_for_generation(&mut h2, 2).await;
+    assert!(
+        report.failed.is_empty(),
+        "empty-config drift pass failed: {:?}",
+        report.failed
+    );
+
+    assert_eq!(
+        h2.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac()),
+        Some(prior_group_id),
+        "empty config must preserve the Router-MAC FDB-NHG row"
+    );
+    assert_eq!(
+        h2.handle.nexthop_ops(),
+        prior_nexthops,
+        "empty config must preserve the referenced L3 NHID tree"
+    );
+    assert!(h2.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()));
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"))
+    );
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3"))
+    );
+
+    h2.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn l3_permanent_route_failure_suppresses_until_shape_changes() {
     let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
     h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());

@@ -1064,7 +1064,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 .is_none_or(|t| t.elapsed() >= self.config.periodic_dump);
             if due
                 && self
-                    .reconcile_drift(&snapshot, intent.remote_macs.as_ref())
+                    .reconcile_drift(
+                        &snapshot,
+                        intent.remote_macs.as_ref(),
+                        !intent.ip_vrfs.is_empty() && self.state.l3_adoption_reap_after.is_some(),
+                    )
                     .await
             {
                 self.state.last_drift_check = Some(Instant::now());
@@ -2163,6 +2167,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         &mut self,
         snapshot: &KernelSnapshot,
         desired: &RemoteMacTable,
+        allow_l3_unreferenced_cleanup: bool,
     ) -> bool {
         use crate::dataplane::KernelNexthopKind;
         use crate::nh_id_alloc::NhIdAllocator;
@@ -2456,7 +2461,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if !self.state.adopted_unreferenced.is_empty() {
             let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
         }
-        self.reconcile_l3_nhg_drift(actual_l3_by_id).await;
+        self.reconcile_l3_nhg_drift(actual_l3_by_id, allow_l3_unreferenced_cleanup)
+            .await;
         true
     }
 
@@ -2465,6 +2471,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     async fn reconcile_l3_nhg_drift(
         &mut self,
         actual_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop>,
+        allow_unreferenced_cleanup: bool,
     ) {
         let tracked_vteps: Vec<(IpAddr, u32)> = self
             .state
@@ -2511,11 +2518,17 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if adopted_any {
             tracing::info!(
                 adopted = self.state.adopted_l3_unreferenced.len(),
-                "drift: discovered untracked L3 tagged NHIDs; running adoption cleanup in-line"
+                cleanup_allowed = allow_unreferenced_cleanup,
+                "drift: discovered untracked L3 tagged NHIDs"
             );
         }
-        if !self.state.adopted_l3_unreferenced.is_empty() {
+        if allow_unreferenced_cleanup && !self.state.adopted_l3_unreferenced.is_empty() {
             let _ = self.cleanup_unreferenced_l3_adoptions().await;
+        } else if !allow_unreferenced_cleanup && !self.state.adopted_l3_unreferenced.is_empty() {
+            tracing::debug!(
+                adopted = self.state.adopted_l3_unreferenced.len(),
+                "drift: preserving unreferenced L3 tagged NHIDs until IP-VRF adoption context is available"
+            );
         }
     }
 

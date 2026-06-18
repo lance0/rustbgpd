@@ -85,13 +85,15 @@ and deduplication are part of projection, not the Linux writer, so status,
 tests, and future event surfaces can report the exact intended set before any
 kernel operation happens.
 
-All-active with one surviving target is valid and installs as the same semantic
-target set with one member. The M72 proof must use at least two remote targets
-so it proves ECMP/NHG behavior rather than the single-survivor degenerate case.
+All-active with fewer than two surviving targets remains fail-closed in v1.
+That keeps the all-active writer limited to shapes that prove actual ECMP/NHG
+behavior; a single surviving target should arrive through the already shipped
+single-active/scalar paths or wait for a later, explicit degenerate-case
+decision. The M72 proof must use at least two remote targets.
 
 ### 4. Program the route through route-level ECMP plus FDB-NHG
 
-For an all-active target set with `N` remote VTEPs, rustbgpd programs:
+For an all-active target set with `N >= 2` remote VTEPs, rustbgpd programs:
 
 - one VRF-table route for the RT-5 prefix with `N` `onlink` nexthops through the
   L3VXLAN device;
