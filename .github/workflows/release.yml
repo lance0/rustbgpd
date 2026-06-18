@@ -87,6 +87,13 @@ jobs:
         # the GitHub release page already shows the version. If no
         # matching section exists, write a stub so the action still
         # has a body to publish (and surface the gap at release time).
+        #
+        # CHANGELOG.md is hard-wrapped (~72-80 cols) for review quality and
+        # clean diffs, but GitHub renders release bodies with comment-style
+        # Markdown where every newline is a hard break — so the raw extract
+        # "crams". reflow-release-notes.py un-hard-wraps each paragraph / list
+        # item (preserving headings, blank lines, fences, tables, and nested
+        # list boundaries) so the release page renders cleanly.
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
@@ -94,8 +101,11 @@ jobs:
             $0 ~ "^## \\[" v "\\]" { in_section=1; print; next }
             in_section && /^## \[/ { exit }
             in_section { print }
-          ' CHANGELOG.md | tail -n +2 > release-notes.md
-          if ! [ -s release-notes.md ]; then
+          ' CHANGELOG.md | tail -n +2 > release-notes.raw.md
+          if [ -s release-notes.raw.md ]; then
+            python3 scripts/reflow-release-notes.py \
+              < release-notes.raw.md > release-notes.md
+          else
             echo "no \`## [$version]\` section found in CHANGELOG.md" \
               > release-notes.md
           fi
