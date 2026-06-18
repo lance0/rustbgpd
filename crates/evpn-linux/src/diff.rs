@@ -1556,13 +1556,17 @@ mod tests {
                 | DataplaneOp::SetAcPortState { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
+                | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+                | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
                 | DataplaneOp::AddL3Neighbor { .. }
                 | DataplaneOp::RemoveL3Neighbor { .. }
                 | DataplaneOp::AddL3VxlanFdb { .. }
                 | DataplaneOp::RemoveL3VxlanFdb { .. }
                 | DataplaneOp::InstallFdbNhg { .. }
                 | DataplaneOp::UpdateFdbNhgMembers { .. }
-                | DataplaneOp::RemoveFdbNhg { .. } => {
+                | DataplaneOp::RemoveFdbNhg { .. }
+                | DataplaneOp::InstallL3FdbNhg { .. }
+                | DataplaneOp::RemoveL3FdbNhg { .. } => {
                     panic!("compute_diff must only produce L2 FDB ops; got {op:?}");
                 }
             }

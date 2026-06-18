@@ -9,8 +9,9 @@ ADR-0087 closed the native GW-IP overlay-index origination gap and then added
 the bounded ESI overlay-index tail: rustbgpd can originate non-zero-ESI RT-5
 routes and can import the receive-side shape when scoped EAD state yields
 exactly one single-active remote VTEP. That is intentionally not the all-active
-case. Today, all-active ESI overlay-index RT-5 candidates still fail closed with
-`unsupported_all_active_esi_overlay_index`.
+case. The first all-active implementation now accepts valid two-or-more-member
+target sets through the L3 writer; malformed, ambiguous, or single-member
+all-active shapes still fail closed with bounded drop reasons.
 
 The remaining work is not just a projection switch. RFC 9136 says an RT-5 with
 non-zero ESI and zero Gateway Address uses the ESI as an overlay index, and the
@@ -84,13 +85,15 @@ and deduplication are part of projection, not the Linux writer, so status,
 tests, and future event surfaces can report the exact intended set before any
 kernel operation happens.
 
-All-active with one surviving target is valid and installs as the same semantic
-target set with one member. The M72 proof must use at least two remote targets
-so it proves ECMP/NHG behavior rather than the single-survivor degenerate case.
+All-active with fewer than two surviving targets remains fail-closed in v1.
+That keeps the all-active writer limited to shapes that prove actual ECMP/NHG
+behavior; a single surviving target should arrive through the already shipped
+single-active/scalar paths or wait for a later, explicit degenerate-case
+decision. The M72 proof must use at least two remote targets.
 
 ### 4. Program the route through route-level ECMP plus FDB-NHG
 
-For an all-active target set with `N` remote VTEPs, rustbgpd programs:
+For an all-active target set with `N >= 2` remote VTEPs, rustbgpd programs:
 
 - one VRF-table route for the RT-5 prefix with `N` `onlink` nexthops through the
   L3VXLAN device;
@@ -159,14 +162,14 @@ not alone prove the two hashing layers forward consistently.
 
 - The all-active ESI receive work gets its own review boundary rather than
   expanding ADR-0087 past its GW-IP/origination title.
-- Current runtime behavior does not change: single-active ESI receive remains
-  shipped; all-active ESI receive remains fail-closed until the projection and
-  dataplane contracts above are implemented.
 - LAN-70 is now explicitly classified as a mechanism receipt, not a product
   feature. It proves Linux can host the route/FDB shape this ADR requires.
-- The next implementation slice should be pure projection/model work: carry an
-  all-active target set without touching Linux programming. The following slice
-  can then update `L3OwnedState` and the Linux writer to own route ECMP plus
-  L3VXLAN FDB-NHG together.
+- The implementation is intentionally sliced: projection/model substrate first,
+  L3 ownership substrate second, then the production L3 writer that owns route
+  ECMP plus L3VXLAN FDB-NHG together.
+- LAN-76 is the same-host production writer receipt. It proves a real
+  `ReconcileActor<LinuxDataplane>` can install and withdraw the route ECMP,
+  per-VTEP L3 neighbors, L3-tagged FDB-NHG members, and Router-MAC `nhid` FDB
+  row against a Linux kernel.
 - M72 is the required cross-vendor or real-peer receipt before the roadmap may
-  claim all-active ESI overlay-index Type 5 receive is implemented.
+  claim the all-active ESI overlay-index Type 5 receive arc complete.

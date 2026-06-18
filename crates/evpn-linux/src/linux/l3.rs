@@ -45,13 +45,14 @@
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use netlink_packet_core::DefaultNla;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteFlags, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
-    RouteType,
+    RouteAddress, RouteAttribute, RouteFlags, RouteHeader, RouteMessage, RouteNextHop,
+    RouteNextHopFlags, RouteProtocol, RouteScope, RouteType,
 };
 use rtnetlink::Handle;
 use rustbgpd_evpn::{EvpnIpPrefixValue, MacAddress};
@@ -79,6 +80,10 @@ const NUD_PERMANENT: u16 = 0x80;
 /// for `bridge fdb add ... extern_learn`). Mirrors the fdb-helper
 /// constant so the L2 and L3 paths use the same shape.
 const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
+/// `NDA_NH_ID` (kind = 13). Exposed in iproute2 as `bridge fdb ...
+/// nhid N`; `netlink-packet-route 0.30` keeps it behind the raw NLA
+/// escape hatch.
+const NDA_NH_ID: u16 = 13;
 
 /// Install (or replace) a kernel route for a remote IP prefix in
 /// the IP-VRF's `table_id`.
@@ -122,6 +127,52 @@ pub(crate) async fn apply_remove_ip_route(
     next_hop: IpAddr,
 ) -> Result<(), DataplaneError> {
     let msg = build_ip_route_message(prefix, table_id, l3vxlan_ifindex, next_hop)?;
+    match handle.route().del(msg).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => classify_remove_apply_error(&e),
+    }
+}
+
+/// Install (or replace) an ECMP kernel route for an all-active ESI
+/// overlay-index Type 5 prefix in the IP-VRF's `table_id`.
+///
+/// # Errors
+///
+/// Returns [`DataplaneError::InvalidArgument`] if the target set is
+/// empty or if any next-hop disagrees with the prefix family. Any
+/// other failure is classified by [`classify_apply_error`].
+pub(crate) async fn apply_add_ip_route_ecmp(
+    handle: &Handle,
+    prefix: EvpnIpPrefixValue,
+    table_id: u32,
+    l3vxlan_ifindex: u32,
+    next_hops: &[IpAddr],
+) -> Result<(), DataplaneError> {
+    let msg = build_ip_route_ecmp_message(prefix, table_id, l3vxlan_ifindex, next_hops)?;
+    handle
+        .route()
+        .add(msg)
+        .replace()
+        .execute()
+        .await
+        .map_err(|e| classify_apply_error(&e))
+}
+
+/// Remove a previously-installed all-active ECMP remote IP-prefix route.
+///
+/// # Errors
+///
+/// Returns [`DataplaneError::InvalidArgument`] on invalid target set
+/// shape. Other failures classify per [`classify_remove_apply_error`],
+/// which treats `ENOENT` as idempotent success.
+pub(crate) async fn apply_remove_ip_route_ecmp(
+    handle: &Handle,
+    prefix: EvpnIpPrefixValue,
+    table_id: u32,
+    l3vxlan_ifindex: u32,
+    next_hops: &[IpAddr],
+) -> Result<(), DataplaneError> {
+    let msg = build_ip_route_ecmp_message(prefix, table_id, l3vxlan_ifindex, next_hops)?;
     match handle.route().del(msg).execute().await {
         Ok(()) => Ok(()),
         Err(e) => classify_remove_apply_error(&e),
@@ -189,6 +240,73 @@ fn build_ip_route_message(
         IpAddr::V6(a) => RouteAddress::Inet6(a),
     }));
     msg.attributes.push(RouteAttribute::Oif(l3vxlan_ifindex));
+    Ok(msg)
+}
+
+fn build_ip_route_ecmp_message(
+    prefix: EvpnIpPrefixValue,
+    table_id: u32,
+    l3vxlan_ifindex: u32,
+    next_hops: &[IpAddr],
+) -> Result<RouteMessage, DataplaneError> {
+    if next_hops.len() < 2 {
+        return Err(DataplaneError::InvalidArgument(
+            "all-active Type 5 ECMP route requires at least two next-hops".into(),
+        ));
+    }
+    let prefix_family = match prefix {
+        EvpnIpPrefixValue::V4(_) => AddressFamily::Inet,
+        EvpnIpPrefixValue::V6(_) => AddressFamily::Inet6,
+    };
+    for next_hop in next_hops {
+        let nh_family = match next_hop {
+            IpAddr::V4(_) => AddressFamily::Inet,
+            IpAddr::V6(_) => AddressFamily::Inet6,
+        };
+        if prefix_family != nh_family {
+            return Err(DataplaneError::InvalidArgument(format!(
+                "all-active Type 5 ECMP route does not implement cross-family \
+                 next-hops (prefix family {prefix_family:?} vs next-hop family {nh_family:?}); \
+                 reconciler should drop the route before generating an op"
+            )));
+        }
+    }
+
+    let mut msg = RouteMessage::default();
+    msg.header = RouteHeader {
+        address_family: prefix_family,
+        destination_prefix_length: match prefix {
+            EvpnIpPrefixValue::V4(p) => p.len,
+            EvpnIpPrefixValue::V6(p) => p.len,
+        },
+        source_prefix_length: 0,
+        tos: 0,
+        table: u8::try_from(table_id).unwrap_or(RT_TABLE_COMPAT),
+        protocol: RouteProtocol::Bgp,
+        scope: RouteScope::Universe,
+        kind: RouteType::Unicast,
+        flags: RouteFlags::Onlink,
+    };
+    msg.attributes.push(RouteAttribute::Table(table_id));
+    msg.attributes
+        .push(RouteAttribute::Destination(match prefix {
+            EvpnIpPrefixValue::V4(p) => RouteAddress::Inet(p.addr),
+            EvpnIpPrefixValue::V6(p) => RouteAddress::Inet6(p.addr),
+        }));
+    let hops = next_hops
+        .iter()
+        .map(|next_hop| {
+            let mut hop = RouteNextHop::default();
+            hop.flags = RouteNextHopFlags::Onlink;
+            hop.interface_index = l3vxlan_ifindex;
+            hop.attributes.push(RouteAttribute::Gateway(match next_hop {
+                IpAddr::V4(a) => RouteAddress::Inet(*a),
+                IpAddr::V6(a) => RouteAddress::Inet6(*a),
+            }));
+            hop
+        })
+        .collect();
+    msg.attributes.push(RouteAttribute::MultiPath(hops));
     Ok(msg)
 }
 
@@ -419,6 +537,50 @@ pub(crate) async fn apply_remove_l3vxlan_fdb(
     }
 }
 
+fn build_l3vxlan_fdb_nhg_message(
+    l3vxlan_ifindex: u32,
+    router_mac: MacAddress,
+    nh_id: u32,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = l3vxlan_ifindex;
+    msg.header.state = NeighbourState::Other(NUD_NOARP_PERMANENT);
+    msg.header.flags = NeighbourFlags::Own | NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes.push(NeighbourAttribute::LinkLayerAddress(
+        router_mac.octets().to_vec(),
+    ));
+    msg.attributes
+        .push(NeighbourAttribute::Other(DefaultNla::new(
+            NDA_NH_ID,
+            nh_id.to_ne_bytes().to_vec(),
+        )));
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    msg
+}
+
+/// Install (or replace) the L3VXLAN FDB row that maps the remote
+/// Router MAC to an FDB nexthop group.
+///
+/// # Errors
+///
+/// Failures classify per [`classify_apply_error`].
+pub(crate) async fn apply_add_l3vxlan_fdb_nhg(
+    handle: &Handle,
+    l3vxlan_ifindex: u32,
+    router_mac: MacAddress,
+    nh_id: u32,
+) -> Result<(), DataplaneError> {
+    let mut req = handle
+        .neighbours()
+        .add_bridge(l3vxlan_ifindex, &router_mac.octets())
+        .replace();
+    *req.message_mut() = build_l3vxlan_fdb_nhg_message(l3vxlan_ifindex, router_mac, nh_id);
+    req.execute().await.map_err(|e| classify_apply_error(&e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +673,33 @@ mod tests {
         let nh = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
         let err = build_ip_route_message(prefix, 100, 42, nh).unwrap_err();
         assert!(matches!(err, DataplaneError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn build_ecmp_route_requires_two_next_hops() {
+        let prefix = v4_prefix([198, 51, 100, 0], 24);
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let err = build_ip_route_ecmp_message(prefix, 100, 42, &[nh]).unwrap_err();
+        assert!(matches!(
+            err,
+            DataplaneError::InvalidArgument(message)
+                if message.contains("requires at least two next-hops")
+        ));
+    }
+
+    #[test]
+    fn build_ecmp_route_carries_onlink_marker_for_adoption() {
+        let prefix = v4_prefix([198, 51, 100, 0], 24);
+        let hops = [
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        ];
+        let msg = build_ip_route_ecmp_message(prefix, 100, 42, &hops).unwrap();
+        assert_eq!(msg.header.protocol, RouteProtocol::Bgp);
+        assert!(
+            msg.header.flags.contains(RouteFlags::Onlink),
+            "ECMP routes must carry the same RTPROT_BGP + onlink ownership marker as scalar routes",
+        );
     }
 
     fn protocol_attr(msg: &NeighbourMessage) -> Option<RouteProtocol> {

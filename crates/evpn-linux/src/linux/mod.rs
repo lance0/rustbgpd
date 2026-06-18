@@ -653,6 +653,9 @@ impl Dataplane for LinuxDataplane {
     }
 
     async fn apply(&mut self, op: &DataplaneOp) -> Result<(), DataplaneError> {
+        if let Some(result) = apply_l3_op(&self.handle, op).await {
+            return result;
+        }
         match op {
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 bum_filter::apply_bum_port_flags(&self.handle, *ifindex, *flags).await
@@ -666,66 +669,16 @@ impl Dataplane for LinuxDataplane {
                 let cache = self.link_cache.lock().await.clone();
                 fdb::apply_op(&self.handle, &cache, op).await
             }
-            DataplaneOp::AddRemoteIpRoute {
-                prefix,
-                table_id,
-                l3vxlan_ifindex,
-                next_hop,
-                ..
-            } => {
-                l3::apply_add_ip_route(
-                    &self.handle,
-                    *prefix,
-                    *table_id,
-                    *l3vxlan_ifindex,
-                    *next_hop,
-                )
-                .await
+            DataplaneOp::AddRemoteIpRoute { .. }
+            | DataplaneOp::RemoveRemoteIpRoute { .. }
+            | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+            | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
+            | DataplaneOp::AddL3Neighbor { .. }
+            | DataplaneOp::RemoveL3Neighbor { .. }
+            | DataplaneOp::AddL3VxlanFdb { .. }
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+                unreachable!("plain L3 ops are handled by apply_l3_op")
             }
-            DataplaneOp::RemoveRemoteIpRoute {
-                prefix,
-                table_id,
-                l3vxlan_ifindex,
-                next_hop,
-                ..
-            } => {
-                l3::apply_remove_ip_route(
-                    &self.handle,
-                    *prefix,
-                    *table_id,
-                    *l3vxlan_ifindex,
-                    *next_hop,
-                )
-                .await
-            }
-            DataplaneOp::AddL3Neighbor {
-                l3vxlan_ifindex,
-                next_hop,
-                router_mac,
-                ..
-            } => {
-                l3::apply_add_l3_neighbor(&self.handle, *l3vxlan_ifindex, *next_hop, *router_mac)
-                    .await
-            }
-            DataplaneOp::RemoveL3Neighbor {
-                l3vxlan_ifindex,
-                next_hop,
-                ..
-            } => l3::apply_remove_l3_neighbor(&self.handle, *l3vxlan_ifindex, *next_hop).await,
-            DataplaneOp::AddL3VxlanFdb {
-                l3vxlan_ifindex,
-                router_mac,
-                next_hop,
-                ..
-            } => {
-                l3::apply_add_l3vxlan_fdb(&self.handle, *l3vxlan_ifindex, *router_mac, *next_hop)
-                    .await
-            }
-            DataplaneOp::RemoveL3VxlanFdb {
-                l3vxlan_ifindex,
-                router_mac,
-                ..
-            } => l3::apply_remove_l3vxlan_fdb(&self.handle, *l3vxlan_ifindex, *router_mac).await,
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —
             // the reconcile actor's coordinator routes them through
             // `NexthopOps` + `linux::fdb_nhg` directly, because they
@@ -736,7 +689,9 @@ impl Dataplane for LinuxDataplane {
             // backoff-retrying a programming bug forever.
             DataplaneOp::InstallFdbNhg { .. }
             | DataplaneOp::UpdateFdbNhgMembers { .. }
-            | DataplaneOp::RemoveFdbNhg { .. } => Err(DataplaneError::InvalidArgument(
+            | DataplaneOp::RemoveFdbNhg { .. }
+            | DataplaneOp::InstallL3FdbNhg { .. }
+            | DataplaneOp::RemoveL3FdbNhg { .. } => Err(DataplaneError::InvalidArgument(
                 "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
                  not Dataplane::apply"
                     .into(),
@@ -767,6 +722,77 @@ impl Dataplane for LinuxDataplane {
 
     fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {
         self.local_mac_rx.take()
+    }
+}
+
+async fn apply_l3_op(handle: &Handle, op: &DataplaneOp) -> Option<Result<(), DataplaneError>> {
+    match op {
+        DataplaneOp::AddRemoteIpRoute {
+            prefix,
+            table_id,
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => Some(
+            l3::apply_add_ip_route(handle, *prefix, *table_id, *l3vxlan_ifindex, *next_hop).await,
+        ),
+        DataplaneOp::RemoveRemoteIpRoute {
+            prefix,
+            table_id,
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => Some(
+            l3::apply_remove_ip_route(handle, *prefix, *table_id, *l3vxlan_ifindex, *next_hop)
+                .await,
+        ),
+        DataplaneOp::AddRemoteIpRouteEcmp {
+            prefix,
+            table_id,
+            l3vxlan_ifindex,
+            next_hops,
+            ..
+        } => Some(
+            l3::apply_add_ip_route_ecmp(handle, *prefix, *table_id, *l3vxlan_ifindex, next_hops)
+                .await,
+        ),
+        DataplaneOp::RemoveRemoteIpRouteEcmp {
+            prefix,
+            table_id,
+            l3vxlan_ifindex,
+            next_hops,
+            ..
+        } => Some(
+            l3::apply_remove_ip_route_ecmp(handle, *prefix, *table_id, *l3vxlan_ifindex, next_hops)
+                .await,
+        ),
+        DataplaneOp::AddL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            router_mac,
+            ..
+        } => {
+            Some(l3::apply_add_l3_neighbor(handle, *l3vxlan_ifindex, *next_hop, *router_mac).await)
+        }
+        DataplaneOp::RemoveL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => Some(l3::apply_remove_l3_neighbor(handle, *l3vxlan_ifindex, *next_hop).await),
+        DataplaneOp::AddL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            next_hop,
+            ..
+        } => {
+            Some(l3::apply_add_l3vxlan_fdb(handle, *l3vxlan_ifindex, *router_mac, *next_hop).await)
+        }
+        DataplaneOp::RemoveL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => Some(l3::apply_remove_l3vxlan_fdb(handle, *l3vxlan_ifindex, *router_mac).await),
+        _ => None,
     }
 }
 
@@ -828,6 +854,23 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
     ) -> Result<(), DataplaneError> {
         let cache = self.link_cache.lock().await.clone();
         fdb_nhg::apply_remove_fdb_nhg_row(&self.handle, &cache, vni, mac, vlan).await
+    }
+
+    async fn install_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: rustbgpd_evpn::MacAddress,
+        nh_id: u32,
+    ) -> Result<(), DataplaneError> {
+        l3::apply_add_l3vxlan_fdb_nhg(&self.handle, l3vxlan_ifindex, router_mac, nh_id).await
+    }
+
+    async fn remove_l3_fdb_nhg_row(
+        &mut self,
+        l3vxlan_ifindex: u32,
+        router_mac: rustbgpd_evpn::MacAddress,
+    ) -> Result<(), DataplaneError> {
+        l3::apply_remove_l3vxlan_fdb(&self.handle, l3vxlan_ifindex, router_mac).await
     }
 
     async fn dump_owned_nexthops(

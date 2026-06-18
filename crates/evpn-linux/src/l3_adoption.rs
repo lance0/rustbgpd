@@ -33,15 +33,41 @@ use rustbgpd_evpn::{EvpnIpPrefixValue, IpVrfId, MacAddress};
 /// `RemoveRemoteIpRoute` op needs, captured at dump time because the
 /// kernel row (not the intent, which may no longer carry the prefix)
 /// is the only authority on its identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdoptedL3Route {
     /// Kernel route table the row lives in (the configured IP-VRF
     /// `table_id` that matched at dump time).
     pub table_id: u32,
     /// Output device — the IP-VRF's L3VXLAN ifindex.
     pub l3vxlan_ifindex: u32,
-    /// Gateway — the remote VTEP next-hop.
+    /// Representative gateway — the remote VTEP next-hop. For ECMP
+    /// rows this is the first deterministic member.
     pub next_hop: IpAddr,
+    /// Full gateway set. Scalar rows carry exactly one element;
+    /// ECMP rows carry every onlink next-hop.
+    pub next_hops: Vec<IpAddr>,
+}
+
+/// One adopted crash-leftover L3VXLAN FDB row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdoptedL3VxlanFdb {
+    /// Owning IP-VRF, inferred from the managed L3VXLAN ifindex.
+    pub vrf_id: IpVrfId,
+    /// Kernel target shape for the row.
+    pub target: AdoptedL3VxlanFdbTarget,
+}
+
+/// Kernel target shape for an adopted L3VXLAN FDB row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptedL3VxlanFdbTarget {
+    /// Legacy scalar row (`NDA_DST`) pointing at one remote VTEP.
+    SingleDst,
+    /// All-active row (`NDA_NH_ID`) pointing at an L3 FDB nexthop
+    /// group.
+    NexthopGroup {
+        /// Kernel nexthop group ID carried in `NDA_NH_ID`.
+        nh_id: u32,
+    },
 }
 
 /// Marker-matching kernel L3 state surfaced by one
@@ -58,8 +84,8 @@ pub struct L3AdoptionDump {
     pub routes: BTreeMap<(IpVrfId, EvpnIpPrefixValue), AdoptedL3Route>,
     /// `(l3vxlan_ifindex, next_hop)` → owning `vrf_id`.
     pub neighbors: BTreeMap<(u32, IpAddr), IpVrfId>,
-    /// `(l3vxlan_ifindex, router_mac)` → owning `vrf_id`.
-    pub l3vxlan_fdb: BTreeMap<(u32, MacAddress), IpVrfId>,
+    /// `(l3vxlan_ifindex, router_mac)` → adopted FDB row identity.
+    pub l3vxlan_fdb: BTreeMap<(u32, MacAddress), AdoptedL3VxlanFdb>,
 }
 
 impl L3AdoptionDump {

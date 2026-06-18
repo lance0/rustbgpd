@@ -273,9 +273,9 @@ FDB-NHG ownership, and an all-active real-peer proof.
   default `"interface_less"` posture.
 - **All-active ESI receive and real-peer interop** — ADR-0090 owns the
   all-active receive policy and dataplane contract. Single-active ESI
-  RT-5 receive now resolves through scoped EAD-per-EVI state, while
-  all-active ESI RT-5s still drop fail-closed until the ADR-0090
-  projection/dataplane slices and M72 proof land.
+  RT-5 receive resolves through scoped EAD-per-EVI state, and valid
+  two-or-more-member all-active target sets now install through the ADR-0090
+  L3 writer. M72 remains the deferred real-peer proof.
 - **gRPC `IpVrfState` surface** — `ListIpVrfs`/`GetIpVrf` do not yet
   report the mode; add when an operator asks.
 - **Tighter subnet attribution** (linked-L2VNI-bridge-scoped

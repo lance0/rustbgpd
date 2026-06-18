@@ -42,18 +42,23 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use futures::stream::TryStreamExt;
+use netlink_packet_core::Nla;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
-use netlink_packet_route::route::{RouteFlags, RouteMessage, RouteProtocol};
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteNextHopFlags, RouteProtocol,
+};
 use rtnetlink::{Handle, IpVersion, RouteMessageBuilder};
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfTable};
 use rustbgpd_evpn::{EvpnIpPrefixValue, MacAddress};
 
 use crate::error::DataplaneError;
-use crate::l3_adoption::{AdoptedL3Route, L3AdoptionDump};
+use crate::l3_adoption::{
+    AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget, L3AdoptionDump,
+};
 
 use super::ip_vrf;
 use super::routes::{
@@ -64,6 +69,9 @@ use super::routes::{
 /// constant in `super::l3` (the write side); both halves of the
 /// marker must read the same bit.
 const NUD_PERMANENT: u16 = 0x80;
+/// `NDA_NH_ID` (kind = 13). `netlink-packet-route 0.30` exposes it
+/// through `NeighbourAttribute::Other(DefaultNla)`.
+const NDA_NH_ID: u16 = 13;
 
 /// Escape hatch for the ADR-0082 strict L3-neighbor adoption rule.
 /// The stamp-or-legacy migration window (decision 4) closed after
@@ -125,7 +133,7 @@ pub(super) fn adoption_accept_legacy() -> bool {
 
 /// Verdict for one kernel route row against the ADR-0079 VRF-route
 /// marker (`RTPROT_BGP` + onlink, in a configured `table_id`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RouteAdoptionVerdict {
     /// Not in a configured IP-VRF table, or missing the marker pair —
     /// foreign state, never touched.
@@ -164,13 +172,13 @@ pub(crate) fn classify_adoption_route(
         // fail safe); onlink alone is any operator onlink route.
         return RouteAdoptionVerdict::NotOurs;
     }
-    let (Some(prefix), Some(next_hop), Some(l3vxlan_ifindex)) = (
-        extract_prefix(msg),
-        super::routes::extract_gateway(msg),
-        extract_output_ifindex(msg),
-    ) else {
+    let Some(prefix) = extract_prefix(msg) else {
         return RouteAdoptionVerdict::MarkedButUnusable;
     };
+    let Some((next_hops, l3vxlan_ifindex)) = extract_route_targets(msg) else {
+        return RouteAdoptionVerdict::MarkedButUnusable;
+    };
+    let next_hop = next_hops[0];
     RouteAdoptionVerdict::Candidate {
         vrf_id,
         prefix,
@@ -178,8 +186,47 @@ pub(crate) fn classify_adoption_route(
             table_id,
             l3vxlan_ifindex,
             next_hop,
+            next_hops,
         },
     }
+}
+
+fn extract_route_targets(msg: &RouteMessage) -> Option<(Vec<IpAddr>, u32)> {
+    if let (Some(next_hop), Some(l3vxlan_ifindex)) = (
+        super::routes::extract_gateway(msg),
+        extract_output_ifindex(msg),
+    ) {
+        return Some((vec![next_hop], l3vxlan_ifindex));
+    }
+    let mut out = Vec::new();
+    let mut ifindex = None;
+    for attr in &msg.attributes {
+        let RouteAttribute::MultiPath(hops) = attr else {
+            continue;
+        };
+        for hop in hops {
+            if !hop.flags.contains(RouteNextHopFlags::Onlink) {
+                return None;
+            }
+            match ifindex {
+                Some(existing) if existing != hop.interface_index => return None,
+                Some(_) => {}
+                None => ifindex = Some(hop.interface_index),
+            }
+            let next_hop = hop.attributes.iter().find_map(|attr| match attr {
+                RouteAttribute::Gateway(RouteAddress::Inet(v4)) => Some(IpAddr::V4(*v4)),
+                RouteAttribute::Gateway(RouteAddress::Inet6(v6)) => Some(IpAddr::V6(*v6)),
+                _ => None,
+            })?;
+            out.push(next_hop);
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.len() < 2 {
+        return None;
+    }
+    Some((out, ifindex?))
 }
 
 /// Pure L3-neighbor classifier: keep rows on a managed L3VXLAN
@@ -247,17 +294,12 @@ pub(crate) fn classify_adoption_neighbor(
 pub(crate) fn classify_adoption_l3vxlan_fdb(
     msg: &NeighbourMessage,
     managed_l3vxlan: &HashMap<u32, IpVrfId>,
-) -> Option<((u32, MacAddress), IpVrfId)> {
+) -> Option<((u32, MacAddress), AdoptedL3VxlanFdb)> {
     if msg.header.family != AddressFamily::Bridge {
         return None;
     }
     let ifindex = msg.header.ifindex;
     let vrf_id = managed_l3vxlan.get(&ifindex).copied()?;
-    if !state_has_permanent(msg.header.state)
-        || !msg.header.flags.contains(NeighbourFlags::ExtLearned)
-    {
-        return None;
-    }
     if extract_protocol(msg).is_some_and(|p| p != RouteProtocol::Bgp) {
         return None;
     }
@@ -269,7 +311,20 @@ pub(crate) fn classify_adoption_l3vxlan_fdb(
         }
         _ => None,
     })?;
-    Some(((ifindex, router_mac), vrf_id))
+    let target = if let Some(nh_id) = extract_nh_id(msg) {
+        if !crate::nh_id_alloc::NhIdAllocator::is_l3_nhg(nh_id) {
+            return None;
+        }
+        AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id }
+    } else {
+        if !state_has_permanent(msg.header.state)
+            || !msg.header.flags.contains(NeighbourFlags::ExtLearned)
+        {
+            return None;
+        }
+        AdoptedL3VxlanFdbTarget::SingleDst
+    };
+    Some(((ifindex, router_mac), AdoptedL3VxlanFdb { vrf_id, target }))
 }
 
 /// `NDA_PROTOCOL` value from the dumped neighbour message, if the
@@ -278,6 +333,20 @@ pub(crate) fn classify_adoption_l3vxlan_fdb(
 fn extract_protocol(msg: &NeighbourMessage) -> Option<RouteProtocol> {
     msg.attributes.iter().find_map(|attr| match attr {
         NeighbourAttribute::Protocol(p) => Some(*p),
+        _ => None,
+    })
+}
+
+/// `NDA_NH_ID` from an L3VXLAN FDB row, if present.
+fn extract_nh_id(msg: &NeighbourMessage) -> Option<u32> {
+    msg.attributes.iter().find_map(|attr| match attr {
+        NeighbourAttribute::Other(default_nla)
+            if Nla::kind(default_nla) == NDA_NH_ID && Nla::value_len(default_nla) == 4 =>
+        {
+            let mut bytes = [0u8; 4];
+            Nla::emit_value(default_nla, &mut bytes);
+            Some(u32::from_ne_bytes(bytes))
+        }
         _ => None,
     })
 }
@@ -432,8 +501,8 @@ async fn dump_l3vxlan_fdb(
         .await
         .map_err(|e| DataplaneError::Other(format!("L3 adoption fdb dump: {e}")))?
     {
-        if let Some((key, vrf_id)) = classify_adoption_l3vxlan_fdb(&msg, managed_l3vxlan) {
-            out.l3vxlan_fdb.insert(key, vrf_id);
+        if let Some((key, row)) = classify_adoption_l3vxlan_fdb(&msg, managed_l3vxlan) {
+            out.l3vxlan_fdb.insert(key, row);
         }
     }
     Ok(())
@@ -442,8 +511,10 @@ async fn dump_l3vxlan_fdb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netlink_packet_core::DefaultNla;
     use netlink_packet_route::route::{
-        RouteAddress, RouteAttribute, RouteHeader, RouteProtocol, RouteScope, RouteType,
+        RouteAddress, RouteAttribute, RouteHeader, RouteNextHop, RouteProtocol, RouteScope,
+        RouteType,
     };
     use rustbgpd_evpn::Ipv4Prefix;
     use std::net::Ipv4Addr;
@@ -458,6 +529,13 @@ mod tests {
 
     fn managed(entries: &[(u32, u32)]) -> HashMap<u32, IpVrfId> {
         entries.iter().map(|(i, v)| (*i, vrf_id(*v))).collect()
+    }
+
+    fn adopted_fdb(vrf: u32, target: AdoptedL3VxlanFdbTarget) -> AdoptedL3VxlanFdb {
+        AdoptedL3VxlanFdb {
+            vrf_id: vrf_id(vrf),
+            target,
+        }
     }
 
     /// Marker-shaped route message — proto bgp + onlink in `table`,
@@ -498,6 +576,23 @@ mod tests {
         if let Some(idx) = oif {
             msg.attributes.push(RouteAttribute::Oif(idx));
         }
+        msg
+    }
+
+    fn ecmp_route_msg(table: u32, dest: Ipv4Addr, oif: u32, gateways: &[Ipv4Addr]) -> RouteMessage {
+        let mut msg = route_msg(table, RouteProtocol::Bgp, true, Some(dest), None, None);
+        let hops = gateways
+            .iter()
+            .map(|gateway| {
+                let mut hop = RouteNextHop::default();
+                hop.flags = RouteNextHopFlags::Onlink;
+                hop.interface_index = oif;
+                hop.attributes
+                    .push(RouteAttribute::Gateway(RouteAddress::Inet(*gateway)));
+                hop
+            })
+            .collect();
+        msg.attributes.push(RouteAttribute::MultiPath(hops));
         msg
     }
 
@@ -547,6 +642,34 @@ mod tests {
                     table_id: 201,
                     l3vxlan_ifindex: 42,
                     next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    next_hops: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn marker_ecmp_route_in_configured_table_is_candidate() {
+        let msg = ecmp_route_msg(
+            201,
+            Ipv4Addr::new(198, 51, 100, 0),
+            42,
+            &[Ipv4Addr::new(10, 0, 0, 3), Ipv4Addr::new(10, 0, 0, 2)],
+        );
+        let verdict = classify_adoption_route(&msg, &tables(&[(201, 101)]));
+        assert_eq!(
+            verdict,
+            RouteAdoptionVerdict::Candidate {
+                vrf_id: vrf_id(101),
+                prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+                route: AdoptedL3Route {
+                    table_id: 201,
+                    l3vxlan_ifindex: 42,
+                    next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    next_hops: vec![
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                    ],
                 },
             },
         );
@@ -691,6 +814,15 @@ mod tests {
         msg
     }
 
+    fn with_nh_id(mut msg: NeighbourMessage, nh_id: u32) -> NeighbourMessage {
+        msg.attributes
+            .push(NeighbourAttribute::Other(DefaultNla::new(
+                NDA_NH_ID,
+                nh_id.to_ne_bytes().to_vec(),
+            )));
+        msg
+    }
+
     #[test]
     fn neighbor_with_bgp_protocol_stamp_is_adopted_in_both_modes() {
         // A v0.38.0+ install: the stamp matches our RTPROT_BGP
@@ -823,8 +955,79 @@ mod tests {
             classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
             Some((
                 (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
-                vrf_id(101),
+                adopted_fdb(101, AdoptedL3VxlanFdbTarget::SingleDst),
             )),
+        );
+    }
+
+    #[test]
+    fn fdb_row_with_nhid_records_nexthop_group_target() {
+        let msg = with_nh_id(
+            neigh_msg(
+                AddressFamily::Bridge,
+                42,
+                NeighbourState::Other(0xc0),
+                NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+                None,
+                Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+            ),
+            0x6000_0007,
+        );
+        assert_eq!(
+            classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            Some((
+                (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
+                adopted_fdb(
+                    101,
+                    AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id: 0x6000_0007 },
+                ),
+            )),
+        );
+    }
+
+    #[test]
+    fn fdb_nhid_row_uses_l3_nhid_marker_even_when_kernel_drops_flags() {
+        let msg = with_nh_id(
+            neigh_msg(
+                AddressFamily::Bridge,
+                42,
+                NeighbourState::Other(0),
+                NeighbourFlags::Own,
+                None,
+                Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+            ),
+            crate::nh_id_alloc::L3_NHG_TAG | 7,
+        );
+        assert_eq!(
+            classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            Some((
+                (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
+                adopted_fdb(
+                    101,
+                    AdoptedL3VxlanFdbTarget::NexthopGroup {
+                        nh_id: crate::nh_id_alloc::L3_NHG_TAG | 7
+                    },
+                ),
+            )),
+        );
+    }
+
+    #[test]
+    fn fdb_nhid_row_with_non_l3_nhid_is_foreign() {
+        let msg = with_nh_id(
+            neigh_msg(
+                AddressFamily::Bridge,
+                42,
+                NeighbourState::Other(0xc0),
+                NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+                None,
+                Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+            ),
+            crate::nh_id_alloc::NHG_TAG | 7,
+        );
+        assert_eq!(
+            classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            None
         );
     }
 
@@ -902,7 +1105,7 @@ mod tests {
             classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
             Some((
                 (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
-                vrf_id(101),
+                adopted_fdb(101, AdoptedL3VxlanFdbTarget::SingleDst),
             )),
         );
     }
@@ -949,7 +1152,7 @@ mod tests {
             classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
             Some((
                 (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
-                vrf_id(101),
+                adopted_fdb(101, AdoptedL3VxlanFdbTarget::SingleDst),
             )),
         );
     }

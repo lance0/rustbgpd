@@ -528,10 +528,16 @@ where
         let report_tx = report_broadcast_tx.clone();
         let metrics = metrics.clone();
         tokio::spawn(async move {
+            let mut last_ip_prefix_install_drop_counts = BTreeMap::new();
             while let Some(report) = report_mpsc_rx.recv().await {
                 record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
                 record_l3_adoption_metrics(&metrics, report.l3_adoption_counters);
                 record_single_active_metrics(&metrics, report.single_active_counters);
+                record_remote_prefix_install_drop_metrics(
+                    &metrics,
+                    &mut last_ip_prefix_install_drop_counts,
+                    report.ip_vrf_install_drop_counts.clone(),
+                );
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -636,6 +642,34 @@ fn record_remote_prefix_drop_metrics(
         .collect();
     for (vrf, reason) in stale {
         metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, reason, 0);
+    }
+    for ((vrf, reason), count) in &current {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(
+            vrf,
+            reason,
+            i64::try_from(*count).unwrap_or(i64::MAX),
+        );
+    }
+    *previous = current;
+    true
+}
+
+fn record_remote_prefix_install_drop_metrics(
+    metrics: &BgpMetrics,
+    previous: &mut BTreeMap<(String, String), u64>,
+    current: BTreeMap<(String, String), u64>,
+) -> bool {
+    if *previous == current {
+        return false;
+    }
+
+    let stale: Vec<(String, String)> = previous
+        .keys()
+        .filter(|key| !current.contains_key(*key))
+        .cloned()
+        .collect();
+    for (vrf, reason) in stale {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, &reason, 0);
     }
     for ((vrf, reason), count) in &current {
         metrics.set_evpn_ip_vrf_remote_prefix_drops(
@@ -1462,12 +1496,33 @@ fn fold_ead_per_es_modes(
 /// future Add-Path duplicates).
 fn fold_ead_per_es_modes_for_esi_type5_import(
     routes: &[EvpnRibRoute],
-) -> std::collections::BTreeMap<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier), bool>
-{
+) -> std::collections::BTreeMap<
+    (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+    rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode,
+> {
     let mut modes = std::collections::BTreeMap::new();
     for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
-        let entry = modes.entry(key).or_insert(true);
-        *entry = *entry && single_active;
+        let mode = if single_active {
+            rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::SingleActive
+        } else {
+            rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::AllActive
+        };
+        modes
+            .entry(key)
+            .and_modify(|existing| {
+                use rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::{
+                    AllActive, Conflicting, SingleActive,
+                };
+                *existing = match (*existing, mode) {
+                    (Conflicting, _)
+                    | (_, Conflicting)
+                    | (SingleActive, AllActive)
+                    | (AllActive, SingleActive) => Conflicting,
+                    (SingleActive, SingleActive) => SingleActive,
+                    (AllActive, AllActive) => AllActive,
+                };
+            })
+            .or_insert(mode);
     }
     modes
 }
@@ -1543,7 +1598,7 @@ fn project_esi_overlay_ead_per_evi(
     instances: &EvpnInstanceTable,
     ead_per_es_modes: &std::collections::BTreeMap<
         (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
-        bool,
+        rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode,
     >,
 ) -> Option<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> {
     let EvpnRoute::EadPerEvi(ead) = &route.route else {
@@ -1554,13 +1609,13 @@ fn project_esi_overlay_ead_per_evi(
     }
     let l2vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
     instances.get(l2vni)?;
-    let single_active = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
+    let mode = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
     Some(rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi {
         l2vni,
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         next_hop: route.next_hop,
-        single_active,
+        mode,
     })
 }
 
@@ -2006,6 +2061,46 @@ mod tests {
         assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
     }
 
+    #[test]
+    fn l3_install_drop_report_snapshot_feeds_and_clears_metrics() {
+        let metrics = BgpMetrics::new();
+        let mut previous = BTreeMap::new();
+
+        record_remote_prefix_install_drop_metrics(
+            &metrics,
+            &mut previous,
+            BTreeMap::from([(
+                (
+                    "vrf1".to_string(),
+                    "unsupported_all_active_target_set".to_string(),
+                ),
+                1,
+            )]),
+        );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"unsupported_all_active_target_set\",vrf=\"vrf1\"} 1"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"vrf1\",reason=\"unsupported_all_active_target_set\"} 1"
+            ),
+            "missing install-drop gauge in metrics text: {text}"
+        );
+
+        record_remote_prefix_install_drop_metrics(&metrics, &mut previous, BTreeMap::new());
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"unsupported_all_active_target_set\",vrf=\"vrf1\"} 0"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"vrf1\",reason=\"unsupported_all_active_target_set\"} 0"
+            ),
+            "stale install-drop gauge should be reset in metrics text: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn remote_type5_projection_drop_metrics_track_current_snapshot() {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
@@ -2399,12 +2494,14 @@ mod tests {
 
     #[test]
     fn project_esi_overlay_ead_per_evi_carries_l2vni_tag_and_mode() {
+        use rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::{AllActive, SingleActive};
+
         let esi = EthernetSegmentIdentifier::new([8; 10]);
         let local_vteps = BTreeSet::new();
         let instances = local_instance_table(100, Some("br100"));
         let ead = evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2");
-        let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), false)]);
-        let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), true)]);
+        let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), AllActive)]);
+        let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), SingleActive)]);
 
         let all_active_projected =
             project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &all_active)
@@ -2412,12 +2509,12 @@ mod tests {
         assert_eq!(all_active_projected.l2vni, vni(100));
         assert_eq!(all_active_projected.ethernet_tag, EthernetTagId(42));
         assert_eq!(all_active_projected.next_hop, ipa("10.0.0.2"));
-        assert!(!all_active_projected.single_active);
+        assert_eq!(all_active_projected.mode, AllActive);
 
         let single_active_projected =
             project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &single_active)
                 .expect("single-active feeds the import-capable Type 5 resolver");
-        assert!(single_active_projected.single_active);
+        assert_eq!(single_active_projected.mode, SingleActive);
 
         let self_originated = BTreeSet::from([ipa("10.0.0.2")]);
         assert!(
@@ -2499,8 +2596,8 @@ mod tests {
             let modes = fold_ead_per_es_modes_for_esi_type5_import(&routes);
             assert_eq!(
                 modes.get(&(nh, esi)),
-                Some(&false),
-                "conflicting signal must fail closed (non-single-active) for Type 5 import"
+                Some(&rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::Conflicting),
+                "conflicting signal must stay explicit for Type 5 import"
             );
         }
 
@@ -2508,7 +2605,7 @@ mod tests {
         let unanimous = vec![single_active.clone(), single_active];
         assert_eq!(
             fold_ead_per_es_modes_for_esi_type5_import(&unanimous).get(&(nh, esi)),
-            Some(&true),
+            Some(&rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode::SingleActive),
             "unanimous single-active must remain single-active"
         );
     }
@@ -3028,7 +3125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_intent_tables_drops_all_active_esi_overlay_type5() {
+    async fn build_intent_tables_imports_all_active_esi_overlay_type5_target_set() {
         let instances = local_instance_table(100, Some("br100"));
         let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
         ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
@@ -3056,14 +3153,22 @@ mod tests {
             build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias())
                 .await
                 .unwrap();
-        assert!(tables.remote_ip_prefixes.is_empty());
+        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        let entries: Vec<_> = tables
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
+        assert_eq!(
+            entries[0].1.router_mac,
+            MacAddress::new([0x02, 0x59, 0, 0, 0, 1])
+        );
+        let expected_next_hops = [ipa("10.0.0.2")];
         assert!(matches!(
-            tables.remote_ip_prefixes.drops()[0],
-            rustbgpd_evpn::ip_vrf::projection::DropReason::UnsupportedAllActiveEsiOverlayIndex {
-                ref vrf,
-                candidates: 1,
-                ..
-            } if vrf == "blue"
+            &entries[0].1.targets,
+            rustbgpd_evpn::ip_vrf::RemoteIpPrefixTargets::AllActive(targets)
+                if targets.next_hops() == expected_next_hops
         ));
     }
 

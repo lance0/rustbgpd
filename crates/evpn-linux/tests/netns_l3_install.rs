@@ -49,9 +49,18 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
+use std::sync::Arc;
 
-use rustbgpd_evpn::{Ipv4Prefix, MacAddress};
-use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, LinuxDataplane};
+use rustbgpd_evpn::ip_vrf::{RemoteIpPrefixEntry, RemoteIpPrefixTable};
+use rustbgpd_evpn::{
+    BumEnforcementTable, DataplaneIntent, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable,
+    Ipv4Prefix, MacAddress, RemoteMacTable, RouteDistinguisher, RouteTarget,
+};
+use rustbgpd_evpn_linux::{
+    Dataplane, DataplaneOp, LinuxDataplane, ReconcileActor, ReconcileActorConfig,
+};
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 fn netns_gate() -> bool {
     std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
@@ -182,12 +191,80 @@ fn v4_prefix(octets: [u8; 4], len: u8) -> rustbgpd_evpn::EvpnIpPrefixValue {
     rustbgpd_evpn::EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::from(octets), len))
 }
 
+fn actor_ip_vrfs(local_router_mac: MacAddress) -> IpVrfTable {
+    let mut table = IpVrfTable::new();
+    table
+        .insert(
+            IpVrf::new(
+                "vrf-test".to_string(),
+                IpVrfId::new(L3VNI).unwrap(),
+                RouteDistinguisher::new([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+                vec!["65000:100".parse::<RouteTarget>().unwrap()],
+                LOCAL_VTEP.parse().unwrap(),
+                local_router_mac,
+                "vrf-test".to_string(),
+                "l3vxlan-test".to_string(),
+                TABLE_ID,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    table
+}
+
+fn actor_all_active_prefixes(router_mac: MacAddress) -> RemoteIpPrefixTable {
+    let mut table = RemoteIpPrefixTable::new();
+    let entry = RemoteIpPrefixEntry::all_active(
+        v4_prefix([203, 0, 113, 0], 24),
+        vec!["10.0.0.2".parse().unwrap(), "10.0.0.3".parse().unwrap()],
+        L3VNI,
+        router_mac,
+    )
+    .unwrap();
+    table.insert_resolved(IpVrfId::new(L3VNI).unwrap(), entry);
+    table
+}
+
+fn actor_intent(
+    generation: u64,
+    ip_vrfs: IpVrfTable,
+    remote_ip_prefixes: RemoteIpPrefixTable,
+) -> Arc<DataplaneIntent> {
+    Arc::new(DataplaneIntent {
+        generation,
+        instances: Arc::new(EvpnInstanceTable::new()),
+        remote_macs: Arc::new(RemoteMacTable::new()),
+        bum_enforcement: Arc::new(BumEnforcementTable::new()),
+        ip_vrfs: Arc::new(ip_vrfs),
+        remote_ip_prefixes: Arc::new(remote_ip_prefixes),
+    })
+}
+
+async fn wait_for_report_generation(
+    report_rx: &mut mpsc::Receiver<rustbgpd_evpn::DataplaneReport>,
+    generation: u64,
+) -> rustbgpd_evpn::DataplaneReport {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let report = report_rx.recv().await.expect("dataplane report channel");
+            if report.intent_generation >= generation {
+                return report;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for dataplane report")
+}
+
 const TABLE_ID: u32 = 200;
 const L3VNI: u32 = 100;
 const LOCAL_VTEP: &str = "10.0.0.1";
 const AA_NHID_A: u32 = 805_306_369;
 const AA_NHID_B: u32 = 805_306_370;
 const AA_GROUP_NHID: u32 = 1_073_741_825;
+const L3_AA_NHID_A: u32 = rustbgpd_evpn_linux::nh_id_alloc::L3_VTEP_NH_TAG | 1;
+const L3_AA_NHID_B: u32 = rustbgpd_evpn_linux::nh_id_alloc::L3_VTEP_NH_TAG | 2;
+const L3_AA_GROUP_NHID: u32 = rustbgpd_evpn_linux::nh_id_alloc::L3_NHG_TAG | 3;
 
 /// Spawn the inner test invocation inside the netns. The outer
 /// process sets up the topology and any pre-loaded foreign state;
@@ -208,6 +285,25 @@ fn run_inner(ns: &NetnsFixture, test_name: &str) {
 
 fn is_inner() -> bool {
     std::env::var("RUSTBGPD_NETNS_INNER").is_ok()
+}
+
+async fn spawn_reconcile_actor(
+    config: ReconcileActorConfig,
+) -> (
+    watch::Sender<Arc<DataplaneIntent>>,
+    mpsc::Receiver<rustbgpd_evpn::DataplaneReport>,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let dataplane = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+    let (report_tx, report_rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let actor = ReconcileActor::new(config, dataplane, intent_rx, report_tx, shutdown.clone());
+    let actor_join = tokio::spawn(actor.run());
+    (intent_tx, report_rx, shutdown, actor_join)
 }
 
 /// One full cycle: install route + neighbor + FDB via the dataplane,
@@ -437,6 +533,231 @@ async fn linux_dataplane_foreign_route_survives_l3_cycle() {
     let after_withdraw = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
     assert_route_absent(&after_withdraw, "198.51.100.0/24");
     assert_route_present(&after_withdraw, foreign_prefix, foreign_gw, "l3vxlan-test");
+}
+
+/// LAN-76 production-path proof: the reconcile actor drives the
+/// all-active ESI Type 5 L3 writer against a real kernel.
+///
+/// Unlike [`l3vxlan_all_active_multipath_kernel_shape`], this test
+/// does not hand-program the Linux objects with shell commands. It
+/// feeds a [`DataplaneIntent`] through `ReconcileActor<LinuxDataplane>`
+/// and asserts the same operator-visible kernel state the daemon would
+/// leave in production: VRF-table ECMP, per-VTEP L3 neighbors, an
+/// L3VXLAN FDB row pointing at an L3-tagged NHG, and clean withdrawal.
+#[tokio::test]
+async fn linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged L3 actor proof");
+        return;
+    }
+    let local_router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xdd]);
+    let remote_router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xee]);
+    let prefix = "203.0.113.0/24";
+    let nh_a = "10.0.0.2";
+    let nh_b = "10.0.0.3";
+
+    if !is_inner() {
+        let ns = NetnsFixture::create("actor-aa");
+        setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, local_router_mac);
+        run_inner(
+            &ns,
+            "linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer",
+        );
+        return;
+    }
+
+    let dataplane = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+    let (report_tx, mut report_rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let actor = ReconcileActor::new(
+        ReconcileActorConfig::for_tests(),
+        dataplane,
+        intent_rx,
+        report_tx,
+        shutdown.clone(),
+    );
+    let actor_join = tokio::spawn(actor.run());
+
+    let ip_vrfs = actor_ip_vrfs(local_router_mac);
+    intent_tx
+        .send(actor_intent(
+            1,
+            ip_vrfs.clone(),
+            actor_all_active_prefixes(remote_router_mac),
+        ))
+        .expect("send install intent");
+    let install_report = wait_for_report_generation(&mut report_rx, 1).await;
+    assert!(
+        install_report.failed.is_empty(),
+        "actor install failures: {:?}",
+        install_report.failed
+    );
+
+    let route_dump = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_multipath_route_present(&route_dump, prefix, &[nh_a, nh_b], "l3vxlan-test");
+    let neigh_dump = shell_capture("ip", &["neigh", "show", "dev", "l3vxlan-test"]);
+    assert_neighbor_present(&neigh_dump, nh_a, &format_mac(remote_router_mac));
+    assert_neighbor_present(&neigh_dump, nh_b, &format_mac(remote_router_mac));
+    let nexthop_dump = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_member_present(&nexthop_dump, L3_AA_NHID_A, nh_a);
+    assert_nexthop_member_present(&nexthop_dump, L3_AA_NHID_B, nh_b);
+    assert_nexthop_group_present(
+        &nexthop_dump,
+        L3_AA_GROUP_NHID,
+        &[L3_AA_NHID_A, L3_AA_NHID_B],
+    );
+    let fdb_dump = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_nhid_present(&fdb_dump, &format_mac(remote_router_mac), L3_AA_GROUP_NHID);
+
+    intent_tx
+        .send(actor_intent(2, ip_vrfs, RemoteIpPrefixTable::new()))
+        .expect("send withdraw intent");
+    let withdraw_report = wait_for_report_generation(&mut report_rx, 2).await;
+    assert!(
+        withdraw_report.failed.is_empty(),
+        "actor withdraw failures: {:?}",
+        withdraw_report.failed
+    );
+
+    let route_after = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_route_absent(&route_after, prefix);
+    let neigh_after = shell_capture("ip", &["neigh", "show", "dev", "l3vxlan-test"]);
+    assert_neighbor_absent(&neigh_after, nh_a);
+    assert_neighbor_absent(&neigh_after, nh_b);
+    let fdb_after = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_absent(&fdb_after, &format_mac(remote_router_mac));
+    let nexthop_after = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_absent(
+        &nexthop_after,
+        &[L3_AA_NHID_A, L3_AA_NHID_B, L3_AA_GROUP_NHID],
+    );
+
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), actor_join)
+        .await
+        .expect("actor shutdown timeout")
+        .expect("actor join");
+}
+
+/// LAN-77 restart-adoption proof: a fresh actor in the same netns
+/// reclaims the crash-leftover all-active L3 writer state instead of
+/// treating the Router-MAC FDB-NHG row as a scalar FDB entry or
+/// leaking the L3 NHID tree.
+#[tokio::test]
+async fn linux_reconcile_actor_restarts_and_adopts_all_active_l3_writer() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged L3 actor proof");
+        return;
+    }
+    let local_router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xde]);
+    let remote_router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xef]);
+    let prefix = "203.0.113.0/24";
+    let nh_a = "10.0.0.2";
+    let nh_b = "10.0.0.3";
+
+    if !is_inner() {
+        let ns = NetnsFixture::create("actor-aa-restart");
+        setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, local_router_mac);
+        run_inner(
+            &ns,
+            "linux_reconcile_actor_restarts_and_adopts_all_active_l3_writer",
+        );
+        return;
+    }
+
+    let ip_vrfs = actor_ip_vrfs(local_router_mac);
+    let (intent_tx1, mut report_rx1, _shutdown1, actor_join1) =
+        spawn_reconcile_actor(ReconcileActorConfig::for_tests()).await;
+    intent_tx1
+        .send(actor_intent(
+            1,
+            ip_vrfs.clone(),
+            actor_all_active_prefixes(remote_router_mac),
+        ))
+        .expect("send lifetime-1 install intent");
+    let install_report = wait_for_report_generation(&mut report_rx1, 1).await;
+    assert!(
+        install_report.failed.is_empty(),
+        "actor install failures: {:?}",
+        install_report.failed
+    );
+    let prior_fdb = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_nhid_present(&prior_fdb, &format_mac(remote_router_mac), L3_AA_GROUP_NHID);
+    let prior_nexthops = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_member_present(&prior_nexthops, L3_AA_NHID_A, nh_a);
+    assert_nexthop_member_present(&prior_nexthops, L3_AA_NHID_B, nh_b);
+    assert_nexthop_group_present(
+        &prior_nexthops,
+        L3_AA_GROUP_NHID,
+        &[L3_AA_NHID_A, L3_AA_NHID_B],
+    );
+    actor_join1.abort();
+    let _ = actor_join1.await;
+    drop(intent_tx1);
+    drop(report_rx1);
+
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: std::time::Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let (intent_tx2, mut report_rx2, shutdown2, actor_join2) = spawn_reconcile_actor(cfg).await;
+    intent_tx2
+        .send(actor_intent(
+            1,
+            ip_vrfs.clone(),
+            actor_all_active_prefixes(remote_router_mac),
+        ))
+        .expect("send lifetime-2 install intent");
+    let reclaim_report = wait_for_report_generation(&mut report_rx2, 1).await;
+    assert!(
+        reclaim_report.failed.is_empty(),
+        "restart reclaim failures: {:?}",
+        reclaim_report.failed
+    );
+    assert_eq!(reclaim_report.l3_adoption_counters.routes_adopted, 1);
+    assert_eq!(reclaim_report.l3_adoption_counters.neighbors_adopted, 2);
+    assert_eq!(reclaim_report.l3_adoption_counters.l3vxlan_fdb_adopted, 1);
+
+    let route_dump = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_multipath_route_present(&route_dump, prefix, &[nh_a, nh_b], "l3vxlan-test");
+    let fdb_dump = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_nhid_present(&fdb_dump, &format_mac(remote_router_mac), L3_AA_GROUP_NHID);
+    let nexthop_dump = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_member_present(&nexthop_dump, L3_AA_NHID_A, nh_a);
+    assert_nexthop_member_present(&nexthop_dump, L3_AA_NHID_B, nh_b);
+    assert_nexthop_group_present(
+        &nexthop_dump,
+        L3_AA_GROUP_NHID,
+        &[L3_AA_NHID_A, L3_AA_NHID_B],
+    );
+
+    intent_tx2
+        .send(actor_intent(2, ip_vrfs, RemoteIpPrefixTable::new()))
+        .expect("send withdraw intent");
+    let withdraw_report = wait_for_report_generation(&mut report_rx2, 2).await;
+    assert!(
+        withdraw_report.failed.is_empty(),
+        "actor withdraw failures: {:?}",
+        withdraw_report.failed
+    );
+    let route_after = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+    assert_route_absent(&route_after, prefix);
+    let fdb_after = shell_capture("bridge", &["fdb", "show", "dev", "l3vxlan-test"]);
+    assert_fdb_absent(&fdb_after, &format_mac(remote_router_mac));
+    let nexthop_after = shell_capture("ip", &["nexthop", "show"]);
+    assert_nexthop_absent(
+        &nexthop_after,
+        &[L3_AA_NHID_A, L3_AA_NHID_B, L3_AA_GROUP_NHID],
+    );
+
+    shutdown2.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), actor_join2)
+        .await
+        .expect("actor shutdown timeout")
+        .expect("actor join");
 }
 
 /// Slice 6a kernel-event wake: an `ip route add` / `ip route del`

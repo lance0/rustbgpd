@@ -494,7 +494,7 @@ jobs:
           script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + l3_multipath)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + l3_multipath + l3_all_active_writer)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -503,9 +503,10 @@ jobs:
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
       # netns never leaks to the host namespace. All selectors except
-      # l3_multipath are vrf-free and need no host setup beyond Docker
-      # (preinstalled); l3_multipath creates a `vrf` device, so the step below
-      # loads the vrf module on the host kernel the containers share.
+      # All selectors except l3_multipath/l3_all_active_writer are vrf-free
+      # and need no host setup beyond Docker (preinstalled); the L3 selectors
+      # create a `vrf` device, so the step below loads the vrf module on the
+      # host kernel the containers share.
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 
@@ -534,3 +535,6 @@ jobs:
 
       - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath
+
+      - name: LAN-76 all-active Type 5 L3 writer netns proof
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_all_active_writer

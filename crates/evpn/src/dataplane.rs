@@ -472,6 +472,14 @@ pub struct DataplaneReport {
     /// `IpVrfState.installed_routes_count` field reads it
     /// lock-free.
     pub ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32>,
+    /// Current Linux-writer remote Type 5 install-policy drops by
+    /// bounded `(vrf, reason)` labels. These are post-projection
+    /// suppressions: the Type 5 resolved to a desired IP-VRF prefix,
+    /// but the L3 writer refused the kernel install shape (for
+    /// example, an all-active target set with fewer than two
+    /// candidates). The daemon mirrors this into Prometheus alongside
+    /// projection drops.
+    pub ip_vrf_install_drop_counts: std::collections::BTreeMap<(String, String), u64>,
     /// Latest owned ADR-0059 FDB nexthop-group state. Empty / zeroed
     /// when no FDB-NHG rows are installed or when the Linux dataplane
     /// actor is not running (RR-only deployments).

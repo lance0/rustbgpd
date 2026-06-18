@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::ip_vrf::{
-    IpVrf, IpVrfId, IpVrfStatus, IpVrfTable, ProjectedIpPrefixRoute, RemoteIpPrefixTable,
-    project_ip_prefix_routes,
+    IpVrf, IpVrfId, IpVrfStatus, IpVrfTable, ProjectedIpPrefixRoute, RemoteIpPrefixEntry,
+    RemoteIpPrefixTable, project_ip_prefix_routes,
 };
 use rustbgpd_evpn::{
     BridgeVlan, BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
@@ -35,6 +35,15 @@ use tokio_util::sync::CancellationToken;
 
 fn vni(n: u32) -> EvpnInstanceId {
     EvpnInstanceId::new(n).unwrap()
+}
+
+async fn wait_for_generation(h: &mut Harness, generation: u64) -> rustbgpd_evpn::DataplaneReport {
+    loop {
+        let r = h.next_report().await;
+        if r.intent_generation >= generation {
+            return r;
+        }
+    }
 }
 fn mac(b: u8) -> MacAddress {
     MacAddress::new([b; 6])
@@ -144,6 +153,12 @@ impl Harness {
             tail.push(r);
         }
         tail
+    }
+
+    fn crash(self) -> InMemoryHandle {
+        let handle = self.handle.clone();
+        self.actor_join.abort();
+        handle
     }
 }
 
@@ -2411,6 +2426,14 @@ fn l3_desired_prefixes(ip_vrfs: &IpVrfTable) -> RemoteIpPrefixTable {
     )
 }
 
+fn l3_all_active_prefixes(next_hops: Vec<IpAddr>) -> RemoteIpPrefixTable {
+    let mut table = RemoteIpPrefixTable::new();
+    let entry =
+        RemoteIpPrefixEntry::all_active(l3_prefix(), next_hops, 101, l3_router_mac()).unwrap();
+    table.insert_resolved(l3_vrf_id(), entry);
+    table
+}
+
 fn l3_intent(
     generation: u64,
     ip_vrfs: IpVrfTable,
@@ -2450,6 +2473,415 @@ fn l3_kernel_rows(handle: &InMemoryHandle) -> (bool, bool, bool) {
         handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")),
         handle.kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac()),
     )
+}
+
+fn copy_l3_kernel_state(from: &InMemoryHandle, to: &InMemoryHandle) {
+    for ((table_id, prefix), row) in from.l3_routes() {
+        match row.targets {
+            rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Single { next_hop } => {
+                to.pre_load_l3_route(table_id, prefix, row.l3vxlan_ifindex, next_hop, row.marked);
+            }
+            rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Ecmp { next_hops } => {
+                to.pre_load_l3_route_ecmp(
+                    table_id,
+                    prefix,
+                    row.l3vxlan_ifindex,
+                    next_hops,
+                    row.marked,
+                );
+            }
+        }
+    }
+    for ((ifindex, next_hop), row) in from.l3_neighbors() {
+        to.pre_load_l3_neighbor(ifindex, next_hop, row.router_mac, row.marked);
+    }
+    for ((ifindex, router_mac), row) in from.l3_vxlan_fdb() {
+        match row.target {
+            rustbgpd_evpn_linux::in_memory::InMemoryL3VxlanFdbTarget::SingleDst { next_hop } => {
+                to.pre_load_l3_vxlan_fdb(ifindex, router_mac, next_hop, row.marked)
+            }
+            rustbgpd_evpn_linux::in_memory::InMemoryL3VxlanFdbTarget::Nhg { nh_id } => {
+                to.pre_load_l3_vxlan_fdb_nhg(ifindex, router_mac, nh_id, row.marked);
+            }
+        }
+    }
+    for nh in from.nexthop_ops().into_values() {
+        to.pre_load_nexthop_op(nh);
+    }
+}
+
+#[tokio::test]
+async fn l3_all_active_writer_installs_ecmp_route_and_l3_nhg() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    h.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.3"), ipa("10.0.0.2")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+
+    let routes = h.handle.l3_routes();
+    let route = routes
+        .get(&(L3_TABLE_ID, l3_prefix()))
+        .expect("all-active route installed");
+    assert_eq!(route.l3vxlan_ifindex, L3_IFINDEX);
+    assert!(matches!(
+        &route.targets,
+        rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Ecmp { next_hops }
+            if next_hops == &vec![ipa("10.0.0.2"), ipa("10.0.0.3")]
+    ));
+    assert!(h.handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")));
+    assert!(h.handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3")));
+
+    let group_id = h
+        .handle
+        .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+        .expect("L3VXLAN FDB row points at an NHG");
+    let nhs = h.handle.nexthop_ops();
+    let member_ids = match &nhs.get(&group_id).expect("group NH installed").kind {
+        rustbgpd_evpn_linux::dataplane::KernelNexthopKind::Group { member_ids } => member_ids,
+        other => panic!("expected group NH, got {other:?}"),
+    };
+    assert_eq!(member_ids.len(), 2);
+    let gateways: std::collections::BTreeSet<_> = member_ids
+        .iter()
+        .map(|id| match &nhs.get(id).expect("member NH installed").kind {
+            rustbgpd_evpn_linux::dataplane::KernelNexthopKind::Member { gateway } => *gateway,
+            other => panic!("expected member NH, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        gateways,
+        std::collections::BTreeSet::from([ipa("10.0.0.2"), ipa("10.0.0.3")])
+    );
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn l3_all_active_restart_reclaims_existing_l3_nhg_without_new_ids() {
+    // Lifetime 1: install the all-active writer state, then crash
+    // without running the graceful drain. The fake kernel keeps the
+    // ECMP route, both L3 neighbors, the L3VXLAN FDB-NHG row, and
+    // the L3 NHID objects.
+    let mut h1 = Harness::spawn(ReconcileActorConfig::for_tests());
+    h1.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h1.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    h1.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h1, 1).await;
+    let prior_group_id = h1
+        .handle
+        .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+        .expect("lifetime 1 installed L3 FDB-NHG row");
+    let prior_nexthops = h1.handle.nexthop_ops();
+    assert_eq!(prior_nexthops.len(), 3, "two members + one group");
+    let handle1 = h1.crash();
+
+    // Lifetime 2: copy the kernel state into a fresh actor and keep
+    // the prefix desired. Adoption must reserve and reconstruct the
+    // existing group, then the replace-semantics install claims it.
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h2 = Harness::spawn(cfg);
+    h2.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h2.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    copy_l3_kernel_state(&handle1, &h2.handle);
+    h2.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let report = wait_for_generation(&mut h2, 1).await;
+    assert!(
+        report.failed.is_empty(),
+        "claim failed: {:?}",
+        report.failed
+    );
+
+    assert_eq!(
+        h2.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac()),
+        Some(prior_group_id),
+        "restart claim must reuse the crash-leftover NHG id"
+    );
+    assert_eq!(
+        h2.handle.nexthop_ops(),
+        prior_nexthops,
+        "restart claim must not allocate a fresh L3 NHID tree"
+    );
+    let route = h2
+        .handle
+        .l3_routes()
+        .remove(&(L3_TABLE_ID, l3_prefix()))
+        .expect("ECMP route remains installed after claim");
+    assert!(matches!(
+        route.targets,
+        rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Ecmp { next_hops }
+            if next_hops == vec![ipa("10.0.0.2"), ipa("10.0.0.3")]
+    ));
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"))
+    );
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3"))
+    );
+    let counters = report.l3_adoption_counters;
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 2);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(
+        counters.routes_reaped + counters.neighbors_reaped + counters.l3vxlan_fdb_reaped,
+        0,
+        "desired all-active state must claim, not reap"
+    );
+
+    // Then remove the desired route. The normal writer teardown must
+    // remove the ECMP route, the L3VXLAN FDB-NHG row, the group, and
+    // both member NHIDs.
+    h2.intent_tx
+        .send(l3_intent(2, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let report = wait_for_generation(&mut h2, 2).await;
+    assert!(
+        report.failed.is_empty(),
+        "withdraw failed: {:?}",
+        report.failed
+    );
+    assert!(!h2.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()));
+    assert!(
+        !h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"))
+    );
+    assert!(
+        !h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3"))
+    );
+    assert!(
+        h2.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+            .is_none()
+    );
+    assert!(
+        h2.handle.nexthop_ops().is_empty(),
+        "withdraw must reap the adopted L3 group and all member NHIDs"
+    );
+
+    h2.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn l3_all_active_restart_with_no_ip_vrf_config_preserves_l3_nhg() {
+    // Lifetime 1: create the same all-active writer state as the
+    // configured restart test above, then crash without a graceful
+    // drain.
+    let mut h1 = Harness::spawn(ReconcileActorConfig::for_tests());
+    h1.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h1.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    h1.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h1, 1).await;
+    let prior_group_id = h1
+        .handle
+        .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+        .expect("lifetime 1 installed L3 FDB-NHG row");
+    let prior_nexthops = h1.handle.nexthop_ops();
+    let handle1 = h1.crash();
+
+    // Lifetime 2: no [[evpn_ip_vrfs]] config is available yet. The
+    // actor may reserve L3-tagged NHIDs for allocator safety, but it
+    // must not delete them because no config-gated L3 FDB adoption
+    // pass can prove whether the Router-MAC FDB row still references
+    // the group.
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h2 = Harness::spawn(cfg);
+    copy_l3_kernel_state(&handle1, &h2.handle);
+    h2.intent_tx
+        .send(l3_intent(1, IpVrfTable::new(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h2, 1).await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    h2.intent_tx
+        .send(l3_intent(2, IpVrfTable::new(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let report = wait_for_generation(&mut h2, 2).await;
+    assert!(
+        report.failed.is_empty(),
+        "empty-config drift pass failed: {:?}",
+        report.failed
+    );
+
+    assert_eq!(
+        h2.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac()),
+        Some(prior_group_id),
+        "empty config must preserve the Router-MAC FDB-NHG row"
+    );
+    assert_eq!(
+        h2.handle.nexthop_ops(),
+        prior_nexthops,
+        "empty config must preserve the referenced L3 NHID tree"
+    );
+    assert!(h2.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()));
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"))
+    );
+    assert!(
+        h2.handle
+            .kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3"))
+    );
+
+    h2.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn l3_permanent_route_failure_suppresses_until_shape_changes() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    let target = DataplaneOp::AddRemoteIpRouteEcmp {
+        vrf_id: l3_vrf_id(),
+        prefix: l3_prefix(),
+        table_id: L3_TABLE_ID,
+        l3vxlan_ifindex: L3_IFINDEX,
+        next_hops: vec![ipa("10.0.0.2"), ipa("10.0.0.3")],
+        router_mac: l3_router_mac(),
+    };
+    h.handle.inject_failure_kernel_too_old(Some(target));
+
+    h.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    let after_first = h.handle.apply_count();
+    assert!(
+        after_first >= 3,
+        "neighbors and route apply should have been attempted, got apply_count={after_first}"
+    );
+    assert!(
+        !h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        "permanent route failure must leave the route uninstalled"
+    );
+
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+    }
+    let _ = h.try_drain_reports().await;
+    assert_eq!(
+        h.handle.apply_count(),
+        after_first,
+        "unchanged permanent-failed L3 route op retried"
+    );
+
+    h.intent_tx
+        .send(l3_intent(
+            2,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.4")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+    assert!(
+        h.handle.apply_count() > after_first,
+        "changed L3 route op shape must clear permanent suppression"
+    );
+    let routes = h.handle.l3_routes();
+    let route = routes
+        .get(&(L3_TABLE_ID, l3_prefix()))
+        .expect("changed target set installs after suppression clears");
+    assert!(matches!(
+        &route.targets,
+        rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Ecmp { next_hops }
+            if next_hops == &vec![ipa("10.0.0.2"), ipa("10.0.0.4")]
+    ));
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn l3_all_active_to_single_cleans_up_l3_nhg_state() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    h.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    assert!(
+        h.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+            .is_some()
+    );
+
+    let ip_vrfs = l3_ip_vrfs();
+    let scalar = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(2, ip_vrfs, scalar)).unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+
+    let routes = h.handle.l3_routes();
+    let route = routes
+        .get(&(L3_TABLE_ID, l3_prefix()))
+        .expect("scalar route installed after collapse");
+    assert!(matches!(
+        route.targets,
+        rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Single { next_hop }
+            if next_hop == ipa("10.0.0.2")
+    ));
+    assert!(
+        h.handle
+            .kernel_l3_vxlan_fdb_nh_id(L3_IFINDEX, l3_router_mac())
+            .is_none(),
+        "collapse must replace the FDB-NHG row with a scalar dst row"
+    );
+    assert!(
+        h.handle
+            .kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac())
+    );
+    assert!(h.handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")));
+    assert!(!h.handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.3")));
+    assert!(
+        h.handle.nexthop_ops().is_empty(),
+        "all L3 NHG/member IDs should be released after collapse"
+    );
+
+    h.shutdown().await;
 }
 
 fn sum_l3_adoption_counters(
@@ -2799,23 +3231,7 @@ async fn l3_double_crash_readoption_is_idempotent() {
     let mut h2 = Harness::spawn(cfg);
     h2.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
     h2.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
-    for ((table_id, prefix), row) in handle1.l3_routes() {
-        h2.handle.pre_load_l3_route(
-            table_id,
-            prefix,
-            row.l3vxlan_ifindex,
-            row.next_hop,
-            row.marked,
-        );
-    }
-    for ((ifindex, next_hop), row) in handle1.l3_neighbors() {
-        h2.handle
-            .pre_load_l3_neighbor(ifindex, next_hop, row.router_mac, row.marked);
-    }
-    for ((ifindex, router_mac), row) in handle1.l3_vxlan_fdb() {
-        h2.handle
-            .pre_load_l3_vxlan_fdb(ifindex, router_mac, row.next_hop, row.marked);
-    }
+    copy_l3_kernel_state(&handle1, &h2.handle);
     h2.intent_tx
         .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
         .unwrap();

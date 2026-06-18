@@ -16,30 +16,45 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   growing ADR-0087 further: all-active RT-5 receive must project a deterministic
   remote-VTEP target set, install the prefix as route-level ECMP over the
   L3VXLAN device, program per-VTEP L3 neighbors, and use an L3VXLAN FDB
-  nexthop-group for the shared Router MAC. This is documentation only; current
-  runtime behavior is unchanged and all-active ESI RT-5s still fail closed until
-  the remaining dataplane writer and M72 proof land.
+  nexthop-group for the shared Router MAC.
 - **EVPN all-active ESI Type 5 projection model substrate.** The IP-VRF
   projection layer now distinguishes single-active, all-active, and conflicting
   EAD redundancy signals for RFC 9136 §4.3 ESI overlay-index Type 5 receive,
-  and can model deterministic all-active remote-VTEP target sets without
-  touching Linux programming. Runtime import behavior is intentionally unchanged:
-  all-active ESI RT-5s still fail closed until the L3 ECMP / L3VXLAN FDB-NHG
-  writer and M72 proof land.
+  and can model deterministic all-active remote-VTEP target sets while keeping
+  conflicting mixed-mode signals fail-closed.
 - **EVPN L3VXLAN FDB-NHG ownership substrate.** The Linux EVPN dataplane now has
   distinct L3 nexthop-ID ranges, L3 Router-MAC FDB-NHG owned-state/refcount
-  types, and a separate L3 owned-nexthop dump surface so future all-active ESI
-  Type 5 receive cleanup/adoption cannot be conflated with the existing L2
-  aliasing FDB-NHG domain. Production import behavior remains unchanged:
-  all-active ESI RT-5s still fail closed until the L3 writer and M72 proof land.
+  types, and a separate L3 owned-nexthop dump surface so all-active ESI Type 5
+  receive cleanup/adoption cannot be conflated with the existing L2 aliasing
+  FDB-NHG domain.
 - **EVPN all-active ESI Type 5 L3 diff boundary.** The daemon-facing remote
   IP-prefix model now carries an explicit single-target vs. all-active
-  target-set shape, and the `evpn-linux` L3 diff validates those target sets
-  before the scalar writer boundary. All-active target-set intent is kept
-  fail-closed with an install-time drop and emits no scalar route / neighbor /
-  FDB ops until the LAN-73 Linux writer lands; incompatible target sets sharing
-  one Router MAC now fail closed together instead of letting a scalar row
-  survive beside a future multipath claim.
+  target-set shape, and the `evpn-linux` L3 diff validates all-active target
+  sets before the writer. Single-member all-active target sets and incompatible
+  target sets sharing one Router MAC fail closed instead of degrading to a
+  scalar route or letting scalar state survive beside a multipath claim.
+- **EVPN all-active ESI Type 5 L3 writer.** Valid RFC 9136 §4.3 all-active ESI
+  overlay-index Type 5 target sets with at least two remote VTEPs now install as
+  a VRF-table ECMP route over the L3VXLAN device, per-VTEP L3 neighbors, and an
+  L3VXLAN Router-MAC FDB row pointing at an L3-tagged FDB nexthop group. The
+  reconcile actor owns L3 member/group IDs separately from ADR-0059 L2 aliasing
+  NHIDs, suppresses exact-repeat permanent L3 writer failures until the op shape
+  changes, and cleans up the route, neighbors, FDB row, and nexthop objects on
+  withdraw or all-active-to-single collapse.
+- **LAN-77 all-active Type 5 L3 restart adoption.** Crash-leftover all-active
+  L3VXLAN FDB-NHG rows now re-adopt the existing L3 NHID group/member tree at
+  startup, reclaim the ECMP VRF route and every remote-VTEP neighbor, preserve
+  the prior NHG ID on desired re-claim, and reap unreferenced L3 NHIDs through
+  the L3 allocator namespace instead of leaking them or deleting the FDB row as
+  a scalar single-dst entry. The `l3_all_active_writer` netns selector now also
+  aborts and restarts the actor in the same namespace to prove the adoption path
+  against the real kernel.
+- **LAN-76 all-active Type 5 L3 writer netns proof.** The privileged Docker
+  netns harness now has an `l3_all_active_writer` selector that drives a real
+  `ReconcileActor<LinuxDataplane>` through the production writer path and
+  asserts the kernel ECMP route, per-VTEP neighbors, L3-tagged FDB-NHG members,
+  Router-MAC `nhid` FDB row, clean withdrawal, and restart adoption. M72 remains the real-peer /
+  cross-vendor receipt before claiming the full all-active receive arc complete.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI
@@ -47,8 +62,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nexthops through one L3VXLAN device, duplicate single-dst FDB rows for one
   Router MAC collapse to one destination, and an FDB nexthop-group row with
   `nhid` works on the L3VXLAN device and cleans up with its member/group
-  objects. This is a proof receipt only; projection and production dataplane
-  behavior remain unchanged.
+  objects.
 
 ## [0.40.0] — 2026-06-17
 
@@ -230,7 +244,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (2) adding the single-active EAD-per-ES + EAD-per-EVI imports the prefix
   into vrf1 with a kernel route via the PE VTEP, (3) advertising the
   same EAD-per-ES without the Single-Active flag withdraws the import and fails closed
-  (`...{reason="unsupported_all_active_esi_overlay_index"}`), and
+  as a one-candidate all-active target set
+  (`...{reason="unsupported_all_active_target_set"}`), and
   (4) withdrawing the Type 5 leaves vrf1 clean. GoBGP rather than FRR
   because the proof needs byte-exact, independent control over the
   EAD-per-ES Single-Active vs All-Active ESI Label flag, which FRR's
