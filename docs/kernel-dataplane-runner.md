@@ -34,7 +34,14 @@ shared persistent Docker daemon. Two composite actions carry the repetition:
 - **`.github/actions/setup-dataplane-host`** — installs containerlab (via the
   above), `grpcurl` + `jq`, loads kernel modules (`vrf` via
   `linux-modules-extra` when absent, plus `vxlan` / `bridge` / `bonding`), and
-  builds `rustbgpd:dev` with a GitHub Actions layer cache (`type=gha`).
+  builds `rustbgpd:dev` with a GitHub Actions layer cache (`type=gha`). The
+  `vrf` load is best-effort and exposes a `vrf-available` output: the hosted
+  kernel can roll ahead of the matching `linux-modules-extra-$(uname -r)` in the
+  apt mirror (`actions/runner-images` #7570 / #7587), and on that transient skew
+  the module cannot install. The vrf-dependent receipts are CI-gated on that
+  output — they run when the runner exposes or can install `vrf`, and otherwise
+  **skip with a notice** rather than fail (the netns job applies the same gate
+  to its L3 selectors).
 
 Because every job rebuilds from a clean VM, stale `clab-*` topology
 accumulation cannot happen across jobs (this obsoletes issue #188 — there is no
