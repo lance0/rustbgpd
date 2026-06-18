@@ -31,11 +31,11 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
-The clippy-reason ratchet currently covers `crates/rib/src`. Any
+The clippy-reason ratchet currently covers the paths listed in
+`DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any
 `#[allow(clippy::...)]` or `#[expect(clippy::...)]` in a ratcheted path must
-include `reason = "..."` explaining why the escape hatch is intentional.
-When another crate is backfilled, add it to `DEFAULT_PATHS` in
-`scripts/check-clippy-reasons.py`.
+include `reason = "..."` explaining why the escape hatch is intentional. When
+another crate is backfilled, add it to `DEFAULT_PATHS`.
 
 ### Pre-commit hooks
 

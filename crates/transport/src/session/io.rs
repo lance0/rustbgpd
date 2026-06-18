@@ -239,7 +239,10 @@ impl PeerSession {
     }
 
     /// Drain complete messages from the read buffer and feed to FSM.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "message ingestion keeps decode, BMP accounting, FSM dispatch, and buffer ordering explicit"
+    )]
     pub(super) async fn process_read_buffer(&mut self) {
         loop {
             match self.read_buf.try_decode() {

@@ -23,13 +23,20 @@ use socket2::Socket;
 /// This implements RFC 2385 by calling `setsockopt(TCP_MD5SIG)` on Linux.
 /// The password is associated with a specific peer address.
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "Linux socket option ABI requires raw libc structs and socklen_t casts"
+)]
 pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::Result<()> {
     use std::mem;
 
     const TCP_MD5SIG: libc::c_int = 14;
 
-    #[allow(clippy::struct_field_names)]
+    #[allow(
+        clippy::struct_field_names,
+        reason = "field names mirror the Linux tcp_md5sig ABI"
+    )]
     #[repr(C)]
     struct TcpMd5Sig {
         tcpm_addr: libc::sockaddr_storage,
@@ -279,7 +286,12 @@ pub(crate) enum TcpAoSocketRole {
 
 /// Add a TCP-AO key to a socket.
 #[cfg(target_os = "linux")]
-#[allow(dead_code, unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    dead_code,
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "TCP-AO key installation uses raw Linux socket-option ABI structs"
+)]
 pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<()> {
     let add = build_tcp_ao_add(key)?;
     let fd = {
@@ -306,7 +318,11 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
 
 /// Inspect runtime TCP-AO socket state.
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "TCP-AO inspection uses raw Linux getsockopt ABI structs"
+)]
 pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnapshot> {
     let mut info: TcpAoInfoOpt = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<TcpAoInfoOpt>() as libc::socklen_t;
@@ -498,7 +514,11 @@ fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: 
 /// Sets GTSM for the remote address family: accept only directly connected
 /// packets and send with TTL/Hop-Limit 255.
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "GTSM requires raw Linux socket options and socklen_t casts"
+)]
 pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
     if remote.is_ipv6() {
         return set_gtsm_v6(socket);
@@ -507,7 +527,11 @@ pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "IPv4 GTSM requires raw Linux socket options and socklen_t casts"
+)]
 fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
     const IP_MINTTL: libc::c_int = 21;
     let min_ttl: libc::c_int = 254;
@@ -541,7 +565,11 @@ fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "IPv6 GTSM requires raw Linux socket options and socklen_t casts"
+)]
 fn set_gtsm_v6(socket: &Socket) -> io::Result<()> {
     let min_hops: libc::c_int = 254;
     let fd = socket.as_raw_fd();
