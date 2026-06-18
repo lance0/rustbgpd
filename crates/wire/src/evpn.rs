@@ -1058,7 +1058,10 @@ pub fn decode_evpn_nlri(mut buf: &[u8]) -> Result<Vec<EvpnRoute>, DecodeError> {
 
 fn encode_mpls_label(label: MplsLabel, out: &mut Vec<u8>) {
     let v = label.0 & 0x00FF_FFFF;
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     {
         out.push((v >> 16) as u8);
         out.push((v >> 8) as u8);
@@ -1206,7 +1209,10 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) {
             u8::try_from(body_len).is_ok(),
             "EVPN NLRI body exceeds 255 bytes"
         );
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         {
             buf[len_placeholder + 1] = body_len as u8;
         }

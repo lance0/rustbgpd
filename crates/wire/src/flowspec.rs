@@ -29,7 +29,10 @@ pub const MAX_FLOWSPEC_NLRI_RULE_LEN: usize = 0x0FFF;
 ///
 /// Multiple terms are combined with AND/OR logic per the `and_bit` flag;
 /// the `end_of_list` flag terminates the operator list for a component.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "fields directly model RFC 8955 numeric operator flag bits"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NumericMatch {
     /// Last term in this operator list.
@@ -47,7 +50,10 @@ pub struct NumericMatch {
 }
 
 /// A single bitmask comparison term.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "fields directly model RFC 8955 bitmask operator flag bits"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BitmaskMatch {
     /// Last term in this operator list.
@@ -518,10 +524,16 @@ fn decode_flowspec_length(buf: &[u8]) -> Result<(usize, usize), DecodeError> {
 /// Encode `FlowSpec` NLRI length prefix.
 fn encode_flowspec_length(len: usize, buf: &mut Vec<u8>) {
     if len < 0xF0 {
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         buf.push(len as u8);
     } else {
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         let val = (0xF000 | (len & 0x0FFF)) as u16;
         buf.extend_from_slice(&val.to_be_bytes());
     }
@@ -890,15 +902,24 @@ fn encode_numeric_ops(ops: &[NumericMatch], buf: &mut Vec<u8>) {
         let value_len = 1usize << len_code;
         match value_len {
             1 => {
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.push(op.value as u8);
             }
             2 => {
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.extend_from_slice(&(op.value as u16).to_be_bytes());
             }
             4 => {
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.extend_from_slice(&(op.value as u32).to_be_bytes());
             }
             8 => buf.extend_from_slice(&op.value.to_be_bytes()),
@@ -934,7 +955,10 @@ fn encode_bitmask_ops(ops: &[BitmaskMatch], buf: &mut Vec<u8>) {
         buf.push(op_byte);
         match 1usize << len_code {
             1 => {
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.push(op.value as u8);
             }
             2 => buf.extend_from_slice(&op.value.to_be_bytes()),
@@ -1503,7 +1527,10 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "round-trip test intentionally covers all component encodings in one ordered fixture"
+    )]
     fn all_13_component_types_in_order() {
         let rule = FlowSpecRule {
             components: vec![

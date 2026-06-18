@@ -76,7 +76,10 @@ impl NotificationMessage {
         }
 
         let header = BgpHeader {
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "codec bounds or masks the value before narrowing to the protocol field width"
+            )]
             length: total_len as u16,
             message_type: MessageType::Notification,
         };

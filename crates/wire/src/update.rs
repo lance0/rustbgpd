@@ -182,17 +182,26 @@ impl UpdateMessage {
         }
 
         let header = BgpHeader {
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "codec bounds or masks the value before narrowing to the protocol field width"
+            )]
             length: total_len as u16,
             message_type: MessageType::Update,
         };
         header.encode(buf);
 
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         buf.put_u16(self.withdrawn_routes.len() as u16);
         buf.put_slice(&self.withdrawn_routes);
 
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         buf.put_u16(self.path_attributes.len() as u16);
         buf.put_slice(&self.path_attributes);
 
