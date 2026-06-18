@@ -57,7 +57,10 @@ use self::outbound::remove_private_asns;
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
 /// tokio task driven by `select!` over TCP reads, timer expirations,
 /// and external commands.
-#[expect(clippy::struct_excessive_bools)] // Per-session protocol flags are intentionally explicit.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "per-session protocol flags are intentionally explicit state-machine latches"
+)]
 pub(crate) struct PeerSession {
     config: TransportConfig,
     fsm: Session,
@@ -350,7 +353,10 @@ impl PeerSession {
     }
 
     #[cfg(test)]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test constructor mirrors production dependency wiring for focused harnesses"
+    )]
     pub(crate) fn new(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -380,7 +386,10 @@ impl PeerSession {
         )
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "session constructor owns the transport dependency boundary explicitly"
+    )]
     pub(crate) fn new_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -464,7 +473,10 @@ impl PeerSession {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "inbound constructor carries the same dependency boundary plus accepted stream"
+    )]
     pub(crate) fn new_inbound_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,

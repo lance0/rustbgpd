@@ -132,7 +132,10 @@ impl PeerSession {
     /// Execute a batch of FSM actions, returning any follow-up events.
     ///
     /// Follow-up events arise from TCP connect results and send failures.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central FSM action interpreter is kept together to preserve ordering invariants"
+    )]
     pub(super) async fn execute_actions(&mut self, actions: Vec<Action>) -> Vec<Event> {
         let mut follow_up = Vec::new();
 

@@ -403,7 +403,10 @@ impl PeerSession {
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "UPDATE handling keeps decode, validation, import policy, RIB enqueue, and FSM side effects ordered"
+    )]
     pub(super) async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let mut import_policy_routes_permitted = 0_u64;

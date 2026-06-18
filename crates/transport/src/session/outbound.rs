@@ -226,7 +226,11 @@ impl PeerSession {
     /// onto the writer task's bulk channel via [`Self::enqueue_bulk`].
     /// Returns synchronously — there's no awaiting on TCP writes here
     /// after the writer-task split (ADR-0051).
-    #[expect(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::needless_pass_by_value,
+        reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
+    )]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let is_ebgp = self
@@ -848,7 +852,10 @@ impl PeerSession {
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
         // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
-            #[allow(clippy::type_complexity)]
+            #[allow(
+                clippy::type_complexity,
+                reason = "EVPN UPDATE grouping keeps next-hop, attributes, and route batch identity explicit"
+            )]
             let mut evpn_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<EvpnRoute>)> = Vec::new();
             for evpn_route in &update.evpn_announce {
                 let attrs = self.prepare_outbound_attributes_evpn(evpn_route, is_ebgp);
@@ -1119,7 +1126,10 @@ impl PeerSession {
     /// `LOCAL_PREF`. For route-server clients, preserve `AS_PATH` and
     /// `NEXT_HOP` by default. For iBGP: ensure `LOCAL_PREF` present (default
     /// 100), pass `NEXT_HOP` through.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "route-refresh helper keeps per-family replay and EoR emission ordering explicit"
+    )]
     pub(super) fn prepare_outbound_attributes(
         &self,
         route: &Route,

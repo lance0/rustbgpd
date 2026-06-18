@@ -394,7 +394,10 @@ impl PeerHandle {
     /// The session starts in Idle. Send [`PeerCommand::Start`] to initiate
     /// the BGP handshake.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -423,7 +426,10 @@ impl PeerHandle {
 
     /// Spawn a new primary peer session with an explicit notification identity.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_with_identity(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -456,7 +462,10 @@ impl PeerHandle {
     /// Spawn a new primary peer session with explicit notification identity and
     /// bounded lifecycle event channel.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -495,7 +504,10 @@ impl PeerHandle {
     /// `None` when `[event_history]` is disabled without branching
     /// at every call site.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_with_event_sink_and_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -548,7 +560,10 @@ impl PeerHandle {
     /// The session starts with a connected stream and receives
     /// `TcpConnectionConfirmed` to begin the handshake.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_inbound(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -579,7 +594,10 @@ impl PeerHandle {
 
     /// Spawn a new inbound peer session with an explicit notification identity.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_inbound_with_identity(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -614,7 +632,10 @@ impl PeerHandle {
     /// Spawn a new inbound peer session with explicit notification identity and
     /// bounded lifecycle event channel.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_inbound_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -653,7 +674,10 @@ impl PeerHandle {
     /// [`Self::spawn_with_event_sink_and_identity_and_lifecycle`]
     /// for the lifetime contract.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
     pub fn spawn_inbound_with_event_sink_and_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,

@@ -54,7 +54,10 @@ impl BgpListener {
     /// # Errors
     ///
     /// Returns an error if binding fails.
-    #[allow(clippy::unused_async)] // Preserve the existing async public API for callers.
+    #[allow(
+        clippy::unused_async,
+        reason = "preserve the existing async public API for callers"
+    )]
     pub async fn bind(
         addr: SocketAddr,
         accept_tx: mpsc::Sender<AcceptedConnection>,
@@ -67,7 +70,10 @@ impl BgpListener {
     /// # Errors
     ///
     /// Returns an error if binding or pre-listen option installation fails.
-    #[allow(clippy::unused_async)] // Preserve the async API shape for callers.
+    #[allow(
+        clippy::unused_async,
+        reason = "preserve the existing async public API for callers"
+    )]
     pub async fn bind_with_options(
         addr: SocketAddr,
         accept_tx: mpsc::Sender<AcceptedConnection>,

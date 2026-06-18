@@ -2800,7 +2800,10 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
 /// per-session import-decision cache holds an explainable `Deny` entry
 /// for the denied prefix (which never reached RIB) and a `Permit` entry
 /// — carrying the applied modifications — for the permitted one.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test pins a full session lifecycle sequence"
+)]
 #[tokio::test]
 async fn import_decision_cache_records_deny_and_permit_for_explain() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
@@ -2965,7 +2968,10 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
 /// session could return a decision recorded on the *previous* session
 /// for any prefix the peer has not yet re-advertised. Mirrors the
 /// per-session permit/deny counter reset in the same handler.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps the multi-step policy refresh scenario readable"
+)]
 #[tokio::test]
 async fn session_down_flushes_import_decision_cache() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
@@ -3160,7 +3166,10 @@ async fn explain_import_policy_command_does_not_touch_counters() {
 /// and a stale entry must carry NO statement trace — the chain that
 /// produced the decision is gone, so re-walking the current chain
 /// could contradict the recorded outcome.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps cache hit and stale trace assertions together"
+)]
 #[tokio::test]
 async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     use super::import_decision_cache::LookupResult;
@@ -3514,7 +3523,10 @@ async fn explain_disabled_stores_no_decisions() {
 
 /// Import policy chains accumulate modifications across matching permit
 /// policies before the route reaches the RIB.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps accumulated policy modifications and route assertions together"
+)]
 #[tokio::test]
 async fn import_policy_chain_accumulates_community_and_local_pref() {
     let peer_config = PeerConfig {
@@ -3760,7 +3772,10 @@ async fn update_import_policy_applies_to_future_updates() {
 /// End-to-end ERR + import policy interaction:
 /// a stale route that is "replaced" by an inbound UPDATE denied by import
 /// policy is not reinstalled, so the stale entry is swept at `EoRR`.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test pins ERR stale-sweep behavior after import-policy denial"
+)]
 #[tokio::test]
 async fn err_denied_replacement_is_swept_at_eorr() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -4481,7 +4496,10 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
 /// actually drops RPKI-invalid routes when a `ValidationSnapshot` with a VRP table
 /// is provided to the session.
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps RPKI table setup and import-denial assertions together"
+)]
 async fn import_policy_filters_rpki_invalid_with_snapshot() {
     use rustbgpd_rpki::{ValidationSnapshot, VrpEntry, VrpTable};
     use tokio::sync::watch;
@@ -4625,7 +4643,10 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
 /// Verify that import policy `match_aspa_validation = "invalid"` + `action = "deny"`
 /// drops ASPA-invalid routes when a `ValidationSnapshot` with an ASPA table is provided.
 #[tokio::test]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps ASPA table setup and import-denial assertions together"
+)]
 async fn import_policy_filters_aspa_invalid_with_snapshot() {
     use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot};
     use tokio::sync::watch;

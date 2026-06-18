@@ -16,6 +16,7 @@ DEFAULT_PATHS = (
     "crates/policy/src",
     "crates/rpki/src",
     "crates/evpn/src",
+    "crates/transport/src",
 )
 ATTRIBUTE_HEAD = re.compile(r"#\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")
@@ -93,7 +94,10 @@ def main() -> int:
         nargs="*",
         type=pathlib.Path,
         default=[pathlib.Path(path) for path in DEFAULT_PATHS],
-        help="Rust files or directories to check (default: crates/rib/src)",
+        help=(
+            "Rust files or directories to check "
+            f"(default: {', '.join(DEFAULT_PATHS)})"
+        ),
     )
     args = parser.parse_args()
 
