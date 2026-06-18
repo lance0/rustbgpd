@@ -1391,11 +1391,11 @@ session machinery:
 > multi-homing enforcement, auto-derived RTs, partial ADR-0063 live
 > EVPN runtime mutation, receive-side RFC 9135 overlay-index recursion,
 > native GW-IP + ESI overlay-index Type 5 origination, single-active
-> ESI overlay-index Type 5 receive, and controller Gateway Address Type 5
-> injection have since shipped.
-> Still ahead: remaining ADR-0063 shapes, all-active ESI overlay-index
-> receive-side protected recursion / broader recursion-path interop, and
-> deeper cross-vendor/scale
+> and all-active ESI overlay-index Type 5 receive, and controller Gateway
+> Address Type 5 injection have since shipped.
+> Still ahead: remaining ADR-0063 shapes, Linux softswitch local-bias
+> split-horizon, true shared-VNI / non-zero Ethernet Tag service, managed
+> netdev ergonomics, service-provider EVPN breadth, and deeper cross-vendor/scale
 > validation. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual

@@ -465,9 +465,11 @@ controller-driven injection for Type 2 / Type 3. What remains:
   sub-second mobility convergence. Later EVPN work added remote
   duplicate-MAC suppression + manual clear, native GW-IP overlay-index
   Type 5 origination, single-active ESI overlay-index Type 5 receive
-  (M71), and receive-side overlay-index recursion, so the remaining VTEP
-  tail is all-active ESI overlay-index receive-side protected recursion,
-  broader recursion-path interop, and standards features outside the
+  (M71), all-active ESI overlay-index Type 5 receive (M72), and
+  receive-side overlay-index recursion. The remaining VTEP tail is the
+  ADR-0063 mixed-edit runtime boundary, the Linux softswitch local-bias
+  split-horizon gap, true non-zero-Ethernet-Tag / shared-VNI service,
+  managed netdev ergonomics, and standards features outside the
   Linux/VXLAN alpha boundary.
 - **Multi-homing execution:** EVPN multi-homing (ESI, Type-1/Type-4) plus
   BUM-flood suppression + DF election cover rustbgpd-as-VTEP

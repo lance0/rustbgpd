@@ -52,10 +52,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
   Remaining big investments are the remaining ADR-0063 runtime
-  convergence shapes, ESI protected-recursion / broader recursion-path
-  interop, and lower-priority VTEP operability gaps such as bridge-ifindex
-  MAC+IP VLAN correlation, SVD/shared-VNI service models, and rustbgpd-managed
-  netdev creation. ADR-0088 records the boundary for those operability
+  convergence shapes and lower-priority VTEP operability gaps such as
+  bridge-ifindex MAC+IP VLAN correlation, true shared-VNI / non-zero
+  Ethernet Tag service, and rustbgpd-managed netdev creation. ADR-0088
+  records the boundary for those operability
   gaps; ADR-0089's first VNI-per-broadcast-domain VLAN-aware bridge slice
   now validates an explicit `bridge_vlan` binding, programs VLAN-scoped
   remote-MAC FDB rows, attributes AF_BRIDGE local-MAC observations by

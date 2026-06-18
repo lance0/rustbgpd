@@ -847,9 +847,12 @@ implemented per ADR-0040.
   kernel-dataplane CI gates M36–M43 incl. M39b.
 - **Shipped after Gate 9:** receive-side overlay-index recursion for imported
   Type 5 routes, native GW-IP + ESI overlay-index Type 5 origination
-  (ADR-0087), and single-active ESI overlay-index Type 5 receive.
-  Remaining overlay-index work is all-active ESI receive and broader
-  recursion-path interop.
+  (ADR-0087), single-active ESI overlay-index Type 5 receive, and
+  all-active ESI overlay-index Type 5 receive with route-level ECMP plus
+  L3VXLAN FDB-NHG programming. Remaining EVPN work is outside the core
+  overlay-index shape: runtime mixed-edit tails, Linux softswitch local-bias
+  limits, true shared-VNI / non-zero Ethernet Tag service, managed netdev
+  ergonomics, and service-provider route families.
 
 ---
 
@@ -900,9 +903,13 @@ implemented per ADR-0040.
   M39 hosted smoke against FRR 10.3.1.
 - **Shipped after Gate 9:** receive-side overlay-index recursion,
   auto-derived Route Targets per RFC 8365 §5.1.2.1, native GW-IP +
-  ESI overlay-index Type 5 origination (ADR-0087), and single-active
-  ESI overlay-index Type 5 receive. Remaining overlay-index work is
-  all-active ESI receive and broader recursion-path interop.
+  ESI overlay-index Type 5 origination (ADR-0087), single-active ESI
+  overlay-index Type 5 receive, and all-active ESI overlay-index Type 5
+  receive with route-level ECMP plus L3VXLAN FDB-NHG programming. Remaining
+  EVPN work is outside the core overlay-index shape: runtime mixed-edit
+  tails, Linux softswitch local-bias limits, true shared-VNI / non-zero
+  Ethernet Tag service, managed netdev ergonomics, and service-provider
+  route families.
 
 ---
 

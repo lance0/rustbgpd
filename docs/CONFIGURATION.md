@@ -2317,11 +2317,13 @@ IP-VRF carries:
   appliance / transit-switch MAC rather than the PE/NVE `router_mac`.
 
 This mode is for locally attached multi-homed gateway designs where receivers
-resolve the ESI through Ethernet A-D state. rustbgpd currently ships the
-origination side. Inbound remote Type 5s with a non-zero ESI are observed but
-dropped fail-closed with the bounded `unsupported_esi_overlay_index` reason
-until receive-side ESI protected recursion / real-peer interop ships. Existing
-receive-side GW-IP protected recursion is unchanged.
+resolve the ESI through Ethernet A-D state. rustbgpd also ships bounded
+receive-side ESI protected recursion: a non-zero-ESI Type 5 imports through
+scoped EAD-per-EVI state when the candidate set is either exactly one
+single-active remote VTEP or a valid two-or-more-member all-active target set.
+Unsupported, ambiguous, mixed-signal, or incomplete ESI recursion still drops
+fail-closed through bounded remote-prefix drop reasons. Existing receive-side
+GW-IP protected recursion is unchanged.
 
 See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) and
 [ADR-0087](adr/0087-evpn-type5-gateway-ip-overlay-index-origination.md)

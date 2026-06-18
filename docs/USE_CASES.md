@@ -806,15 +806,15 @@ Be honest about where rustbgpd isn't the right tool:
 	  including non-zero Gateway Address, receive-side RFC 9135
 	  overlay-index recursion, native GW-IP overlay-index Type 5
 	  origination, single-active ESI overlay-index Type 5 receive
-	  with M71 GoBGP proof, duplicate-MAC remote suppression +
+	  with M71 GoBGP proof, all-active ESI overlay-index Type 5
+	  receive with M72 GoBGP proof, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
 	  have also shipped. **Still missing for full VTEP parity:**
-	  all-active ESI overlay-index receive-side protected recursion /
-	  broader recursion-path interop,
+	  Linux softswitch local-bias split-horizon, the remaining ADR-0063
+	  runtime mixed-edit tail,
 	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
 	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
-	  all-active ESI overlay-index or MPLS/PBB requirements, rustbgpd is a
-	  fit today.
+	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

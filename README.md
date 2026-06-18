@@ -350,10 +350,9 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   tenant teardown, `ip_vrf` relink, and L2VNI-only mixed compositions live,
   while L3VNI/device/table IP-VRF identity changes (restart-required) and
   ES/IP-VRF row mixed edits fail closed ([#268](https://github.com/lance0/rustbgpd/issues/268));
-  ESI overlay-index origination and single-active ESI overlay-index receive
-  now ship, with M71 proving the receive path against a GoBGP route source;
-  ADR-0090 scopes all-active protected recursion as the nearest
-  standards-tail item.
+  ESI overlay-index origination plus single-active and all-active
+  ESI overlay-index receive now ship, with M71/M72 proving the receive
+  paths against GoBGP route sources.
   VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
   topologies, including SVD / collect-metadata VXLAN; bridge / VXLAN / VRF
   netdev creation remains operator-provisioned by
