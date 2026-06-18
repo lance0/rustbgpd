@@ -26,8 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: python3 scripts/check-clippy-reasons.py
@@ -88,8 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
         with:
           # Distinct cache key from the `check` job so MSRV builds don't
