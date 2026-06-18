@@ -17,8 +17,8 @@ use futures::stream::TryStreamExt;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::link::{
     AfSpecBridge, BridgeVlanInfo, BridgeVlanInfoFlags, BridgeVlanTunnelInfo, InfoBridge,
-    InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVxlan, LinkAttribute, LinkExtentMask,
-    LinkInfo, LinkMessage,
+    InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVlan, InfoVxlan, LinkAttribute,
+    LinkExtentMask, LinkInfo, LinkMessage,
 };
 use rtnetlink::Handle;
 
@@ -111,6 +111,14 @@ struct SvdVxlanPort {
     info: KernelSvdVxlanInfo,
 }
 
+/// VLAN upper device (`br0.10`) before config-driven attribution.
+#[derive(Debug, Clone, Copy)]
+struct VlanUpperLink {
+    ifindex: u32,
+    lower_ifindex: u32,
+    vlan: u16,
+}
+
 /// Result of one link inventory pass. Built fresh on every dump and
 /// stored on the [`crate::LinuxDataplane`] so probe + diff see
 /// consistent state.
@@ -150,6 +158,14 @@ pub(crate) struct LinkCache {
     /// ifindex-only classification; if the VLAN-specific map has no entry,
     /// observation fails closed.
     pub bridge_ports_requiring_vlan_attribution: HashSet<u32>,
+    /// Observed VLAN upper devices keyed by `(lower_bridge_ifindex, VLAN)`.
+    /// `None` means duplicate uppers were observed for the same lower/VLAN
+    /// pair, so MAC+IP attribution must fail closed for that pair.
+    pub(crate) vlan_upper_links: HashMap<(u32, u16), Option<u32>>,
+    /// `AF_INET` / `AF_INET6` neighbour attribution for VLAN upper devices:
+    /// `vlan_upper_ifindex -> VNI`. Populated only after the configured
+    /// `bridge_vlan` binding and observed bridge/VXLAN VLAN membership agree.
+    pub ip_neighbour_vlan_upper_to_vni: HashMap<u32, u32>,
     /// VLAN-aware VXLAN-port attribution for remote-takeover echoes:
     /// `(vxlan_ifindex, bridge_vlan) -> VNI`. This prevents a remote row
     /// in one bridge VLAN from withdrawing a local claim in another VNI.
@@ -380,6 +396,7 @@ impl LinkCache {
     fn rebuild_local_mac_vlan_attribution(&mut self) {
         let mut bridge_port_vlan_to_vni = HashMap::new();
         let mut vxlan_port_vlan_to_vni = HashMap::new();
+        let mut ip_neighbour_vlan_upper_to_vni = HashMap::new();
         let mut bridge_ports_requiring_vlan_attribution = HashSet::new();
         let mut vxlan_ports_requiring_vlan_attribution = HashSet::new();
         for ((bridge_name, vlan), vni) in &self.local_mac_vlan_bindings {
@@ -431,6 +448,11 @@ impl LinkCache {
                 continue;
             };
             vxlan_port_vlan_to_vni.insert((vxlan_ifindex, *vlan), vni);
+            if let Some(Some(vlan_upper_ifindex)) =
+                self.vlan_upper_links.get(&(bridge.ifindex, *vlan))
+            {
+                ip_neighbour_vlan_upper_to_vni.insert(*vlan_upper_ifindex, vni);
+            }
             for row in &bridge.port_vlan_inventory {
                 if row.is_vxlan || !vlan_rows_contain(&row.vlans, *vlan) {
                     continue;
@@ -440,6 +462,7 @@ impl LinkCache {
         }
         self.bridge_port_vlan_to_vni = bridge_port_vlan_to_vni;
         self.bridge_ports_requiring_vlan_attribution = bridge_ports_requiring_vlan_attribution;
+        self.ip_neighbour_vlan_upper_to_vni = ip_neighbour_vlan_upper_to_vni;
         self.vxlan_port_vlan_to_vni = vxlan_port_vlan_to_vni;
         self.vxlan_ports_requiring_vlan_attribution = vxlan_ports_requiring_vlan_attribution;
     }
@@ -462,6 +485,23 @@ fn insert_unique_binding(
     }
 }
 
+fn insert_unique_ifindex_binding(
+    bindings: &mut HashMap<(u32, u16), Option<u32>>,
+    key: (u32, u16),
+    ifindex: u32,
+) {
+    match bindings.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(Some(ifindex));
+        }
+        Entry::Occupied(mut entry) => {
+            if *entry.get() != Some(ifindex) {
+                entry.insert(None);
+            }
+        }
+    }
+}
+
 type BridgeVlanInventory =
     HashMap<u32, (Vec<KernelBridgeVlanInfo>, Vec<KernelBridgeVlanTunnelInfo>)>;
 
@@ -476,6 +516,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     let mut bridges: HashMap<String, BridgeLink> = HashMap::new();
     let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
     let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
+    let mut vlan_upper_links: HashMap<(u32, u16), Option<u32>> = HashMap::new();
     // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
     // rows, but on real kernels it is not a substitute for the normal
     // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
@@ -550,6 +591,15 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                     vxlan_ports.push(port);
                 }
             }
+            Some(InfoKind::Vlan) => {
+                if let Some(upper) = parse_vlan_upper_link(&msg) {
+                    insert_unique_ifindex_binding(
+                        &mut vlan_upper_links,
+                        (upper.lower_ifindex, upper.vlan),
+                        upper.ifindex,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -568,6 +618,8 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         local_mac_vlan_bindings: HashMap::new(),
         bridge_port_vlan_to_vni: HashMap::new(),
         bridge_ports_requiring_vlan_attribution: HashSet::new(),
+        vlan_upper_links,
+        ip_neighbour_vlan_upper_to_vni: HashMap::new(),
         vxlan_port_vlan_to_vni: HashMap::new(),
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
@@ -966,6 +1018,36 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
     }))
 }
 
+fn parse_vlan_upper_link(msg: &LinkMessage) -> Option<VlanUpperLink> {
+    let ifindex = msg.header.index;
+    let mut lower_ifindex = None;
+    let mut vlan = None;
+
+    for attr in &msg.attributes {
+        match attr {
+            LinkAttribute::Link(idx) => lower_ifindex = Some(*idx),
+            LinkAttribute::LinkInfo(infos) => {
+                for info in infos {
+                    if let LinkInfo::Data(InfoData::Vlan(items)) = info {
+                        for item in items {
+                            if let InfoVlan::Id(id) = item {
+                                vlan = Some(*id);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(VlanUpperLink {
+        ifindex,
+        lower_ifindex: lower_ifindex?,
+        vlan: vlan?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -1136,6 +1218,40 @@ mod tests {
         assert!(port.info.vnifilter);
         assert_eq!(port.info.local_ip, None);
         assert_eq!(port.info.learning_disabled, Some(true));
+    }
+
+    #[test]
+    fn parse_vlan_upper_link_captures_lower_ifindex_and_vlan_id() {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 110;
+        msg.attributes.push(LinkAttribute::Link(10));
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vlan),
+            LinkInfo::Data(InfoData::Vlan(vec![InfoVlan::Id(20)])),
+        ]));
+
+        let upper = parse_vlan_upper_link(&msg).expect("vlan upper");
+
+        assert_eq!(upper.ifindex, 110);
+        assert_eq!(upper.lower_ifindex, 10);
+        assert_eq!(upper.vlan, 20);
+    }
+
+    #[test]
+    fn parse_vlan_upper_link_drops_without_lower_or_vlan() {
+        let mut without_lower = LinkMessage::default();
+        without_lower.header.index = 110;
+        without_lower
+            .attributes
+            .push(LinkAttribute::LinkInfo(vec![LinkInfo::Data(
+                InfoData::Vlan(vec![InfoVlan::Id(20)]),
+            )]));
+        assert!(parse_vlan_upper_link(&without_lower).is_none());
+
+        let mut without_vlan = LinkMessage::default();
+        without_vlan.header.index = 111;
+        without_vlan.attributes.push(LinkAttribute::Link(10));
+        assert!(parse_vlan_upper_link(&without_vlan).is_none());
     }
 
     #[test]
@@ -1321,6 +1437,7 @@ mod tests {
 
         assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 10)), Some(&100));
         assert_eq!(cache.bridge_port_vlan_to_vni.get(&(30, 20)), Some(&200));
+        assert!(cache.ip_neighbour_vlan_upper_to_vni.is_empty());
         assert!(cache.bridge_ports_requiring_vlan_attribution.contains(&30));
         assert!(
             !cache.bridge_port_vlan_to_vni.contains_key(&(30, 99)),
@@ -1331,6 +1448,66 @@ mod tests {
         assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&20));
         assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&21));
         assert!(!cache.vxlan_port_vlan_to_vni.contains_key(&(20, 99)));
+    }
+
+    #[test]
+    fn bind_local_mac_vlan_attribution_indexes_vlan_upper_devices() {
+        let mut cache = LinkCache::default();
+        cache.vlan_upper_links.insert((10, 10), Some(110));
+        cache.vlan_upper_links.insert((10, 20), Some(120));
+        cache.vlan_upper_links.insert((10, 99), Some(199));
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan_ports: vec![
+                    KernelVxlanInfo {
+                        ifindex: 20,
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                    KernelVxlanInfo {
+                        ifindex: 21,
+                        vni: 200,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        learning_disabled: Some(true),
+                    },
+                ],
+                vxlan_attach_count: 2,
+                vlans: vec![vlan_row(10), vlan_row(20), vlan_row(99)],
+                port_vlan_inventory: vec![
+                    KernelBridgePortVlanInfo {
+                        ifindex: 20,
+                        name: Some("vxlan100".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(10)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                    KernelBridgePortVlanInfo {
+                        ifindex: 21,
+                        name: Some("vxlan200".to_string()),
+                        is_vxlan: true,
+                        vlans: vec![vlan_row(20)],
+                        vlan_tunnels: Vec::new(),
+                    },
+                ],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+        instances.insert(instance(200, "br100", 20)).unwrap();
+
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        assert_eq!(cache.ip_neighbour_vlan_upper_to_vni.get(&110), Some(&100));
+        assert_eq!(cache.ip_neighbour_vlan_upper_to_vni.get(&120), Some(&200));
+        assert!(
+            !cache.ip_neighbour_vlan_upper_to_vni.contains_key(&199),
+            "unconfigured VLAN upper must not become MAC+IP-attributable"
+        );
     }
 
     #[test]
@@ -1378,6 +1555,42 @@ mod tests {
         assert!(cache.vxlan_port_vlan_to_vni.is_empty());
         assert!(cache.bridge_ports_requiring_vlan_attribution.contains(&30));
         assert!(cache.vxlan_ports_requiring_vlan_attribution.contains(&20));
+        assert!(cache.ip_neighbour_vlan_upper_to_vni.is_empty());
+    }
+
+    #[test]
+    fn bind_local_mac_vlan_attribution_drops_duplicate_vlan_upper_device() {
+        let mut cache = LinkCache::default();
+        cache.vlan_upper_links.insert((10, 10), None);
+        cache.bridges.insert(
+            "br100".to_string(),
+            BridgeLink {
+                ifindex: 10,
+                vlan_filtering: true,
+                vxlan_ports: vec![KernelVxlanInfo {
+                    ifindex: 20,
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    learning_disabled: Some(true),
+                }],
+                vxlan_attach_count: 1,
+                vlans: vec![vlan_row(10)],
+                port_vlan_inventory: vec![KernelBridgePortVlanInfo {
+                    ifindex: 20,
+                    name: Some("vxlan100".to_string()),
+                    is_vxlan: true,
+                    vlans: vec![vlan_row(10)],
+                    vlan_tunnels: Vec::new(),
+                }],
+                ..BridgeLink::default()
+            },
+        );
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100, "br100", 10)).unwrap();
+
+        cache.bind_local_mac_vlan_attribution(&instances);
+
+        assert!(cache.ip_neighbour_vlan_upper_to_vni.is_empty());
     }
 
     #[test]

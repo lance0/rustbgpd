@@ -340,6 +340,8 @@ mod tests {
             local_mac_vlan_bindings: HashMap::new(),
             bridge_port_vlan_to_vni: HashMap::new(),
             bridge_ports_requiring_vlan_attribution: HashSet::new(),
+            vlan_upper_links: HashMap::new(),
+            ip_neighbour_vlan_upper_to_vni: HashMap::new(),
             vxlan_port_vlan_to_vni: HashMap::new(),
             vxlan_ports_requiring_vlan_attribution: HashSet::new(),
             bridge_ports_by_name: HashMap::new(),

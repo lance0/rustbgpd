@@ -324,6 +324,8 @@ has it, no broad performance sprints without profile evidence.
   single-dst and FDB-NHG rows program `NDA_VLAN`, and snapshot / owned /
   adoption-reap state is VLAN-scoped; AF_BRIDGE local-MAC observations resolve
   `NDA_VLAN` through configured bridge-VLAN bindings before Type 2
+  origination, and AF_INET / AF_INET6 MAC+IP observations on VLAN upper
+  devices resolve through the same configured bindings before Type 2 MAC+IP
   origination. **Cross-vendor receipt landed:** M70 has FRR originate the same
   MAC in VNI100 and VNI200 while rustbgpd programs and withdraws only the
   matching VLAN-scoped FDB row on one `vlan_filtering=1` bridge. **SVD /
@@ -331,10 +333,13 @@ has it, no broad performance sprints without profile evidence.
   `external` / `vnifilter`, probe accepts unambiguous bridge-VLAN tunnel
   mappings as Ready, single-dst and FDB-NHG rows program `NDA_SRC_VNI`, and
   `svd_fdb_vni` proves same-MAC two-VNI isolation plus scoped delete against a
-  real kernel. True RFC VLAN-aware bundle / non-zero Ethernet Tag
-  remains a separate ADR gate, MAC+IP ARP/ND VLAN attribution is
-  kernel-evidence-gated, and managed netdev creation stays separate operator
-  ergonomics work. A dedicated counter for unattributable-VLAN local-MAC
+  real kernel. **LAN-78 netns receipt landed:** `macip_vlan_attribution`
+  proves same-MAC+IP VLAN10/VNI100 and VLAN20/VNI200 observations on real VLAN
+  upper devices, while bridge-ifindex ARP/ND on a `vlan_filtering=1` bridge
+  remains fail-closed unless a future FDB-correlation design proves freshness
+  and ambiguity handling. True RFC VLAN-aware bundle / non-zero Ethernet Tag
+  remains a separate ADR gate, and managed netdev creation stays separate
+  operator ergonomics work. A dedicated counter for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is
   already metered by `evpn_local_observations_dropped_total{reason}`. The

@@ -70,6 +70,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Router MAC collapse to one destination, and an FDB nexthop-group row with
   `nhid` works on the L3VXLAN device and cleans up with its member/group
   objects.
+- **LAN-78 EVPN VLAN-aware MAC+IP attribution.** AF_INET / AF_INET6
+  neighbor events on VLAN upper devices such as `brvlan.10` now resolve through
+  the configured `bridge_vlan` binding before emitting local Type 2 MAC+IP
+  observations. The privileged netns harness adds a `macip_vlan_attribution`
+  selector proving the same MAC+IP on VLAN 10 and VLAN 20 maps to VNI100 and
+  VNI200 with no cross-VNI bleed. ARP/ND neighbor events reported on the raw
+  `vlan_filtering=1` bridge ifindex still fail closed because Linux does not
+  report bridge VLAN identity there.
 
 ### Changed
 
