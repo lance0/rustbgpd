@@ -30,6 +30,7 @@ const PER_PEER_HEADER_LEN: usize = 42;
 // BMP Initiation TLV types
 const BMP_INIT_TLV_SYS_DESCR: u16 = 1;
 const BMP_INIT_TLV_SYS_NAME: u16 = 2;
+const BMP_TLV_STRING_MAX_LEN: usize = u16::MAX as usize;
 
 // BMP Termination TLV types
 const BMP_TERM_TLV_STRING: u16 = 0;
@@ -112,10 +113,12 @@ fn encode_per_peer_header(info: &BmpPeerInfo, buf: &mut BytesMut) {
     buf.put_u32(info.peer_asn);
     buf.put_slice(&info.peer_bgp_id.octets());
 
-    // Timestamp seconds (4 bytes) + microseconds (4 bytes)
-    #[expect(clippy::cast_possible_truncation)]
+    // Timestamp seconds (4 bytes) + microseconds (4 bytes).
     let (secs, usecs) = match info.timestamp.duration_since(UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as u32, d.subsec_micros()),
+        Ok(d) => (
+            u32::try_from(d.as_secs()).unwrap_or(u32::MAX),
+            d.subsec_micros(),
+        ),
         Err(_) => (0, 0),
     };
     buf.put_u32(secs);
@@ -125,19 +128,39 @@ fn encode_per_peer_header(info: &BmpPeerInfo, buf: &mut BytesMut) {
 /// Write the BMP common header (6 bytes) at the beginning of a buffer.
 fn write_common_header(buf: &mut [u8], msg_type: u8) {
     buf[0] = BMP_VERSION;
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "BMP common header length is a 32-bit field and callers build bounded in-memory messages"
+    )]
     let len = buf.len() as u32;
     buf[1..5].copy_from_slice(&len.to_be_bytes());
     buf[5] = msg_type;
 }
 
 fn put_tlv_string(buf: &mut BytesMut, tlv_type: u16, value: &str) {
+    let value = truncate_tlv_string(value);
     if !value.is_empty() {
         buf.put_u16(tlv_type);
-        #[expect(clippy::cast_possible_truncation)]
-        buf.put_u16(value.len() as u16);
+        buf.put_u16(u16::try_from(value.len()).unwrap_or(u16::MAX));
         buf.put_slice(value.as_bytes());
     }
+}
+
+fn tlv_string_wire_len(value: &str) -> usize {
+    let value = truncate_tlv_string(value);
+    if value.is_empty() { 0 } else { 4 + value.len() }
+}
+
+fn truncate_tlv_string(value: &str) -> &str {
+    if value.len() <= BMP_TLV_STRING_MAX_LEN {
+        return value;
+    }
+
+    let mut end = BMP_TLV_STRING_MAX_LEN;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// Encode an IP address into 16 bytes per RFC 7854 §4.2.
@@ -158,15 +181,7 @@ fn put_ipaddr_16(buf: &mut BytesMut, addr: IpAddr) {
 /// Encode BMP Initiation message (Type 4, RFC 7854 §4.3).
 #[must_use]
 pub fn encode_initiation(sys_name: &str, sys_descr: &str) -> Bytes {
-    let tlv_len = if sys_name.is_empty() {
-        0
-    } else {
-        4 + sys_name.len()
-    } + if sys_descr.is_empty() {
-        0
-    } else {
-        4 + sys_descr.len()
-    };
+    let tlv_len = tlv_string_wire_len(sys_name) + tlv_string_wire_len(sys_descr);
     let total = BMP_COMMON_HEADER_LEN + tlv_len;
 
     let mut buf = BytesMut::with_capacity(total);
@@ -293,13 +308,19 @@ pub fn encode_stats_report(
     buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
     encode_per_peer_header(info, &mut buf);
 
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "BMP stats-report item count is a 32-bit field and counts process-owned vectors"
+    )]
     buf.put_u32(num_valid as u32);
 
     for counter in counters {
         if let Some(sz) = numeric_stat_size(counter.stat_type) {
             buf.put_u16(counter.stat_type);
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "BMP 4-octet stat counters are encoded in their declared protocol field width"
+            )]
             if sz == 4 {
                 buf.put_u16(4);
                 buf.put_u32(counter.value as u32);
@@ -328,11 +349,7 @@ pub fn encode_stats_report(
 #[must_use]
 pub fn encode_termination(reason: u16, message: &str) -> Bytes {
     let reason_tlv_len = 4 + 2; // type(2) + len(2) + value(2)
-    let msg_tlv_len = if message.is_empty() {
-        0
-    } else {
-        4 + message.len()
-    };
+    let msg_tlv_len = tlv_string_wire_len(message);
     let total = BMP_COMMON_HEADER_LEN + reason_tlv_len + msg_tlv_len;
 
     let mut buf = BytesMut::with_capacity(total);
@@ -515,6 +532,39 @@ mod tests {
     }
 
     #[test]
+    fn initiation_oversized_tlv_string_truncates_without_length_wrap() {
+        let sys_descr = "a".repeat(BMP_TLV_STRING_MAX_LEN + 1);
+        let msg = encode_initiation("rustbgpd", &sys_descr);
+        verify_common_header(&msg, BMP_MSG_INITIATION);
+
+        let payload = &msg[BMP_COMMON_HEADER_LEN..];
+        let descr_len = u16::from_be_bytes([payload[2], payload[3]]);
+        assert_eq!(descr_len, u16::MAX);
+
+        let name_offset = 4 + BMP_TLV_STRING_MAX_LEN;
+        assert_eq!(
+            u16::from_be_bytes([payload[name_offset], payload[name_offset + 1]]),
+            BMP_INIT_TLV_SYS_NAME
+        );
+        assert_eq!(
+            msg.len(),
+            BMP_COMMON_HEADER_LEN + 4 + BMP_TLV_STRING_MAX_LEN + 4 + "rustbgpd".len()
+        );
+    }
+
+    #[test]
+    fn initiation_oversized_tlv_string_truncates_on_char_boundary() {
+        let sys_descr = format!("{}é", "a".repeat(BMP_TLV_STRING_MAX_LEN - 1));
+        let msg = encode_initiation("", &sys_descr);
+        verify_common_header(&msg, BMP_MSG_INITIATION);
+
+        let payload = &msg[BMP_COMMON_HEADER_LEN..];
+        let descr_len = u16::from_be_bytes([payload[2], payload[3]]) as usize;
+        assert_eq!(descr_len, BMP_TLV_STRING_MAX_LEN - 1);
+        assert_eq!(msg.len(), BMP_COMMON_HEADER_LEN + 4 + descr_len);
+    }
+
+    #[test]
     fn peer_down_local_no_notification() {
         let info = sample_peer_info();
         let msg = encode_peer_down(&info, &PeerDownReason::LocalNoNotification(6));
@@ -560,6 +610,24 @@ mod tests {
             &[10, 0, 0, 2],
             "last 4 bytes must be IPv4 address"
         );
+    }
+
+    #[test]
+    fn per_peer_header_timestamp_saturates_at_u32_max() {
+        let mut info = sample_peer_info();
+        info.timestamp = UNIX_EPOCH + std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
+
+        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
+
+        let timestamp_offset = BMP_COMMON_HEADER_LEN + 34;
+        let secs = u32::from_be_bytes([
+            msg[timestamp_offset],
+            msg[timestamp_offset + 1],
+            msg[timestamp_offset + 2],
+            msg[timestamp_offset + 3],
+        ]);
+        assert_eq!(secs, u32::MAX);
     }
 
     #[test]

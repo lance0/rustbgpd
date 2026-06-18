@@ -17,6 +17,8 @@ DEFAULT_PATHS = (
     "crates/rpki/src",
     "crates/evpn/src",
     "crates/transport/src",
+    "crates/wire/src",
+    "crates/bmp/src",
 )
 ATTRIBUTE_HEAD = re.compile(r"#\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")

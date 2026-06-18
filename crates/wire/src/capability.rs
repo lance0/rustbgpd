@@ -236,7 +236,10 @@ impl Capability {
     ///
     /// Returns [`DecodeError::MalformedOptionalParameter`] if the TLV is
     /// truncated or the claimed length exceeds the remaining bytes.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "capability decoder keeps TLV length validation and variant decoding together"
+    )]
     pub fn decode(buf: &mut impl Buf) -> Result<Self, DecodeError> {
         if buf.remaining() < 2 {
             return Err(DecodeError::MalformedOptionalParameter {
@@ -539,7 +542,10 @@ impl Capability {
                     });
                 }
                 buf.put_u8(capability_code::EXTENDED_NEXT_HOP);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(value_len as u8);
                 for fam in families {
                     buf.put_u16(fam.nlri_afi as u16);
@@ -571,7 +577,10 @@ impl Capability {
                     });
                 }
                 buf.put_u8(capability_code::GRACEFUL_RESTART);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(value_len as u8);
                 let mut flags_and_time = *restart_time;
                 if *restart_state {
@@ -596,14 +605,20 @@ impl Capability {
                     });
                 }
                 buf.put_u8(capability_code::LONG_LIVED_GRACEFUL_RESTART);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(value_len as u8);
                 for fam in families {
                     buf.put_u16(fam.afi as u16);
                     buf.put_u8(fam.safi as u8);
                     buf.put_u8(if fam.forwarding_preserved { 0x80 } else { 0 });
                     // stale_time is 24-bit (3 bytes, big-endian)
-                    #[expect(clippy::cast_possible_truncation)]
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                    )]
                     buf.put_u8((fam.stale_time >> 16) as u8);
                     buf.put_u16((fam.stale_time & 0xFFFF) as u16);
                 }
@@ -617,7 +632,10 @@ impl Capability {
                     });
                 }
                 buf.put_u8(capability_code::ADD_PATH);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(value_len as u8);
                 for fam in families {
                     buf.put_u16(fam.afi as u16);
@@ -644,7 +662,10 @@ impl Capability {
                     });
                 }
                 buf.put_u8(capability_code::OUTBOUND_ROUTE_FILTERING);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(value_len as u8);
                 crate::orf::encode_capability_value(entries, buf);
             }
@@ -666,7 +687,10 @@ impl Capability {
                     });
                 }
                 buf.put_u8(*code);
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "codec bounds or masks the value before narrowing to the protocol field width"
+                )]
                 buf.put_u8(data.len() as u8);
                 buf.put_slice(data);
             }
@@ -799,7 +823,10 @@ pub fn encode_optional_parameters(
 
     // Parameter type 2 header
     buf.put_u8(param_type::CAPABILITIES);
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     buf.put_u8(cap_total as u8);
 
     for cap in capabilities {

@@ -417,7 +417,10 @@ impl ExtendedCommunity {
     pub fn esi_label(single_active: bool, label: u32) -> Self {
         let flags = u8::from(single_active);
         let l = label & 0x00FF_FFFF;
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         let raw = u64::from_be_bytes([
             0x06,
             0x01,
@@ -808,7 +811,10 @@ pub fn decode_path_attributes(
 }
 
 /// Decode a single attribute value given its flags, type code, and raw bytes.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single attribute decoder keeps type-specific validation and error mapping together"
+)]
 fn decode_attribute_value(
     flags: u8,
     type_code: u8,
@@ -1045,7 +1051,10 @@ fn decode_attribute_value(
 ///
 /// Wire layout (RFC 4760 §3):
 ///   AFI (2) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "MP_REACH decoder keeps family dispatch and next-hop validation in one pass"
+)]
 fn decode_mp_reach_nlri(
     value: &[u8],
     add_path_families: &[(Afi, Safi)],
@@ -1388,13 +1397,19 @@ pub(crate) fn attr_error_data(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8>
     if value.len() > 255 {
         buf.push(flags | attr_flags::EXTENDED_LENGTH);
         buf.push(type_code);
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         let len = value.len() as u16;
         buf.extend_from_slice(&len.to_be_bytes());
     } else {
         buf.push(flags);
         buf.push(type_code);
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         buf.push(value.len() as u8);
     }
     buf.extend_from_slice(value);
@@ -1558,13 +1573,19 @@ pub fn encode_path_attributes(
         if value.len() > 255 {
             buf.push(flags | attr_flags::EXTENDED_LENGTH);
             buf.push(type_code);
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "codec bounds or masks the value before narrowing to the protocol field width"
+            )]
             let len = value.len() as u16;
             buf.extend_from_slice(&len.to_be_bytes());
         } else {
             buf.push(flags);
             buf.push(type_code);
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "codec bounds or masks the value before narrowing to the protocol field width"
+            )]
             buf.push(value.len() as u8);
         }
         buf.extend_from_slice(&value);
@@ -1689,7 +1710,10 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
         };
         for chunk in asns.chunks(u8::MAX as usize) {
             buf.push(seg_type);
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "codec bounds or masks the value before narrowing to the protocol field width"
+            )]
             buf.push(chunk.len() as u8);
             for &asn in chunk {
                 if four_octet_as {
@@ -2877,7 +2901,10 @@ mod tests {
         let mut buf = Vec::new();
         buf.push(0x40); // flags: Transitive only (wrong)
         buf.push(14); // type: MP_REACH_NLRI
-        #[expect(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
         buf.push(value.len() as u8);
         buf.extend_from_slice(&value);
 
@@ -2894,7 +2921,10 @@ mod tests {
     // --- MP Add-Path decode tests ---
 
     #[test]
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     fn mp_reach_nlri_ipv4_addpath_decode() {
         use crate::capability::{Afi, Safi};
         use crate::nlri::Prefix;
@@ -2933,7 +2963,10 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     fn mp_reach_nlri_ipv6_addpath_decode() {
         use crate::capability::{Afi, Safi};
         use crate::nlri::{Ipv6Prefix, Prefix};
@@ -2969,7 +3002,10 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     fn mp_unreach_nlri_ipv6_addpath_decode() {
         use crate::capability::{Afi, Safi};
         use crate::nlri::{Ipv6Prefix, Prefix};

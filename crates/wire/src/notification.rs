@@ -151,7 +151,10 @@ pub fn encode_shutdown_communication(reason: &str) -> bytes::Bytes {
     }
     let truncated = &reason[..end];
     // Safe: end ≤ 128, which always fits in u8.
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "codec bounds or masks the value before narrowing to the protocol field width"
+    )]
     let len = truncated.len() as u8;
     let mut buf = Vec::with_capacity(1 + truncated.len());
     buf.push(len);
