@@ -31,8 +31,15 @@ runs:
         GRPCURL_VERSION: ${{ inputs.grpcurl-version }}
       run: |
         set -euo pipefail
-        sudo apt-get update -y
-        sudo apt-get install -y jq
+        # jq is normally preinstalled on hosted runners; only touch apt when it
+        # is missing. A transient 403 from a preinstalled third-party repo (e.g.
+        # packages.microsoft.com) otherwise fails the whole `apt-get update` and
+        # the job — and we only need jq from the Ubuntu archive.
+        if ! command -v jq >/dev/null 2>&1; then
+          sudo apt-get update -o Acquire::Retries=3 || \
+            echo "::warning::apt-get update reported repo errors; installing jq from cache"
+          sudo apt-get install -y jq
+        fi
         curl -fsSL --retry 3 --retry-delay 3 \
           "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
           | sudo tar -xz -C /usr/local/bin grpcurl
