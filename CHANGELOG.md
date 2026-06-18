@@ -53,8 +53,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   netns harness now has an `l3_all_active_writer` selector that drives a real
   `ReconcileActor<LinuxDataplane>` through the production writer path and
   asserts the kernel ECMP route, per-VTEP neighbors, L3-tagged FDB-NHG members,
-  Router-MAC `nhid` FDB row, clean withdrawal, and restart adoption. M72 remains the real-peer /
-  cross-vendor receipt before claiming the full all-active receive arc complete.
+  Router-MAC `nhid` FDB row, clean withdrawal, and restart adoption.
+- **M72 GoBGP interop proof for all-active ESI overlay-index Type 5 receive.**
+  The hosted kernel-dataplane workflow now extends M71's real-peer route-source
+  shape to two GoBGP PEs advertising all-active EAD-per-ES / EAD-per-EVI state.
+  rustbgpd first holds the Type 5 unresolved, then imports it as a VRF-table
+  ECMP route over `l3vxlan100` with per-VTEP L3 neighbors and a Router-MAC
+  `nhid` FDB row, then cleans the route, FDB-NHG, nexthops, and neighbors on
+  target-set collapse and Type 5 withdraw. This closes the ADR-0090 real-peer
+  proof gate for all-active receive.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the
   Linux shape needed before implementing all-active RFC 9136 §4.3 ESI

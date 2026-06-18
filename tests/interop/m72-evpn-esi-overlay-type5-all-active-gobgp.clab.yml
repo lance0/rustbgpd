@@ -1,0 +1,86 @@
+# Containerlab topology: rustbgpd receive-side RFC 9136 §4.3 ESI
+# overlay-index Type 5 ALL-ACTIVE recursion proof (M72).
+#
+# rustbgpd is the device under test (receive side / VTEP) with a full
+# L3 VRF datapath (vrf1 + L3VNI 100 + linked L2VNI 10). Two GoBGP PEs
+# are control-plane route sources. pe1 injects the ESI overlay-index
+# Type 5 (non-zero ESI, Router-MAC extcomm, Gateway Address 0.0.0.0)
+# while pe1 + pe2 inject all-active Type 1 EAD-per-ES / EAD-per-EVI
+# rows that resolve it to a multi-VTEP target set.
+#
+# GoBGP — not FRR — because the proof needs byte-exact, independent
+# control over the Type 1 EAD route shape injected and withdrawn
+# separately from the Type 5. This directly extends M71: the previous
+# all-active phase that failed closed becomes a route-level ECMP +
+# L3VXLAN FDB-NHG success path.
+#
+# Phased control-plane + RIB/kernel proof:
+#   1. Fail-closed before any EAD: the ESI overlay Type 5 is held
+#      unresolved (`evpn_ip_vrf_remote_prefix_drops{reason=
+#      "unresolved_esi_overlay_index"}` >= 1, no kernel route).
+#   2. All-active resolves: pe1 + pe2 EAD rows import the prefix into
+#      vrf1 as ECMP over l3vxlan100, with per-VTEP L3 neighbors and a
+#      Router-MAC FDB row carrying `nhid`.
+#   3. Member change: withdrawing pe2's EAD rows collapses below the
+#      all-active minimum and cleans the route/NHG state; re-adding
+#      pe2 restores the two-way ECMP route.
+#   4. Withdraw: deleting the Type 5 leaves vrf1 and L3 NHG state clean.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m72-evpn-esi-overlay-type5-all-active-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m72-evpn-esi-overlay-type5-all-active-gobgp.sh
+#   containerlab destroy -t tests/interop/m72-evpn-esi-overlay-type5-all-active-gobgp.clab.yml
+
+name: m72-evpn-esi-overlay-type5-all-active-gobgp
+
+topology:
+  nodes:
+    vtep:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m72-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m72-vtep.sh:/usr/local/bin/start-rustbgpd-m72-vtep.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug,rustbgpd::evpn_l3_originator=debug
+
+    pe1:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m72-pe1.toml:/config/gobgp.toml:ro
+        - ./scripts/start-gobgp-m72-pe.sh:/usr/local/bin/start-gobgp-m72-pe.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-gobgp-m72-pe.sh
+
+    pe2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m72-pe2.toml:/config/gobgp.toml:ro
+        - ./scripts/start-gobgp-m72-pe.sh:/usr/local/bin/start-gobgp-m72-pe.sh:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-gobgp-m72-pe.sh
+
+  links:
+    - endpoints: ["vtep:eth1", "pe1:eth1"]
+    - endpoints: ["vtep:eth2", "pe2:eth1"]
+
+# Underlay: vtep peers separately with pe1 (10.0.1.2) and pe2
+# (10.0.2.2), all AS 65000 (iBGP L2VPN/EVPN). The rustbgpd VTEP owns
+# L3VNI 100 / vrf1 and linked L2VNI 10; GoBGP only speaks BGP.

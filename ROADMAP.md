@@ -40,7 +40,7 @@ those.
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
-| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion; M72 real-peer all-active proof pending) |
+| EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
@@ -257,8 +257,11 @@ has it, no broad performance sprints without profile evidence.
   deferred reap deletes it. **LAN-76's same-host production-path proof landed:** the privileged
   `l3_all_active_writer` netns selector drives a real
   `ReconcileActor<LinuxDataplane>` through the all-active writer and asserts the
-  route, neighbor, FDB-NHG, cleanup, and restart-adoption state. M72 remains pending as the
-  cross-vendor / real-peer proof for the all-active receive arc. The
+  route, neighbor, FDB-NHG, cleanup, and restart-adoption state. **M72's real-peer proof landed:**
+  two GoBGP PEs advertise all-active EAD state, rustbgpd imports the ESI-overlay
+  Type 5 as a two-way VRF ECMP route over `l3vxlan100` with a Router-MAC
+  `nhid` FDB row, then withdraws cleanly on target-set collapse and Type 5
+  delete. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop
   groups with a pre-created standby NH, and an EAD-per-ES withdrawal
