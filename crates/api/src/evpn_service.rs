@@ -287,7 +287,10 @@ impl EvpnService {
 
     /// Construct a service exposing the full EVPN surface plus the
     /// optional duplicate-MAC manual-clear control hook.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "constructor wires independent EVPN status/control hooks explicitly"
+    )]
     #[must_use]
     pub fn with_full_surface_and_duplicate_mac_control(
         instances: Arc<EvpnInstanceTable>,
@@ -317,7 +320,10 @@ impl EvpnService {
     /// Construct a service exposing the full EVPN surface with an
     /// explicit ADR-0063 runtime model provider and optional apply
     /// hook.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "constructor wires the full EVPN runtime surface without hiding optional hooks"
+    )]
     #[must_use]
     pub fn with_full_surface_runtime_and_duplicate_mac_control(
         originated_local_mac_count: OriginatedLocalMacCountFn,

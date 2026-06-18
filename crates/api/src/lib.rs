@@ -54,19 +54,34 @@ pub mod event_converters {
 }
 
 /// Generated protobuf/gRPC types.
-#[allow(clippy::all, clippy::pedantic, missing_docs)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    missing_docs,
+    reason = "tonic-generated protobuf modules control their own lint shape"
+)]
 pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
 }
 
 /// Generated OpenConfig gNMI protobuf/gRPC types.
-#[allow(clippy::all, clippy::pedantic, missing_docs)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    missing_docs,
+    reason = "tonic-generated protobuf modules control their own lint shape"
+)]
 pub mod gnmi_ext {
     tonic::include_proto!("gnmi_ext");
 }
 
 /// Generated OpenConfig gNMI service and message types.
-#[allow(clippy::all, clippy::pedantic, missing_docs)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    missing_docs,
+    reason = "tonic-generated protobuf modules control their own lint shape"
+)]
 pub mod gnmi {
     tonic::include_proto!("gnmi");
 }

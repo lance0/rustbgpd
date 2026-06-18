@@ -10,6 +10,7 @@ import sys
 
 
 DEFAULT_PATHS = (
+    "crates/api/src",
     "crates/rib/src",
     "crates/fsm/src",
     "crates/policy/src",

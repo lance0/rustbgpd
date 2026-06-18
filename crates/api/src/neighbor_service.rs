@@ -30,7 +30,10 @@ fn is_ipv6_link_local(address: IpAddr) -> bool {
 }
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
-#[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the standard gRPC error type"
+)]
 pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status> {
     if families.is_empty() {
         return Ok(vec![(Afi::Ipv4, Safi::Unicast)]);
@@ -54,7 +57,10 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
 }
 
 /// gRPC service for adding, removing, enabling, and disabling BGP neighbors.
-#[allow(clippy::struct_field_names)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "service fields intentionally keep neighbor/control-plane nouns explicit"
+)]
 pub struct NeighborService {
     local_asn: u32,
     access_mode: AccessMode,
@@ -295,7 +301,10 @@ pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
     }
 }
 
-#[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the standard gRPC error type"
+)]
 pub(crate) fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
     match mode {
         "" => Ok(RemovePrivateAs::Disabled),

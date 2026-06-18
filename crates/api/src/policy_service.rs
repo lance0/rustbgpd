@@ -226,7 +226,10 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
     }
 }
 
-#[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the standard gRPC error type"
+)]
 fn proto_definition_to_input(
     definition: proto::PolicyDefinition,
 ) -> Result<NamedPolicyDefinition, Status> {
