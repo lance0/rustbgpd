@@ -539,6 +539,9 @@ jobs:
       - name: ADR-0089 VLAN-scoped FDB netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
 
+      - name: LAN-78 MAC+IP VLAN attribution netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh macip_vlan_attribution
+
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
 

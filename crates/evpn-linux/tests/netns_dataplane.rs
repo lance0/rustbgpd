@@ -207,6 +207,19 @@ fn setup_vlan_access_port(ns: &NetnsFixture) {
     }
 }
 
+fn setup_vlan_upper_devices(ns: &NetnsFixture) {
+    for vlan in ["10", "20"] {
+        let dev = format!("brvlan.{vlan}");
+        ns.exec(
+            "ip",
+            &[
+                "link", "add", "link", "brvlan", "name", &dev, "type", "vlan", "id", vlan,
+            ],
+        );
+        ns.exec("ip", &["link", "set", &dev, "up"]);
+    }
+}
+
 async fn expect_learned(
     rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>,
     want_vni: u32,
@@ -231,6 +244,37 @@ async fn expect_learned(
                 extra,
                 LocalMacObservation::Learned { vni, mac, .. }
                     if vni.as_u32() == want_vni && mac == want_mac
+            ),
+            "cross-VLAN or unrelated observation: {extra:?}"
+        );
+    }
+}
+
+async fn expect_ip_added(
+    rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>,
+    want_vni: u32,
+    want_mac: MacAddress,
+    want_ip: IpAddr,
+) {
+    let obs = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for local MAC+IP observation")
+        .expect("local MAC channel closed");
+    assert!(
+        matches!(
+            obs,
+            LocalMacObservation::IpAdded { vni, mac, ip }
+                if vni.as_u32() == want_vni && mac == want_mac && ip == want_ip
+        ),
+        "unexpected observation: {obs:?}"
+    );
+
+    while let Ok(Some(extra)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        assert!(
+            matches!(
+                extra,
+                LocalMacObservation::IpAdded { vni, mac, ip }
+                    if vni.as_u32() == want_vni && mac == want_mac && ip == want_ip
             ),
             "cross-VLAN or unrelated observation: {extra:?}"
         );
@@ -691,6 +735,108 @@ async fn linux_dataplane_attributes_vlan_local_mac_observations_inner() {
             "vlan",
             "30",
             "static",
+        ],
+    );
+    expect_no_observation(&mut rx).await;
+}
+
+#[tokio::test]
+async fn linux_dataplane_attributes_vlan_mac_ip_observations() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("vlan-mac-ip") {
+        linux_dataplane_attributes_vlan_mac_ip_observations_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("vlan-mac-ip");
+    let local_ip = "10.255.0.10";
+    setup_vlan_aware_vxlan_topology(&ns, local_ip);
+    setup_vlan_upper_devices(&ns);
+
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "linux_dataplane_attributes_vlan_mac_ip_observations";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "vlan-mac-ip")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn linux_dataplane_attributes_vlan_mac_ip_observations_inner() {
+    let local_ip = "10.255.0.10";
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let mut rx = dp.take_local_mac_rx().expect("local MAC receiver");
+    let table = table_with_vlan_instances(local_ip);
+    let probes = dp.probe(&table).await;
+    for raw_vni in [100, 200] {
+        let vni = EvpnInstanceId::new(raw_vni).unwrap();
+        match probes.get(vni) {
+            Some(InstanceProbe::Ready) => {}
+            Some(other) => panic!("VNI {raw_vni} not Ready in real netns: {other:?}"),
+            None => panic!("probe returned no result for VNI {raw_vni}"),
+        }
+    }
+
+    let shared_mac = mac(0x65);
+    let shared_ip: IpAddr = "192.0.2.65".parse().unwrap();
+    let shared_mac_str = mac_str(shared_mac);
+    let shared_ip_str = shared_ip.to_string();
+
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            &shared_ip_str,
+            "lladdr",
+            &shared_mac_str,
+            "dev",
+            "brvlan.10",
+            "nud",
+            "reachable",
+        ],
+    );
+    expect_ip_added(&mut rx, 100, shared_mac, shared_ip).await;
+
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            &shared_ip_str,
+            "lladdr",
+            &shared_mac_str,
+            "dev",
+            "brvlan.20",
+            "nud",
+            "reachable",
+        ],
+    );
+    expect_ip_added(&mut rx, 200, shared_mac, shared_ip).await;
+
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            "192.0.2.66",
+            "lladdr",
+            &mac_str(mac(0x66)),
+            "dev",
+            "brvlan",
+            "nud",
+            "reachable",
         ],
     );
     expect_no_observation(&mut rx).await;

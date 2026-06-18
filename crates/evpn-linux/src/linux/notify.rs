@@ -345,27 +345,35 @@ fn classify_ip_neighbour_with_cached_mac(
     cache: &LinkCache,
     cached_mac: Option<MacAddress>,
 ) -> Option<LocalMacObservation> {
-    // Resolve ifindex → VNI by matching the bridge ifindex against
-    // the inventory. AF_INET / AF_INET6 neighbours sit on the bridge
-    // itself (the kernel's ARP/ND-suppression table is per-bridge);
-    // bridge_port_to_vni is the wrong map for this family.
+    // Resolve ifindex → VNI. Plain VLAN-unaware bridges still use the
+    // bridge ifindex. VLAN-aware bridges must not use bridge-ifindex
+    // fallback: AF_INET / AF_INET6 neighbour netlink does not carry a
+    // bridge VLAN. The only VLAN-aware path accepted here is a VLAN
+    // upper device (`br0.10`) that the link cache has already tied to
+    // exactly one configured `bridge_vlan` instance.
     let ifindex = msg.header.ifindex;
-    let Some(vni_raw) = cache.bridges.values().find_map(|b| {
-        if b.ifindex != ifindex {
-            return None;
-        }
-        if b.vlan_filtering {
-            // ADR-0089 MAC+IP VLAN attribution is deliberately deferred:
-            // AF_INET/AF_INET6 bridge-neighbour notifications are not
-            // acted on for VLAN-aware bridges until we have a kernel proof
-            // for unambiguous VLAN identity.
-            return None;
-        }
-        b.vxlan.as_ref().map(|v| v.vni)
-    }) else {
+    let Some(vni_raw) = cache
+        .ip_neighbour_vlan_upper_to_vni
+        .get(&ifindex)
+        .copied()
+        .or_else(|| {
+            cache.bridges.values().find_map(|b| {
+                if b.ifindex != ifindex {
+                    return None;
+                }
+                if b.vlan_filtering {
+                    // VLAN-aware bridge-neighbour notifications remain
+                    // fail-closed unless they arrive on a validated VLAN
+                    // upper device.
+                    return None;
+                }
+                b.vxlan.as_ref().map(|v| v.vni)
+            })
+        })
+    else {
         debug!(
             ifindex,
-            "RTNLGRP_NEIGH AF_INET[6] classifier: ifindex not a known EVPN bridge; \
+            "RTNLGRP_NEIGH AF_INET[6] classifier: ifindex not a known EVPN bridge or VLAN upper; \
              event dropped"
         );
         return None;
@@ -721,6 +729,8 @@ mod tests {
             local_mac_vlan_bindings: HashMap::new(),
             bridge_port_vlan_to_vni: HashMap::new(),
             bridge_ports_requiring_vlan_attribution: HashSet::new(),
+            vlan_upper_links: HashMap::new(),
+            ip_neighbour_vlan_upper_to_vni: HashMap::new(),
             vxlan_port_vlan_to_vni: HashMap::new(),
             vxlan_ports_requiring_vlan_attribution: HashSet::new(),
             bridge_ports_by_name: HashMap::new(),
@@ -734,6 +744,8 @@ mod tests {
         cache.bridge_port_vlan_to_vni.insert((22, 10), 100);
         cache.bridge_port_vlan_to_vni.insert((22, 20), 200);
         cache.bridge_ports_requiring_vlan_attribution.insert(22);
+        cache.ip_neighbour_vlan_upper_to_vni.insert(44, 100);
+        cache.ip_neighbour_vlan_upper_to_vni.insert(45, 200);
         cache.vxlan_port_vlan_to_vni.insert((11, 10), 100);
         cache.vxlan_port_vlan_to_vni.insert((33, 20), 200);
         cache.vxlan_ports_requiring_vlan_attribution.insert(11);
@@ -1129,6 +1141,67 @@ mod tests {
     }
 
     #[test]
+    fn classify_inet_vlan_upper_emits_ip_added() {
+        let cache = vlan_aware_cache();
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            44,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]),
+            Some(v4),
+        );
+
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+
+        match obs {
+            LocalMacObservation::IpAdded { vni, mac, ip } => {
+                assert_eq!(vni.as_u32(), 100);
+                assert_eq!(mac.octets(), [0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]);
+                assert_eq!(ip, v4);
+            }
+            other => panic!("expected IpAdded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_inet6_vlan_upper_emits_ip_added() {
+        let cache = vlan_aware_cache();
+        let v6: IpAddr = "2001:db8::10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet6,
+            45,
+            NeighbourState::Stale,
+            NeighbourFlags::empty(),
+            Some([0xBB; 6]),
+            Some(v6),
+        );
+
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+
+        assert!(
+            matches!(obs, LocalMacObservation::IpAdded { vni, ip, .. } if vni.as_u32() == 200 && ip == v6),
+            "unexpected observation: {obs:?}"
+        );
+    }
+
+    #[test]
+    fn classify_inet_vlan_upper_unknown_mapping_drops() {
+        let cache = vlan_aware_cache();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            46,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    #[test]
     fn classify_inet6_emits_ip_added() {
         let cache = cache_for(100, 11, 22);
         let v6: IpAddr = "2001:db8::1".parse().unwrap();
@@ -1184,6 +1257,35 @@ mod tests {
         let cached_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]);
         let obs = classify_ip_neighbour_delete_with_cached_mac(&msg, &cache, cached_mac)
             .expect("cached delete should classify");
+        assert!(
+            matches!(
+                obs,
+                LocalMacObservation::IpRemoved { vni, mac, ip }
+                    if vni.as_u32() == 100 && mac == cached_mac && ip == v4
+            ),
+            "unexpected observation: {obs:?}"
+        );
+    }
+
+    #[test]
+    fn classify_inet_del_on_vlan_upper_uses_cached_mac() {
+        let cache = vlan_aware_cache();
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            44,
+            NeighbourState::Other(NUD_FAILED),
+            NeighbourFlags::empty(),
+            None,
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::Del, &msg, &cache).is_none());
+        assert_eq!(ip_neighbour_cache_key(&msg), Some((44, v4)));
+
+        let cached_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]);
+        let obs = classify_ip_neighbour_delete_with_cached_mac(&msg, &cache, cached_mac)
+            .expect("cached delete should classify");
+
         assert!(
             matches!(
                 obs,

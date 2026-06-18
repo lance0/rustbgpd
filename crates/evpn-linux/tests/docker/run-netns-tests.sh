@@ -96,11 +96,12 @@ case "${1:-all}" in
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
+    macip_vlan_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_mac_ip_observations" ;;
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
     l3_multipath)       TEST_BIN="netns_l3_install"; FILTER="l3vxlan_all_active_multipath_kernel_shape" ;;
     l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, svd_fdb_vni, l3_multipath, l3_all_active_writer" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer" >&2
         exit 2
         ;;
 esac
