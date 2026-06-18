@@ -1,0 +1,20 @@
+name: "Install protobuf compiler (hardened)"
+description: >-
+  Install protoc from the Ubuntu archive while tolerating transient failures
+  from preinstalled third-party apt repositories. The package install and
+  protoc sanity check remain hard failures.
+runs:
+  using: "composite"
+  steps:
+    - name: Install protobuf compiler
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v protoc >/dev/null 2>&1; then
+          protoc --version
+          exit 0
+        fi
+        sudo apt-get update -o Acquire::Retries=3 || \
+          echo "::warning::apt-get update reported repo errors; installing protobuf-compiler using existing package lists"
+        sudo apt-get install -y protobuf-compiler
+        protoc --version
