@@ -737,7 +737,7 @@ mod tests {
         }
     }
 
-    fn vlan_aware_cache() -> LinkCache {
+    fn vlan_upper_cache() -> LinkCache {
         let mut cache = cache_for(100, /* vxlan */ 11, /* swp */ 22);
         cache.vxlan_ifindex_to_vni.insert(33, 200);
         cache.bridge_port_to_vni.clear();
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn classify_vlan_aware_local_bridge_port_by_vlan() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let msg = with_vlan(
             neigh_msg(
                 AddressFamily::Bridge,
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn classify_vlan_aware_local_bridge_port_drops_missing_or_unknown_vlan() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let missing = neigh_msg(
             AddressFamily::Bridge,
             22,
@@ -920,7 +920,7 @@ mod tests {
 
     #[test]
     fn classify_vlan_aware_vxlan_port_by_vlan() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let msg = with_vlan(
             neigh_msg(
                 AddressFamily::Bridge,
@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn classify_inet_vlan_upper_emits_ip_added() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let v4: IpAddr = "192.0.2.10".parse().unwrap();
         let msg = ip_neigh_msg(
             AddressFamily::Inet,
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn classify_inet6_vlan_upper_emits_ip_added() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let v6: IpAddr = "2001:db8::10".parse().unwrap();
         let msg = ip_neigh_msg(
             AddressFamily::Inet6,
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn classify_inet_vlan_upper_unknown_mapping_drops() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let msg = ip_neigh_msg(
             AddressFamily::Inet,
             46,
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn classify_inet_del_on_vlan_upper_uses_cached_mac() {
-        let cache = vlan_aware_cache();
+        let cache = vlan_upper_cache();
         let v4: IpAddr = "192.0.2.10".parse().unwrap();
         let msg = ip_neigh_msg(
             AddressFamily::Inet,
