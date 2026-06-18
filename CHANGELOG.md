@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-06-18
+
 ### Added
 
 - **ADR-0090 all-active ESI overlay-index Type 5 receive contract.** The
