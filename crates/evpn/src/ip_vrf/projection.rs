@@ -675,9 +675,12 @@ pub enum DropReason {
         next_hop: IpAddr,
         vrf: String,
     },
-    /// The route resolved at least one all-active EAD candidate, or a
-    /// mixed/conflicting redundancy set. Production import deliberately
-    /// keeps these fail-closed until L3 multipath/NHG programming exists.
+    /// The route resolved a conflicting EAD redundancy signal, or a mixed
+    /// set where the same ESI is advertised both single-active and
+    /// all-active. The signal is ambiguous, so import fails closed here.
+    /// (Unambiguous all-active sets with two or more targets now install
+    /// through the L3 ECMP / L3VXLAN FDB-NHG writer; a single-member
+    /// all-active set fails closed at the writer boundary instead.)
     UnsupportedAllActiveEsiOverlayIndex {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
