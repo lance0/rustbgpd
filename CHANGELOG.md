@@ -71,6 +71,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nhid` works on the L3VXLAN device and cleans up with its member/group
   objects.
 
+### Changed
+
+- **Clippy suppression reason ratchet expanded to `rustbgpd-api`.**
+  `scripts/check-clippy-reasons.py` now covers `crates/api/src`, and the API
+  crate's generated-proto, tonic `Status`, DTO-shape, and route-converter
+  suppressions carry explicit `reason =` text.
+
 ## [0.40.0] — 2026-06-17
 
 ### Added

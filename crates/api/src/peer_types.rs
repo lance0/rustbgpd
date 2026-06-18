@@ -1317,7 +1317,10 @@ pub struct PolicyChainAssignment {
 
 /// Configuration for adding a peer dynamically.
 #[derive(Clone)]
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "neighbor config mirrors independent protocol flags from config/proto"
+)]
 pub struct PeerManagerNeighborConfig {
     /// Remote peer IP address (used as peer identifier).
     pub address: IpAddr,
@@ -1606,7 +1609,10 @@ pub enum ConfigEvent {
 
 /// Snapshot of a peer's state for queries.
 #[derive(Debug, Clone)]
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "peer status DTO mirrors independent runtime/config booleans for API consumers"
+)]
 pub struct PeerInfo {
     /// Remote peer IP address.
     pub address: IpAddr,

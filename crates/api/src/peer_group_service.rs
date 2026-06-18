@@ -58,7 +58,10 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
     }
 }
 
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for peer-group conversion"
+)]
 fn proto_definition_to_input(
     definition: proto::PeerGroupDefinition,
 ) -> Result<PeerGroupDefinition, Status> {

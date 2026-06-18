@@ -246,7 +246,10 @@ impl RibService {
 
 /// Validate the requested unicast route-listing address family.
 /// 0 = UNSPECIFIED (treat as "any"), 1-2 = valid unicast families.
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for validation helpers"
+)]
 fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Unicast as i32
@@ -261,7 +264,10 @@ fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
 
 /// Validate the requested `FlowSpec` route-listing address family.
 /// 0 = UNSPECIFIED (treat as "any"), 3-4 = valid `FlowSpec` families.
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for validation helpers"
+)]
 fn validate_flowspec_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Flowspec as i32
@@ -349,7 +355,10 @@ impl<'a> RouteFilterAttrs<'a> {
 }
 
 impl RouteFilters {
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tonic::Status keeps route-filter validation errors at the RPC boundary"
+    )]
     fn from_request(req: &proto::ListRoutesRequest) -> Result<Self, Status> {
         let prefix = if req.prefix_filter.is_empty() {
             if req.prefix_filter_length != 0 {
@@ -501,7 +510,10 @@ struct FibRouteFilters {
 }
 
 impl FibRouteFilters {
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tonic::Status keeps FIB route-filter validation errors at the RPC boundary"
+    )]
     fn from_request(req: &proto::ListFibRoutesRequest) -> Result<Self, Status> {
         let table_name = (!req.table_name.is_empty()).then(|| req.table_name.clone());
         let reason = (!req.reason.is_empty()).then(|| req.reason.clone());
@@ -738,7 +750,10 @@ fn build_filtered_response(
     }
 }
 
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for prefix parsing"
+)]
 fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
     let addr: IpAddr = prefix
         .parse()
@@ -765,7 +780,10 @@ fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Stat
     })
 }
 
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for event prefix filters"
+)]
 pub(crate) fn parse_route_event_prefix_filter(
     prefix: &str,
     prefix_length: u32,
@@ -1524,7 +1542,10 @@ async fn dispatch_fib_table_control(
         .map_err(FibTableControlError::into_status)
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "FlowSpec route conversion keeps every component and action mapping adjacent"
+)]
 fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
@@ -1705,7 +1726,10 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     }
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "EVPN route conversion keeps per-route-type field mapping in one audited place"
+)]
 pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
