@@ -89,7 +89,7 @@ All-active with fewer than two surviving targets remains fail-closed in v1.
 That keeps the all-active writer limited to shapes that prove actual ECMP/NHG
 behavior; a single surviving target should arrive through the already shipped
 single-active/scalar paths or wait for a later, explicit degenerate-case
-decision. The M72 proof must use at least two remote targets.
+decision. The M72 proof uses two remote targets.
 
 ### 4. Program the route through route-level ECMP plus FDB-NHG
 
@@ -141,8 +141,8 @@ This preserves the current "wrong forwarding is worse than no import" posture.
 M71 remains the real-peer proof for the shipped single-active v1. Its current
 all-active phase is a regression guard for the present fail-closed behavior.
 
-The all-active implementation must add a new proof, M72, with an independent
-route source that can originate:
+The all-active implementation added M72, with independent GoBGP route sources
+that can originate:
 
 1. an ESI overlay-index RT-5 alone, proving the route is held unresolved;
 2. matching all-active EAD-per-ES and EAD-per-EVI from at least two remote
@@ -154,9 +154,9 @@ route source that can originate:
 5. withdraw or target collapse cleanup, proving route, neighbor, FDB, NHG, and
    NH ownership converge deterministically.
 
-If practical, M72 should include a packet-level forwarding assertion. Route ECMP
-and FDB-NHG are separate kernel objects; object presence is necessary but does
-not alone prove the two hashing layers forward consistently.
+M72 is an object-state and cleanup receipt: route ECMP and FDB-NHG are separate
+kernel objects, so a later packet-level forwarding assertion can still augment
+the proof, but it is no longer the roadmap completion gate for this receive arc.
 
 ## Consequences
 
@@ -171,5 +171,5 @@ not alone prove the two hashing layers forward consistently.
   `ReconcileActor<LinuxDataplane>` can install and withdraw the route ECMP,
   per-VTEP L3 neighbors, L3-tagged FDB-NHG members, and Router-MAC `nhid` FDB
   row against a Linux kernel.
-- M72 is the required cross-vendor or real-peer receipt before the roadmap may
-  claim the all-active ESI overlay-index Type 5 receive arc complete.
+- M72 is now the required real-peer receipt for the roadmap's all-active ESI
+  overlay-index Type 5 receive completion claim.

@@ -1270,9 +1270,11 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - **[docs/INTEROP.md](docs/INTEROP.md)** — the full M-NN interop test matrix.
   The automated scripts cover the M-series against FRR 10.3.1, BIRD 2.0.12 /
   3.2.1, GoBGP 4.3.0, and StayRTR; M0 (FRR, BIRD) are manual smokes. Privileged
-  kernel-dataplane smokes (EVPN VTEP / IRB, FIB, BFD, TCP-AO — M36–M53) run in
-  the hosted `kernel-dataplane` workflow; large-scale churn (M33) is a manual
-  soak harness under `tests/soak/`.
+  kernel-dataplane smokes now run in the hosted `kernel-dataplane` workflow for
+  the EVPN VTEP / IRB / adoption / multihoming / VLAN / overlay-index receipts
+  plus the FIB, BFD, TCP-AO, BGP-unnumbered, and BLACKHOLE kernel receipts; see
+  `INTEROP.md` for the current M36-M72 span. Large-scale churn (M33) is a
+  manual soak harness under `tests/soak/`.
 - **[docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md)** — the consolidated
   operator-facing receipt index for CI interop, hosted dataplane, benchmarks,
   high-N memory profiles, and archived 24 h soaks.

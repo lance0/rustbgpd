@@ -22,12 +22,13 @@ new class of state:
 - failures from netlink operations that are operationally important but
   should not mutate the desired-state model.
 
-The boundary must be explicit before Linux logic lands. If netlink
+The boundary had to be explicit before Linux logic landed. If netlink
 helpers grow on `EvpnInstance`, the domain crate stops being portable
 intent and becomes an OS driver. If RIB or transport code starts owning
 FDB apply decisions directly, route-reflector behavior becomes coupled
 to a local dataplane. This ADR locks the interface between the existing
-domain model and the future Linux dataplane crate.
+domain model and the Linux dataplane crate that later became
+`crates/evpn-linux`.
 
 Relevant source constraints:
 
@@ -65,7 +66,7 @@ crates/wire  <-- transport/rib existing EVPN route flow
 crates/evpn  --desired local VTEP intent-->  crates/evpn-linux
      ^                                            |
      |                                            v
- daemon config / future MAC domain        Linux netlink / kernel snapshot
+ daemon config / MAC domain              Linux netlink / kernel snapshot
 ```
 
 `crates/evpn-linux` may depend on `crates/evpn` and Linux netlink
@@ -91,7 +92,8 @@ pub struct DataplaneIntent {
 }
 
 pub struct RemoteMacTable {
-    // Minimum Gate 7b shape. VLAN-aware expansion is a follow-up.
+    // Minimum Gate 7b shape. ADR-0089 later adds VLAN attribution
+    // while keeping route identity keyed by VNI + MAC.
     pub entries: BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacEntry>,
 }
 
@@ -120,8 +122,12 @@ dataplane actor computes create/update/delete operations by comparing
 the new complete desired table against the kernel snapshot and its
 previous applied state. The minimum key is `(VNI, MAC)`;
 `RemoteMacEntry` initially needs the remote VTEP IP, optional MAC
-mobility sequence, and source class. VLAN-aware keys are deferred until
-the EVPN instance schema has an explicit VLAN field.
+mobility sequence, and source class. ADR-0089 later added explicit
+`bridge_vlan` schema/status and Linux-side VLAN/VNI attribution for
+traditional multi-VXLAN bridges and SVD / collect-metadata VXLAN, but
+the EVPN route identity remains `(VNI, MAC)`. True shared-VNI /
+non-zero Ethernet Tag service still needs a separate ADR and domain
+model.
 
 Remote/local MAC domain tables should be portable domain objects such
 as "MAC X in VNI Y is owned locally with mobility sequence N" or
@@ -153,14 +159,15 @@ Gate 7b L2VNI dataplane boundary.
 
 Gate 7b does not create or delete Linux bridge or VXLAN netdevs. It
 expects the operator or host-networking layer to create them. For an
-`EvpnInstance` with `bridge = "br100"`, the dataplane crate verifies:
+`EvpnInstance` with `bridge = "br100"`, the initial Gate 7b dataplane
+crate verifies:
 
 1. the bridge exists;
 2. exactly one VXLAN port for the instance VNI is attached to that
    bridge;
 3. the VXLAN port's local address matches `local_vtep_ip`;
 4. the VXLAN port uses a supported destination port and learning mode;
-5. the bridge is not VLAN-aware.
+5. for the original Gate 7b shape, the bridge is not VLAN-aware.
 
 If any check fails, the instance is reported `NotReady`; no synthetic
 device is created. This keeps the first Linux integration non-
@@ -170,9 +177,13 @@ before the project has real operator signal.
 
 VLAN-aware bridges were rejected for the initial Gate 7b scope. That
 kept the dataplane crate from guessing a VNI-to-VLAN mapping before the
-configuration model existed. ADR-0088/ADR-0089 later add the explicit
+configuration model existed. ADR-0088/ADR-0089 later added the explicit
 `bridge_vlan` binding for the VLAN-aware, VNI-per-broadcast-domain
-slice while preserving this ADR's non-destructive netdev boundary.
+slice while preserving this ADR's non-destructive netdev boundary:
+`NDA_VLAN` and `NDA_SRC_VNI` attribute Linux FDB observations and
+programming, while EVPN route identity stays VNI-based with Ethernet
+Tag ID `0`. True VLAN-aware bundle service, shared VNI, and non-zero
+Ethernet Tag remain deferred.
 
 Future ADRs may allow rustbgpd to create netdev topology, but that is a
 separate ownership decision.
