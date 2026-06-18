@@ -111,7 +111,7 @@ pub use diff::{Plan, compute_diff};
 pub use enforcement::build_bum_enforcement_status;
 pub use error::{DataplaneError, FailureClass};
 pub use in_memory::{InMemoryDataplane, InMemoryHandle};
-pub use l3_adoption::{AdoptedL3Route, L3AdoptionDump};
+pub use l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget, L3AdoptionDump};
 pub use reconcile::{ReconcileActor, ReconcileActorConfig};
 pub use snapshot::{
     InstanceProbe, InstanceProbes, KernelBridgePortInfo, KernelFdbEntry, KernelFdbFlags,

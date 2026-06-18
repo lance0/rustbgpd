@@ -79,6 +79,7 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # runs the LAN-70 L3VNI route-multipath + FDB-NHG proof; `l3_all_active_writer`
 # runs the LAN-76 production actor all-active L3 writer proof.
 TEST_BIN="netns_bum_filter"
+EXACT_FILTER=1
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
 RUSTBGPD_TEST_FILTER=""
@@ -97,7 +98,7 @@ case "${1:-all}" in
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
     l3_multipath)       TEST_BIN="netns_l3_install"; FILTER="l3vxlan_all_active_multipath_kernel_shape" ;;
-    l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer" ;;
+    l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
     *)
         echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, svd_fdb_vni, l3_multipath, l3_all_active_writer" >&2
         exit 2
@@ -199,7 +200,11 @@ else
         --test-threads=1 --nocapture
     )
     if [ -n "$FILTER" ]; then
-        TEST_ARGS+=("--exact" "$FILTER")
+        if [ "$EXACT_FILTER" = "1" ]; then
+            TEST_ARGS+=("--exact" "$FILTER")
+        else
+            TEST_ARGS+=("$FILTER")
+        fi
     fi
 fi
 

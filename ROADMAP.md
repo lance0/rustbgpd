@@ -251,10 +251,13 @@ has it, no broad performance sprints without profile evidence.
   ranges, a separate L3 owned-nexthop dump surface, Router-MAC FDB-NHG refcount
   state partitioned from ADR-0059's L2 aliasing domain, VRF-table ECMP route
   programming, per-VTEP L3 neighbors, and clean all-active withdraw/collapse
-  cleanup. **LAN-76's same-host production-path proof landed:** the privileged
+  cleanup. Restart adoption now reclaims crash-leftover all-active ECMP routes,
+  every remote-VTEP neighbor, the Router-MAC L3VXLAN FDB-NHG row, and the
+  existing L3 NHID member/group tree before desired state reclaims it or the
+  deferred reap deletes it. **LAN-76's same-host production-path proof landed:** the privileged
   `l3_all_active_writer` netns selector drives a real
   `ReconcileActor<LinuxDataplane>` through the all-active writer and asserts the
-  route, neighbor, FDB-NHG, and cleanup state. M72 remains pending as the
+  route, neighbor, FDB-NHG, cleanup, and restart-adoption state. M72 remains pending as the
   cross-vendor / real-peer proof for the all-active receive arc. The
   single-active arc below is **done (ADR-0083, all four slices):** remote
   single-active MACs ride per-`(ESI, EthTag)` one-member FDB nexthop

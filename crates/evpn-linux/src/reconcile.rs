@@ -56,7 +56,7 @@ use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
-use crate::l3_adoption::AdoptedL3Route;
+use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget};
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
 };
@@ -360,10 +360,15 @@ struct ActorState {
     /// the accounting tag the remove op carries). Same claim / reap
     /// lifecycle as `adopted_l3_routes`.
     adopted_l3_neighbors: BTreeMap<(u32, IpAddr), IpVrfId>,
-    /// ADR-0079 L3 sweep: adopted crash-leftover L3VXLAN FDB rows,
-    /// `(l3vxlan_ifindex, router_mac) → owning vrf_id`. Same claim /
-    /// reap lifecycle as `adopted_l3_routes`.
-    adopted_l3_fdb: BTreeMap<(u32, MacAddress), IpVrfId>,
+    /// ADR-0079 L3 sweep: adopted crash-leftover L3VXLAN FDB rows.
+    /// The value preserves whether the row was scalar (`NDA_DST`) or
+    /// all-active (`NDA_NH_ID`) so reaping tears down the matching
+    /// kernel shape.
+    adopted_l3_fdb: BTreeMap<(u32, MacAddress), AdoptedL3VxlanFdb>,
+    /// L3 NHIDs the startup/drift adoption pass reserved from the
+    /// kernel dump but has not matched to an adopted L3VXLAN FDB-NHG
+    /// row. Drained after convergence, using L3 release semantics.
+    adopted_l3_unreferenced: BTreeMap<u32, crate::dataplane::KernelNexthop>,
     /// When adopted-but-unclaimed L3 rows become reapable. `None`
     /// until the one-shot sweep runs; `Some` doubles as the "swept"
     /// latch and is never reset within a process lifetime — same
@@ -464,6 +469,7 @@ impl ActorState {
             adopted_l3_routes: BTreeMap::new(),
             adopted_l3_neighbors: BTreeMap::new(),
             adopted_l3_fdb: BTreeMap::new(),
+            adopted_l3_unreferenced: BTreeMap::new(),
             l3_adoption_reap_after: None,
             l3_adoption_since_report: L3AdoptionCounters::default(),
             last_drift_check: None,
@@ -810,6 +816,58 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         return;
                     }
                 },
+            }
+            if !self.state.adoption_done {
+                match self.dataplane.dump_owned_l3_nexthops().await {
+                    Ok(adopted) => {
+                        for nh in adopted {
+                            if self.state.adopted_l3_unreferenced.contains_key(&nh.id) {
+                                continue;
+                            }
+                            match self.state.nh_id_alloc.reserve(nh.id) {
+                                Ok(()) => {
+                                    self.state.adopted_l3_unreferenced.insert(nh.id, nh);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        ?e,
+                                        id = nh.id,
+                                        "adoption: L3 reserve failed; ignoring"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => match e.class() {
+                        crate::error::FailureClass::Permanent => {
+                            tracing::warn!(
+                                error = %e,
+                                "adoption: dump_owned_l3_nexthops permanently failed; \
+                                 L3 FDB-NHG all-active Type 5 adoption disabled for this daemon instance"
+                            );
+                        }
+                        crate::error::FailureClass::Transient
+                        | crate::error::FailureClass::Conflict => {
+                            tracing::warn!(
+                                error = %e,
+                                "adoption: dump_owned_l3_nexthops failed transiently; deferring this reconcile pass to avoid L3 allocator collisions"
+                            );
+                            let status = build_instance_status(&intent.instances, &probes);
+                            let bum_enforcement =
+                                build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
+                            self.emit_report(
+                                status,
+                                vec![],
+                                vec![],
+                                bum_enforcement,
+                                ip_vrf_status,
+                                ip_vrf_routes,
+                            )
+                            .await;
+                            return;
+                        }
+                    },
+                }
             }
         }
 
@@ -1161,7 +1219,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             if !self.state.l3_owned.installs.contains_key(&(vrf_id, prefix)) {
                                 self.state
                                     .adopted_l3_routes
-                                    .insert((vrf_id, prefix), *route);
+                                    .insert((vrf_id, prefix), route.clone());
                                 self.state.l3_adoption_since_report.routes_adopted += 1;
                                 tracing::info!(
                                     vrf_id = vrf_id.as_u32(),
@@ -1190,19 +1248,26 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 );
                             }
                         }
-                        for (&(ifindex, router_mac), &vrf_id) in &dump.l3vxlan_fdb {
+                        for (&(ifindex, router_mac), &row) in &dump.l3vxlan_fdb {
                             if !self
                                 .state
                                 .l3_owned
                                 .kernel_fdb
                                 .contains_key(&(ifindex, router_mac))
                             {
-                                self.state
-                                    .adopted_l3_fdb
-                                    .insert((ifindex, router_mac), vrf_id);
+                                self.state.adopted_l3_fdb.insert((ifindex, router_mac), row);
+                                if let AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id } = row.target
+                                {
+                                    self.adopt_l3_fdb_nhg_group(
+                                        crate::group_state::L3NhgKey::new(
+                                            row.vrf_id, ifindex, router_mac,
+                                        ),
+                                        nh_id,
+                                    );
+                                }
                                 self.state.l3_adoption_since_report.l3vxlan_fdb_adopted += 1;
                                 tracing::info!(
-                                    vrf_id = vrf_id.as_u32(),
+                                    vrf_id = row.vrf_id.as_u32(),
                                     l3vxlan_ifindex = ifindex,
                                     %router_mac,
                                     "adopted extern_learn L3VXLAN FDB row from a previous daemon lifetime"
@@ -1215,6 +1280,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             "L3 adoption dump failed; sweep deferred to a later reconcile pass"
                         );
                     }
+                }
+                if !self.state.adopted_l3_unreferenced.is_empty() {
+                    let _ = self.cleanup_unreferenced_l3_adoptions().await;
                 }
             }
 
@@ -1373,6 +1441,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                     .remove(&(*l3vxlan_ifindex, *next_hop));
                             }
                             crate::dataplane::DataplaneOp::AddL3VxlanFdb {
+                                l3vxlan_ifindex,
+                                router_mac,
+                                ..
+                            }
+                            | crate::dataplane::DataplaneOp::InstallL3FdbNhg {
                                 l3vxlan_ifindex,
                                 router_mac,
                                 ..
@@ -1780,6 +1853,260 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         all_ok
     }
 
+    /// Rebuild the in-memory L3 FDB-NHG ownership map for an adopted
+    /// L3VXLAN FDB row that points at `NDA_NH_ID`.
+    fn adopt_l3_fdb_nhg_group(&mut self, key: crate::group_state::L3NhgKey, nh_id: u32) {
+        use crate::dataplane::KernelNexthopKind;
+
+        if self.state.l3_groups.group(&key).is_some() {
+            return;
+        }
+        if self
+            .state
+            .l3_groups
+            .iter_groups()
+            .any(|(existing_key, group)| *existing_key != key && group.id == nh_id)
+        {
+            tracing::warn!(
+                ?key,
+                nh_id,
+                "L3 adoption: NHG ID already adopted under a different key; retaining for cleanup"
+            );
+            return;
+        }
+        let Some(group_nh) = self.state.adopted_l3_unreferenced.get(&nh_id).cloned() else {
+            tracing::warn!(
+                ?key,
+                nh_id,
+                "L3 adoption: FDB row references an NHG ID absent from dump_owned_l3_nexthops; retaining row for later reap"
+            );
+            return;
+        };
+        let KernelNexthopKind::Group { member_ids } = group_nh.kind else {
+            tracing::warn!(
+                ?key,
+                nh_id,
+                "L3 adoption: FDB row references an L3 NHID that is not a group; retaining for later reap"
+            );
+            return;
+        };
+        if member_ids.len() < 2 {
+            tracing::warn!(
+                ?key,
+                nh_id,
+                members = member_ids.len(),
+                "L3 adoption: all-active FDB-NHG group has fewer than two members; retaining for later reap"
+            );
+            return;
+        }
+
+        let Some(members) = self.resolve_adopted_l3_nhg_members(key, nh_id, &member_ids) else {
+            return;
+        };
+
+        for member_id in &member_ids {
+            if let Some(crate::dataplane::KernelNexthop { kind, .. }) =
+                self.state.adopted_l3_unreferenced.get(member_id)
+                && let KernelNexthopKind::Member { gateway } = kind
+            {
+                self.state
+                    .l3_groups
+                    .record_member_install(*gateway, *member_id);
+            }
+        }
+        self.state
+            .l3_groups
+            .record_group_install(key, nh_id, members);
+        self.state.adopted_l3_unreferenced.remove(&nh_id);
+        for member_id in member_ids {
+            self.state.adopted_l3_unreferenced.remove(&member_id);
+        }
+    }
+
+    fn resolve_adopted_l3_nhg_members(
+        &self,
+        key: crate::group_state::L3NhgKey,
+        nh_id: u32,
+        member_ids: &[u32],
+    ) -> Option<BTreeSet<IpAddr>> {
+        use crate::dataplane::KernelNexthopKind;
+
+        let mut members = BTreeSet::new();
+        for member_id in member_ids {
+            if let Some((ip, _)) = self
+                .state
+                .l3_groups
+                .iter_vtep_nhs()
+                .find(|(_, nh)| nh.id == *member_id)
+            {
+                members.insert(*ip);
+                continue;
+            }
+            let Some(member) = self.state.adopted_l3_unreferenced.get(member_id) else {
+                tracing::warn!(
+                    ?key,
+                    nh_id,
+                    member_id,
+                    "L3 adoption: NHG member ID missing from dump; retaining group for later reap"
+                );
+                return None;
+            };
+            match &member.kind {
+                KernelNexthopKind::Member { gateway } => {
+                    members.insert(*gateway);
+                }
+                KernelNexthopKind::Group { .. } => {
+                    tracing::warn!(
+                        ?key,
+                        nh_id,
+                        member_id,
+                        "L3 adoption: NHG member ID is not a member object; retaining group for later reap"
+                    );
+                    return None;
+                }
+            }
+        }
+        if members.len() != member_ids.len() {
+            tracing::warn!(
+                ?key,
+                nh_id,
+                members = members.len(),
+                member_ids = member_ids.len(),
+                "L3 adoption: NHG members collapse to duplicate gateways; retaining group for later reap"
+            );
+            return None;
+        }
+        Some(members)
+    }
+
+    /// Delete L3 NHIDs that were reserved from the kernel but never
+    /// matched to an adopted L3VXLAN FDB-NHG row.
+    async fn cleanup_unreferenced_l3_adoptions(&mut self) -> bool {
+        let any_l3_nhg_perm_failure = self.state.l3_permanent_failures.values().any(|op| {
+            matches!(
+                op,
+                DataplaneOp::InstallL3FdbNhg { .. } | DataplaneOp::RemoveL3FdbNhg { .. }
+            )
+        });
+        if any_l3_nhg_perm_failure {
+            tracing::warn!(
+                adopted = self.state.adopted_l3_unreferenced.len(),
+                "L3 adoption cleanup blocked: L3 FDB-NHG op(s) permanently suppressed; adopted IDs retained until suppression clears"
+            );
+            return false;
+        }
+
+        let mut retain: BTreeSet<u32> = BTreeSet::new();
+        for row in self.state.adopted_l3_fdb.values() {
+            let AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id } = row.target else {
+                continue;
+            };
+            if !self.state.adopted_l3_unreferenced.contains_key(&nh_id) {
+                continue;
+            }
+            retain.insert(nh_id);
+            if let Some(adopted) = self.state.adopted_l3_unreferenced.get(&nh_id)
+                && let crate::dataplane::KernelNexthopKind::Group { member_ids } = &adopted.kind
+            {
+                for mid in member_ids {
+                    retain.insert(*mid);
+                }
+            }
+        }
+
+        let (stale_groups, stale_members): (Vec<u32>, Vec<u32>) = self
+            .state
+            .adopted_l3_unreferenced
+            .keys()
+            .copied()
+            .filter(|id| !retain.contains(id))
+            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_l3_nhg(*id));
+
+        let mut all_ok = true;
+        for id in stale_groups.into_iter().chain(stale_members) {
+            match self.dataplane.del_nexthop(id).await {
+                Ok(()) => {
+                    self.state.nh_id_alloc.release_l3(id);
+                    self.state.adopted_l3_unreferenced.remove(&id);
+                    self.state.fdb_nhg_drift_since_report.orphans_cleaned += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "L3 adoption cleanup: del_nexthop failed; leaving reserved for next pass"
+                    );
+                    all_ok = false;
+                }
+            }
+        }
+        all_ok
+    }
+
+    /// Reap one adopted L3VXLAN FDB row whose target is `NDA_NH_ID`.
+    async fn reap_adopted_l3_fdb_nhg(
+        &mut self,
+        key: crate::group_state::L3NhgKey,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+        nh_id: u32,
+    ) -> Result<(), crate::error::DataplaneError> {
+        if self
+            .state
+            .l3_groups
+            .group(&key)
+            .is_some_and(|g| !g.ref_routes.is_empty())
+        {
+            return Err(crate::error::DataplaneError::Other(format!(
+                "refusing to reap referenced L3 FDB-NHG group {key:?}"
+            )));
+        }
+        self.dataplane
+            .remove_l3_fdb_nhg_row(l3vxlan_ifindex, router_mac)
+            .await?;
+
+        let Some((tracked_id, members)) = self.state.l3_groups.drop_unreferenced_group(&key) else {
+            // The group could not be reconstructed during adoption
+            // (partial dump or malformed prior state). Leave the raw
+            // NHIDs in `adopted_l3_unreferenced`; once the caller
+            // removes this FDB row from `adopted_l3_fdb`, the L3
+            // unreferenced cleanup pass deletes the group and any
+            // members no longer retained by another adopted row.
+            if !self.state.adopted_l3_unreferenced.contains_key(&nh_id) {
+                tracing::warn!(
+                    ?key,
+                    nh_id,
+                    "L3 adoption reap removed FDB-NHG row but no tracked or raw NHG ownership was found"
+                );
+            }
+            return Ok(());
+        };
+        if tracked_id != nh_id {
+            tracing::warn!(
+                ?key,
+                expected_nh_id = nh_id,
+                tracked_id,
+                "L3 adoption reap: tracked group ID differs from adopted FDB row NHID"
+            );
+        }
+        self.dataplane.del_nexthop(tracked_id).await?;
+        self.state.nh_id_alloc.release_l3(tracked_id);
+        for ip in members {
+            if self.state.l3_groups.vtep_nh_is_orphan(&ip)
+                && let Some(id) = self.state.l3_groups.drop_vtep_nh(&ip)
+            {
+                try_del_and_release_l3_alloc(
+                    &mut self.dataplane,
+                    &mut self.state,
+                    id,
+                    "l3_adoption_reap_member",
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
     /// ADR-0059 slice 3.5 PR 2 — steady-state drift recovery.
     ///
     /// Walks the rustbgpd-tagged nexthop space (`VTEP_NH_TAG` /
@@ -1875,6 +2202,33 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         };
         let actual_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop> =
             actual.into_iter().map(|nh| (nh.id, nh)).collect();
+        let actual_l3 = match self.dataplane.dump_owned_l3_nexthops().await {
+            Ok(v) => v,
+            Err(e) => {
+                match e.class() {
+                    crate::error::FailureClass::Permanent => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_l3_nexthops permanently failed; \
+                             disabling drift recovery for this daemon instance"
+                        );
+                        self.state.drift_disabled = true;
+                        self.state.fdb_nhg_drift_since_report.drift_disabled += 1;
+                    }
+                    crate::error::FailureClass::Transient
+                    | crate::error::FailureClass::Conflict => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_l3_nexthops failed transiently; \
+                             deferring this drift cycle"
+                        );
+                    }
+                }
+                return false;
+            }
+        };
+        let actual_l3_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop> =
+            actual_l3.into_iter().map(|nh| (nh.id, nh)).collect();
 
         // Snapshot tracked state so the &mut self loops below can call
         // dataplane methods without holding a borrow across .await.
@@ -2102,7 +2456,154 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if !self.state.adopted_unreferenced.is_empty() {
             let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
         }
+        self.reconcile_l3_nhg_drift(actual_l3_by_id).await;
         true
+    }
+
+    /// Steady-state drift recovery for the ADR-0090 L3 FDB-NHG
+    /// namespace.
+    async fn reconcile_l3_nhg_drift(
+        &mut self,
+        actual_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop>,
+    ) {
+        let tracked_vteps: Vec<(IpAddr, u32)> = self
+            .state
+            .l3_groups
+            .iter_vtep_nhs()
+            .map(|(ip, nh)| (*ip, nh.id))
+            .collect();
+        let tracked_groups: Vec<(crate::group_state::L3NhgKey, u32, BTreeSet<IpAddr>)> = self
+            .state
+            .l3_groups
+            .iter_groups()
+            .map(|(k, g)| (*k, g.id, g.members.clone()))
+            .collect();
+        let tracked_ids: BTreeSet<u32> = tracked_vteps
+            .iter()
+            .map(|(_, id)| *id)
+            .chain(tracked_groups.iter().map(|(_, id, _)| *id))
+            .collect();
+
+        self.repair_l3_nhg_members(&actual_by_id, &tracked_vteps)
+            .await;
+        self.repair_l3_nhg_groups(&actual_by_id, &tracked_groups)
+            .await;
+
+        let mut adopted_any = false;
+        for (id, nh) in actual_by_id {
+            if tracked_ids.contains(&id) || self.state.adopted_l3_unreferenced.contains_key(&id) {
+                continue;
+            }
+            match self.state.nh_id_alloc.reserve(id) {
+                Ok(()) => {
+                    self.state.adopted_l3_unreferenced.insert(id, nh);
+                    adopted_any = true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "drift: untracked L3 tagged NHID could not be reserved"
+                    );
+                }
+            }
+        }
+        if adopted_any {
+            tracing::info!(
+                adopted = self.state.adopted_l3_unreferenced.len(),
+                "drift: discovered untracked L3 tagged NHIDs; running adoption cleanup in-line"
+            );
+        }
+        if !self.state.adopted_l3_unreferenced.is_empty() {
+            let _ = self.cleanup_unreferenced_l3_adoptions().await;
+        }
+    }
+
+    async fn repair_l3_nhg_members(
+        &mut self,
+        actual_by_id: &BTreeMap<u32, crate::dataplane::KernelNexthop>,
+        tracked_vteps: &[(IpAddr, u32)],
+    ) {
+        use crate::dataplane::KernelNexthopKind;
+
+        for (ip, id) in tracked_vteps {
+            let needs_action = match actual_by_id.get(id) {
+                None => true,
+                Some(nh) => match &nh.kind {
+                    KernelNexthopKind::Member { gateway } => gateway != ip,
+                    KernelNexthopKind::Group { .. } => true,
+                },
+            };
+            if !needs_action {
+                continue;
+            }
+            match self.dataplane.add_nexthop_member(*id, *ip).await {
+                Ok(()) => {
+                    self.state.fdb_nhg_drift_since_report.members_repaired += 1;
+                    tracing::info!(
+                        id = *id,
+                        gateway = %ip,
+                        "drift: re-installed L3 FDB nexthop member"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    id = *id,
+                    gateway = %ip,
+                    "drift: L3 re-add member failed; deferring"
+                ),
+            }
+        }
+    }
+
+    async fn repair_l3_nhg_groups(
+        &mut self,
+        actual_by_id: &BTreeMap<u32, crate::dataplane::KernelNexthop>,
+        tracked_groups: &[(crate::group_state::L3NhgKey, u32, BTreeSet<IpAddr>)],
+    ) {
+        use crate::dataplane::KernelNexthopKind;
+
+        for (key, g_id, members) in tracked_groups {
+            let expected_member_ids: Vec<u32> = members
+                .iter()
+                .filter_map(|ip| self.state.l3_groups.vtep_nh(ip).map(|nh| nh.id))
+                .collect();
+            let needs_action = match actual_by_id.get(g_id) {
+                None => true,
+                Some(nh) => match &nh.kind {
+                    KernelNexthopKind::Group { member_ids } => {
+                        let kset: BTreeSet<u32> = member_ids.iter().copied().collect();
+                        let eset: BTreeSet<u32> = expected_member_ids.iter().copied().collect();
+                        kset != eset
+                    }
+                    KernelNexthopKind::Member { .. } => true,
+                },
+            };
+            if !needs_action {
+                continue;
+            }
+            match self
+                .dataplane
+                .add_nexthop_group(*g_id, &expected_member_ids)
+                .await
+            {
+                Ok(()) => {
+                    self.state.fdb_nhg_drift_since_report.groups_replaced += 1;
+                    tracing::info!(
+                        id = *g_id,
+                        ?key,
+                        members = expected_member_ids.len(),
+                        "drift: re-added/replaced L3 FDB nexthop group"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    id = *g_id,
+                    ?key,
+                    "drift: L3 re-add group failed; deferring"
+                ),
+            }
+        }
     }
 
     /// ADR-0079 slice 2 reap: remove adopted single-dst FDB rows that
@@ -2307,7 +2808,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         for ((vrf_id, prefix), entry) in desired.iter() {
             desired_route_keys.insert((*vrf_id, *prefix));
             if let Some(ifindex) = ready_l3vxlan_ifindex.get(vrf_id) {
-                desired_neighbor_keys.insert((*ifindex, entry.next_hop));
+                for next_hop in entry.targets.next_hops() {
+                    desired_neighbor_keys.insert((*ifindex, *next_hop));
+                }
                 desired_fdb_keys.insert((*ifindex, entry.router_mac));
             }
         }
@@ -2318,7 +2821,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .state
             .adopted_l3_routes
             .iter()
-            .map(|(k, v)| (*k, *v))
+            .map(|(k, v)| (*k, v.clone()))
             .collect();
         for ((vrf_id, prefix), route) in route_candidates {
             if desired_route_keys.contains(&(vrf_id, prefix)) {
@@ -2327,12 +2830,22 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 // eventual claim exempts it.
                 continue;
             }
-            let op = DataplaneOp::RemoveRemoteIpRoute {
-                vrf_id,
-                prefix,
-                table_id: route.table_id,
-                l3vxlan_ifindex: route.l3vxlan_ifindex,
-                next_hop: route.next_hop,
+            let op = if route.next_hops.len() >= 2 {
+                DataplaneOp::RemoveRemoteIpRouteEcmp {
+                    vrf_id,
+                    prefix,
+                    table_id: route.table_id,
+                    l3vxlan_ifindex: route.l3vxlan_ifindex,
+                    next_hops: route.next_hops.clone(),
+                }
+            } else {
+                DataplaneOp::RemoveRemoteIpRoute {
+                    vrf_id,
+                    prefix,
+                    table_id: route.table_id,
+                    l3vxlan_ifindex: route.l3vxlan_ifindex,
+                    next_hop: route.next_hop,
+                }
             };
             match self.dataplane.apply(&op).await {
                 Ok(()) => {
@@ -2401,31 +2914,48 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
 
-        let fdb_candidates: Vec<((u32, MacAddress), IpVrfId)> = self
+        let fdb_candidates: Vec<((u32, MacAddress), AdoptedL3VxlanFdb)> = self
             .state
             .adopted_l3_fdb
             .iter()
             .map(|(k, v)| (*k, *v))
             .collect();
-        for ((ifindex, router_mac), vrf_id) in fdb_candidates {
+        for ((ifindex, router_mac), row) in fdb_candidates {
             // Same not-ready skip as the neighbor loop above.
-            if !ready_l3vxlan_ifindex.contains_key(&vrf_id) {
+            if !ready_l3vxlan_ifindex.contains_key(&row.vrf_id) {
                 continue;
             }
             if desired_fdb_keys.contains(&(ifindex, router_mac)) {
                 continue;
             }
-            let op = DataplaneOp::RemoveL3VxlanFdb {
-                vrf_id,
-                l3vxlan_ifindex: ifindex,
-                router_mac,
+            let res = match row.target {
+                AdoptedL3VxlanFdbTarget::SingleDst => {
+                    let op = DataplaneOp::RemoveL3VxlanFdb {
+                        vrf_id: row.vrf_id,
+                        l3vxlan_ifindex: ifindex,
+                        router_mac,
+                    };
+                    self.dataplane.apply(&op).await
+                }
+                AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id } => {
+                    self.reap_adopted_l3_fdb_nhg(
+                        crate::group_state::L3NhgKey::new(row.vrf_id, ifindex, router_mac),
+                        ifindex,
+                        router_mac,
+                        nh_id,
+                    )
+                    .await
+                }
             };
-            match self.dataplane.apply(&op).await {
+            match res {
                 Ok(()) => {
                     self.state.adopted_l3_fdb.remove(&(ifindex, router_mac));
+                    if matches!(row.target, AdoptedL3VxlanFdbTarget::NexthopGroup { .. }) {
+                        let _ = self.cleanup_unreferenced_l3_adoptions().await;
+                    }
                     self.state.l3_adoption_since_report.l3vxlan_fdb_reaped += 1;
                     tracing::info!(
-                        vrf_id = vrf_id.as_u32(),
+                        vrf_id = row.vrf_id.as_u32(),
                         l3vxlan_ifindex = ifindex,
                         %router_mac,
                         "reaped adopted L3VXLAN FDB row that no Type 5 re-claimed"

@@ -41,11 +41,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   NHIDs, suppresses exact-repeat permanent L3 writer failures until the op shape
   changes, and cleans up the route, neighbors, FDB row, and nexthop objects on
   withdraw or all-active-to-single collapse.
+- **LAN-77 all-active Type 5 L3 restart adoption.** Crash-leftover all-active
+  L3VXLAN FDB-NHG rows now re-adopt the existing L3 NHID group/member tree at
+  startup, reclaim the ECMP VRF route and every remote-VTEP neighbor, preserve
+  the prior NHG ID on desired re-claim, and reap unreferenced L3 NHIDs through
+  the L3 allocator namespace instead of leaking them or deleting the FDB row as
+  a scalar single-dst entry. The `l3_all_active_writer` netns selector now also
+  aborts and restarts the actor in the same namespace to prove the adoption path
+  against the real kernel.
 - **LAN-76 all-active Type 5 L3 writer netns proof.** The privileged Docker
   netns harness now has an `l3_all_active_writer` selector that drives a real
   `ReconcileActor<LinuxDataplane>` through the production writer path and
   asserts the kernel ECMP route, per-VTEP neighbors, L3-tagged FDB-NHG members,
-  Router-MAC `nhid` FDB row, and clean withdrawal. M72 remains the real-peer /
+  Router-MAC `nhid` FDB row, clean withdrawal, and restart adoption. M72 remains the real-peer /
   cross-vendor receipt before claiming the full all-active receive arc complete.
 - **LAN-70 L3VNI all-active Type 5 kernel-mechanism proof.** The
   privileged netns harness now has an `l3_multipath` selector that proves the

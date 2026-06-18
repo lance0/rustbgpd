@@ -28,7 +28,9 @@ use crate::dataplane::{
     Dataplane, DataplaneOp, KernelEvent, KernelNexthop, KernelNexthopKind, NexthopOps,
 };
 use crate::error::DataplaneError;
-use crate::l3_adoption::{AdoptedL3Route, L3AdoptionDump};
+use crate::l3_adoption::{
+    AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget, L3AdoptionDump,
+};
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
@@ -592,6 +594,10 @@ impl InMemoryDataplane {
                     table_id,
                     l3vxlan_ifindex: row.l3vxlan_ifindex,
                     next_hop: row.next_hop,
+                    next_hops: match &row.targets {
+                        InMemoryL3RouteTargets::Single { next_hop } => vec![*next_hop],
+                        InMemoryL3RouteTargets::Ecmp { next_hops } => next_hops.clone(),
+                    },
                 },
             );
         }
@@ -608,13 +614,17 @@ impl InMemoryDataplane {
             if !row.marked {
                 continue;
             }
-            let InMemoryL3VxlanFdbTarget::SingleDst { .. } = row.target else {
-                continue;
-            };
             let Some(vrf_id) = managed.get(&ifindex).copied() else {
                 continue;
             };
-            out.l3vxlan_fdb.insert((ifindex, router_mac), vrf_id);
+            let target = match row.target {
+                InMemoryL3VxlanFdbTarget::SingleDst { .. } => AdoptedL3VxlanFdbTarget::SingleDst,
+                InMemoryL3VxlanFdbTarget::Nhg { nh_id } => {
+                    AdoptedL3VxlanFdbTarget::NexthopGroup { nh_id }
+                }
+            };
+            out.l3vxlan_fdb
+                .insert((ifindex, router_mac), AdoptedL3VxlanFdb { vrf_id, target });
         }
         Some(out)
     }
@@ -1063,6 +1073,31 @@ impl InMemoryHandle {
         );
     }
 
+    /// Pre-load an ECMP kernel route row — the all-active
+    /// counterpart to [`Self::pre_load_l3_route`].
+    pub fn pre_load_l3_route_ecmp(
+        &self,
+        table_id: u32,
+        prefix: EvpnIpPrefixValue,
+        l3vxlan_ifindex: u32,
+        next_hops: Vec<IpAddr>,
+        marked: bool,
+    ) {
+        assert!(
+            !next_hops.is_empty(),
+            "test ECMP preload requires at least one next-hop"
+        );
+        self.state.lock().expect("poisoned").l3_routes.insert(
+            (table_id, prefix),
+            InMemoryL3Route {
+                l3vxlan_ifindex,
+                next_hop: next_hops[0],
+                targets: InMemoryL3RouteTargets::Ecmp { next_hops },
+                marked,
+            },
+        );
+    }
+
     /// Pre-load an L3 neighbor row — `marked` distinguishes our
     /// `NUD_PERMANENT` + `extern_learn` shape from a foreign entry.
     pub fn pre_load_l3_neighbor(
@@ -1091,6 +1126,23 @@ impl InMemoryHandle {
             (l3vxlan_ifindex, router_mac),
             InMemoryL3VxlanFdb {
                 target: InMemoryL3VxlanFdbTarget::SingleDst { next_hop },
+                marked,
+            },
+        );
+    }
+
+    /// Pre-load an L3VXLAN FDB row pointing at an FDB nexthop group.
+    pub fn pre_load_l3_vxlan_fdb_nhg(
+        &self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+        nh_id: u32,
+        marked: bool,
+    ) {
+        self.state.lock().expect("poisoned").l3_vxlan_fdb.insert(
+            (l3vxlan_ifindex, router_mac),
+            InMemoryL3VxlanFdb {
+                target: InMemoryL3VxlanFdbTarget::Nhg { nh_id },
                 marked,
             },
         );
