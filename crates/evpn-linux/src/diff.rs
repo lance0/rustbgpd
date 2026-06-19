@@ -1556,6 +1556,8 @@ mod tests {
                 | DataplaneOp::SetAcPortState { .. }
                 | DataplaneOp::CreateManagedBridge { .. }
                 | DataplaneOp::RemoveManagedBridge { .. }
+                | DataplaneOp::CreateManagedVxlan { .. }
+                | DataplaneOp::RemoveManagedVxlan { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
                 | DataplaneOp::AddRemoteIpRouteEcmp { .. }

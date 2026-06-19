@@ -35,6 +35,7 @@ use crate::l3_adoption::{
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
+    KernelVxlanLinkInfo,
 };
 
 /// Test fake of [`Dataplane`].
@@ -475,6 +476,66 @@ impl InMemoryDataplane {
                 }
                 None => {}
             },
+            DataplaneOp::CreateManagedVxlan {
+                name,
+                spec,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get_mut(name) {
+                Some(link) if managed_vxlan_exact(link, name, spec, ownership_stamp) => {}
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VXLAN {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+                        )));
+                    }
+                    if !state.kernel.links.contains_key(&spec.bridge) {
+                        return Err(crate::error::DataplaneError::Other(format!(
+                            "managed VXLAN {name} cannot be created: desired bridge {} is absent",
+                            spec.bridge
+                        )));
+                    }
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_vxlan(KernelVxlanLinkInfo {
+                        ifindex: next_ifindex,
+                        name: name.clone(),
+                        altnames: vec![ownership_stamp.clone()],
+                        vni: Some(spec.vni),
+                        local_ip: Some(spec.local_ip),
+                        dstport: Some(spec.dstport),
+                        learning_disabled: Some(true),
+                        collect_metadata: false,
+                        vnifilter: false,
+                        bridge: Some(spec.bridge.clone()),
+                    });
+                }
+            },
+            DataplaneOp::RemoveManagedVxlan {
+                name,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get(name) {
+                Some(link) if managed_vxlan_has_exact_stamp(link, name, ownership_stamp) => {
+                    state.kernel.remove_vxlan(name);
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VXLAN {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
             // Gate 9 slice 6c L3 ops mutate the fake's L3 kernel maps
             // with the same replace-on-add / idempotent-remove
             // semantics the real netlink path has (`.replace()` on
@@ -880,6 +941,15 @@ impl InMemoryHandle {
     /// Replace the fake link inventory wholesale.
     pub fn set_links(&self, links: BTreeMap<String, KernelLinkInfo>) {
         self.state.lock().expect("poisoned").kernel.set_links(links);
+    }
+
+    /// Replace the fake VXLAN inventory wholesale.
+    pub fn set_vxlans(&self, vxlans: BTreeMap<String, KernelVxlanLinkInfo>) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .set_vxlans(vxlans);
     }
 
     /// Set the probe outcome for one instance.
@@ -1300,6 +1370,35 @@ fn managed_bridge_exact(
 
 fn managed_bridge_has_exact_stamp(
     link: &KernelLinkInfo,
+    name: &str,
+    ownership_stamp: &str,
+) -> bool {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
+}
+
+fn managed_vxlan_exact(
+    link: &KernelVxlanLinkInfo,
+    name: &str,
+    spec: &rustbgpd_evpn::ManagedVxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> bool {
+    managed_vxlan_has_exact_stamp(link, name, ownership_stamp)
+        && link.vni == Some(spec.vni)
+        && link.local_ip == Some(spec.local_ip)
+        && link.dstport == Some(spec.dstport)
+        && link.learning_disabled == Some(true)
+        && !link.collect_metadata
+        && !link.vnifilter
+        && link.bridge.as_deref() == Some(spec.bridge.as_str())
+}
+
+fn managed_vxlan_has_exact_stamp(
+    link: &KernelVxlanLinkInfo,
     name: &str,
     ownership_stamp: &str,
 ) -> bool {

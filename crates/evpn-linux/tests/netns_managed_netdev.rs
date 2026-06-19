@@ -1,21 +1,171 @@
-//! Privileged netns proof for ADR-0091 managed bridge lifecycle.
+//! Privileged netns proof for ADR-0091 managed netdev lifecycle.
 //!
-//! Proves the real Linux netlink path for the bridge-class slice:
+//! Proves the real Linux netlink path for the bridge and fixed-VNI VXLAN
+//! class slices:
 //!
 //! - create a bridge with the configured `vlan_filtering` value;
 //! - stamp it with the durable `IFLA_ALT_IFNAME` ownership marker;
 //! - treat a second create as restart adoption/idempotent success;
 //! - reap the exact owned bridge on config removal;
 //! - preserve a same-name unstamped foreign bridge.
+//! - create a fixed-VNI VXLAN attached to an existing bridge;
+//! - stamp/adopt/reap the exact owned VXLAN;
+//! - preserve a same-name unstamped foreign VXLAN.
 
 #![cfg(target_os = "linux")]
 
 use std::process::Command;
 
+use rustbgpd_evpn::ManagedVxlanNetdevSpec;
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, LinuxDataplane};
 
 fn netns_gate() -> bool {
     std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
+}
+
+#[tokio::test]
+async fn managed_vxlan_create_adopt_and_reap_round_trip() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("managed-vxlan") {
+        managed_vxlan_create_adopt_and_reap_round_trip_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("managed-vxlan");
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "managed_vxlan_create_adopt_and_reap_round_trip";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "managed-vxlan")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn managed_vxlan_create_adopt_and_reap_round_trip_inner() {
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "br100",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+        ],
+    );
+
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let create = DataplaneOp::CreateManagedVxlan {
+        name: "vxmgd100".to_string(),
+        spec: ManagedVxlanNetdevSpec {
+            vni: 100,
+            local_ip: "10.0.0.1".parse().unwrap(),
+            dstport: 4789,
+            bridge: "br100".to_string(),
+        },
+        ownership_stamp: "rustbgpd:vxlan:leaf-1:vxmgd100".to_string(),
+    };
+    dp.apply(&create).await.expect("create managed VXLAN");
+
+    let first = dp.dump_snapshot().await.expect("dump after create");
+    let link = first.vxlans.get("vxmgd100").expect("managed VXLAN exists");
+    assert_eq!(link.vni, Some(100));
+    assert_eq!(link.local_ip, Some("10.0.0.1".parse().unwrap()));
+    assert_eq!(link.dstport, Some(4789));
+    assert_eq!(link.learning_disabled, Some(true));
+    assert!(!link.collect_metadata);
+    assert!(!link.vnifilter);
+    assert_eq!(link.bridge.as_deref(), Some("br100"));
+    assert_eq!(link.altnames, vec!["rustbgpd:vxlan:leaf-1:vxmgd100"]);
+    let ifindex = link.ifindex;
+
+    let mut restarted = LinuxDataplane::connect()
+        .await
+        .expect("fresh netlink connect inside netns");
+    restarted
+        .apply(&create)
+        .await
+        .expect("adopt existing managed VXLAN");
+    let adopted = restarted.dump_snapshot().await.expect("dump after adopt");
+    let link = adopted
+        .vxlans
+        .get("vxmgd100")
+        .expect("managed VXLAN adopted");
+    assert_eq!(link.ifindex, ifindex);
+    assert_eq!(link.altnames, vec!["rustbgpd:vxlan:leaf-1:vxmgd100"]);
+
+    restarted
+        .apply(&DataplaneOp::RemoveManagedVxlan {
+            name: "vxmgd100".to_string(),
+            ownership_stamp: "rustbgpd:vxlan:leaf-1:vxmgd100".to_string(),
+        })
+        .await
+        .expect("remove managed VXLAN");
+    let removed = restarted.dump_snapshot().await.expect("dump after remove");
+    assert!(!removed.vxlans.contains_key("vxmgd100"));
+
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxforeign",
+            "type",
+            "vxlan",
+            "id",
+            "200",
+            "local",
+            "10.0.0.1",
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run(
+        "ip",
+        &["link", "set", "dev", "vxforeign", "master", "br100"],
+    );
+    let err = restarted
+        .apply(&DataplaneOp::CreateManagedVxlan {
+            name: "vxforeign".to_string(),
+            spec: ManagedVxlanNetdevSpec {
+                vni: 200,
+                local_ip: "10.0.0.1".parse().unwrap(),
+                dstport: 4789,
+                bridge: "br100".to_string(),
+            },
+            ownership_stamp: "rustbgpd:vxlan:leaf-1:vxforeign".to_string(),
+        })
+        .await
+        .expect_err("unstamped same-name VXLAN is foreign");
+    assert_eq!(err.class(), FailureClass::Permanent);
+    assert!(
+        err.to_string().contains("ownership stamp"),
+        "unexpected error: {err}"
+    );
+    let preserved = restarted
+        .dump_snapshot()
+        .await
+        .expect("dump after foreign preserve");
+    let link = preserved
+        .vxlans
+        .get("vxforeign")
+        .expect("foreign VXLAN preserved");
+    assert!(link.altnames.is_empty());
 }
 
 fn run(cmd: &str, args: &[&str]) -> std::process::Output {

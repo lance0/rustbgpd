@@ -1938,8 +1938,9 @@ default — RR-only deployments leave it empty.
 > [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe;
 > the `bridge` / `local_vtep_ip` fields below must match. ADR-0091 is the
 > explicit opt-in exception for bridge creation/adoption/reap through
-> `[managed_netdevs]`; fixed-VNI VXLAN rows are accepted for status but
-> managed VXLAN / VRF creation remains deferred.
+> `[managed_netdevs]`; fixed-VNI VXLAN rows can also create/adopt/reap
+> traditional one-VNI VXLAN devices. SVD / collect-metadata VXLAN and VRF
+> creation remain deferred.
 > ADR-0089 enables the first VLAN-aware bridge programming target through
 > a local bridge-VLAN / VNI binding while keeping EVPN Ethernet Tag ID at
 > `0`.
@@ -2343,12 +2344,11 @@ ADR-0091 managed EVPN netdevs are opt-in and class-scoped. The current
 surface accepts bridge rows and fixed-VNI VXLAN rows, derives durable Linux
 altname ownership stamps, and reports status through
 `EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. Bridge rows
-are active lifecycle intent: the dataplane actor creates missing bridges,
-stamps them with the derived altname, treats exact stamped bridges as
-crash-restart adoption, and reaps exact same-owner orphans when the config
-keeps the owner token but removes the bridge row. Fixed-VNI VXLAN rows are
-read-only schema/status substrate in this release; VXLAN create/adopt/reap is
-the next ADR-0091 slice.
+are active lifecycle intent: the dataplane actor creates missing bridges and
+fixed-VNI VXLANs, stamps them with the derived altname, treats exact stamped
+links as crash-restart adoption, and reaps exact same-owner orphans when the
+config keeps the owner token but removes the row. SVD / collect-metadata
+VXLAN, managed VRF, and managed L3VXLAN creation remain deferred.
 
 Any `[managed_netdevs]` add/remove/change is restart-required in this
 tranche for SIGHUP, config transactions, gNMI Set, and

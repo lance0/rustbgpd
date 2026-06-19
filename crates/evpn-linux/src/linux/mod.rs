@@ -692,7 +692,9 @@ impl Dataplane for LinuxDataplane {
             | DataplaneOp::AddL3VxlanFdb { .. }
             | DataplaneOp::RemoveL3VxlanFdb { .. }
             | DataplaneOp::CreateManagedBridge { .. }
-            | DataplaneOp::RemoveManagedBridge { .. } => {
+            | DataplaneOp::RemoveManagedBridge { .. }
+            | DataplaneOp::CreateManagedVxlan { .. }
+            | DataplaneOp::RemoveManagedVxlan { .. } => {
                 unreachable!("plain L3 and managed-netdev ops are handled before this match")
             }
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —

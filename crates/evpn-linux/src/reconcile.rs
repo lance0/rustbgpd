@@ -1056,7 +1056,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let attempted_managed_netdev_op = plan.ops.iter().any(|op| {
             matches!(
                 op,
-                DataplaneOp::CreateManagedBridge { .. } | DataplaneOp::RemoveManagedBridge { .. }
+                DataplaneOp::CreateManagedBridge { .. }
+                    | DataplaneOp::RemoveManagedBridge { .. }
+                    | DataplaneOp::CreateManagedVxlan { .. }
+                    | DataplaneOp::RemoveManagedVxlan { .. }
             )
         });
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
@@ -1659,7 +1662,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     "FDB-NHG group",
                 ),
                 DataplaneOp::CreateManagedBridge { .. }
-                | DataplaneOp::RemoveManagedBridge { .. } => {
+                | DataplaneOp::RemoveManagedBridge { .. }
+                | DataplaneOp::CreateManagedVxlan { .. }
+                | DataplaneOp::RemoveManagedVxlan { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     check_permanent_suppression(
                         &mut self.state.managed_permanent_failures,
@@ -1693,7 +1698,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     self.state.nhg_retry.next_due_for(*group_key)
                 }
                 DataplaneOp::CreateManagedBridge { .. }
-                | DataplaneOp::RemoveManagedBridge { .. } => {
+                | DataplaneOp::RemoveManagedBridge { .. }
+                | DataplaneOp::CreateManagedVxlan { .. }
+                | DataplaneOp::RemoveManagedVxlan { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     self.state.managed_retry.next_due_for(key)
                 }
@@ -1744,7 +1751,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                     self.state.nhg_retry.record_failure(*group_key, now_ms)
                                 }
                                 DataplaneOp::CreateManagedBridge { .. }
-                                | DataplaneOp::RemoveManagedBridge { .. } => {
+                                | DataplaneOp::RemoveManagedBridge { .. }
+                                | DataplaneOp::CreateManagedVxlan { .. }
+                                | DataplaneOp::RemoveManagedVxlan { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_failure(key, now_ms)
                                 }
@@ -1794,7 +1803,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                         .insert(*group_key, op.clone());
                                 }
                                 DataplaneOp::CreateManagedBridge { .. }
-                                | DataplaneOp::RemoveManagedBridge { .. } => {
+                                | DataplaneOp::RemoveManagedBridge { .. }
+                                | DataplaneOp::CreateManagedVxlan { .. }
+                                | DataplaneOp::RemoveManagedVxlan { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_success(key);
                                     self.state
@@ -3179,7 +3190,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 // success so subsequent failures get a fresh backoff.
                 self.state.nhg_retry.record_success(*group_key);
             }
-            DataplaneOp::CreateManagedBridge { .. } | DataplaneOp::RemoveManagedBridge { .. } => {
+            DataplaneOp::CreateManagedBridge { .. }
+            | DataplaneOp::RemoveManagedBridge { .. }
+            | DataplaneOp::CreateManagedVxlan { .. }
+            | DataplaneOp::RemoveManagedVxlan { .. } => {
                 let key = managed_op_key(op).expect("managed op has a key");
                 self.state.managed_retry.record_success(key);
             }
@@ -3613,10 +3627,11 @@ fn compute_managed_netdev_ops(
     snapshot: &KernelSnapshot,
 ) -> Vec<DataplaneOp> {
     let mut ops = Vec::new();
-    let mut desired_names = BTreeSet::new();
+    let mut desired_bridge_names = BTreeSet::new();
+    let mut desired_vxlan_names = BTreeSet::new();
 
     for bridge in managed.bridges() {
-        desired_names.insert(bridge.name.clone());
+        desired_bridge_names.insert(bridge.name.clone());
         if !snapshot.links.contains_key(&bridge.name) && !snapshot.link_name_exists(&bridge.name) {
             ops.push(DataplaneOp::CreateManagedBridge {
                 name: bridge.name.clone(),
@@ -3625,16 +3640,37 @@ fn compute_managed_netdev_ops(
             });
         }
     }
+    for vxlan in managed.vxlans() {
+        desired_vxlan_names.insert(vxlan.name.clone());
+        if !snapshot.vxlans.contains_key(&vxlan.name) && !snapshot.link_name_exists(&vxlan.name) {
+            ops.push(DataplaneOp::CreateManagedVxlan {
+                name: vxlan.name.clone(),
+                spec: vxlan.spec.clone(),
+                ownership_stamp: vxlan.ownership_stamp.clone(),
+            });
+        }
+    }
 
     let Some(owner_token) = managed.owner_token() else {
         return ops;
     };
     for (name, link) in &snapshot.links {
-        if desired_names.contains(name) {
+        if desired_bridge_names.contains(name) {
             continue;
         }
         if let Some(ownership_stamp) = safe_orphan_bridge_stamp_for_owner(link, owner_token) {
             ops.push(DataplaneOp::RemoveManagedBridge {
+                name: name.clone(),
+                ownership_stamp,
+            });
+        }
+    }
+    for (name, link) in &snapshot.vxlans {
+        if desired_vxlan_names.contains(name) {
+            continue;
+        }
+        if let Some(ownership_stamp) = safe_orphan_vxlan_stamp_for_owner(link, owner_token) {
+            ops.push(DataplaneOp::RemoveManagedVxlan {
                 name: name.clone(),
                 ownership_stamp,
             });
@@ -4943,6 +4979,8 @@ fn managed_op_key(op: &DataplaneOp) -> Option<ManagedNetdevOpKey> {
     match op {
         DataplaneOp::CreateManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(1, name)),
         DataplaneOp::RemoveManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(2, name)),
+        DataplaneOp::CreateManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(3, name)),
+        DataplaneOp::RemoveManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(4, name)),
         _ => None,
     }
 }
@@ -5096,6 +5134,8 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::CreateManagedBridge { .. }
         | DataplaneOp::RemoveManagedBridge { .. }
+        | DataplaneOp::CreateManagedVxlan { .. }
+        | DataplaneOp::RemoveManagedVxlan { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5147,6 +5187,8 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::CreateManagedBridge { .. }
         | DataplaneOp::RemoveManagedBridge { .. }
+        | DataplaneOp::CreateManagedVxlan { .. }
+        | DataplaneOp::RemoveManagedVxlan { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5183,6 +5225,12 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         }
         DataplaneOp::RemoveManagedBridge { name, .. } => {
             DataplaneOpKind::RemoveManagedBridge { name: name.clone() }
+        }
+        DataplaneOp::CreateManagedVxlan { name, .. } => {
+            DataplaneOpKind::CreateManagedVxlan { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedVxlan { name, .. } => {
+            DataplaneOpKind::RemoveManagedVxlan { name: name.clone() }
         }
         // Gate 9 L3 ops use a parallel accounting surface
         // (`AppliedL3Op` lands with the reconciler diff loop). They
@@ -5492,19 +5540,40 @@ mod managed_netdev_tests {
     }
 
     #[test]
-    fn managed_netdev_ops_create_only_when_absent() {
-        let table = ManagedNetdevTable::from_bridge_map(
+    fn managed_netdev_ops_create_bridge_and_vxlan_only_when_absent() {
+        let table = ManagedNetdevTable::from_maps(
             "leaf-1".to_string(),
             BTreeMap::from([("br100".to_string(), true)]),
+            BTreeMap::from([(
+                "vxlan100".to_string(),
+                rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    dstport: 4789,
+                    bridge: "br100".to_string(),
+                },
+            )]),
         );
         let ops = compute_managed_netdev_ops(&table, &KernelSnapshot::new());
         assert_eq!(
             ops,
-            vec![DataplaneOp::CreateManagedBridge {
-                name: "br100".to_string(),
-                vlan_filtering: true,
-                ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
-            }]
+            vec![
+                DataplaneOp::CreateManagedBridge {
+                    name: "br100".to_string(),
+                    vlan_filtering: true,
+                    ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+                },
+                DataplaneOp::CreateManagedVxlan {
+                    name: "vxlan100".to_string(),
+                    spec: rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                        vni: 100,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        dstport: 4789,
+                        bridge: "br100".to_string(),
+                    },
+                    ownership_stamp: "rustbgpd:vxlan:leaf-1:vxlan100".to_string(),
+                }
+            ]
         );
 
         let mut snapshot = KernelSnapshot::new();
@@ -5514,27 +5583,48 @@ mod managed_netdev_tests {
             true,
             vec!["rustbgpd:bridge:leaf-1:br100"],
         ));
+        snapshot.insert_vxlan(vxlan_link(
+            "vxlan100",
+            20,
+            vec!["rustbgpd:vxlan:leaf-1:vxlan100"],
+            100,
+        ));
         assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
 
         let mut occupied = KernelSnapshot::new();
         occupied.insert_link_name("br100");
+        occupied.insert_link_name("vxlan100");
         assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
     }
 
     #[test]
     fn managed_netdev_ops_preserve_foreign_and_unsafe_desired_links() {
-        let table = ManagedNetdevTable::from_bridge_map(
+        let table = ManagedNetdevTable::from_maps(
             "leaf-1".to_string(),
             BTreeMap::from([("br100".to_string(), true)]),
+            BTreeMap::from([(
+                "vxlan100".to_string(),
+                rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                    vni: 100,
+                    local_ip: "10.0.0.1".parse().unwrap(),
+                    dstport: 4789,
+                    bridge: "br100".to_string(),
+                },
+            )]),
         );
 
         let mut snapshot = KernelSnapshot::new();
         snapshot.insert_link(link("br100", 10, true, vec![]));
+        snapshot.insert_vxlan(vxlan_link("vxlan100", 20, vec![], 100));
         assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
 
         snapshot.set_links(BTreeMap::from([(
             "br100".to_string(),
             link("br100", 10, false, vec!["rustbgpd:bridge:leaf-1:br100"]),
+        )]));
+        snapshot.set_vxlans(BTreeMap::from([(
+            "vxlan100".to_string(),
+            vxlan_link("vxlan100", 20, vec!["rustbgpd:vxlan:leaf-1:vxlan100"], 101),
         )]));
         assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
 
@@ -5548,6 +5638,18 @@ mod managed_netdev_tests {
                     "rustbgpd:bridge:leaf-1:br100",
                     "rustbgpd:bridge:other:br100",
                 ],
+            ),
+        )]));
+        snapshot.set_vxlans(BTreeMap::from([(
+            "vxlan100".to_string(),
+            vxlan_link(
+                "vxlan100",
+                20,
+                vec![
+                    "rustbgpd:vxlan:leaf-1:vxlan100",
+                    "rustbgpd:vxlan:other:vxlan100",
+                ],
+                100,
             ),
         )]));
         assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
@@ -5584,18 +5686,51 @@ mod managed_netdev_tests {
             true,
             vec!["rustbgpd:bridge:leaf-1:original"],
         ));
+        snapshot.insert_vxlan(vxlan_link(
+            "vxlan100",
+            50,
+            vec!["rustbgpd:vxlan:leaf-1:vxlan100"],
+            100,
+        ));
+        snapshot.insert_vxlan(vxlan_link(
+            "vxlan200",
+            60,
+            vec!["rustbgpd:vxlan:leaf-2:vxlan200"],
+            200,
+        ));
+        snapshot.insert_vxlan(vxlan_link(
+            "vxlan300",
+            70,
+            vec![
+                "rustbgpd:vxlan:leaf-1:vxlan300",
+                "rustbgpd:vxlan:other:vxlan300",
+            ],
+            300,
+        ));
+        snapshot.insert_vxlan(vxlan_link(
+            "renamed-vxlan",
+            80,
+            vec!["rustbgpd:vxlan:leaf-1:original-vxlan"],
+            400,
+        ));
 
         let ops = compute_managed_netdev_ops(&table, &snapshot);
         assert_eq!(
             ops,
-            vec![DataplaneOp::RemoveManagedBridge {
-                name: "br100".to_string(),
-                ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
-            }]
+            vec![
+                DataplaneOp::RemoveManagedBridge {
+                    name: "br100".to_string(),
+                    ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+                },
+                DataplaneOp::RemoveManagedVxlan {
+                    name: "vxlan100".to_string(),
+                    ownership_stamp: "rustbgpd:vxlan:leaf-1:vxlan100".to_string(),
+                }
+            ]
         );
 
         let rows = build_managed_netdev_status(&table, Some(&snapshot));
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].name, "br100");
         assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
         assert_eq!(rows[1].name, "br200");
@@ -5604,20 +5739,13 @@ mod managed_netdev_tests {
         assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
         assert_eq!(rows[3].name, "renamed");
         assert_eq!(rows[3].state, ManagedNetdevState::OwnedUnsafe);
-    }
-
-    #[test]
-    fn managed_netdev_ops_do_not_create_vxlans_in_status_tranche() {
-        let table = vxlan_table();
-        assert!(compute_managed_netdev_ops(&table, &KernelSnapshot::new()).is_empty());
-
-        let mut snapshot = KernelSnapshot::new();
-        snapshot.insert_vxlan(vxlan_link(
-            "vxlan100",
-            20,
-            vec!["rustbgpd:vxlan:leaf-1:vxlan100"],
-            100,
-        ));
-        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+        assert_eq!(rows[4].name, "renamed-vxlan");
+        assert_eq!(rows[4].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[5].name, "vxlan100");
+        assert_eq!(rows[5].state, ManagedNetdevState::Orphaned);
+        assert_eq!(rows[6].name, "vxlan200");
+        assert_eq!(rows[6].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[7].name, "vxlan300");
+        assert_eq!(rows[7].state, ManagedNetdevState::OwnedUnsafe);
     }
 }

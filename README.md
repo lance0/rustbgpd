@@ -358,11 +358,11 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   ESI overlay-index receive now ship, with M71/M72 proving the receive
   paths against GoBGP route sources.
   VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
-  topologies, including SVD / collect-metadata VXLAN; opt-in bridge
-  netdev creation now ships under
+  topologies, including SVD / collect-metadata VXLAN; opt-in bridge and
+  fixed-VNI VXLAN netdev creation now ship under
   [ADR-0091](docs/adr/0091-evpn-managed-netdev-creation.md)
-  (`[managed_netdevs]`), and fixed-VNI VXLAN desired rows are accepted for
-  status. VXLAN / VRF netdev creation remains operator-provisioned per
+  (`[managed_netdevs]`). SVD / collect-metadata VXLAN and VRF netdev
+  creation remain operator-provisioned per
   [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
   [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
   scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain

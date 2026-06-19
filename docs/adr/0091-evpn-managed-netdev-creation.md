@@ -56,8 +56,9 @@ order:
 3. VRF / L3VXLAN,
 4. optional VLAN upper / bridge membership helpers after the base classes.
 
-The first implementation slice is bridge create/adopt/reap. VXLAN and
-VRF/L3VXLAN are separate slices with their own proofs.
+The first implementation slice was bridge create/adopt/reap. The second
+slice adds fixed-VNI VXLAN create/adopt/reap. SVD / collect-metadata VXLAN
+and VRF/L3VXLAN are separate slices with their own proofs.
 
 ### 2. `IFLA_ALT_IFNAME` is the durable ownership marker
 
@@ -76,13 +77,15 @@ the logical fields are fixed:
   block's stable identity;
 - `owner-token`: operator-configured daemon / installation token.
 
-As shipped, the bridge class encodes this as a colon-delimited altname:
+As shipped, the bridge and fixed-VNI VXLAN classes encode this as a
+colon-delimited altname:
 
 ```text
 rustbgpd:bridge:<owner-token>:<bridge-name>
+rustbgpd:vxlan:<owner-token>:<vxlan-name>
 ```
 
-where the configured bridge name serves as the bridge class's
+where the configured link name serves as the class's
 `stable-config-id`.
 
 The owner token is not a secret. It does not defend against privileged local
@@ -290,8 +293,9 @@ foreign-vs-owned signal.
    dataplane reconciler, including the Decision 6 status / metric surface for
    owned-but-unsafe, orphan, and creation-skipped states. **Done for the bridge
    class.**
-4. Add VXLAN class support. **Done for fixed-VNI schema/status; lifecycle
-   create/adopt/reap remains next.**
+4. Add VXLAN class support. **Done for fixed-VNI schema/status and
+   create/adopt/reap lifecycle.** SVD / collect-metadata VXLAN remains
+   deferred.
 5. Add VRF / L3VXLAN class support.
 6. Add optional VLAN upper / bridge membership helpers if operator demand
    remains after bridge/VXLAN/VRF creation.
@@ -300,6 +304,8 @@ foreign-vs-owned signal.
 
 - netns bridge proof: create -> stamp -> dump -> simulated restart adopt ->
   config removal reap.
+- netns fixed-VNI VXLAN proof: create on the desired bridge -> stamp -> dump
+  -> simulated restart adopt -> config removal reap.
 - Same-name unstamped foreign bridge is never modified or deleted.
 - Crash before stamp leaves an unstamped link that is preserved on restart.
 - Stamped wrong-kind or wrong-attribute link reports owned-but-unsafe and is
