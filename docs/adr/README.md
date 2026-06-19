@@ -99,8 +99,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0088](0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md) | EVPN VLAN-aware bridge and managed netdev boundary | Accepted | 2026-06-15 |
 | [0089](0089-evpn-vni-per-bd-vlan-aware-bridge-support.md) | EVPN VNI-per-BD VLAN-aware bridge support | Accepted | 2026-06-15 |
 | [0090](0090-evpn-all-active-esi-overlay-index-type5-receive.md) | All-active ESI overlay-index Type 5 receive | Accepted | 2026-06-17 |
-| [0091](0091-evpn-managed-netdev-creation.md) | rustbgpd-managed netdev creation | Proposed | 2026-06-19 |
-| [0092](0092-evpn-vlan-aware-bundle-service.md) | EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag) | Proposed | 2026-06-19 |
+| [0091](0091-evpn-managed-netdev-creation.md) | rustbgpd-managed netdev creation | Accepted | 2026-06-19 |
+| [0092](0092-evpn-vlan-aware-bundle-service.md) | EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag) | Accepted | 2026-06-19 |
 | [0093](0093-evpn-vlan-macip-fdb-correlation.md) | VLAN MAC+IP attribution via FDB correlation on raw bridge ifindexes | Proposed | 2026-06-19 |
 
 ## Template
