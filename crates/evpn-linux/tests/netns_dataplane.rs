@@ -840,4 +840,21 @@ async fn linux_dataplane_attributes_vlan_mac_ip_observations_inner() {
         ],
     );
     expect_no_observation(&mut rx).await;
+
+    run(
+        "ip",
+        &[
+            "-6",
+            "neigh",
+            "replace",
+            "2001:db8::66",
+            "lladdr",
+            &mac_str(mac(0x66)),
+            "dev",
+            "brvlan",
+            "nud",
+            "reachable",
+        ],
+    );
+    expect_no_observation(&mut rx).await;
 }
