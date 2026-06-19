@@ -796,6 +796,17 @@ has it, no broad performance sprints without profile evidence.
   multi-key rollover, and public accepted-socket inspection / observability
   matter to some route-server / security operators but are demand-shaped, not
   core-feature blockers.
+- **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
+  `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager
+  + RIB responsiveness within a 200 ms deadline — and deliberately excludes the
+  dataplane actors (FIB / EVPN / event-history). So a wedged `fib_runtime` does
+  not fail `/readyz`: routes are no longer reaching the kernel even though the
+  RIB stays responsive. A future `/readyz?detailed=true` or a separate
+  `/dp-readyz` could surface per-dataplane-actor liveness for orchestrators that
+  want the stricter gate. Demand-shaped / v2 — the control-plane gate is the
+  right default (most readiness consumers want "is the BGP control plane up",
+  and folding a slow or optional dataplane actor into the default gate risks
+  flapping pods), so the stricter probe should be opt-in, not a redefinition.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.
