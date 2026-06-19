@@ -62,6 +62,8 @@
 #       (ADR-0091 managed bridge create/adopt/reap proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_vxlan
 #       (ADR-0091 managed fixed-VNI VXLAN create/adopt/reap proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_ready
+#       (ADR-0091 managed bridge + fixed-VNI VXLAN readiness proof)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -83,7 +85,7 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # runs the LAN-70 L3VNI route-multipath + FDB-NHG proof; `l3_all_active_writer`
 # runs the LAN-76 production actor all-active L3 writer proof;
 # `managed_bridge` / `managed_vxlan` run the ADR-0091 managed netdev
-# lifecycle proofs.
+# lifecycle/readiness proofs.
 TEST_BIN="netns_bum_filter"
 EXACT_FILTER=1
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
@@ -108,8 +110,9 @@ case "${1:-all}" in
     l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
     managed_bridge)     TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_create_adopt_and_reap_round_trip" ;;
     managed_vxlan)      TEST_BIN="netns_managed_netdev"; FILTER="managed_vxlan_create_adopt_and_reap_round_trip" ;;
+    managed_ready)      TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_and_vxlan_make_instance_ready_round_trip" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_ready" >&2
         exit 2
         ;;
 esac

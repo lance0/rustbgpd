@@ -16,8 +16,11 @@
 
 use std::process::Command;
 
-use rustbgpd_evpn::ManagedVxlanNetdevSpec;
-use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, LinuxDataplane};
+use rustbgpd_evpn::{
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, ManagedVxlanNetdevSpec, RouteDistinguisher,
+    RouteTarget,
+};
+use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, InstanceProbe, LinuxDataplane};
 
 fn netns_gate() -> bool {
     std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
@@ -168,6 +171,94 @@ async fn managed_vxlan_create_adopt_and_reap_round_trip_inner() {
     assert!(link.altnames.is_empty());
 }
 
+#[tokio::test]
+async fn managed_bridge_and_vxlan_make_instance_ready_round_trip() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("managed-ready") {
+        managed_bridge_and_vxlan_make_instance_ready_round_trip_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("managed-ready");
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "managed_bridge_and_vxlan_make_instance_ready_round_trip";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "managed-ready")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn managed_bridge_and_vxlan_make_instance_ready_round_trip_inner() {
+    let instances = one_instance_table(instance(100, Some("brready"), "10.0.0.1"));
+    let vni = EvpnInstanceId::new(100).unwrap();
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+
+    let before = dp.probe(&instances).await;
+    assert!(
+        matches!(
+            before.get(vni),
+            Some(InstanceProbe::NotReady { reason }) if reason.contains("bridge brready not found")
+        ),
+        "instance unexpectedly ready before managed links exist: {:?}",
+        before.get(vni)
+    );
+
+    dp.apply(&DataplaneOp::CreateManagedBridge {
+        name: "brready".to_string(),
+        vlan_filtering: false,
+        ownership_stamp: "rustbgpd:bridge:leaf-1:brready".to_string(),
+    })
+    .await
+    .expect("create managed bridge");
+    dp.apply(&DataplaneOp::CreateManagedVxlan {
+        name: "vxready100".to_string(),
+        spec: ManagedVxlanNetdevSpec {
+            vni: 100,
+            local_ip: "10.0.0.1".parse().unwrap(),
+            dstport: 4789,
+            bridge: "brready".to_string(),
+        },
+        ownership_stamp: "rustbgpd:vxlan:leaf-1:vxready100".to_string(),
+    })
+    .await
+    .expect("create managed VXLAN");
+
+    let snapshot = dp.dump_snapshot().await.expect("dump managed topology");
+    let bridge = snapshot
+        .links
+        .get("brready")
+        .expect("managed bridge exists");
+    assert!(!bridge.vlan_filtering);
+    assert_eq!(bridge.altnames, vec!["rustbgpd:bridge:leaf-1:brready"]);
+    let vxlan = snapshot
+        .vxlans
+        .get("vxready100")
+        .expect("managed VXLAN exists");
+    assert_eq!(vxlan.vni, Some(100));
+    assert_eq!(vxlan.local_ip, Some("10.0.0.1".parse().unwrap()));
+    assert_eq!(vxlan.dstport, Some(4789));
+    assert_eq!(vxlan.bridge.as_deref(), Some("brready"));
+    assert_eq!(vxlan.learning_disabled, Some(true));
+    assert!(!vxlan.collect_metadata);
+    assert!(!vxlan.vnifilter);
+    assert_eq!(vxlan.altnames, vec!["rustbgpd:vxlan:leaf-1:vxready100"]);
+
+    let after = dp.probe(&instances).await;
+    assert_eq!(after.get(vni), Some(&InstanceProbe::Ready));
+}
+
 fn run(cmd: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new(cmd).args(args).output().expect("spawn");
     if !out.status.success() {
@@ -183,6 +274,35 @@ fn run(cmd: &str, args: &[&str]) -> std::process::Output {
 
 fn try_run(cmd: &str, args: &[&str]) {
     let _ = Command::new(cmd).args(args).output();
+}
+
+fn rd(asn: u16, val: u32) -> RouteDistinguisher {
+    let mut bytes = [0u8; 8];
+    bytes[0..2].copy_from_slice(&[0, 0]);
+    bytes[2..4].copy_from_slice(&asn.to_be_bytes());
+    bytes[4..8].copy_from_slice(&val.to_be_bytes());
+    RouteDistinguisher::new(bytes)
+}
+
+fn instance(v: u32, bridge: Option<&str>, vtep: &str) -> EvpnInstance {
+    EvpnInstance::new(
+        EvpnInstanceId::new(v).unwrap(),
+        rd(65001, v),
+        vec![RouteTarget::TwoOctetAs {
+            asn: 65001,
+            value: v,
+        }],
+        vtep.parse().unwrap(),
+        bridge.map(String::from),
+        false,
+    )
+    .unwrap()
+}
+
+fn one_instance_table(inst: EvpnInstance) -> EvpnInstanceTable {
+    let mut table = EvpnInstanceTable::new();
+    table.insert(inst).unwrap();
+    table
 }
 
 struct NetnsFixture {
