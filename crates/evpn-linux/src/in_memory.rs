@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
     EvpnInstanceId, EvpnInstanceTable, EvpnIpPrefixValue, LocalMacObservation, MacAddress,
+    parse_ownership_stamp,
 };
 use tokio::sync::mpsc;
 
@@ -425,6 +426,55 @@ impl InMemoryDataplane {
                     }
                 }
             }
+            DataplaneOp::CreateManagedBridge {
+                name,
+                vlan_filtering,
+                ownership_stamp,
+            } => match state.kernel.links.get_mut(name) {
+                Some(link)
+                    if managed_bridge_exact(link, name, *vlan_filtering, ownership_stamp) => {}
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed bridge {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed bridge {name} cannot be created: desired name is occupied by a non-bridge link"
+                        )));
+                    }
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_link(KernelLinkInfo {
+                        ifindex: next_ifindex,
+                        bridge_name: name.clone(),
+                        vlan_filtering: *vlan_filtering,
+                        altnames: vec![ownership_stamp.clone()],
+                        ..KernelLinkInfo::default()
+                    });
+                }
+            },
+            DataplaneOp::RemoveManagedBridge {
+                name,
+                ownership_stamp,
+            } => match state.kernel.links.get(name) {
+                Some(link) if managed_bridge_has_exact_stamp(link, name, ownership_stamp) => {
+                    state.kernel.remove_link(name);
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed bridge {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
             // Gate 9 slice 6c L3 ops mutate the fake's L3 kernel maps
             // with the same replace-on-add / idempotent-remove
             // semantics the real netlink path has (`.replace()` on
@@ -1236,6 +1286,29 @@ impl InMemoryHandle {
     pub fn l3_op_log(&self) -> Vec<DataplaneOp> {
         self.state.lock().expect("poisoned").l3_op_log.clone()
     }
+}
+
+fn managed_bridge_exact(
+    link: &KernelLinkInfo,
+    name: &str,
+    vlan_filtering: bool,
+    ownership_stamp: &str,
+) -> bool {
+    link.vlan_filtering == vlan_filtering
+        && managed_bridge_has_exact_stamp(link, name, ownership_stamp)
+}
+
+fn managed_bridge_has_exact_stamp(
+    link: &KernelLinkInfo,
+    name: &str,
+    ownership_stamp: &str,
+) -> bool {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
 }
 
 #[cfg(test)]

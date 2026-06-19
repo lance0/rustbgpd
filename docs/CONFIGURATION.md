@@ -1932,14 +1932,16 @@ Optional, repeatable. Declares the local L2VNI / EVPN-instance tenants
 this VTEP serves (Gate 7a foundation, ADR-0052 + ADR-0055). Empty by
 default — RR-only deployments leave it empty.
 
-> rustbgpd is observe-only for kernel netdevs: you provision the bridge
-> and VXLAN port yourself, and the daemon probes them (ADR-0054 §4). See
+> By default, rustbgpd is observe-only for kernel netdevs: you provision
+> the bridge and VXLAN port yourself, and the daemon probes them
+> (ADR-0054 §4). See
 > [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe;
-> the `bridge` / `local_vtep_ip` fields below must match. ADR-0088 keeps
-> rustbgpd-managed bridge / VXLAN / VRF creation fail-closed until explicit
-> ownership exists; ADR-0089 enables the first VLAN-aware bridge programming
-> target through a local bridge-VLAN / VNI binding while keeping EVPN
-> Ethernet Tag ID at `0`.
+> the `bridge` / `local_vtep_ip` fields below must match. ADR-0091 is the
+> explicit opt-in exception for bridge creation/adoption/reap through
+> `[managed_netdevs]`; managed VXLAN / VRF creation remains deferred.
+> ADR-0089 enables the first VLAN-aware bridge programming target through
+> a local bridge-VLAN / VNI binding while keeping EVPN Ethernet Tag ID at
+> `0`.
 
 ```toml
 [[evpn_instances]]
@@ -1978,9 +1980,9 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 
 - The combined table enforces uniqueness on both `vni` and `rd` —
   duplicates on either column reject config load.
-- `bridge` (when set) must reference a Linux bridge created out of
-  band; rustbgpd does not create/delete netdevs (ADR-0054 §4 and
-  ADR-0088).
+- `bridge` (when set) must reference a Linux bridge that already exists
+  or is declared in `[managed_netdevs]` for ADR-0091 bridge lifecycle
+  ownership. rustbgpd still does not create VXLAN or VRF netdevs.
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
   `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
   observed bridge must have `vlan_filtering=1`, the configured VLAN
@@ -2337,9 +2339,11 @@ for the design rationale.
 ADR-0091 managed EVPN netdevs are opt-in and class-scoped. The first
 tranche accepts only bridge rows, derives the durable Linux altname
 ownership stamp, and reports status through
-`EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. It
-does **not** create, adopt, or delete links yet; bridge lifecycle
-execution lands in the next ADR-0091 slice.
+`EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. Bridge
+rows are active lifecycle intent: the dataplane actor creates missing
+bridges, stamps them with the derived altname, treats exact stamped
+bridges as crash-restart adoption, and reaps exact same-owner orphans
+when the config keeps the owner token but removes the bridge row.
 
 Any `[managed_netdevs]` add/remove/change is restart-required in this
 tranche for SIGHUP, config transactions, gNMI Set, and
@@ -2366,6 +2370,16 @@ over 15 bytes), invalid owner tokens, and derived stamps longer than
 Linux's 127-byte altname limit. Unknown future rows such as
 `[[managed_netdevs.vxlans]]` and `[[managed_netdevs.vrfs]]` are rejected
 until those classes ship.
+
+rustbgpd preserves foreign links. A same-name bridge without the exact
+ownership stamp is reported `foreign-present` and is not modified. A
+bridge with the expected stamp plus any other rustbgpd stamp, a wrong
+owner stamp, a stamp/name mismatch, or a protected-attribute drift such as
+unexpected `vlan_filtering` is reported `owned-unsafe` and is not
+repaired or deleted by v1. The bounded Prometheus gauge
+`evpn_managed_netdev_state{class,name,desired,state}` mirrors the latest
+reported state for alerting; detailed reason text is available through
+`ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
 
 Status states:
 

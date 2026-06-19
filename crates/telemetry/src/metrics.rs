@@ -128,6 +128,7 @@ pub struct BgpMetrics {
     evpn_ip_vrf_originated_routes: IntGaugeVec,
     evpn_ip_vrf_installed_routes: IntGaugeVec,
     evpn_ip_vrf_remote_prefix_drops: IntGaugeVec,
+    evpn_managed_netdev_state: IntGaugeVec,
     evpn_fdb_nhg_drift_members_repaired: IntCounter,
     evpn_fdb_nhg_drift_groups_replaced: IntCounter,
     evpn_fdb_nhg_orphans_cleaned: IntCounter,
@@ -863,6 +864,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_managed_netdev_state = IntGaugeVec::new(
+            Opts::new(
+                "evpn_managed_netdev_state",
+                "ADR-0091 managed EVPN netdev state gauge. Exactly one state label \
+                 is 1 for each current (class, name, desired) tuple; stale tuples \
+                 are removed when they leave the dataplane report. Detailed reason \
+                 text is exposed via ListManagedNetdevs/rbgp, not as a Prometheus \
+                 label, to keep cardinality bounded.",
+            ),
+            &["class", "name", "desired", "state"],
+        )
+        .expect("valid metric definition");
+
         let evpn_fdb_nhg_drift_members_repaired = IntCounter::new(
             "evpn_fdb_nhg_drift_members_repaired_total",
             "FDB-NHG per-VTEP member nexthops repaired by ADR-0059 drift recovery.",
@@ -1283,6 +1297,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_remote_prefix_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_managed_netdev_state.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_fdb_nhg_drift_members_repaired.clone()))
             .expect("metric not already registered");
         registry
@@ -1441,6 +1458,7 @@ impl BgpMetrics {
             evpn_ip_vrf_originated_routes,
             evpn_ip_vrf_installed_routes,
             evpn_ip_vrf_remote_prefix_drops,
+            evpn_managed_netdev_state,
             evpn_fdb_nhg_drift_members_repaired,
             evpn_fdb_nhg_drift_groups_replaced,
             evpn_fdb_nhg_orphans_cleaned,
@@ -2268,6 +2286,35 @@ impl BgpMetrics {
         self.evpn_ip_vrf_remote_prefix_drops
             .with_label_values(&[vrf, reason])
             .set(count);
+    }
+
+    /// Set one ADR-0091 managed-netdev state gauge tuple.
+    pub fn set_evpn_managed_netdev_state(
+        &self,
+        class: &str,
+        name: &str,
+        desired: bool,
+        state: &str,
+        value: i64,
+    ) {
+        let desired = if desired { "true" } else { "false" };
+        self.evpn_managed_netdev_state
+            .with_label_values(&[class, name, desired, state])
+            .set(value);
+    }
+
+    /// Remove one ADR-0091 managed-netdev state gauge tuple.
+    pub fn remove_evpn_managed_netdev_state(
+        &self,
+        class: &str,
+        name: &str,
+        desired: bool,
+        state: &str,
+    ) {
+        let desired = if desired { "true" } else { "false" };
+        let _ = self
+            .evpn_managed_netdev_state
+            .remove_label_values(&[class, name, desired, state]);
     }
 
     /// Increment repaired FDB-NHG per-VTEP member counter.
@@ -3234,6 +3281,24 @@ mod tests {
         assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
         assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
         assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
+    }
+
+    #[test]
+    fn evpn_managed_netdev_state_gauge_is_exported_and_removed() {
+        let m = BgpMetrics::new();
+        m.set_evpn_managed_netdev_state("bridge", "br100", true, "owned-safe", 1);
+        let text = gather_text(&m);
+        assert!(
+            text.contains(
+                "evpn_managed_netdev_state{class=\"bridge\",name=\"br100\",desired=\"true\",state=\"owned-safe\"} 1"
+            ) || text.contains(
+                "evpn_managed_netdev_state{class=\"bridge\",desired=\"true\",name=\"br100\",state=\"owned-safe\"} 1"
+            )
+        );
+
+        m.remove_evpn_managed_netdev_state("bridge", "br100", true, "owned-safe");
+        let text = gather_text(&m);
+        assert!(!text.contains("evpn_managed_netdev_state{"));
     }
 
     #[test]

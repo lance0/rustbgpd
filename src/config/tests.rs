@@ -10303,6 +10303,18 @@ fn managed_netdevs_default_empty_and_resolve_bridge_stamp() {
     assert!(bridge.vlan_filtering);
     assert_eq!(bridge.ownership_stamp, "rustbgpd:bridge:leaf-1:br100");
 
+    let owner_only = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n",
+        valid_toml()
+    ))
+    .unwrap();
+    let owner_only_table = owner_only.resolve_managed_netdevs().unwrap();
+    assert_eq!(owner_only_table.owner_token(), Some("leaf-1"));
+    assert!(
+        !owner_only_table.is_empty(),
+        "owner-only managed_netdevs config must still spawn the dataplane actor for cleanup"
+    );
+
     let empty = parse(valid_toml()).unwrap();
     assert!(empty.resolve_managed_netdevs().unwrap().is_empty());
 }
@@ -10343,6 +10355,30 @@ fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
     assert!(matches!(
         invalid_name,
         Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+}
+
+#[test]
+fn managed_netdevs_reject_unknown_fields() {
+    let unknown_top_level = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\nunknown = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(unknown_top_level, Err(ConfigError::Parse(_))));
+
+    let unknown_bridge_field = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\nmtu = 9000\n",
+        valid_toml()
+    ));
+    assert!(matches!(unknown_bridge_field, Err(ConfigError::Parse(_))));
+
+    let unsupported_vxlan_table = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        unsupported_vxlan_table,
+        Err(ConfigError::Parse(_))
     ));
 }
 

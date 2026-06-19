@@ -1554,6 +1554,8 @@ mod tests {
                 }
                 DataplaneOp::SetBumPortFlags { .. }
                 | DataplaneOp::SetAcPortState { .. }
+                | DataplaneOp::CreateManagedBridge { .. }
+                | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
                 | DataplaneOp::AddRemoteIpRouteEcmp { .. }

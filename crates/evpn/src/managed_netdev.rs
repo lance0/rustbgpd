@@ -81,10 +81,14 @@ impl ManagedNetdevTable {
         }
     }
 
-    /// Whether no managed rows are configured.
+    /// Whether no managed-netdev intent is configured.
+    ///
+    /// An owner token without rows is still non-empty: it lets the
+    /// dataplane actor reap rustbgpd-owned leftovers for that owner when
+    /// the operator removes the last managed bridge row.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bridges.is_empty()
+        self.owner_token.is_none() && self.bridges.is_empty()
     }
 
     /// Owner token when `[managed_netdevs]` is configured.

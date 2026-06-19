@@ -500,6 +500,13 @@ impl KernelSnapshot {
         self.links.insert(info.bridge_name.clone(), info);
     }
 
+    /// Remove a bridge from the link inventory, returning the previous
+    /// value if any.
+    pub fn remove_link(&mut self, name: &str) -> Option<KernelLinkInfo> {
+        self.link_names.remove(name);
+        self.links.remove(name)
+    }
+
     /// Replace the all-link-name inventory wholesale.
     pub fn set_link_names(&mut self, link_names: BTreeSet<String>) {
         self.link_names = link_names;

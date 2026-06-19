@@ -122,9 +122,10 @@ Expected signals:
    ADR-0089 requires a `vlan_filtering=1` bridge, exactly one VXLAN member
    for the instance VNI, and the configured VLAN on both the bridge and that
    VXLAN member; remote-MAC FDB rows are then scoped with `NDA_VLAN`.
-   rustbgpd does not create bridge/VXLAN netdevs; ADR-0088 keeps
-   managed-netdev behavior fail-closed until explicit ownership semantics
-   exist.
+   Unmanaged deployments still provision bridge/VXLAN netdevs out of
+   band. ADR-0091 is the explicit opt-in exception for bridge
+   create/adopt/reap through `[managed_netdevs]`; managed VXLAN creation
+   remains deferred.
    `rbgp evpn instances` reports the same probe result as `readiness`
    and, for `not-ready`, the concrete failed predicate. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)

@@ -411,11 +411,14 @@ pub(crate) async fn apply_op(
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }
         | DataplaneOp::InstallL3FdbNhg { .. }
-        | DataplaneOp::RemoveL3FdbNhg { .. } => {
+        | DataplaneOp::RemoveL3FdbNhg { .. }
+        | DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. } => {
             // BUM port-flag ops are routed through `linux::bum_filter`,
             // AC-gate ops through `linux::ac_gate`, L3 ops through
-            // `linux::l3`, and ADR-0059 FDB-NHG ops through the
-            // reconcile actor's coordinator (which calls `NexthopOps`
+            // `linux::l3`, managed-netdev ops through
+            // `linux::managed_netdev`, and ADR-0059 FDB-NHG ops through
+            // the reconcile actor's coordinator (which calls `NexthopOps`
             // and `linux::fdb_nhg` directly). They never reach this
             // single-dst FDB helper.
             unreachable!("non-single-dst-FDB op routed to FDB apply helper")
@@ -483,7 +486,9 @@ pub(crate) async fn apply_op(
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }
         | DataplaneOp::InstallL3FdbNhg { .. }
-        | DataplaneOp::RemoveL3FdbNhg { .. } => {
+        | DataplaneOp::RemoveL3FdbNhg { .. }
+        | DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. } => {
             // Unreachable: the early-return at the top of `apply_op`
             // already handled non-single-dst-FDB ops. Arms exist so
             // the compiler can prove exhaustiveness.

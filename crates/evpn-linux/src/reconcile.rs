@@ -83,6 +83,33 @@ enum L3OpKey {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ManagedNetdevOpKey {
+    kind: u8,
+    len: u8,
+    name: [u8; rustbgpd_evpn::MAX_IFNAME_LEN],
+}
+
+impl ManagedNetdevOpKey {
+    fn new(kind: u8, name: &str) -> Self {
+        let mut out = Self {
+            kind,
+            len: u8::try_from(name.len().min(rustbgpd_evpn::MAX_IFNAME_LEN)).unwrap_or(0),
+            name: [0; rustbgpd_evpn::MAX_IFNAME_LEN],
+        };
+        for (idx, byte) in name
+            .as_bytes()
+            .iter()
+            .copied()
+            .take(rustbgpd_evpn::MAX_IFNAME_LEN)
+            .enumerate()
+        {
+            out.name[idx] = byte;
+        }
+        out
+    }
+}
+
 struct ReconcileReportPayload {
     instance_status: Vec<InstanceDataplaneStatus>,
     applied: Vec<AppliedOp>,
@@ -258,6 +285,16 @@ struct ActorState {
     /// the FDB / BUM maps: a different member set on the same
     /// `AliasGroupKey` clears the suppression.
     nhg_permanent_failures: BTreeMap<crate::group_state::AliasGroupKey, DataplaneOp>,
+    /// Retry schedule for ADR-0091 managed-netdev bridge ops, keyed
+    /// by `(op-kind, bridge-name)`. Separate from FDB placeholder
+    /// keys so two bridge lifecycle failures cannot suppress each
+    /// other or collide with non-FDB report placeholders.
+    managed_retry: RetrySchedule<ManagedNetdevOpKey>,
+    /// Per-bridge permanent-failure suppression for managed-netdev
+    /// bridge ops. Same fingerprint-equality semantics as the FDB /
+    /// BUM maps: changing the desired bridge shape clears the
+    /// suppression.
+    managed_permanent_failures: BTreeMap<ManagedNetdevOpKey, DataplaneOp>,
     /// IDs whose kernel `del_nexthop` failed during steady-state
     /// FDB-NHG GC (Install drift heal, `UpdateFdbNhgMembers`,
     /// `RemoveFdbNhg` group teardown). The allocator slot is *not*
@@ -464,6 +501,8 @@ impl ActorState {
             warned_stp_ac_gates: BTreeSet::new(),
             nhg_retry: RetrySchedule::new(),
             nhg_permanent_failures: BTreeMap::new(),
+            managed_retry: RetrySchedule::new(),
+            managed_permanent_failures: BTreeMap::new(),
             pending_deletes: BTreeSet::new(),
             warned_ipv6_fallback: BTreeSet::new(),
             warned_managed_netdevs: BTreeSet::new(),
@@ -1009,7 +1048,32 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
 
+        plan.ops.extend(compute_managed_netdev_ops(
+            &intent.managed_netdevs,
+            &snapshot,
+        ));
+
+        let attempted_managed_netdev_op = plan.ops.iter().any(|op| {
+            matches!(
+                op,
+                DataplaneOp::CreateManagedBridge { .. } | DataplaneOp::RemoveManagedBridge { .. }
+            )
+        });
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
+        let managed_status_snapshot = if attempted_managed_netdev_op {
+            match self.dataplane.dump_snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "managed-netdev post-apply snapshot failed; reporting pre-apply status"
+                    );
+                    snapshot.clone()
+                }
+            }
+        } else {
+            snapshot.clone()
+        };
 
         // Retry any kernel-nexthop deletes left over from steady-state
         // FDB-NHG GC failures (see `try_del_and_release_alloc`). Runs
@@ -1528,7 +1592,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         let status = build_instance_status(&intent.instances, &probes);
-        let managed_netdevs = build_managed_netdev_status(&intent.managed_netdevs, Some(&snapshot));
+        let managed_netdevs =
+            build_managed_netdev_status(&intent.managed_netdevs, Some(&managed_status_snapshot));
         self.emit_report(ReconcileReportPayload {
             instance_status: status,
             applied,
@@ -1593,6 +1658,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     op,
                     "FDB-NHG group",
                 ),
+                DataplaneOp::CreateManagedBridge { .. }
+                | DataplaneOp::RemoveManagedBridge { .. } => {
+                    let key = managed_op_key(op).expect("managed op has a key");
+                    check_permanent_suppression(
+                        &mut self.state.managed_permanent_failures,
+                        &key,
+                        op,
+                        "managed-netdev",
+                    )
+                }
                 _ => check_permanent_suppression(
                     &mut self.state.permanent_failures,
                     &(fdb_op_vni(op), fdb_op_mac(op)),
@@ -1616,6 +1691,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
                     self.state.nhg_retry.next_due_for(*group_key)
+                }
+                DataplaneOp::CreateManagedBridge { .. }
+                | DataplaneOp::RemoveManagedBridge { .. } => {
+                    let key = managed_op_key(op).expect("managed op has a key");
+                    self.state.managed_retry.next_due_for(key)
                 }
                 _ => self
                     .state
@@ -1663,6 +1743,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
                                     self.state.nhg_retry.record_failure(*group_key, now_ms)
                                 }
+                                DataplaneOp::CreateManagedBridge { .. }
+                                | DataplaneOp::RemoveManagedBridge { .. } => {
+                                    let key = managed_op_key(op).expect("managed op has a key");
+                                    self.state.managed_retry.record_failure(key, now_ms)
+                                }
                                 _ => self.state.retry.record_failure(fdb_key_for_failed, now_ms),
                             };
                             let retry_in_ms = u32::try_from(next_due_ms.saturating_sub(now_ms))
@@ -1707,6 +1792,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                     self.state
                                         .nhg_permanent_failures
                                         .insert(*group_key, op.clone());
+                                }
+                                DataplaneOp::CreateManagedBridge { .. }
+                                | DataplaneOp::RemoveManagedBridge { .. } => {
+                                    let key = managed_op_key(op).expect("managed op has a key");
+                                    self.state.managed_retry.record_success(key);
+                                    self.state
+                                        .managed_permanent_failures
+                                        .insert(key, op.clone());
                                 }
                                 _ => {
                                     self.state.retry.record_success(fdb_key_for_failed);
@@ -3086,6 +3179,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 // success so subsequent failures get a fresh backoff.
                 self.state.nhg_retry.record_success(*group_key);
             }
+            DataplaneOp::CreateManagedBridge { .. } | DataplaneOp::RemoveManagedBridge { .. } => {
+                let key = managed_op_key(op).expect("managed op has a key");
+                self.state.managed_retry.record_success(key);
+            }
             // Gate 9 slice 6c L3 ops have their own owned-set and retry
             // tracking inside the L3 diff loop, handled by
             // `record_success_l3`.
@@ -3458,7 +3555,12 @@ fn build_managed_netdev_status(
             if observed_stamps.is_empty() {
                 continue;
             }
-            rows.push(orphaned_managed_bridge_status(name, link, observed_stamps));
+            rows.push(unconfigured_managed_bridge_status(
+                name,
+                link,
+                observed_stamps,
+                managed.owner_token(),
+            ));
         }
     }
 
@@ -3477,6 +3579,42 @@ fn build_managed_netdev_status(
             ))
     });
     rows
+}
+
+fn compute_managed_netdev_ops(
+    managed: &ManagedNetdevTable,
+    snapshot: &KernelSnapshot,
+) -> Vec<DataplaneOp> {
+    let mut ops = Vec::new();
+    let mut desired_names = BTreeSet::new();
+
+    for bridge in managed.bridges() {
+        desired_names.insert(bridge.name.clone());
+        if !snapshot.links.contains_key(&bridge.name) && !snapshot.link_name_exists(&bridge.name) {
+            ops.push(DataplaneOp::CreateManagedBridge {
+                name: bridge.name.clone(),
+                vlan_filtering: bridge.vlan_filtering,
+                ownership_stamp: bridge.ownership_stamp.clone(),
+            });
+        }
+    }
+
+    let Some(owner_token) = managed.owner_token() else {
+        return ops;
+    };
+    for (name, link) in &snapshot.links {
+        if desired_names.contains(name) {
+            continue;
+        }
+        if let Some(ownership_stamp) = safe_orphan_bridge_stamp_for_owner(link, owner_token) {
+            ops.push(DataplaneOp::RemoveManagedBridge {
+                name: name.clone(),
+                ownership_stamp,
+            });
+        }
+    }
+
+    ops
 }
 
 fn desired_managed_bridge_status(
@@ -3576,18 +3714,32 @@ fn classify_desired_managed_bridge(
     (ManagedNetdevState::OwnedSafe, String::new())
 }
 
-fn orphaned_managed_bridge_status(
+fn unconfigured_managed_bridge_status(
     name: &str,
     link: &KernelLinkInfo,
     observed_stamps: Vec<String>,
+    owner_token: Option<&str>,
 ) -> ManagedNetdevStatus {
+    let safe_orphan =
+        owner_token.is_none_or(|owner| safe_orphan_bridge_stamp_for_owner(link, owner).is_some());
+    let (state, reason) = if safe_orphan {
+        (
+            ManagedNetdevState::Orphaned,
+            "rustbgpd-stamped bridge is not configured".to_string(),
+        )
+    } else {
+        (
+            ManagedNetdevState::OwnedUnsafe,
+            "rustbgpd-stamped bridge is not configured but is not safe to reap".to_string(),
+        )
+    };
     ManagedNetdevStatus {
         class: ManagedNetdevClass::Bridge,
         name: name.to_string(),
         desired: false,
         ownership_stamp: None,
-        state: ManagedNetdevState::Orphaned,
-        reason: "rustbgpd-stamped bridge is not configured".to_string(),
+        state,
+        reason,
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: Some(link.vlan_filtering),
         observed_stamps,
@@ -3602,6 +3754,26 @@ fn rustbgpd_stamps(altnames: &[String]) -> Vec<String> {
     stamps.sort();
     stamps.dedup();
     stamps
+}
+
+fn safe_orphan_bridge_stamp_for_owner(link: &KernelLinkInfo, owner_token: &str) -> Option<String> {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() != 1 {
+        return None;
+    }
+    let stamp = &stamps[0];
+    if stamp.class == ManagedNetdevClass::Bridge
+        && stamp.owner_token == owner_token
+        && stamp.name == link.bridge_name
+    {
+        Some(stamp.raw.clone())
+    } else {
+        None
+    }
 }
 
 /// Build the per-IP-VRF status block for a [`DataplaneReport`] (Gate 9).
@@ -4498,6 +4670,14 @@ fn l3_op_key(op: &DataplaneOp) -> Option<L3OpKey> {
     }
 }
 
+fn managed_op_key(op: &DataplaneOp) -> Option<ManagedNetdevOpKey> {
+    match op {
+        DataplaneOp::CreateManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(1, name)),
+        DataplaneOp::RemoveManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(2, name)),
+        _ => None,
+    }
+}
+
 fn record_l3_prerequisite_failure(
     op: &DataplaneOp,
     failed_neighbor_keys: &mut std::collections::HashSet<(u32, IpAddr)>,
@@ -4645,6 +4825,8 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => group_key.vni,
         DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
+        | DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -4694,6 +4876,8 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
+        | DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -4725,6 +4909,12 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
             ifindex: *ifindex,
             blocked: *blocked,
         },
+        DataplaneOp::CreateManagedBridge { name, .. } => {
+            DataplaneOpKind::CreateManagedBridge { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedBridge { name, .. } => {
+            DataplaneOpKind::RemoveManagedBridge { name: name.clone() }
+        }
         // Gate 9 L3 ops use a parallel accounting surface
         // (`AppliedL3Op` lands with the reconciler diff loop). They
         // never reach the L2 `op_to_kind` path under the current
@@ -4877,5 +5067,120 @@ mod managed_netdev_tests {
 
         let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
         assert!(unmanaged.is_empty());
+    }
+
+    #[test]
+    fn managed_netdev_ops_create_only_when_absent() {
+        let table = ManagedNetdevTable::from_bridge_map(
+            "leaf-1".to_string(),
+            BTreeMap::from([("br100".to_string(), true)]),
+        );
+        let ops = compute_managed_netdev_ops(&table, &KernelSnapshot::new());
+        assert_eq!(
+            ops,
+            vec![DataplaneOp::CreateManagedBridge {
+                name: "br100".to_string(),
+                vlan_filtering: true,
+                ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+            }]
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link(
+            "br100",
+            10,
+            true,
+            vec!["rustbgpd:bridge:leaf-1:br100"],
+        ));
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+
+        let mut occupied = KernelSnapshot::new();
+        occupied.insert_link_name("br100");
+        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+    }
+
+    #[test]
+    fn managed_netdev_ops_preserve_foreign_and_unsafe_desired_links() {
+        let table = ManagedNetdevTable::from_bridge_map(
+            "leaf-1".to_string(),
+            BTreeMap::from([("br100".to_string(), true)]),
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link("br100", 10, true, vec![]));
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link("br100", 10, false, vec!["rustbgpd:bridge:leaf-1:br100"]),
+        )]));
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link(
+                "br100",
+                10,
+                true,
+                vec![
+                    "rustbgpd:bridge:leaf-1:br100",
+                    "rustbgpd:bridge:other:br100",
+                ],
+            ),
+        )]));
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+    }
+
+    #[test]
+    fn managed_netdev_ops_reap_only_exact_owner_orphans() {
+        let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link(
+            "br100",
+            10,
+            true,
+            vec!["rustbgpd:bridge:leaf-1:br100"],
+        ));
+        snapshot.insert_link(link(
+            "br200",
+            20,
+            true,
+            vec!["rustbgpd:bridge:leaf-2:br200"],
+        ));
+        snapshot.insert_link(link(
+            "br300",
+            30,
+            true,
+            vec![
+                "rustbgpd:bridge:leaf-1:br300",
+                "rustbgpd:bridge:other:br300",
+            ],
+        ));
+        snapshot.insert_link(link(
+            "renamed",
+            40,
+            true,
+            vec!["rustbgpd:bridge:leaf-1:original"],
+        ));
+
+        let ops = compute_managed_netdev_ops(&table, &snapshot);
+        assert_eq!(
+            ops,
+            vec![DataplaneOp::RemoveManagedBridge {
+                name: "br100".to_string(),
+                ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+            }]
+        );
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].name, "br100");
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(rows[1].name, "br200");
+        assert_eq!(rows[1].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[2].name, "br300");
+        assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[3].name, "renamed");
+        assert_eq!(rows[3].state, ManagedNetdevState::OwnedUnsafe);
     }
 }

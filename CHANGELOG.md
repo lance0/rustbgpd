@@ -23,9 +23,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpd:bridge:<owner>:<name>` Linux altname ownership stamp, starts the
   EVPN dataplane actor for managed-only configs, and exposes read-only
   desired/observed/orphan/foreign/unsafe rows through
-  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. This tranche
-  is diagnose-only: lifecycle create/adopt/reap remains the next ADR-0091
-  bridge slice.
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`.
+- **ADR-0091 managed EVPN bridge lifecycle.** The Linux dataplane actor now
+  creates configured managed bridges, stamps them with
+  `IFLA_ALT_IFNAME`, treats exact stamped bridges as crash-restart adoption,
+  safely reaps exact same-owner orphans when the config keeps the owner token,
+  and preserves foreign, wrong-owner, multi-stamped, or protected-attribute
+  drifted links. The `managed_bridge` netns proof covers create, idempotent
+  restart adoption, reap, and same-name unstamped foreign preservation on a
+  real kernel. `evpn_managed_netdev_state{class,name,desired,state}` exposes
+  bounded Prometheus state for alerting; detailed reason text stays in
+  `ListManagedNetdevs` / `rbgp`. Managed VXLAN and VRF classes remain deferred.
 
 ## [0.41.0] — 2026-06-18
 

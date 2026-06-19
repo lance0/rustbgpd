@@ -78,8 +78,10 @@ rustbgpd remains observe-only for Linux bridge, VXLAN, and VRF netdev
 lifecycle by default. The daemon may reconcile owned FDB entries, FDB
 nexthop groups, neighbors, and L3 FIB routes on top of existing devices,
 but it must not create or delete bridge, VXLAN, VRF, bond, VLAN, or
-lower-link netdevs unless a future opt-in ownership mode explicitly says
-so.
+lower-link netdevs unless an opt-in ownership mode explicitly says so.
+ADR-0091 is the first such mode for Linux bridge create/adopt/reap; VXLAN,
+VRF/L3VXLAN, bond, VLAN, and lower-link creation remain outside the
+default boundary.
 
 The current L2VNI readiness rule also remains in force: a configured
 `[[evpn_instances]].bridge` with `vlan_filtering=1` is `NotReady`, not a

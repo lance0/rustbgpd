@@ -139,6 +139,27 @@ pub enum DataplaneOp {
         /// `BR_STATE_FORWARDING`.
         blocked: bool,
     },
+    /// Create a configured ADR-0091 managed bridge and stamp it with
+    /// its durable `IFLA_ALT_IFNAME` ownership marker. Implementations
+    /// must treat an already-present exact stamp as idempotent success
+    /// after a fresh link dump confirms the link is the expected bridge.
+    CreateManagedBridge {
+        /// Linux bridge name.
+        name: String,
+        /// Desired protected `vlan_filtering` value.
+        vlan_filtering: bool,
+        /// Durable rustbgpd ownership stamp for this bridge.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped bridge that is no longer configured.
+    /// Implementations must first confirm the live link still carries
+    /// the exact expected ownership stamp and is a bridge.
+    RemoveManagedBridge {
+        /// Linux bridge name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the bridge.
+        ownership_stamp: String,
+    },
     /// Install a remote IP-prefix route into the IP-VRF's
     /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
     /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and
