@@ -56,7 +56,9 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   receive proofs (M68/M71/M72). Remaining big investments are the remaining
   ADR-0063 runtime convergence exceptions and lower-priority VTEP operability
   gaps such as bridge-ifindex MAC+IP VLAN correlation, true shared-VNI /
-  non-zero Ethernet Tag service, and rustbgpd-managed netdev creation.
+  non-zero Ethernet Tag service, and rustbgpd-managed SVD / collect-metadata
+  VXLAN and VRF/L3VXLAN netdev creation (managed bridge and fixed-VNI VXLAN
+  creation have shipped).
   ADR-0088 records the boundary for those operability gaps; ADR-0089's first
   VNI-per-broadcast-domain VLAN-aware bridge slice now validates an explicit
   `bridge_vlan` binding, programs VLAN-scoped remote-MAC FDB rows, attributes
@@ -68,8 +70,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   upper devices, and `svd_fdb_vni` proves SVD / collect-metadata Ready,
   same-MAC two-VNI isolation, and scoped delete on a real kernel. Raw
   bridge-ifindex ARP/ND on `vlan_filtering=1` bridges still fails closed
-  because Linux does not report bridge VLAN identity there, while managed
-  netdev creation stays fail-closed until explicit ownership semantics exist.
+  because Linux does not report bridge VLAN identity there. Managed bridge and
+  fixed-VNI VXLAN creation now ship under ADR-0091's altname-stamp ownership
+  model; the remaining managed classes (SVD / collect-metadata VXLAN, VRF /
+  L3VXLAN) stay fail-closed until their own ownership/lifecycle proofs land.
 
 ## Current Position
 

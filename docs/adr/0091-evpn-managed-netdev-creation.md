@@ -132,6 +132,13 @@ attributes do not match, rustbgpd treats the link as **owned but unsafe**:
 it fails closed and requires operator action. The v1 design does not repair
 stamped drift in place.
 
+As shipped for the fixed-VNI VXLAN class, the orphan reap (a stamped link whose
+config row was removed while the owner token stays) is equally conservative: a
+plain same-owner stamped VXLAN is reaped, but a stamped orphan that drifted into
+a mode the fixed-VNI lifecycle never creates — collect-metadata / external or
+vnifilter — is preserved as owned-but-unsafe rather than reaped, consistent with
+how those modes are treated for desired links.
+
 ### 4. Crash windows fail closed
 
 Link creation and altname stamping are separate kernel operations in the

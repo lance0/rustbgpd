@@ -213,7 +213,9 @@ has it, no broad performance sprints without profile evidence.
   `rustbgpd:vxlan:<owner>:<name>` stamps, parses named VXLAN links from the
   Linux snapshot, exposes desired/observed/orphan/foreign/unsafe VXLAN
   status, creates missing fixed-VNI VXLANs on the desired bridge, adopts exact
-  stamped VXLANs after restart, and safely reaps same-owner VXLAN orphans;
+  stamped VXLANs after restart, and safely reaps same-owner VXLAN orphans
+  while preserving a stamped orphan that drifted into a collect-metadata or
+  vnifilter mode the fixed-VNI lifecycle never creates;
   `managed_ready` proves that a rustbgpd-created bridge plus rustbgpd-created
   fixed-VNI VXLAN make the real EVPN L2 instance probe Ready only after both
   links are owned-safe; SVD / collect-metadata VXLAN and VRF/L3VXLAN classes

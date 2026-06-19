@@ -10420,6 +10420,30 @@ fn managed_netdevs_reject_invalid_vxlan_fields() {
 }
 
 #[test]
+fn managed_netdevs_reject_duplicate_vxlan_vni() {
+    let duplicate_vni = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan200\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br200\"\n",
+        valid_toml()
+    ));
+    match duplicate_vni {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("duplicate vni"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected duplicate-vni rejection, got {other:?}"),
+    }
+
+    // Distinct VNIs on distinct names load cleanly.
+    let distinct_vnis = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan200\"\nvni = 200\nlocal = \"10.0.0.1\"\nbridge = \"br200\"\n",
+        valid_toml()
+    ));
+    assert!(distinct_vnis.is_ok(), "got {distinct_vnis:?}");
+}
+
+#[test]
 fn managed_netdevs_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();
     let new = parse(&format!(
