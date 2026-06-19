@@ -246,7 +246,7 @@ or a later convergence failure; those remain runtime SIGHUP outcomes.
 | `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; unsupported mixed edits, missing actors, or convergence failure pin/log. |
 | `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply; L3VNI/device/table identity changes stay restart-required. |
 | `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge. |
-| `[managed_netdevs]` | restart-required | ADR-0091 bridge-class lifecycle is resolved at startup and reconciled by the dataplane actor (create, stamp, restart adoption, same-owner orphan reap); it is not live-mutable in this tranche. |
+| `[managed_netdevs]` | restart-required | ADR-0091 bridge-class lifecycle is resolved at startup and reconciled by the dataplane actor (create, stamp, restart adoption, same-owner orphan reap). Fixed-VNI VXLAN rows are accepted for startup status/reporting only until the VXLAN lifecycle slice; managed netdevs are not live-mutable in this tranche. |
 
 ## `[[fib_tables]]` and FIB runtime
 

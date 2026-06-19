@@ -1628,7 +1628,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
-| `ListManagedNetdevs` | List configured ADR-0091 managed EVPN netdev bridge rows joined with the latest Linux link snapshot, plus rustbgpd-stamped orphan/unsafe bridges for the configured owner. Reports class, name, desired flag, ownership stamp, state (`desired-absent`, `owned-safe`, `foreign-present`, `owned-unsafe`, `orphaned`, or `unknown`), observed ifindex, observed `vlan_filtering`, observed rustbgpd ownership stamps, and reason text. Bridge lifecycle execution is active in the dataplane actor; this RPC remains read-only status. |
+| `ListManagedNetdevs` | List configured ADR-0091 managed EVPN bridge and fixed-VNI VXLAN rows joined with the latest Linux link snapshot, plus rustbgpd-stamped orphan/unsafe rows for the configured owner. Reports class, name, desired flag, ownership stamp, state (`desired-absent`, `owned-safe`, `foreign-present`, `owned-unsafe`, `orphaned`, or `unknown`), observed ifindex, bridge `vlan_filtering`, VXLAN `vni` / `local` / `dstport` / `learning` / `collect-metadata` / `vnifilter` / bridge-master attributes, observed rustbgpd ownership stamps, and reason text. Bridge lifecycle execution is active in the dataplane actor; fixed-VNI VXLAN lifecycle remains status-only in this slice. This RPC remains read-only status. |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
 | `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single L2VNI redefine with unchanged `ip_vrf` link metadata, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, single IP-VRF redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, additive build-up, or an atomic tenant teardown (a delete-only plan dropping an ES-member L2VNI together with its Ethernet Segment and/or a linked IP-VRF in one pass) converges live and commits a new generation. When a segment actor already exists, L2VNI add/delete also republishes the current instance table so later ES add/redefine can bind a VNI added at runtime; ES-member L2VNI redefine also rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. An `ip_vrf` relink (an L2VNI re-homed to a different IP-VRF) also converges live as a dataplane-only republish. L3VNI/device/table IP-VRF identity changes are restart-required by design, and generic mixed add/delete/redefine edits still fail closed. |
@@ -1812,14 +1812,19 @@ rbgp evpn vrfs vrf1             # single-VRF detail (matches GetIpVrf)
 
 ### List managed EVPN netdevs
 
-ADR-0091 bridge-class lifecycle status. Returns configured
-`[managed_netdevs]` bridge rows joined with the latest Linux link
-snapshot, plus rustbgpd-stamped orphan bridges observed by the
-dataplane actor. This is read-only status: a
-bridge can be `desired-absent`, `foreign-present`, `owned-unsafe`,
-`owned-safe`, `orphaned`, or `unknown`. Create/adopt/reap happens only
-inside the dataplane reconciler from configured `[managed_netdevs]`
-intent; the RPC itself never mutates links.
+ADR-0091 managed-netdev lifecycle/status surface. Returns configured
+`[managed_netdevs]` bridge and fixed-VNI VXLAN rows joined with the latest
+Linux link snapshot, plus rustbgpd-stamped orphan links observed by the
+dataplane actor. This is read-only status: a row can be `desired-absent`,
+`foreign-present`, `owned-unsafe`, `owned-safe`, `orphaned`, or `unknown`.
+Bridge rows are active lifecycle intent inside the dataplane reconciler.
+Fixed-VNI VXLAN rows report schema/status only in this slice; VXLAN
+create/adopt/reap remains deferred. The RPC itself never mutates links.
+
+Bridge rows expose observed `vlan_filtering`. Fixed-VNI VXLAN rows expose
+observed `vni`, `local`, `dstport`, `learning-disabled`,
+`collect-metadata`, `vnifilter`, and bridge-master fields when the Linux link
+snapshot reports them.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

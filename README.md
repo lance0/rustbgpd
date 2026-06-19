@@ -361,8 +361,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   topologies, including SVD / collect-metadata VXLAN; opt-in bridge
   netdev creation now ships under
   [ADR-0091](docs/adr/0091-evpn-managed-netdev-creation.md)
-  (`[managed_netdevs]`), while VXLAN / VRF netdev creation remains
-  operator-provisioned per
+  (`[managed_netdevs]`), and fixed-VNI VXLAN desired rows are accepted for
+  status. VXLAN / VRF netdev creation remains operator-provisioned per
   [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
   [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
   scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain

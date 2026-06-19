@@ -213,6 +213,38 @@ pub struct KernelVxlanInfo {
     pub learning_disabled: Option<bool>,
 }
 
+/// One VXLAN link observed by name in the kernel link dump.
+///
+/// This is wider than [`KernelVxlanInfo`]: managed-netdev status must
+/// report same-name / stamped VXLAN links even when they are not attached
+/// to a bridge or when protected attributes are missing/mismatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelVxlanLinkInfo {
+    /// Kernel ifindex of the VXLAN link.
+    pub ifindex: u32,
+    /// Linux link name.
+    pub name: String,
+    /// Linux alternative interface names observed on the VXLAN.
+    pub altnames: Vec<String>,
+    /// Fixed VNI when reported. `None` for malformed or collect-metadata
+    /// devices that do not carry one fixed VNI.
+    pub vni: Option<u32>,
+    /// Local source IP when reported.
+    pub local_ip: Option<IpAddr>,
+    /// UDP destination port when reported.
+    pub dstport: Option<u16>,
+    /// Inverted `IFLA_VXLAN_LEARNING` state. `Some(true)` means
+    /// `nolearning`.
+    pub learning_disabled: Option<bool>,
+    /// `true` for collect-metadata / external VXLAN devices.
+    pub collect_metadata: bool,
+    /// `true` when VNI filtering is enabled on the VXLAN.
+    pub vnifilter: bool,
+    /// Observed bridge master by name, if the master is a bridge present in
+    /// the same link snapshot.
+    pub bridge: Option<String>,
+}
+
 /// Properties of a collect-metadata / Single VXLAN Device (SVD) port.
 ///
 /// SVD VXLAN devices carry multiple VNIs over one ifindex, so they
@@ -419,6 +451,10 @@ pub struct KernelSnapshot {
     /// Per-bridge link info, indexed by bridge name. Used by the probe
     /// pass; the diff function itself does not read this.
     pub links: BTreeMap<String, KernelLinkInfo>,
+    /// VXLAN links by name. Used by ADR-0091 managed-netdev status and
+    /// lifecycle to classify desired VXLAN rows and rustbgpd-stamped VXLAN
+    /// orphans independently of bridge readiness.
+    pub vxlans: BTreeMap<String, KernelVxlanLinkInfo>,
     /// Non-VXLAN bridge ports by link name, with observed
     /// `IFLA_BRPORT_STATE`. Consumed by the single-active AC-gate
     /// resolver (`crate::ac_gate`) to map an ADR-0085 `interface`
@@ -490,7 +526,7 @@ impl KernelSnapshot {
 
     /// Replace the link inventory wholesale.
     pub fn set_links(&mut self, links: BTreeMap<String, KernelLinkInfo>) {
-        self.link_names = links.keys().cloned().collect();
+        self.link_names = links.keys().chain(self.vxlans.keys()).cloned().collect();
         self.links = links;
     }
 
@@ -498,6 +534,18 @@ impl KernelSnapshot {
     pub fn insert_link(&mut self, info: KernelLinkInfo) {
         self.link_names.insert(info.bridge_name.clone());
         self.links.insert(info.bridge_name.clone(), info);
+    }
+
+    /// Replace the VXLAN link inventory wholesale.
+    pub fn set_vxlans(&mut self, vxlans: BTreeMap<String, KernelVxlanLinkInfo>) {
+        self.link_names = self.links.keys().chain(vxlans.keys()).cloned().collect();
+        self.vxlans = vxlans;
+    }
+
+    /// Add a single VXLAN link to the inventory.
+    pub fn insert_vxlan(&mut self, info: KernelVxlanLinkInfo) {
+        self.link_names.insert(info.name.clone());
+        self.vxlans.insert(info.name.clone(), info);
     }
 
     /// Remove a bridge from the link inventory, returning the previous

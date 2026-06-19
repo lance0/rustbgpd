@@ -725,6 +725,7 @@ mod tests {
         LinkCache {
             all_link_names,
             bridges,
+            vxlan_links: HashMap::new(),
             vxlan_ifindex_to_vni,
             svd_vxlan_ifindexes: HashSet::new(),
             bridge_port_to_vni,

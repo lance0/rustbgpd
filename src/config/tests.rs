@@ -10289,9 +10289,9 @@ fn reload_matrix_documents_every_peer_group_field() {
 }
 
 #[test]
-fn managed_netdevs_default_empty_and_resolve_bridge_stamp() {
+fn managed_netdevs_default_empty_and_resolve_stamps() {
     let config = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n",
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ))
     .unwrap();
@@ -10302,6 +10302,16 @@ fn managed_netdevs_default_empty_and_resolve_bridge_stamp() {
     assert_eq!(bridge.name, "br100");
     assert!(bridge.vlan_filtering);
     assert_eq!(bridge.ownership_stamp, "rustbgpd:bridge:leaf-1:br100");
+    let vxlan = table.vxlan("vxlan100").unwrap();
+    assert_eq!(vxlan.name, "vxlan100");
+    assert_eq!(vxlan.spec.vni, 100);
+    assert_eq!(
+        vxlan.spec.local_ip,
+        "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert_eq!(vxlan.spec.dstport, 4789);
+    assert_eq!(vxlan.spec.bridge, "br100");
+    assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
 
     let owner_only = parse(&format!(
         "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n",
@@ -10322,7 +10332,7 @@ fn managed_netdevs_default_empty_and_resolve_bridge_stamp() {
 #[test]
 fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
     let missing_owner = parse(&format!(
-        "{}\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n",
+        "{}\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
     assert!(matches!(
@@ -10331,7 +10341,7 @@ fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
     ));
 
     let duplicate = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n",
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n\n[[managed_netdevs.vxlans]]\nname = \"br100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
     assert!(matches!(
@@ -10349,7 +10359,7 @@ fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
     ));
 
     let invalid_name = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br 100\"\nvlan_filtering = false\n",
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan 100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
     assert!(matches!(
@@ -10372,13 +10382,40 @@ fn managed_netdevs_reject_unknown_fields() {
     ));
     assert!(matches!(unknown_bridge_field, Err(ConfigError::Parse(_))));
 
-    let unsupported_vxlan_table = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\n",
+    let unknown_vxlan_field = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\nexternal = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(unknown_vxlan_field, Err(ConfigError::Parse(_))));
+}
+
+#[test]
+fn managed_netdevs_reject_invalid_vxlan_fields() {
+    let invalid_vni = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 16777216\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
     assert!(matches!(
-        unsupported_vxlan_table,
-        Err(ConfigError::Parse(_))
+        invalid_vni,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let invalid_dstport = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\ndstport = 0\nbridge = \"br100\"\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        invalid_dstport,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let learning_enabled = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\nlearning = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        learning_enabled,
+        Err(ConfigError::InvalidManagedNetdev { .. })
     ));
 }
 

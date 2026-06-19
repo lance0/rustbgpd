@@ -5,6 +5,7 @@
 //! stamps, and compact operator-facing status rows.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 /// Prefix used in rustbgpd-managed altname ownership stamps.
 pub const MANAGED_NETDEV_STAMP_PREFIX: &str = "rustbgpd";
@@ -15,12 +16,15 @@ pub const MAX_IFNAME_LEN: usize = 15;
 /// Maximum configured owner token length for ADR-0091 v1.
 pub const MAX_OWNER_TOKEN_LEN: usize = 63;
 
-/// Managed netdev class. ADR-0091 v1 only enables bridge rows; VXLAN and VRF
-/// creation are explicitly deferred.
+/// Managed netdev class. ADR-0091 v1 shipped bridge rows first; fixed-VNI
+/// VXLAN rows are the next class. SVD / VRF creation remains explicitly
+/// deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedNetdevClass {
     /// Linux bridge device.
     Bridge,
+    /// Traditional Linux VXLAN device with one fixed VNI.
+    Vxlan,
 }
 
 impl ManagedNetdevClass {
@@ -29,6 +33,7 @@ impl ManagedNetdevClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Bridge => "bridge",
+            Self::Vxlan => "vxlan",
         }
     }
 }
@@ -44,11 +49,37 @@ pub struct ManagedBridgeNetdev {
     pub ownership_stamp: String,
 }
 
+/// Desired protected attributes for one managed fixed-VNI VXLAN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVxlanNetdevSpec {
+    /// VXLAN VNI (`1..=16_777_215`).
+    pub vni: u32,
+    /// Local source IP for encapsulated packets.
+    pub local_ip: IpAddr,
+    /// UDP destination port.
+    pub dstport: u16,
+    /// Bridge this VXLAN must be enslaved to before it can satisfy EVPN
+    /// readiness.
+    pub bridge: String,
+}
+
+/// One configured fixed-VNI VXLAN row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVxlanNetdev {
+    /// Linux VXLAN interface name.
+    pub name: String,
+    /// Desired protected attributes.
+    pub spec: ManagedVxlanNetdevSpec,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
 /// Resolved managed-netdev desired state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedNetdevTable {
     owner_token: Option<String>,
     bridges: BTreeMap<String, ManagedBridgeNetdev>,
+    vxlans: BTreeMap<String, ManagedVxlanNetdev>,
 }
 
 impl ManagedNetdevTable {
@@ -61,6 +92,16 @@ impl ManagedNetdevTable {
     /// Build a table from validated, already-unique bridge rows.
     #[must_use]
     pub fn from_bridge_map(owner_token: String, bridges: BTreeMap<String, bool>) -> Self {
+        Self::from_maps(owner_token, bridges, BTreeMap::new())
+    }
+
+    /// Build a table from validated, already-unique bridge and VXLAN rows.
+    #[must_use]
+    pub fn from_maps(
+        owner_token: String,
+        bridges: BTreeMap<String, bool>,
+        vxlans: BTreeMap<String, ManagedVxlanNetdevSpec>,
+    ) -> Self {
         let bridges = bridges
             .into_iter()
             .map(|(name, vlan_filtering)| {
@@ -75,9 +116,24 @@ impl ManagedNetdevTable {
                 )
             })
             .collect();
+        let vxlans = vxlans
+            .into_iter()
+            .map(|(name, spec)| {
+                let ownership_stamp = vxlan_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedVxlanNetdev {
+                        name,
+                        spec,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
         Self {
             owner_token: Some(owner_token),
             bridges,
+            vxlans,
         }
     }
 
@@ -88,7 +144,7 @@ impl ManagedNetdevTable {
     /// the operator removes the last managed bridge row.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.owner_token.is_none() && self.bridges.is_empty()
+        self.owner_token.is_none() && self.bridges.is_empty() && self.vxlans.is_empty()
     }
 
     /// Owner token when `[managed_netdevs]` is configured.
@@ -107,6 +163,17 @@ impl ManagedNetdevTable {
     pub fn bridge(&self, name: &str) -> Option<&ManagedBridgeNetdev> {
         self.bridges.get(name)
     }
+
+    /// Desired fixed-VNI VXLAN rows in deterministic name order.
+    pub fn vxlans(&self) -> impl Iterator<Item = &ManagedVxlanNetdev> {
+        self.vxlans.values()
+    }
+
+    /// Find one desired fixed-VNI VXLAN by name.
+    #[must_use]
+    pub fn vxlan(&self, name: &str) -> Option<&ManagedVxlanNetdev> {
+        self.vxlans.get(name)
+    }
 }
 
 /// Derived bridge ownership stamp.
@@ -115,6 +182,15 @@ pub fn bridge_ownership_stamp(owner_token: &str, bridge_name: &str) -> String {
     format!(
         "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{bridge_name}",
         ManagedNetdevClass::Bridge.as_str()
+    )
+}
+
+/// Derived fixed-VNI VXLAN ownership stamp.
+#[must_use]
+pub fn vxlan_ownership_stamp(owner_token: &str, vxlan_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{vxlan_name}",
+        ManagedNetdevClass::Vxlan.as_str()
     )
 }
 
@@ -141,6 +217,7 @@ pub fn parse_ownership_stamp(raw: &str) -> Option<ManagedNetdevStamp> {
     }
     let class = match parts.next()? {
         "bridge" => ManagedNetdevClass::Bridge,
+        "vxlan" => ManagedNetdevClass::Vxlan,
         _ => return None,
     };
     let owner_token = parts.next()?;
@@ -208,6 +285,21 @@ pub struct ManagedNetdevStatus {
     pub ifindex: Option<u32>,
     /// Observed protected `vlan_filtering` value for bridge rows.
     pub observed_vlan_filtering: Option<bool>,
+    /// Observed fixed VNI for VXLAN rows.
+    pub observed_vni: Option<u32>,
+    /// Observed local source IP for VXLAN rows.
+    pub observed_local_ip: Option<IpAddr>,
+    /// Observed UDP destination port for VXLAN rows.
+    pub observed_dstport: Option<u16>,
+    /// Observed inverted VXLAN learning state. `Some(true)` means
+    /// `nolearning`; `None` means the kernel did not report the attribute.
+    pub observed_learning_disabled: Option<bool>,
+    /// Observed collect-metadata / external mode for VXLAN rows.
+    pub observed_collect_metadata: Option<bool>,
+    /// Observed VNI filter mode for VXLAN rows.
+    pub observed_vnifilter: Option<bool>,
+    /// Observed bridge master for VXLAN rows.
+    pub observed_bridge: Option<String>,
     /// Observed rustbgpd ownership stamps on the link.
     pub observed_stamps: Vec<String>,
 }
@@ -227,9 +319,19 @@ mod tests {
     }
 
     #[test]
+    fn vxlan_stamp_round_trips() {
+        let stamp = vxlan_ownership_stamp("leaf-1", "vxlan100");
+        assert_eq!(stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
+        let parsed = parse_ownership_stamp(&stamp).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::Vxlan);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "vxlan100");
+    }
+
+    #[test]
     fn parse_ownership_stamp_ignores_unrelated_or_malformed_altnames() {
         assert!(parse_ownership_stamp("operator:bridge:leaf-1:br100").is_none());
-        assert!(parse_ownership_stamp("rustbgpd:vxlan:leaf-1:vni100").is_none());
+        assert!(parse_ownership_stamp("rustbgpd:vrf:leaf-1:vrf100").is_none());
         assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1").is_none());
         assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1:br100:extra").is_none());
     }

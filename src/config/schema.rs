@@ -1216,10 +1216,11 @@ pub struct EvpnIpVrfConfig {
 
 /// ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.
 ///
-/// v1 accepts only `[[managed_netdevs.bridges]]` rows. The
-/// `owner_token` is required when at least one row is configured and
-/// is used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
-/// `rustbgpd:bridge:<owner_token>:<bridge_name>`.
+/// v1 accepts `[[managed_netdevs.bridges]]` and fixed-VNI
+/// `[[managed_netdevs.vxlans]]` rows. The `owner_token` is required
+/// when at least one row is configured and is used only to derive
+/// durable `IFLA_ALT_IFNAME` ownership stamps:
+/// `rustbgpd:<class>:<owner_token>:<link_name>`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedNetdevsConfig {
@@ -1227,10 +1228,13 @@ pub struct ManagedNetdevsConfig {
     /// configured.
     #[serde(default)]
     pub owner_token: String,
-    /// Managed bridge rows. VXLAN / VRF lifecycle are intentionally not
-    /// accepted in this release.
+    /// Managed bridge rows.
     #[serde(default)]
     pub bridges: Vec<ManagedBridgeNetdevConfig>,
+    /// Managed fixed-VNI VXLAN rows. SVD / collect-metadata VXLANs and
+    /// VRFs are intentionally not accepted in this release.
+    #[serde(default)]
+    pub vxlans: Vec<ManagedVxlanNetdevConfig>,
 }
 
 /// One managed Linux bridge row (ADR-0091 bridge-first tranche).
@@ -1241,6 +1245,34 @@ pub struct ManagedBridgeNetdevConfig {
     pub name: String,
     /// Desired protected bridge `vlan_filtering` value.
     pub vlan_filtering: bool,
+}
+
+/// One managed fixed-VNI VXLAN row (ADR-0091 VXLAN tranche).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedVxlanNetdevConfig {
+    /// Linux VXLAN interface name.
+    pub name: String,
+    /// Fixed VXLAN VNI (`1..=16_777_215`).
+    pub vni: u32,
+    /// Local source IP for VXLAN encapsulation.
+    pub local: std::net::IpAddr,
+    /// UDP destination port. Defaults to the IANA VXLAN port.
+    #[serde(default = "default_vxlan_dstport")]
+    pub dstport: u16,
+    /// Bridge this VXLAN device must be enslaved to before it can satisfy
+    /// EVPN readiness.
+    pub bridge: String,
+    /// Linux VXLAN learning mode. ADR-0091 fixed-VNI lifecycle requires
+    /// `false` (`nolearning`); the field exists so typos or intentional
+    /// deviations fail validation explicitly instead of silently using the
+    /// default.
+    #[serde(default)]
+    pub learning: bool,
+}
+
+const fn default_vxlan_dstport() -> u16 {
+    4789
 }
 
 /// Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).

@@ -703,6 +703,13 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 ifindex: Some(10),
                 observed_vlan_filtering: Some(true),
                 observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+                observed_vni: None,
+                observed_local: None,
+                observed_dstport: None,
+                observed_learning_disabled: None,
+                observed_collect_metadata: None,
+                observed_vnifilter: None,
+                observed_bridge: None,
             }],
         }))
     }
