@@ -13,7 +13,7 @@
 //! This is the fake the `compute_diff` tests don't need (those are
 //! pure), but Phase 3 will need to drive a complete actor lifecycle.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -494,6 +494,12 @@ impl InMemoryDataplane {
                         )));
                     }
                     if !state.kernel.links.contains_key(&spec.bridge) {
+                        if state.kernel.link_name_exists(&spec.bridge) {
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "managed VXLAN {name} cannot be created: desired bridge name {} is occupied by a non-bridge link",
+                                spec.bridge
+                            )));
+                        }
                         return Err(crate::error::DataplaneError::Other(format!(
                             "managed VXLAN {name} cannot be created: desired bridge {} is absent",
                             spec.bridge
@@ -941,6 +947,15 @@ impl InMemoryHandle {
     /// Replace the fake link inventory wholesale.
     pub fn set_links(&self, links: BTreeMap<String, KernelLinkInfo>) {
         self.state.lock().expect("poisoned").kernel.set_links(links);
+    }
+
+    /// Replace the fake raw link-name inventory wholesale.
+    pub fn set_link_names(&self, names: BTreeSet<String>) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .set_link_names(names);
     }
 
     /// Replace the fake VXLAN inventory wholesale.
@@ -1518,6 +1533,34 @@ mod tests {
             dst: ip("10.0.0.2"),
         };
         assert!(dp.apply(&op).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_vxlan_bridge_name_collision_is_permanent() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+        h.set_link_names(BTreeSet::from(["br100".to_string()]));
+
+        let err = dp
+            .apply(&DataplaneOp::CreateManagedVxlan {
+                name: "vxlan100".to_string(),
+                spec: rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                    vni: 100,
+                    local_ip: ip("10.0.0.1"),
+                    dstport: 4789,
+                    bridge: "br100".to_string(),
+                },
+                ownership_stamp: "rustbgpd:vxlan:leaf-1:vxlan100".to_string(),
+            })
+            .await
+            .expect_err("bridge-name collision must fail permanently");
+
+        assert_eq!(err.class(), crate::error::FailureClass::Permanent);
+        assert!(
+            err.to_string().contains("non-bridge link"),
+            "unexpected error: {err}"
+        );
+        assert!(!h.kernel_snapshot().vxlans.contains_key("vxlan100"));
     }
 
     #[tokio::test]
