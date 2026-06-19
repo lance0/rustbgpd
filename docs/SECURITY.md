@@ -153,10 +153,11 @@ table inet filter {
 These examples are intentionally minimal. Fold them into your existing
 stateful-policy baseline rather than pasting them in isolation.
 
-## Metrics endpoint
+## Metrics and probe endpoint
 
-The Prometheus `/metrics` HTTP endpoint is read-only and unauthenticated. It
-does not expose secrets, but it does expose operational detail. Apply the same
+The telemetry HTTP endpoint is read-only and unauthenticated. `/metrics`
+exposes operational detail, `/readyz` exposes only core actor readiness, and
+`/livez` exposes only process liveness. Apply the same
 loopback-vs-management-network discipline to `prometheus_addr` that you apply
 to gRPC.
 

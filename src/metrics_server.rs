@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prometheus::{Encoder, TextEncoder};
+use rustbgpd_api::health_probe::CoreReadinessProbe;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -14,7 +15,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LINE: usize = 8192;
 const MAX_CONNECTIONS: usize = 64;
 
-pub async fn serve_metrics(addr: SocketAddr, metrics: BgpMetrics) {
+pub async fn serve_metrics(
+    addr: SocketAddr,
+    metrics: BgpMetrics,
+    readiness_probe: CoreReadinessProbe,
+) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => {
             info!(%addr, "metrics server listening");
@@ -45,8 +50,9 @@ pub async fn serve_metrics(addr: SocketAddr, metrics: BgpMetrics) {
         };
 
         let metrics = metrics.clone();
+        let readiness_probe = readiness_probe.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &metrics).await {
+            if let Err(e) = handle_connection(stream, &metrics, &readiness_probe).await {
                 debug!(%peer, error = %e, "metrics connection error");
             }
             drop(permit);
@@ -57,6 +63,7 @@ pub async fn serve_metrics(addr: SocketAddr, metrics: BgpMetrics) {
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     metrics: &BgpMetrics,
+    readiness_probe: &CoreReadinessProbe,
 ) -> std::io::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader.take(MAX_REQUEST_LINE as u64));
@@ -89,8 +96,8 @@ async fn handle_connection(
     // Parse path from "GET /path HTTP/1.x"
     let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
-    let response = if path == "/metrics" {
-        match gather(metrics) {
+    let response = match path {
+        "/metrics" => match gather(metrics) {
             Ok(body) => {
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -106,19 +113,29 @@ async fn handle_connection(
                     body.len(),
                 )
             }
-        }
-    } else {
-        let body = "Not Found\n";
-        format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len(),
-        )
+        },
+        "/livez" => text_response("200 OK", "ok\n"),
+        "/readyz" => match readiness_probe.check().await {
+            Ok(()) => text_response("200 OK", "ready\n"),
+            Err(error) => {
+                warn!(%error, "readiness probe failed");
+                text_response("503 Service Unavailable", &format!("not ready: {error}\n"))
+            }
+        },
+        _ => text_response("404 Not Found", "Not Found\n"),
     };
 
     // Write with timeout to prevent slow-client stalls
     tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await??;
 
     Ok(())
+}
+
+fn text_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    )
 }
 
 fn gather(metrics: &BgpMetrics) -> Result<String, std::io::Error> {
@@ -134,12 +151,20 @@ fn gather(metrics: &BgpMetrics) -> Result<String, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_api::peer_types::PeerManagerCommand;
+    use rustbgpd_rib::RibUpdate;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
-    use tokio::sync::Semaphore;
+    use tokio::sync::{Semaphore, mpsc};
 
-    async fn start_server() -> SocketAddr {
+    fn unused_probe() -> CoreReadinessProbe {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        CoreReadinessProbe::new(peer_tx, rib_tx)
+    }
+
+    async fn start_server(readiness_probe: CoreReadinessProbe) -> SocketAddr {
         let metrics = BgpMetrics::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -150,8 +175,9 @@ mod tests {
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let m = metrics.clone();
+                let probe = readiness_probe.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m).await;
+                    let _ = handle_connection(stream, &m, &probe).await;
                     drop(permit);
                 });
             }
@@ -160,39 +186,106 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
-    async fn get_metrics_returns_200() {
-        let addr = start_server().await;
+    async fn request(addr: SocketAddr, path: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn get_metrics_returns_200() {
+        let addr = start_server(unused_probe()).await;
+
+        let response = request(addr, "/metrics").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
     }
 
     #[tokio::test]
     async fn get_other_path_returns_404() {
-        let addr = start_server().await;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+        let addr = start_server(unused_probe()).await;
 
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf);
+        let response = request(addr, "/other").await;
         assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     }
 
     #[tokio::test]
+    async fn get_livez_returns_200() {
+        let addr = start_server(unused_probe()).await;
+
+        let response = request(addr, "/livez").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("ok\n"));
+    }
+
+    #[tokio::test]
+    async fn get_readyz_returns_200_when_core_actors_respond() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await {
+                let _ = reply.send(0);
+            }
+        });
+
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("ready\n"));
+    }
+
+    #[tokio::test]
+    async fn get_readyz_returns_503_when_peer_manager_drops_reply() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                drop(reply);
+            }
+        });
+
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.ends_with("not ready: peer manager dropped reply\n"));
+    }
+
+    #[tokio::test]
+    async fn get_readyz_returns_503_when_rib_probe_times_out() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                drop(reply);
+            }
+        });
+
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.ends_with("not ready: RIB manager probe timed out (200ms deadline)\n"));
+    }
+
+    #[tokio::test]
     async fn slow_client_times_out() {
-        let addr = start_server().await;
+        let addr = start_server(unused_probe()).await;
         let stream = TcpStream::connect(addr).await.unwrap();
         // Don't send anything — the read timeout should kick in and close
         // the connection without blocking the server indefinitely.
@@ -207,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_request_line_returns_400() {
-        let addr = start_server().await;
+        let addr = start_server(unused_probe()).await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
         // Send a request line longer than MAX_REQUEST_LINE without a newline
         let long_line = "G".repeat(MAX_REQUEST_LINE + 100);
@@ -235,8 +328,9 @@ mod tests {
                 let permit = sem.clone().acquire_owned().await.unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let m = metrics.clone();
+                let probe = unused_probe();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m).await;
+                    let _ = handle_connection(stream, &m, &probe).await;
                     drop(permit);
                 });
             }

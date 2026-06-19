@@ -33,8 +33,11 @@ error: invalid hold_time 2: must be 0 or >= 3
 
 The daemon exits with code 1 — it never starts with an invalid config.
 
-On success, structured JSON logs go to stdout. The daemon is ready when you
-see the `starting rustbgpd` log line with version, ASN, and router ID.
+On success, structured JSON logs go to stdout. If `prometheus_addr` is
+configured, use `GET /readyz` on that listener as the orchestrator readiness
+signal; it returns ready once the PeerManager and RIB actors answer their
+bounded probes. The `starting rustbgpd` log line means process startup reached
+runtime wiring, not that every actor has answered a readiness probe yet.
 
 ### Per-peer log filtering
 
@@ -345,9 +348,25 @@ restart it.
 
 ## Key metrics to watch
 
-Metrics are exposed on the Prometheus endpoint if `prometheus_addr` is
-configured. If omitted, metrics are still collected internally and available
-via gRPC `GetMetrics` and `GetHealth` RPCs.
+Metrics and HTTP probes are exposed on the Prometheus endpoint if
+`prometheus_addr` is configured. If omitted, metrics are still collected
+internally and available via gRPC `GetMetrics` and `GetHealth` RPCs, but the
+HTTP `/livez` and `/readyz` probes are disabled.
+
+### HTTP probes
+
+The telemetry HTTP listener exposes three read-only paths:
+
+| Path | Success | Failure |
+|------|---------|---------|
+| `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails |
+| `/livez` | `200 ok` once the listener accepts connections | No actor checks |
+| `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
+
+Readiness is actor responsiveness, not routing policy. A daemon with zero
+configured peers, zero Established peers, or zero routes can still be ready.
+Event-history, EVPN, FIB, and peer-count health are surfaced through their own
+metrics and status commands rather than as v1 readiness gates.
 
 ### Per-peer series lifecycle
 
@@ -373,7 +392,9 @@ never removed.
 
 The current count of Established peers and daemon uptime are read via
 `ControlService.GetHealth` / `rbgp health` (and `GetMetrics`), not a
-Prometheus gauge.
+Prometheus gauge. `GetHealth` uses the same 200 ms core-actor deadline as
+`/readyz`, but returns peer and route counts and therefore remains an
+authenticated sensitive-read surface.
 
 ### Routing
 

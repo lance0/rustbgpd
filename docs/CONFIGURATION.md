@@ -202,10 +202,11 @@ Required. Configures observability and management endpoints.
 
 | Field             | Type   | Required | Default | Description                        |
 |-------------------|--------|----------|---------|------------------------------------|
-| `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics (omit to disable) |
+| `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics and HTTP `/livez` / `/readyz` probes (omit to disable) |
 | `log_format`      | string | yes      | --      | Log output format (`"json"`)       |
 
-`prometheus_addr`, when present, must be a valid `ip:port` socket address.
+`prometheus_addr`, when present, must be a valid `ip:port` socket address. The
+same listener serves `/metrics`, `/livez`, and `/readyz`.
 
 ### `[global.telemetry.looking_glass]`
 
