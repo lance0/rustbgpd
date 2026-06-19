@@ -2368,7 +2368,7 @@ vni = 100                          # fixed VNI, 1..=16_777_215
 local = "10.0.0.1"                 # VXLAN local source IP
 dstport = 4789                     # optional; defaults to IANA VXLAN port
 bridge = "br100"                   # desired bridge master
-learning = false                   # required; fixed-VNI lifecycle uses nolearning
+learning = false                   # optional default; true is rejected
 ```
 
 The derived ownership stamps are:
