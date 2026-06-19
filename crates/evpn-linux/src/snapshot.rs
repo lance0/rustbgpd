@@ -524,9 +524,14 @@ impl KernelSnapshot {
         self.fdb.len()
     }
 
-    /// Replace the link inventory wholesale.
+    /// Replace the bridge inventory while preserving names of
+    /// non-bridge/non-VXLAN links already recorded via
+    /// [`Self::set_link_names`].
     pub fn set_links(&mut self, links: BTreeMap<String, KernelLinkInfo>) {
-        self.link_names = links.keys().chain(self.vxlans.keys()).cloned().collect();
+        for name in self.links.keys() {
+            self.link_names.remove(name);
+        }
+        self.link_names.extend(links.keys().cloned());
         self.links = links;
     }
 
@@ -536,9 +541,14 @@ impl KernelSnapshot {
         self.links.insert(info.bridge_name.clone(), info);
     }
 
-    /// Replace the VXLAN link inventory wholesale.
+    /// Replace the VXLAN inventory while preserving names of
+    /// non-bridge/non-VXLAN links already recorded via
+    /// [`Self::set_link_names`].
     pub fn set_vxlans(&mut self, vxlans: BTreeMap<String, KernelVxlanLinkInfo>) {
-        self.link_names = self.links.keys().chain(vxlans.keys()).cloned().collect();
+        for name in self.vxlans.keys() {
+            self.link_names.remove(name);
+        }
+        self.link_names.extend(vxlans.keys().cloned());
         self.vxlans = vxlans;
     }
 
@@ -940,6 +950,53 @@ mod tests {
         assert_eq!(entry.dst, Some(ip("10.0.0.2")));
         assert_eq!(snap.fdb_len(), 1);
         assert!(snap.find_fdb(vni(100), mac(2)).is_none());
+    }
+
+    #[test]
+    fn typed_link_inventory_preserves_non_typed_link_names() {
+        let mut snap = KernelSnapshot::new();
+        snap.set_link_names(BTreeSet::from([
+            "br100".to_string(),
+            "vxlan100".to_string(),
+            "brdummy".to_string(),
+        ]));
+
+        snap.set_vxlans(BTreeMap::from([(
+            "vxlan100".to_string(),
+            KernelVxlanLinkInfo {
+                ifindex: 20,
+                name: "vxlan100".to_string(),
+                altnames: Vec::new(),
+                vni: Some(100),
+                local_ip: Some(ip("10.0.0.1")),
+                dstport: Some(4789),
+                learning_disabled: Some(true),
+                collect_metadata: false,
+                vnifilter: false,
+                bridge: Some("br100".to_string()),
+            },
+        )]));
+        snap.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            KernelLinkInfo {
+                ifindex: 10,
+                bridge_name: "br100".to_string(),
+                vlan_filtering: true,
+                altnames: Vec::new(),
+                vxlan: None,
+                svd_vxlan_ports: Vec::new(),
+                ce_port_ifindexes: Vec::new(),
+                vlans: Vec::new(),
+                vlan_tunnels: Vec::new(),
+                port_vlan_inventory: Vec::new(),
+            },
+        )]));
+
+        assert!(snap.link_name_exists("br100"));
+        assert!(snap.link_name_exists("vxlan100"));
+        assert!(snap.link_name_exists("brdummy"));
+        assert!(snap.links.contains_key("br100"));
+        assert!(snap.vxlans.contains_key("vxlan100"));
     }
 
     #[test]
