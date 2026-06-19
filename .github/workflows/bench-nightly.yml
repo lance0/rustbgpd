@@ -11,9 +11,10 @@ name: Criterion Bench Nightly
 #
 # CONFIDENT-REGRESSION TRIPWIRE — still not a source of published benchmark
 # truth. The workflow fails only when compare-criterion.sh sees a row with
-# enough completed attempts, a min..max range entirely above zero, and a mean
-# delta above the configured regression threshold while stddev stays below the
-# configured noise ceiling. Straddle-zero or high-stddev rows remain
+# enough completed attempts, a min..max range entirely above zero, the last
+# run's own 95% CI entirely above zero, and a mean delta above the configured
+# regression threshold while stddev stays below the configured noise ceiling.
+# Straddle-zero (min..max or CI), high-stddev, or delta-only rows remain
 # advisory/inconclusive. bgperf2 stays release-time `/bench` only — it is too
 # stateful (Docker, one-at-a-time, shared container names) for unattended runs.
 
@@ -147,9 +148,10 @@ jobs:
             echo "## Nightly criterion tripwire"
             echo
             echo "HEAD vs latest release tag (\`${BASE_REF:-?}\`). The job fails only"
-            echo "for confident regressions: enough attempts, \`min..max\` entirely"
-            echo "above zero, bounded stddev, and \`mean delta\` above the configured"
-            echo "threshold. Straddle-zero or high-stddev rows remain advisory."
+            echo "for confident regressions: enough attempts, \`min..max\` and the"
+            echo "last-run 95% CI both entirely above zero, bounded stddev, and"
+            echo "\`mean delta\` above the configured threshold. Straddle-zero (range"
+            echo "or CI) and high-stddev rows remain advisory."
             echo "See docs/BENCHMARKS.md."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
