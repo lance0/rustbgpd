@@ -27,7 +27,7 @@ observation.
 This ADR records the candidate design and the guardrails. It does **not**
 accept implementation yet.
 
-## Current Decision
+## Decision
 
 ### 1. Keep the raw bridge path fail-closed by default
 

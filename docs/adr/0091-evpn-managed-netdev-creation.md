@@ -65,7 +65,7 @@ Every rustbgpd-created managed link carries an alternate interface name
 stamp, read back from `IFLA_PROP_LIST` during the normal link dump:
 
 ```text
-rbgp_owned_<class>_<stable-config-id>_<owner-token>
+rustbgpd_owned_<class>_<stable-config-id>_<owner-token>
 ```
 
 The exact encoding can be adjusted for length and character constraints, but
