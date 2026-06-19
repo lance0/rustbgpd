@@ -2373,10 +2373,12 @@ learning = false                   # optional default; true is rejected
 
 The VXLAN `bridge` field names the desired bridge master. It may reference a
 managed `[[managed_netdevs.bridges]]` row or an operator-provisioned bridge;
-either way it is bound by name. If the named bridge is absent or foreign (not
-the expected managed bridge) at runtime, the VXLAN is reported `owned-unsafe`
-and is not created — managed creation fails closed rather than attach a VXLAN
-to an unexpected master.
+either way it is bound by name. The VXLAN lifecycle only creates the VXLAN
+after that name resolves to a Linux bridge; an absent bridge or same-name
+non-bridge link makes the create operation fail closed rather than attach to an
+unexpected master. If the named bridge also has a managed bridge row and is
+foreign or owned-unsafe, that state is reported on the bridge row while the
+EVPN L2 readiness check remains fail-closed until the topology matches config.
 
 The derived ownership stamps are:
 
