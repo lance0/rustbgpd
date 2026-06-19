@@ -218,8 +218,14 @@ has it, no broad performance sprints without profile evidence.
   vnifilter mode the fixed-VNI lifecycle never creates;
   `managed_ready` proves that a rustbgpd-created bridge plus rustbgpd-created
   fixed-VNI VXLAN make the real EVPN L2 instance probe Ready only after both
-  links are owned-safe; SVD / collect-metadata VXLAN and VRF/L3VXLAN classes
-  still deferred. The `svd_fdb_vni` netns proof
+  links are owned-safe. **ADR-0091 VRF/L3VXLAN schema/status substrate
+  landed:** `[managed_netdevs]` accepts VRF and L3VXLAN desired rows, derives
+  `rustbgpd:vrf:<owner>:<name>` and `rustbgpd:l3vxlan:<owner>:<name>` stamps,
+  parses observed VRF/L3VXLAN protected attributes from Linux link dumps, and
+  reports desired/observed/orphan/foreign/unsafe state through
+  `ListManagedNetdevs` / `rbgp`; VRF/L3VXLAN create/adopt/reap lifecycle
+  remains deferred. SVD / collect-metadata VXLAN lifecycle is still deferred.
+  The `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
   inference plus owned-state convergence. Service-provider EVPN breadth
@@ -365,9 +371,12 @@ has it, no broad performance sprints without profile evidence.
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
   bridges and fixed-VNI VXLANs, adopts exact stamped links after restart, and
-  safely reaps same-owner bridge/VXLAN orphans; `managed_ready` proves that
-  this rustbgpd-created bridge + VXLAN topology drives the real EVPN L2 probe
-  to Ready. A dedicated counter
+  safely reaps same-owner bridge/VXLAN orphans. VRF/L3VXLAN schema and status
+  substrate now ship too: desired rows validate, derive ownership stamps, parse
+  observed VRF/L3VXLAN link attributes, and surface status through
+  `ListManagedNetdevs` / `rbgp`, while VRF/L3VXLAN create/adopt/reap lifecycle
+  remains deferred. `managed_ready` proves that this rustbgpd-created bridge +
+  VXLAN topology drives the real EVPN L2 probe to Ready. A dedicated counter
   for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is

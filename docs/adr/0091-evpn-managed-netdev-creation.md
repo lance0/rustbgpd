@@ -57,8 +57,10 @@ order:
 4. optional VLAN upper / bridge membership helpers after the base classes.
 
 The first implementation slice was bridge create/adopt/reap. The second
-slice adds fixed-VNI VXLAN create/adopt/reap. SVD / collect-metadata VXLAN
-and VRF/L3VXLAN are separate slices with their own proofs.
+slice adds fixed-VNI VXLAN create/adopt/reap. The VRF/L3VXLAN schema/status
+substrate is present, but VRF/L3VXLAN create/adopt/reap lifecycle remains a
+separate slice with its own proof. SVD / collect-metadata VXLAN lifecycle is
+also a separate proof gate.
 
 ### 2. `IFLA_ALT_IFNAME` is the durable ownership marker
 
@@ -77,16 +79,17 @@ the logical fields are fixed:
   block's stable identity;
 - `owner-token`: operator-configured daemon / installation token.
 
-As shipped, the bridge and fixed-VNI VXLAN classes encode this as a
-colon-delimited altname:
+As shipped, bridge, fixed-VNI VXLAN, VRF, and L3VXLAN classes encode this as
+a colon-delimited altname:
 
 ```text
 rustbgpd:bridge:<owner-token>:<bridge-name>
 rustbgpd:vxlan:<owner-token>:<vxlan-name>
+rustbgpd:vrf:<owner-token>:<vrf-name>
+rustbgpd:l3vxlan:<owner-token>:<l3vxlan-name>
 ```
 
-where the configured link name serves as the class's
-`stable-config-id`.
+where the configured link name serves as the class's `stable-config-id`.
 
 The owner token is not a secret. It does not defend against privileged local
 root or an operator deliberately spoofing the marker. Its job is accidental
@@ -178,11 +181,22 @@ bridge = "br_default"
 
 [[managed_netdevs.vrfs]]
 name = "vrf-blue"
-table = 1001
+table_id = 1001
+
+[[managed_netdevs.l3vxlans]]
+name = "l3vxlan1001"
+vni = 1001
+local = "10.0.0.1"
+dstport = 4789
+vrf = "vrf-blue"
+router_mac = "02:00:00:00:00:01"
+learning = false
 ```
 
-The final schema may split fixed-VNI VXLAN, SVD/collect-metadata VXLAN, and
-L3VXLAN into more specific blocks. The ownership model stays the same.
+The fixed-VNI VXLAN and L3VXLAN blocks are deliberately separate: fixed-VNI
+VXLAN rows create L2 bridge members, while L3VXLAN rows are the per-VRF VTEP
+device used by IRB. SVD / collect-metadata VXLAN lifecycle remains a more
+specific future class. The ownership model stays the same.
 
 Runtime mutation, SIGHUP reload, gNMI `Set`, and `ApplyEvpnRuntime` must
 remain fail-closed for managed-netdev fields until the corresponding class
@@ -303,7 +317,8 @@ foreign-vs-owned signal.
 4. Add VXLAN class support. **Done for fixed-VNI schema/status and
    create/adopt/reap lifecycle.** SVD / collect-metadata VXLAN remains
    deferred.
-5. Add VRF / L3VXLAN class support.
+5. Add VRF / L3VXLAN class support. **Done for schema/status and ownership
+   stamps; lifecycle create/adopt/reap remains deferred.**
 6. Add optional VLAN upper / bridge membership helpers if operator demand
    remains after bridge/VXLAN/VRF creation.
 

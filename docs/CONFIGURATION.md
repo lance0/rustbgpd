@@ -1939,8 +1939,9 @@ default — RR-only deployments leave it empty.
 > the `bridge` / `local_vtep_ip` fields below must match. ADR-0091 is the
 > explicit opt-in exception for bridge creation/adoption/reap through
 > `[managed_netdevs]`; fixed-VNI VXLAN rows can also create/adopt/reap
-> traditional one-VNI VXLAN devices. SVD / collect-metadata VXLAN and VRF
-> creation remain deferred.
+> traditional one-VNI VXLAN devices. Managed VRF / L3VXLAN rows are accepted
+> for schema validation and ownership/status reporting, but VRF / L3VXLAN
+> creation remains deferred.
 > ADR-0089 enables the first VLAN-aware bridge programming target through
 > a local bridge-VLAN / VNI binding while keeping EVPN Ethernet Tag ID at
 > `0`.
@@ -1986,7 +1987,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   or is declared in `[managed_netdevs]` for ADR-0091 bridge lifecycle
   ownership. ADR-0091 bridge and fixed-VNI `[[managed_netdevs.vxlans]]`
   lifecycle now ship (create/adopt/reap); SVD / collect-metadata VXLAN and
-  VRF netdev creation remain operator-provisioned.
+  VRF / L3VXLAN lifecycle remain operator-provisioned, though managed VRF /
+  L3VXLAN rows are valid for status and protected-attribute diagnostics.
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
   `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
   observed bridge must have `vlan_filtering=1`, the configured VLAN
@@ -2341,14 +2343,15 @@ for the design rationale.
 ## `[managed_netdevs]`
 
 ADR-0091 managed EVPN netdevs are opt-in and class-scoped. The current
-surface accepts bridge rows and fixed-VNI VXLAN rows, derives durable Linux
-altname ownership stamps, and reports status through
-`EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. Bridge rows
-are active lifecycle intent: the dataplane actor creates missing bridges and
-fixed-VNI VXLANs, stamps them with the derived altname, treats exact stamped
-links as crash-restart adoption, and reaps exact same-owner orphans when the
-config keeps the owner token but removes the row. SVD / collect-metadata
-VXLAN, managed VRF, and managed L3VXLAN creation remain deferred.
+surface accepts bridge rows, fixed-VNI VXLAN rows, VRF rows, and L3VXLAN rows,
+derives durable Linux altname ownership stamps, and reports status through
+`EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. Bridge and
+fixed-VNI VXLAN rows are active lifecycle intent: the dataplane actor creates
+missing links, stamps them with the derived altname, treats exact stamped links
+as crash-restart adoption, and reaps exact same-owner orphans when the config
+keeps the owner token but removes the row. VRF and L3VXLAN rows are
+schema/status substrate in this tranche; their create/adopt/reap lifecycle
+remains deferred.
 
 Any `[managed_netdevs]` add/remove/change is restart-required in this
 tranche for SIGHUP, config transactions, gNMI Set, and
@@ -2369,6 +2372,19 @@ local = "10.0.0.1"                 # VXLAN local source IP
 dstport = 4789                     # optional; defaults to IANA VXLAN port
 bridge = "br100"                   # desired bridge master
 learning = false                   # optional default; true is rejected
+
+[[managed_netdevs.vrfs]]
+name = "vrf100"                    # Linux ifname, <= 15 bytes
+table_id = 100                     # Linux VRF table id, non-zero
+
+[[managed_netdevs.l3vxlans]]
+name = "l3vxlan100"                # Linux ifname, <= 15 bytes
+vni = 100                          # L3VNI, 1..=16_777_215
+local = "10.0.0.1"                 # VXLAN local source IP
+dstport = 4789                     # optional; defaults to IANA VXLAN port
+vrf = "vrf100"                     # desired VRF master
+router_mac = "02:00:00:00:00:01"   # non-zero unicast Router MAC
+learning = false                   # optional default; true is rejected
 ```
 
 The VXLAN `bridge` field names the desired bridge master. It may reference a
@@ -2385,43 +2401,50 @@ The derived ownership stamps are:
 ```text
 rustbgpd:bridge:<owner_token>:<bridge_name>
 rustbgpd:vxlan:<owner_token>:<vxlan_name>
+rustbgpd:vrf:<owner_token>:<vrf_name>
+rustbgpd:l3vxlan:<owner_token>:<l3vxlan_name>
 ```
 
 Validation rejects managed rows without `owner_token`, duplicate managed
-netdev names across bridge and VXLAN rows, invalid Linux-style link names
-(`.`, `..`, spaces, or names over 15 bytes), invalid owner tokens, and
-derived stamps longer than Linux's 127-byte altname limit. VXLAN validation
-also rejects invalid VNIs (outside `1..=16_777_215`), a duplicate `vni`
-shared by two VXLAN rows, `dstport = 0`, and `learning = true`; SVD /
-collect-metadata VXLANs, managed VRFs, and managed L3VXLAN rows remain
-unsupported.
+netdev names across bridge, VXLAN, VRF, and L3VXLAN rows, invalid Linux-style
+link names (`.`, `..`, spaces, or names over 15 bytes), invalid owner tokens,
+and derived stamps longer than Linux's 127-byte altname limit. VXLAN
+validation also rejects invalid VNIs (outside `1..=16_777_215`), a duplicate
+`vni` shared by two VXLAN rows, `dstport = 0`, and `learning = true`. VRF
+validation rejects `table_id = 0` and duplicate managed VRF table ids. L3VXLAN
+validation rejects invalid VNIs, duplicate managed L3VXLAN VNIs, `dstport = 0`,
+`learning = true`, and a missing, multicast, or all-zero `router_mac`.
 
-rustbgpd preserves foreign links. A same-name bridge or VXLAN without the
-exact ownership stamp is reported `foreign-present` and is not modified. A
-link with the expected stamp plus any other rustbgpd stamp, a wrong owner
-stamp, a stamp/name mismatch, or protected-attribute drift such as unexpected
-bridge `vlan_filtering` or VXLAN `vni`, `local`, `dstport`, `learning`,
-`collect-metadata`, `vnifilter`, or `bridge` attachment is reported
-`owned-unsafe` and is not repaired or deleted by v1. The bounded Prometheus gauge
+rustbgpd preserves foreign links. A same-name bridge, VXLAN, VRF, or L3VXLAN
+without the exact ownership stamp is reported `foreign-present` and is not
+modified. A link with the expected stamp plus any other rustbgpd stamp, a wrong
+owner stamp, a stamp/name mismatch, or protected-attribute drift is reported
+`owned-unsafe` and is not repaired or deleted by v1. Protected attributes are:
+bridge `vlan_filtering`; VXLAN `vni`, `local`, `dstport`, `learning`,
+`collect-metadata`, `vnifilter`, and `bridge` attachment; VRF `table_id`; and
+L3VXLAN `vni`, `local`, `dstport`, `learning`, `collect-metadata`,
+`vnifilter`, `vrf` master, and `router_mac`. The bounded Prometheus gauge
 `evpn_managed_netdev_state{class,name,desired,state}` mirrors the latest
 reported state for alerting; detailed reason text is available through
 `ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
 
-Reaping is equally conservative. When the owner token stays but a VXLAN row is
-removed, only an exact same-owner stamped plain orphan is reaped. A
-de-configured rustbgpd-stamped VXLAN that has drifted into a collect-metadata
-or vnifilter mode — modes the fixed-VNI lifecycle never creates — is preserved
-(`owned-unsafe`), not reaped.
+Reaping is equally conservative. When the owner token stays but a bridge or
+fixed-VNI VXLAN row is removed, only an exact same-owner stamped plain orphan
+is reaped. A de-configured rustbgpd-stamped VXLAN that has drifted into a
+collect-metadata or vnifilter mode — modes the fixed-VNI lifecycle never
+creates — is preserved (`owned-unsafe`), not reaped. VRF and L3VXLAN orphan
+rows are reported for status only in this tranche and are not reaped until
+their lifecycle proof lands.
 
 Status states:
 
 | State | Meaning |
 |-------|---------|
-| `desired-absent` | Configured bridge or VXLAN is not present in the kernel snapshot |
+| `desired-absent` | Configured bridge, VXLAN, VRF, or L3VXLAN is not present in the kernel snapshot |
 | `foreign-present` | Same-name link exists without the expected rustbgpd ownership stamp |
 | `owned-unsafe` | Link carries a rustbgpd stamp that is not the expected one, or a protected attribute does not match config |
 | `owned-safe` | Expected stamp and protected attributes match |
-| `orphaned` | A rustbgpd-stamped bridge or VXLAN exists with no desired config row |
+| `orphaned` | A rustbgpd-stamped link exists with no desired config row |
 | `unknown` | No dataplane status snapshot has been published yet, or the link dump failed |
 
 ---

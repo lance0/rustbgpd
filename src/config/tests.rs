@@ -10291,7 +10291,7 @@ fn reload_matrix_documents_every_peer_group_field() {
 #[test]
 fn managed_netdevs_default_empty_and_resolve_stamps() {
     let config = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
         valid_toml()
     ))
     .unwrap();
@@ -10312,6 +10312,27 @@ fn managed_netdevs_default_empty_and_resolve_stamps() {
     assert_eq!(vxlan.spec.dstport, 4789);
     assert_eq!(vxlan.spec.bridge, "br100");
     assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
+    let vrf = table.vrf("vrf100").unwrap();
+    assert_eq!(vrf.name, "vrf100");
+    assert_eq!(vrf.spec.table_id, 5000);
+    assert_eq!(vrf.ownership_stamp, "rustbgpd:vrf:leaf-1:vrf100");
+    let l3vxlan = table.l3vxlan("l3vxlan100").unwrap();
+    assert_eq!(l3vxlan.name, "l3vxlan100");
+    assert_eq!(l3vxlan.spec.vni, 5000);
+    assert_eq!(
+        l3vxlan.spec.local_ip,
+        "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert_eq!(l3vxlan.spec.dstport, 4789);
+    assert_eq!(l3vxlan.spec.vrf, "vrf100");
+    assert_eq!(
+        l3vxlan.spec.router_mac,
+        rustbgpd_wire::MacAddress::new([0x02, 0, 0, 0, 0, 1])
+    );
+    assert_eq!(
+        l3vxlan.ownership_stamp,
+        "rustbgpd:l3vxlan:leaf-1:l3vxlan100"
+    );
 
     let owner_only = parse(&format!(
         "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n",
@@ -10387,6 +10408,18 @@ fn managed_netdevs_reject_unknown_fields() {
         valid_toml()
     ));
     assert!(matches!(unknown_vxlan_field, Err(ConfigError::Parse(_))));
+
+    let unknown_vrf_field = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\nmtu = 9000\n",
+        valid_toml()
+    ));
+    assert!(matches!(unknown_vrf_field, Err(ConfigError::Parse(_))));
+
+    let unknown_l3vxlan_field = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\nexternal = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(unknown_l3vxlan_field, Err(ConfigError::Parse(_))));
 }
 
 #[test]
@@ -10441,6 +10474,54 @@ fn managed_netdevs_reject_duplicate_vxlan_vni() {
         valid_toml()
     ));
     assert!(distinct_vnis.is_ok(), "got {distinct_vnis:?}");
+}
+
+#[test]
+fn managed_netdevs_reject_invalid_vrf_and_l3vxlan_fields() {
+    let zero_table = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 0\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        zero_table,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let duplicate_table = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.vrfs]]\nname = \"vrf200\"\ntable_id = 5000\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        duplicate_table,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let duplicate_l3_vni = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan200\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf200\"\nrouter_mac = \"02:00:00:00:00:02\"\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        duplicate_l3_vni,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let learning_enabled = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\nlearning = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        learning_enabled,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let multicast_router_mac = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"01:00:5e:00:00:01\"\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        multicast_router_mac,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
 }
 
 #[test]

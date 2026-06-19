@@ -50,6 +50,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instance probe transitions from NotReady to Ready only after both links are
   owned-safe. SVD / collect-metadata VXLAN plus VRF/L3VXLAN lifecycle stay
   deferred.
+- **ADR-0091 managed VRF/L3VXLAN schema and status substrate.**
+  `[managed_netdevs]` now accepts `[[managed_netdevs.vrfs]]` and
+  `[[managed_netdevs.l3vxlans]]` rows, derives
+  `rustbgpd:vrf:<owner>:<name>` and `rustbgpd:l3vxlan:<owner>:<name>`
+  ownership stamps, validates protected VRF/L3VXLAN identity attributes,
+  parses observed VRF/L3VXLAN link state from Linux link dumps, and exposes
+  desired/observed/orphan/foreign/unsafe status through
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. VRF and
+  L3VXLAN create/adopt/reap lifecycle remains deferred to the next managed
+  netdev slice.
 
 ### Changed
 

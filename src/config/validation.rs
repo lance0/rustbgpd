@@ -1,12 +1,17 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use super::parse::{
     parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
 };
+use super::schema::{
+    ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
+    ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig,
+};
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -801,7 +806,7 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     if !owner_token.is_empty() {
         validate_managed_token(owner_token, "managed_netdevs.owner_token")?;
     }
-    if (!managed.bridges.is_empty() || !managed.vxlans.is_empty()) && owner_token.is_empty() {
+    if managed_netdevs_has_rows(managed) && owner_token.is_empty() {
         return Err(ConfigError::InvalidManagedNetdev {
             reason:
                 "managed_netdevs.owner_token is required when managed netdev rows are configured"
@@ -809,29 +814,49 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
         });
     }
 
-    let mut names = std::collections::HashSet::new();
-    for bridge in &managed.bridges {
+    let mut names = HashSet::new();
+    validate_managed_bridges(&managed.bridges, owner_token, &mut names)?;
+    validate_managed_vxlans(&managed.vxlans, owner_token, &mut names)?;
+    validate_managed_vrfs(&managed.vrfs, owner_token, &mut names)?;
+    validate_managed_l3vxlans(&managed.l3vxlans, owner_token, &mut names)?;
+    Ok(())
+}
+
+fn managed_netdevs_has_rows(managed: &ManagedNetdevsConfig) -> bool {
+    !managed.bridges.is_empty()
+        || !managed.vxlans.is_empty()
+        || !managed.vrfs.is_empty()
+        || !managed.l3vxlans.is_empty()
+}
+
+fn validate_managed_bridges(
+    bridges: &[ManagedBridgeNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    for bridge in bridges {
         validate_managed_link_name(&bridge.name)?;
         if !names.insert(bridge.name.clone()) {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!("duplicate managed bridge name {:?}", bridge.name),
             });
         }
-        let stamp = rustbgpd_evpn::bridge_ownership_stamp(owner_token, &bridge.name);
-        if stamp.len() > rustbgpd_evpn::MAX_ALT_IFNAME_LEN {
-            return Err(ConfigError::InvalidManagedNetdev {
-                reason: format!(
-                    "managed bridge {:?}: derived ownership altname {:?} is {} bytes; maximum is {}",
-                    bridge.name,
-                    stamp,
-                    stamp.len(),
-                    rustbgpd_evpn::MAX_ALT_IFNAME_LEN
-                ),
-            });
-        }
+        validate_managed_stamp_len(
+            "managed bridge",
+            &bridge.name,
+            &rustbgpd_evpn::bridge_ownership_stamp(owner_token, &bridge.name),
+        )?;
     }
-    let mut seen_vnis = std::collections::HashSet::new();
-    for vxlan in &managed.vxlans {
+    Ok(())
+}
+
+fn validate_managed_vxlans(
+    vxlans: &[ManagedVxlanNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    let mut seen_vnis = HashSet::new();
+    for vxlan in vxlans {
         validate_managed_link_name(&vxlan.name)?;
         validate_managed_link_name(&vxlan.bridge)?;
         if !names.insert(vxlan.name.clone()) {
@@ -871,18 +896,130 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
                 ),
             });
         }
-        let stamp = rustbgpd_evpn::vxlan_ownership_stamp(owner_token, &vxlan.name);
-        if stamp.len() > rustbgpd_evpn::MAX_ALT_IFNAME_LEN {
+        validate_managed_stamp_len(
+            "managed VXLAN",
+            &vxlan.name,
+            &rustbgpd_evpn::vxlan_ownership_stamp(owner_token, &vxlan.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_managed_vrfs(
+    vrfs: &[ManagedVrfNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    let mut seen_table_ids = HashSet::new();
+    for vrf in vrfs {
+        validate_managed_link_name(&vrf.name)?;
+        if !names.insert(vrf.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed netdev name {:?}", vrf.name),
+            });
+        }
+        if vrf.table_id == 0 {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("managed VRF {:?}: table_id must be > 0", vrf.name),
+            });
+        }
+        if !seen_table_ids.insert(vrf.table_id) {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!(
-                    "managed VXLAN {:?}: derived ownership altname {:?} is {} bytes; maximum is {}",
-                    vxlan.name,
-                    stamp,
-                    stamp.len(),
-                    rustbgpd_evpn::MAX_ALT_IFNAME_LEN
+                    "managed VRF {:?}: duplicate table_id {}",
+                    vrf.name, vrf.table_id
                 ),
             });
         }
+        validate_managed_stamp_len(
+            "managed VRF",
+            &vrf.name,
+            &rustbgpd_evpn::vrf_ownership_stamp(owner_token, &vrf.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_managed_l3vxlans(
+    l3vxlans: &[ManagedL3VxlanNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    let mut seen_vnis = HashSet::new();
+    for l3vxlan in l3vxlans {
+        validate_managed_link_name(&l3vxlan.name)?;
+        validate_managed_link_name(&l3vxlan.vrf)?;
+        if !names.insert(l3vxlan.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed netdev name {:?}", l3vxlan.name),
+            });
+        }
+        rustbgpd_evpn::EvpnInstanceId::new(l3vxlan.vni).map_err(|e| {
+            ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: invalid vni {}: {e}",
+                    l3vxlan.name, l3vxlan.vni
+                ),
+            }
+        })?;
+        if !seen_vnis.insert(l3vxlan.vni) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: duplicate vni {}",
+                    l3vxlan.name, l3vxlan.vni
+                ),
+            });
+        }
+        if l3vxlan.dstport == 0 {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: dstport must be in 1..=65535",
+                    l3vxlan.name
+                ),
+            });
+        }
+        if l3vxlan.learning {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: learning=true is unsupported; use learning=false (`nolearning`)",
+                    l3vxlan.name
+                ),
+            });
+        }
+        let router_mac = parse_mac_address(&l3vxlan.router_mac).map_err(|e| {
+            ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: invalid router_mac {:?}: {e}",
+                    l3vxlan.name, l3vxlan.router_mac
+                ),
+            }
+        })?;
+        if !is_unicast_nonzero_mac(router_mac) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: router_mac {:?} must be a non-zero unicast MAC",
+                    l3vxlan.name, l3vxlan.router_mac
+                ),
+            });
+        }
+        validate_managed_stamp_len(
+            "managed L3VXLAN",
+            &l3vxlan.name,
+            &rustbgpd_evpn::l3vxlan_ownership_stamp(owner_token, &l3vxlan.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_managed_stamp_len(label: &str, name: &str, stamp: &str) -> Result<(), ConfigError> {
+    if stamp.len() > rustbgpd_evpn::MAX_ALT_IFNAME_LEN {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!(
+                "{label} {name:?}: derived ownership altname {stamp:?} is {} bytes; maximum is {}",
+                stamp.len(),
+                rustbgpd_evpn::MAX_ALT_IFNAME_LEN
+            ),
+        });
     }
     Ok(())
 }

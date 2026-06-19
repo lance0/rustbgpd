@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use crate::MacAddress;
+
 /// Prefix used in rustbgpd-managed altname ownership stamps.
 pub const MANAGED_NETDEV_STAMP_PREFIX: &str = "rustbgpd";
 /// Maximum Linux altname byte length (`ALTIFNAMSIZ - 1`).
@@ -16,15 +18,19 @@ pub const MAX_IFNAME_LEN: usize = 15;
 /// Maximum configured owner token length for ADR-0091 v1.
 pub const MAX_OWNER_TOKEN_LEN: usize = 63;
 
-/// Managed netdev class. ADR-0091 v1 shipped bridge rows first; fixed-VNI
-/// VXLAN rows are the next class. SVD / VRF creation remains explicitly
-/// deferred.
+/// Managed netdev class. ADR-0091 ships lifecycle support class by class:
+/// bridge and fixed-VNI VXLAN rows are live, while VRF and L3VXLAN rows first
+/// enter as schema/status substrate before their create/delete executor lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedNetdevClass {
     /// Linux bridge device.
     Bridge,
     /// Traditional Linux VXLAN device with one fixed VNI.
     Vxlan,
+    /// Linux VRF master device.
+    Vrf,
+    /// Linux L3 VXLAN device enslaved to a VRF.
+    L3Vxlan,
 }
 
 impl ManagedNetdevClass {
@@ -34,6 +40,8 @@ impl ManagedNetdevClass {
         match self {
             Self::Bridge => "bridge",
             Self::Vxlan => "vxlan",
+            Self::Vrf => "vrf",
+            Self::L3Vxlan => "l3vxlan",
         }
     }
 }
@@ -74,12 +82,59 @@ pub struct ManagedVxlanNetdev {
     pub ownership_stamp: String,
 }
 
+/// Desired protected attributes for one managed Linux VRF.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVrfNetdevSpec {
+    /// Linux route-table id carried by `IFLA_VRF_TABLE`.
+    pub table_id: u32,
+}
+
+/// One configured VRF row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVrfNetdev {
+    /// Linux VRF interface name.
+    pub name: String,
+    /// Desired protected attributes.
+    pub spec: ManagedVrfNetdevSpec,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
+/// Desired protected attributes for one managed L3 VXLAN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedL3VxlanNetdevSpec {
+    /// VXLAN VNI (`1..=16_777_215`).
+    pub vni: u32,
+    /// Local source IP for encapsulated packets.
+    pub local_ip: IpAddr,
+    /// UDP destination port.
+    pub dstport: u16,
+    /// VRF this L3 VXLAN must be enslaved to before it can satisfy IP-VRF
+    /// readiness.
+    pub vrf: String,
+    /// Router MAC the L3 VXLAN link must carry.
+    pub router_mac: MacAddress,
+}
+
+/// One configured L3 VXLAN row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedL3VxlanNetdev {
+    /// Linux L3 VXLAN interface name.
+    pub name: String,
+    /// Desired protected attributes.
+    pub spec: ManagedL3VxlanNetdevSpec,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
 /// Resolved managed-netdev desired state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedNetdevTable {
     owner_token: Option<String>,
     bridges: BTreeMap<String, ManagedBridgeNetdev>,
     vxlans: BTreeMap<String, ManagedVxlanNetdev>,
+    vrfs: BTreeMap<String, ManagedVrfNetdev>,
+    l3vxlans: BTreeMap<String, ManagedL3VxlanNetdev>,
 }
 
 impl ManagedNetdevTable {
@@ -101,6 +156,24 @@ impl ManagedNetdevTable {
         owner_token: String,
         bridges: BTreeMap<String, bool>,
         vxlans: BTreeMap<String, ManagedVxlanNetdevSpec>,
+    ) -> Self {
+        Self::from_all_maps(
+            owner_token,
+            bridges,
+            vxlans,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    }
+
+    /// Build a table from validated, already-unique managed-netdev rows.
+    #[must_use]
+    pub fn from_all_maps(
+        owner_token: String,
+        bridges: BTreeMap<String, bool>,
+        vxlans: BTreeMap<String, ManagedVxlanNetdevSpec>,
+        vrfs: BTreeMap<String, ManagedVrfNetdevSpec>,
+        l3vxlans: BTreeMap<String, ManagedL3VxlanNetdevSpec>,
     ) -> Self {
         let bridges = bridges
             .into_iter()
@@ -130,10 +203,40 @@ impl ManagedNetdevTable {
                 )
             })
             .collect();
+        let vrfs = vrfs
+            .into_iter()
+            .map(|(name, spec)| {
+                let ownership_stamp = vrf_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedVrfNetdev {
+                        name,
+                        spec,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
+        let l3vxlans = l3vxlans
+            .into_iter()
+            .map(|(name, spec)| {
+                let ownership_stamp = l3vxlan_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedL3VxlanNetdev {
+                        name,
+                        spec,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
         Self {
             owner_token: Some(owner_token),
             bridges,
             vxlans,
+            vrfs,
+            l3vxlans,
         }
     }
 
@@ -144,7 +247,11 @@ impl ManagedNetdevTable {
     /// the operator removes the last managed bridge row.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.owner_token.is_none() && self.bridges.is_empty() && self.vxlans.is_empty()
+        self.owner_token.is_none()
+            && self.bridges.is_empty()
+            && self.vxlans.is_empty()
+            && self.vrfs.is_empty()
+            && self.l3vxlans.is_empty()
     }
 
     /// Owner token when `[managed_netdevs]` is configured.
@@ -174,6 +281,28 @@ impl ManagedNetdevTable {
     pub fn vxlan(&self, name: &str) -> Option<&ManagedVxlanNetdev> {
         self.vxlans.get(name)
     }
+
+    /// Desired VRF rows in deterministic name order.
+    pub fn vrfs(&self) -> impl Iterator<Item = &ManagedVrfNetdev> {
+        self.vrfs.values()
+    }
+
+    /// Find one desired VRF by name.
+    #[must_use]
+    pub fn vrf(&self, name: &str) -> Option<&ManagedVrfNetdev> {
+        self.vrfs.get(name)
+    }
+
+    /// Desired L3 VXLAN rows in deterministic name order.
+    pub fn l3vxlans(&self) -> impl Iterator<Item = &ManagedL3VxlanNetdev> {
+        self.l3vxlans.values()
+    }
+
+    /// Find one desired L3 VXLAN by name.
+    #[must_use]
+    pub fn l3vxlan(&self, name: &str) -> Option<&ManagedL3VxlanNetdev> {
+        self.l3vxlans.get(name)
+    }
 }
 
 /// Derived bridge ownership stamp.
@@ -191,6 +320,24 @@ pub fn vxlan_ownership_stamp(owner_token: &str, vxlan_name: &str) -> String {
     format!(
         "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{vxlan_name}",
         ManagedNetdevClass::Vxlan.as_str()
+    )
+}
+
+/// Derived VRF ownership stamp.
+#[must_use]
+pub fn vrf_ownership_stamp(owner_token: &str, vrf_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{vrf_name}",
+        ManagedNetdevClass::Vrf.as_str()
+    )
+}
+
+/// Derived L3 VXLAN ownership stamp.
+#[must_use]
+pub fn l3vxlan_ownership_stamp(owner_token: &str, l3vxlan_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{l3vxlan_name}",
+        ManagedNetdevClass::L3Vxlan.as_str()
     )
 }
 
@@ -218,6 +365,8 @@ pub fn parse_ownership_stamp(raw: &str) -> Option<ManagedNetdevStamp> {
     let class = match parts.next()? {
         "bridge" => ManagedNetdevClass::Bridge,
         "vxlan" => ManagedNetdevClass::Vxlan,
+        "vrf" => ManagedNetdevClass::Vrf,
+        "l3vxlan" => ManagedNetdevClass::L3Vxlan,
         _ => return None,
     };
     let owner_token = parts.next()?;
@@ -300,6 +449,14 @@ pub struct ManagedNetdevStatus {
     pub observed_vnifilter: Option<bool>,
     /// Observed bridge master for VXLAN rows.
     pub observed_bridge: Option<String>,
+    /// Observed VRF table id for VRF rows.
+    pub observed_table_id: Option<u32>,
+    /// Observed administrative link-up state for VRF and L3VXLAN rows.
+    pub observed_up: Option<bool>,
+    /// Observed master device for L3VXLAN rows.
+    pub observed_master: Option<String>,
+    /// Observed Router MAC / link-layer address for L3VXLAN rows.
+    pub observed_router_mac: Option<MacAddress>,
     /// Observed rustbgpd ownership stamps on the link.
     pub observed_stamps: Vec<String>,
 }
@@ -329,9 +486,25 @@ mod tests {
     }
 
     #[test]
+    fn vrf_and_l3vxlan_stamps_round_trip() {
+        let vrf = vrf_ownership_stamp("leaf-1", "vrf100");
+        assert_eq!(vrf, "rustbgpd:vrf:leaf-1:vrf100");
+        let parsed = parse_ownership_stamp(&vrf).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::Vrf);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "vrf100");
+
+        let l3vxlan = l3vxlan_ownership_stamp("leaf-1", "l3vxlan100");
+        assert_eq!(l3vxlan, "rustbgpd:l3vxlan:leaf-1:l3vxlan100");
+        let parsed = parse_ownership_stamp(&l3vxlan).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::L3Vxlan);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "l3vxlan100");
+    }
+
+    #[test]
     fn parse_ownership_stamp_ignores_unrelated_or_malformed_altnames() {
         assert!(parse_ownership_stamp("operator:bridge:leaf-1:br100").is_none());
-        assert!(parse_ownership_stamp("rustbgpd:vrf:leaf-1:vrf100").is_none());
         assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1").is_none());
         assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1:br100:extra").is_none());
     }

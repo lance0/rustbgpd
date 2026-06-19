@@ -710,6 +710,10 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 observed_collect_metadata: None,
                 observed_vnifilter: None,
                 observed_bridge: None,
+                observed_table_id: None,
+                observed_up: None,
+                observed_master: None,
+                observed_router_mac: None,
             }],
         }))
     }

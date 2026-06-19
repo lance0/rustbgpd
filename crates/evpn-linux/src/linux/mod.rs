@@ -532,6 +532,13 @@ impl Dataplane for LinuxDataplane {
                 .map(|(name, link)| (name.clone(), link.clone()))
                 .collect(),
         );
+        snap.set_vrfs(
+            cache
+                .vrfs
+                .iter()
+                .map(|(name, link)| (name.clone(), link.clone()))
+                .collect(),
+        );
         for (name, link) in &cache.bridges {
             // Only surface bridges with exactly one VXLAN port so
             // the diff loop's NotReady inference matches the probe

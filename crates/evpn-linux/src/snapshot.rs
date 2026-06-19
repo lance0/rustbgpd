@@ -226,6 +226,8 @@ pub struct KernelVxlanLinkInfo {
     pub name: String,
     /// Linux alternative interface names observed on the VXLAN.
     pub altnames: Vec<String>,
+    /// Administrative link-up state.
+    pub up: bool,
     /// Fixed VNI when reported. `None` for malformed or collect-metadata
     /// devices that do not carry one fixed VNI.
     pub vni: Option<u32>,
@@ -243,6 +245,27 @@ pub struct KernelVxlanLinkInfo {
     /// Observed bridge master by name, if the master is a bridge present in
     /// the same link snapshot.
     pub bridge: Option<String>,
+    /// Observed master device by name, if the master is present in the same
+    /// link snapshot. L3VXLAN managed status uses this to verify VRF
+    /// attachment without overloading the bridge-specific field.
+    pub master: Option<String>,
+    /// Link-layer address reported on the VXLAN device.
+    pub mac: Option<MacAddress>,
+}
+
+/// One VRF link observed by name in the kernel link dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelVrfLinkInfo {
+    /// Kernel ifindex of the VRF link.
+    pub ifindex: u32,
+    /// Linux link name.
+    pub name: String,
+    /// Linux alternative interface names observed on the VRF.
+    pub altnames: Vec<String>,
+    /// Administrative link-up state.
+    pub up: bool,
+    /// VRF route table id from `IFLA_VRF_TABLE`, when reported.
+    pub table_id: Option<u32>,
 }
 
 /// Properties of a collect-metadata / Single VXLAN Device (SVD) port.
@@ -455,6 +478,9 @@ pub struct KernelSnapshot {
     /// lifecycle to classify desired VXLAN rows and rustbgpd-stamped VXLAN
     /// orphans independently of bridge readiness.
     pub vxlans: BTreeMap<String, KernelVxlanLinkInfo>,
+    /// VRF links by name. Used by ADR-0091 managed-netdev status substrate
+    /// to classify desired VRF rows before lifecycle create/delete lands.
+    pub vrfs: BTreeMap<String, KernelVrfLinkInfo>,
     /// Non-VXLAN bridge ports by link name, with observed
     /// `IFLA_BRPORT_STATE`. Consumed by the single-active AC-gate
     /// resolver (`crate::ac_gate`) to map an ADR-0085 `interface`
@@ -556,6 +582,22 @@ impl KernelSnapshot {
     pub fn insert_vxlan(&mut self, info: KernelVxlanLinkInfo) {
         self.link_names.insert(info.name.clone());
         self.vxlans.insert(info.name.clone(), info);
+    }
+
+    /// Replace the VRF inventory while preserving names of non-VRF links
+    /// already recorded via [`Self::set_link_names`].
+    pub fn set_vrfs(&mut self, vrfs: BTreeMap<String, KernelVrfLinkInfo>) {
+        for name in self.vrfs.keys() {
+            self.link_names.remove(name);
+        }
+        self.link_names.extend(vrfs.keys().cloned());
+        self.vrfs = vrfs;
+    }
+
+    /// Add a single VRF link to the inventory.
+    pub fn insert_vrf(&mut self, info: KernelVrfLinkInfo) {
+        self.link_names.insert(info.name.clone());
+        self.vrfs.insert(info.name.clone(), info);
     }
 
     /// Remove a bridge from the link inventory, returning the previous
@@ -974,6 +1016,7 @@ mod tests {
                 ifindex: 20,
                 name: "vxlan100".to_string(),
                 altnames: Vec::new(),
+                up: true,
                 vni: Some(100),
                 local_ip: Some(ip("10.0.0.1")),
                 dstport: Some(4789),
@@ -981,6 +1024,8 @@ mod tests {
                 collect_metadata: false,
                 vnifilter: false,
                 bridge: Some("br100".to_string()),
+                master: Some("br100".to_string()),
+                mac: None,
             },
         )]));
         snap.set_links(BTreeMap::from([(
