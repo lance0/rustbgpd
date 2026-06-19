@@ -35,6 +35,8 @@ const RTPROT_BGP: u8 = 186;
 /// state and bridge aging time as those become relevant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelLinkInfo {
+    /// Kernel ifindex of the bridge device.
+    pub ifindex: u32,
     /// Bridge name (e.g., `"br100"`).
     pub bridge_name: String,
     /// `true` if the bridge has `vlan_filtering=1`. Legacy L2VNIs still
@@ -42,6 +44,11 @@ pub struct KernelLinkInfo {
     /// validate an explicit local VLAN/VNI binding before reporting
     /// `Ready`.
     pub vlan_filtering: bool,
+    /// Linux alternative interface names observed through
+    /// `IFLA_PROP_LIST/IFLA_ALT_IFNAME`. ADR-0091 uses an
+    /// `rustbgpd:*` altname as the durable ownership stamp for
+    /// managed netdev adoption.
+    pub altnames: Vec<String>,
     /// VXLAN port attached to the bridge for this instance's VNI, if
     /// exactly one is found. `None` indicates a missing or ambiguous
     /// VXLAN port and reports the instance `NotReady`.
@@ -405,6 +412,10 @@ pub enum InstanceProbe {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
     fdb: BTreeMap<(EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry>,
+    /// Every kernel link name observed in the dump, independent of
+    /// link kind. This lets managed-netdev status report a same-name
+    /// non-bridge collision separately from a genuinely absent bridge.
+    link_names: BTreeSet<String>,
     /// Per-bridge link info, indexed by bridge name. Used by the probe
     /// pass; the diff function itself does not read this.
     pub links: BTreeMap<String, KernelLinkInfo>,
@@ -479,12 +490,31 @@ impl KernelSnapshot {
 
     /// Replace the link inventory wholesale.
     pub fn set_links(&mut self, links: BTreeMap<String, KernelLinkInfo>) {
+        self.link_names = links.keys().cloned().collect();
         self.links = links;
     }
 
     /// Add a single bridge to the link inventory (test convenience).
     pub fn insert_link(&mut self, info: KernelLinkInfo) {
+        self.link_names.insert(info.bridge_name.clone());
         self.links.insert(info.bridge_name.clone(), info);
+    }
+
+    /// Replace the all-link-name inventory wholesale.
+    pub fn set_link_names(&mut self, link_names: BTreeSet<String>) {
+        self.link_names = link_names;
+    }
+
+    /// Add a single non-bridge link name to the inventory.
+    pub fn insert_link_name(&mut self, name: impl Into<String>) {
+        self.link_names.insert(name.into());
+    }
+
+    /// `true` if the kernel reported a link with this name, regardless
+    /// of link kind.
+    #[must_use]
+    pub fn link_name_exists(&self, name: &str) -> bool {
+        self.link_names.contains(name)
     }
 
     /// Add (or overwrite) one named bridge port. Used by the Linux

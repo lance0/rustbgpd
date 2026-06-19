@@ -100,6 +100,7 @@ pub mod instance;
 pub mod ip_vrf;
 pub mod label_allocator;
 pub mod mac;
+pub mod managed_netdev;
 pub mod mass_withdraw;
 pub mod origination;
 pub mod origination_es;
@@ -139,6 +140,11 @@ pub use label_allocator::{AllocateError, EsiLabelAllocator, synthesize_from_esi}
 pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
+};
+pub use managed_netdev::{
+    MANAGED_NETDEV_STAMP_PREFIX, MAX_ALT_IFNAME_LEN, MAX_IFNAME_LEN, MAX_OWNER_TOKEN_LEN,
+    ManagedBridgeNetdev, ManagedNetdevClass, ManagedNetdevStamp, ManagedNetdevState,
+    ManagedNetdevStatus, ManagedNetdevTable, bridge_ownership_stamp, parse_ownership_stamp,
 };
 pub use mass_withdraw::{AsPathFingerprint, AsPathTracker, MassWithdrawTrigger};
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};

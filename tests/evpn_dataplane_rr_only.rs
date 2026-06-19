@@ -188,13 +188,14 @@ fn rr_only_deployment_does_not_spawn_evpn_dataplane_actor() {
     wait_for_health(&grpc_addr, &mut daemon);
     daemon.assert_still_running();
 
-    // The supervisor logs at INFO level when [[evpn_instances]] is
-    // empty. JSON-mode telemetry emits one line per record; we look
-    // for the marker substring rather than parsing each record so the
-    // assertion stays resilient to surrounding fields.
+    // The supervisor logs at INFO level when EVPN L2 instances,
+    // IP-VRFs, and managed netdevs are all empty. JSON-mode telemetry
+    // emits one line per record; we look for the marker substring
+    // rather than parsing each record so the assertion stays resilient
+    // to surrounding fields.
     let logs = daemon.structured_logs();
     assert!(
-        logs.contains("no EVPN L2 instances or IP-VRFs configured"),
+        logs.contains("no EVPN L2 instances, IP-VRFs, or managed netdevs configured"),
         "expected the RR-only short-circuit log line in daemon logs, \
          but got:\n{logs}"
     );

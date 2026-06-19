@@ -11,6 +11,7 @@ use crate::proto::{
     EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest, GetIpVrfRequest,
     IpVrfReadinessState, IpVrfState, ListEthernetSegmentsRequest, ListEthernetSegmentsResponse,
     ListEvpnInstancesRequest, ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest,
+    ListManagedNetdevsRequest, ManagedNetdevClass, ManagedNetdevLifecycleState, ManagedNetdevState,
     MetricsRequest, SetEthernetSegmentDrainRequest,
 };
 
@@ -565,6 +566,96 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
         "originated_local_macs_count": instance.originated_local_macs_count,
         "readiness": evpn_instance_readiness_label(instance.readiness_state),
         "not_ready_reason": instance.not_ready_reason,
+    })
+}
+
+/// List ADR-0091 managed EVPN netdev status rows.
+///
+/// Read-only. Surfaces the configured `[managed_netdevs]` bridge rows
+/// joined with the latest Linux link snapshot, plus rustbgpd-stamped
+/// orphan rows observed by the dataplane actor.
+pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_managed_netdevs(ListManagedNetdevsRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        let out: Vec<serde_json::Value> = resp.netdevs.iter().map(managed_netdev_to_json).collect();
+        output::print_json_pretty(&out)?;
+    } else if resp.netdevs.is_empty() {
+        println!("No managed EVPN netdevs configured or observed");
+    } else {
+        for row in &resp.netdevs {
+            let mut detail = vec![
+                format!("class={}", managed_netdev_class_label(row.class)),
+                format!("name={}", row.name),
+                format!("state={}", managed_netdev_state_label(row.state)),
+                format!("desired={}", row.desired),
+            ];
+            if !row.ownership_stamp.is_empty() {
+                detail.push(format!("stamp={}", row.ownership_stamp));
+            }
+            if let Some(ifindex) = row.ifindex {
+                detail.push(format!("ifindex={ifindex}"));
+            }
+            if let Some(vlan_filtering) = row.observed_vlan_filtering {
+                detail.push(format!("vlan-filtering={vlan_filtering}"));
+            }
+            if !row.observed_stamps.is_empty() {
+                detail.push(format!(
+                    "observed-stamps=[{}]",
+                    row.observed_stamps.join(",")
+                ));
+            }
+            if !row.reason.is_empty() {
+                detail.push(format!("reason=[{}]", row.reason));
+            }
+            println!("{}", detail.join(" "));
+        }
+    }
+    Ok(())
+}
+
+fn managed_netdev_class_label(class: i32) -> &'static str {
+    match ManagedNetdevClass::try_from(class) {
+        Ok(ManagedNetdevClass::Bridge) => "bridge",
+        Ok(ManagedNetdevClass::Unknown) | Err(_) => "unknown",
+    }
+}
+
+fn managed_netdev_state_label(state: i32) -> &'static str {
+    match ManagedNetdevLifecycleState::try_from(state) {
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateDesiredAbsent) => "desired-absent",
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe) => "owned-safe",
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateForeignPresent) => "foreign-present",
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateOwnedUnsafe) => "owned-unsafe",
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateOrphaned) => "orphaned",
+        Ok(ManagedNetdevLifecycleState::ManagedNetdevStateUnknown) | Err(_) => "unknown",
+    }
+}
+
+fn managed_netdev_to_json(row: &ManagedNetdevState) -> serde_json::Value {
+    serde_json::json!({
+        "class": managed_netdev_class_label(row.class),
+        "name": row.name,
+        "desired": row.desired,
+        "ownership_stamp": if row.ownership_stamp.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(row.ownership_stamp.clone())
+        },
+        "state": managed_netdev_state_label(row.state),
+        "reason": row.reason,
+        "ifindex": row
+            .ifindex
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_vlan_filtering": row
+            .observed_vlan_filtering
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_stamps": row.observed_stamps,
     })
 }
 
@@ -1311,6 +1402,46 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::list_nexthops(connection, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_managed_netdevs_command_runs_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_managed_netdevs(connection, false)
+            .await
+            .unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_managed_netdevs(connection, true).await.unwrap();
+    }
+
+    #[test]
+    fn managed_netdev_json_shape_is_stable() {
+        let value = super::managed_netdev_to_json(&crate::proto::ManagedNetdevState {
+            class: crate::proto::ManagedNetdevClass::Bridge as i32,
+            name: "br100".to_string(),
+            desired: true,
+            ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+            state: crate::proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32,
+            reason: String::new(),
+            ifindex: Some(10),
+            observed_vlan_filtering: Some(false),
+            observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+        });
+
+        assert_eq!(value["class"], "bridge");
+        assert_eq!(value["name"], "br100");
+        assert_eq!(value["desired"], true);
+        assert_eq!(value["ownership_stamp"], "rustbgpd:bridge:leaf-1:br100");
+        assert_eq!(value["state"], "owned-safe");
+        assert_eq!(value["ifindex"], 10);
+        assert_eq!(value["observed_vlan_filtering"], false);
+        assert_eq!(value["observed_stamps"][0], "rustbgpd:bridge:leaf-1:br100");
     }
 
     #[tokio::test]

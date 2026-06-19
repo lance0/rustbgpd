@@ -1,0 +1,232 @@
+//! Portable managed-netdev domain/status types (ADR-0091).
+//!
+//! The Linux implementation owns the netlink details. This module keeps the
+//! daemon/API boundary kernel-free: desired bridge rows, derived ownership
+//! stamps, and compact operator-facing status rows.
+
+use std::collections::BTreeMap;
+
+/// Prefix used in rustbgpd-managed altname ownership stamps.
+pub const MANAGED_NETDEV_STAMP_PREFIX: &str = "rustbgpd";
+/// Maximum Linux altname byte length (`ALTIFNAMSIZ - 1`).
+pub const MAX_ALT_IFNAME_LEN: usize = 127;
+/// Maximum Linux ifname byte length (`IFNAMSIZ - 1`).
+pub const MAX_IFNAME_LEN: usize = 15;
+/// Maximum configured owner token length for ADR-0091 v1.
+pub const MAX_OWNER_TOKEN_LEN: usize = 63;
+
+/// Managed netdev class. ADR-0091 v1 only enables bridge rows; VXLAN and VRF
+/// creation are explicitly deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ManagedNetdevClass {
+    /// Linux bridge device.
+    Bridge,
+}
+
+impl ManagedNetdevClass {
+    /// Stable lowercase label used in altnames and API output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bridge => "bridge",
+        }
+    }
+}
+
+/// One configured bridge row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedBridgeNetdev {
+    /// Linux bridge name.
+    pub name: String,
+    /// Desired protected `vlan_filtering` value.
+    pub vlan_filtering: bool,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
+/// Resolved managed-netdev desired state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManagedNetdevTable {
+    owner_token: Option<String>,
+    bridges: BTreeMap<String, ManagedBridgeNetdev>,
+}
+
+impl ManagedNetdevTable {
+    /// Empty desired state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a table from validated, already-unique bridge rows.
+    #[must_use]
+    pub fn from_bridge_map(owner_token: String, bridges: BTreeMap<String, bool>) -> Self {
+        let bridges = bridges
+            .into_iter()
+            .map(|(name, vlan_filtering)| {
+                let ownership_stamp = bridge_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedBridgeNetdev {
+                        name,
+                        vlan_filtering,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            owner_token: Some(owner_token),
+            bridges,
+        }
+    }
+
+    /// Whether no managed rows are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bridges.is_empty()
+    }
+
+    /// Owner token when `[managed_netdevs]` is configured.
+    #[must_use]
+    pub fn owner_token(&self) -> Option<&str> {
+        self.owner_token.as_deref()
+    }
+
+    /// Desired bridge rows in deterministic name order.
+    pub fn bridges(&self) -> impl Iterator<Item = &ManagedBridgeNetdev> {
+        self.bridges.values()
+    }
+
+    /// Find one desired bridge by name.
+    #[must_use]
+    pub fn bridge(&self, name: &str) -> Option<&ManagedBridgeNetdev> {
+        self.bridges.get(name)
+    }
+}
+
+/// Derived bridge ownership stamp.
+#[must_use]
+pub fn bridge_ownership_stamp(owner_token: &str, bridge_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{bridge_name}",
+        ManagedNetdevClass::Bridge.as_str()
+    )
+}
+
+/// Parsed rustbgpd ownership stamp from a link altname.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedNetdevStamp {
+    /// Original altname.
+    pub raw: String,
+    /// Managed class encoded in the stamp.
+    pub class: ManagedNetdevClass,
+    /// Owner token encoded in the stamp.
+    pub owner_token: String,
+    /// Link name encoded in the stamp.
+    pub name: String,
+}
+
+/// Parse a rustbgpd ownership stamp. Returns `None` for unrelated altnames.
+#[must_use]
+pub fn parse_ownership_stamp(raw: &str) -> Option<ManagedNetdevStamp> {
+    let mut parts = raw.split(':');
+    let prefix = parts.next()?;
+    if prefix != MANAGED_NETDEV_STAMP_PREFIX {
+        return None;
+    }
+    let class = match parts.next()? {
+        "bridge" => ManagedNetdevClass::Bridge,
+        _ => return None,
+    };
+    let owner_token = parts.next()?;
+    let name = parts.next()?;
+    if parts.next().is_some() || owner_token.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(ManagedNetdevStamp {
+        raw: raw.to_string(),
+        class,
+        owner_token: owner_token.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// Coarse status for one desired or observed managed netdev.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedNetdevState {
+    /// No live dataplane status has been published yet.
+    Unknown,
+    /// Configured row is absent from the current kernel snapshot.
+    DesiredAbsent,
+    /// Exact stamp, expected kind, and protected attributes all match.
+    OwnedSafe,
+    /// A same-name device exists but lacks the expected ownership stamp.
+    ForeignPresent,
+    /// A rustbgpd-stamped row exists but does not match the configured owner,
+    /// class, name, or protected attributes.
+    OwnedUnsafe,
+    /// A rustbgpd-stamped row exists with no corresponding desired config.
+    Orphaned,
+}
+
+impl ManagedNetdevState {
+    /// Stable lowercase label for API/CLI output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::DesiredAbsent => "desired-absent",
+            Self::OwnedSafe => "owned-safe",
+            Self::ForeignPresent => "foreign-present",
+            Self::OwnedUnsafe => "owned-unsafe",
+            Self::Orphaned => "orphaned",
+        }
+    }
+}
+
+/// Operator-facing status row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedNetdevStatus {
+    /// Netdev class.
+    pub class: ManagedNetdevClass,
+    /// Link name.
+    pub name: String,
+    /// Whether this row is present in desired config.
+    pub desired: bool,
+    /// Desired ownership stamp, when configured.
+    pub ownership_stamp: Option<String>,
+    /// Current status.
+    pub state: ManagedNetdevState,
+    /// Operator-facing reason. Empty for the happy path.
+    pub reason: String,
+    /// Observed kernel ifindex when present.
+    pub ifindex: Option<u32>,
+    /// Observed protected `vlan_filtering` value for bridge rows.
+    pub observed_vlan_filtering: Option<bool>,
+    /// Observed rustbgpd ownership stamps on the link.
+    pub observed_stamps: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_stamp_round_trips() {
+        let stamp = bridge_ownership_stamp("leaf-1", "br100");
+        assert_eq!(stamp, "rustbgpd:bridge:leaf-1:br100");
+        let parsed = parse_ownership_stamp(&stamp).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::Bridge);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "br100");
+    }
+
+    #[test]
+    fn parse_ownership_stamp_ignores_unrelated_or_malformed_altnames() {
+        assert!(parse_ownership_stamp("operator:bridge:leaf-1:br100").is_none());
+        assert!(parse_ownership_stamp("rustbgpd:vxlan:leaf-1:vni100").is_none());
+        assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1").is_none());
+        assert!(parse_ownership_stamp("rustbgpd:bridge:leaf-1:br100:extra").is_none());
+    }
+}

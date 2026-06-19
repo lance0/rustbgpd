@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use crate::ip_vrf::{IpVrfId, IpVrfStatus, IpVrfTable};
 use crate::mac::{MacAddress, RemoteMacTable};
-use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable};
+use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable, ManagedNetdevStatus, ManagedNetdevTable};
 use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
 
 /// Complete desired-state snapshot fed to the Linux dataplane.
@@ -38,7 +38,7 @@ use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
 /// gen N" without timestamp guesswork.
 ///
 /// `instances`, `remote_macs`, `bum_enforcement`, `ip_vrfs`, and
-/// `remote_ip_prefixes` are `Arc` so the daemon can re-publish a
+/// `remote_ip_prefixes` and `managed_netdevs` are `Arc` so the daemon can re-publish a
 /// near-identical snapshot (e.g., only the [`RemoteMacTable`]
 /// changed) without cloning the full instance / VRF tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,9 @@ pub struct DataplaneIntent {
     /// prefix still needs them. Empty when no `[[evpn_ip_vrfs]]`
     /// are configured.
     pub remote_ip_prefixes: Arc<crate::ip_vrf::RemoteIpPrefixTable>,
+    /// Desired ADR-0091 managed netdev state. Empty by default;
+    /// bridge lifecycle remains opt-in and restart-required.
+    pub managed_netdevs: Arc<ManagedNetdevTable>,
 }
 
 impl DataplaneIntent {
@@ -88,6 +91,7 @@ impl DataplaneIntent {
             bum_enforcement: Arc::new(BumEnforcementTable::new()),
             ip_vrfs: Arc::new(IpVrfTable::new()),
             remote_ip_prefixes: Arc::new(crate::ip_vrf::RemoteIpPrefixTable::new()),
+            managed_netdevs: Arc::new(ManagedNetdevTable::new()),
         }
     }
 }
@@ -498,6 +502,10 @@ pub struct DataplaneReport {
     /// failover events (group swaps + ordered teardowns). Same
     /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
     pub single_active_counters: SingleActiveCounters,
+    /// ADR-0091 managed-netdev desired/observed status rows. Empty when no
+    /// `[managed_netdevs]` config is present and no rustbgpd ownership stamps
+    /// are observed.
+    pub managed_netdevs: Vec<ManagedNetdevStatus>,
 }
 
 /// Per-report deltas for FDB-NHG drift recovery and stale-NHID

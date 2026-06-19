@@ -2332,6 +2332,54 @@ for the design rationale.
 
 ---
 
+## `[managed_netdevs]`
+
+ADR-0091 managed EVPN netdevs are opt-in and class-scoped. The first
+tranche accepts only bridge rows, derives the durable Linux altname
+ownership stamp, and reports status through
+`EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. It
+does **not** create, adopt, or delete links yet; bridge lifecycle
+execution lands in the next ADR-0091 slice.
+
+Any `[managed_netdevs]` add/remove/change is restart-required in this
+tranche for SIGHUP, config transactions, gNMI Set, and
+`EvpnService.ApplyEvpnRuntime`.
+
+```toml
+[managed_netdevs]
+owner_token = "leaf-1"             # ASCII letters/digits/_/./-, <= 63 bytes
+
+[[managed_netdevs.bridges]]
+name = "br100"                     # Linux ifname, <= 15 bytes
+vlan_filtering = true              # protected bridge attribute
+```
+
+The derived bridge stamp is:
+
+```text
+rustbgpd:bridge:<owner_token>:<bridge_name>
+```
+
+Validation rejects bridge rows without `owner_token`, duplicate bridge
+names, invalid Linux-style bridge names (`.`, `..`, spaces, or names
+over 15 bytes), invalid owner tokens, and derived stamps longer than
+Linux's 127-byte altname limit. Unknown future rows such as
+`[[managed_netdevs.vxlans]]` and `[[managed_netdevs.vrfs]]` are rejected
+until those classes ship.
+
+Status states:
+
+| State | Meaning |
+|-------|---------|
+| `desired-absent` | Configured bridge is not present in the kernel snapshot |
+| `foreign-present` | Same-name bridge exists without the expected rustbgpd ownership stamp |
+| `owned-unsafe` | Bridge carries a rustbgpd stamp that is not the expected one, or a protected attribute such as `vlan_filtering` does not match config |
+| `owned-safe` | Expected stamp and protected attributes match |
+| `orphaned` | A rustbgpd-stamped bridge exists with no desired config row |
+| `unknown` | No dataplane status snapshot has been published yet, or the link dump failed |
+
+---
+
 ## `[event_history]`
 
 Durable event-history outbox (ADR-0072). A daemon-local SQLite WAL

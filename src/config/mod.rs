@@ -1031,6 +1031,41 @@ impl Config {
         Ok(table)
     }
 
+    /// Resolve `[managed_netdevs]` into ADR-0091 desired state.
+    ///
+    /// The config validation pass already enforces owner-token, bridge-name,
+    /// duplicate-name, and derived-altname bounds. This method exists so
+    /// daemon wiring can hand a typed, ordered table to the EVPN dataplane
+    /// without duplicating the ownership-stamp format.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidManagedNetdev`] if a caller bypassed
+    /// validation and left bridge rows without an owner token.
+    pub fn resolve_managed_netdevs(
+        &self,
+    ) -> Result<rustbgpd_evpn::ManagedNetdevTable, ConfigError> {
+        if self.managed_netdevs.bridges.is_empty() {
+            return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
+        }
+        let owner_token = self.managed_netdevs.owner_token.as_str();
+        if owner_token.is_empty() {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: "managed_netdevs.owner_token is required when bridges are configured"
+                    .to_string(),
+            });
+        }
+        let bridges = self
+            .managed_netdevs
+            .bridges
+            .iter()
+            .map(|bridge| (bridge.name.clone(), bridge.vlan_filtering))
+            .collect();
+        Ok(rustbgpd_evpn::ManagedNetdevTable::from_bridge_map(
+            owner_token.to_string(),
+            bridges,
+        ))
+    }
+
     fn overlay_index_esi_member_map(
         &self,
     ) -> Result<BTreeMap<EthernetSegmentIdentifier, BTreeSet<EvpnInstanceId>>, ConfigError> {
@@ -1474,6 +1509,11 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
+    /// `[managed_netdevs]` changed. ADR-0091 v1 reads this table at
+    /// startup and reports status from the Linux dataplane actor; live
+    /// lifecycle changes are restart-required until the managed-netdev
+    /// executor lands.
+    pub managed_netdevs_changed: bool,
     /// `[[fib_tables]]` blocks added/removed/modified between old and new.
     /// Reload-applied in the common case: the ADR-0061 general-FIB actor
     /// accepts a runtime table-set swap on SIGHUP
@@ -1701,6 +1741,7 @@ impl ConfigDiff {
             || self.bfd_changed
             || self.policy_explain_changed
             || self.fib_tables_requires_restart
+            || self.managed_netdevs_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1969,6 +2010,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[fib_tables]] startup-from-empty".to_string());
     }
+    if diff.managed_netdevs_changed {
+        class
+            .restart_required_sections
+            .push("[managed_netdevs]".to_string());
+    }
     if diff.apply_bum_enforcement_changed {
         class
             .restart_required_sections
@@ -2124,6 +2170,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed,
+            "managed_netdevs_changed": diff.managed_netdevs_changed,
             "fib_tables_requires_restart": diff.fib_tables_requires_restart,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
@@ -2349,6 +2396,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
+    if diff.managed_netdevs_changed {
+        restart_sections.push("[managed_netdevs]");
+    }
     if diff.fib_tables_requires_restart {
         restart_sections.push("[[fib_tables]] (start FIB from an empty config)");
     }
@@ -2479,6 +2529,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
+        managed_netdevs_changed: old.managed_netdevs != new.managed_netdevs,
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,

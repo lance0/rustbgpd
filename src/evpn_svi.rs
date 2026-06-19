@@ -525,6 +525,7 @@ mod tests {
             bum_enforcement: vec![],
             ip_vrf_status: vec![],
             ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),
+            managed_netdevs: vec![],
             ip_vrf_installed_routes: std::collections::HashMap::new(),
             ip_vrf_install_drop_counts: std::collections::BTreeMap::new(),
             fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),

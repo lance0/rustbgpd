@@ -1561,6 +1561,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         );
     }));
 
+    // ADR-0091 managed EVPN netdev desired state. PR1 is read-only:
+    // the Linux dataplane actor reports desired/observed status rows
+    // but does not create, adopt, or delete links.
+    let evpn_managed_netdevs =
+        std::sync::Arc::new(config.resolve_managed_netdevs().unwrap_or_else(|e| {
+            fatal_startup_error(
+                "managed EVPN netdevs failed to re-resolve after configuration validation",
+                e,
+            );
+        }));
+
     let (evpn_duplicate_mac_quarantine_tx, evpn_duplicate_mac_quarantine_rx) =
         tokio::sync::watch::channel(std::sync::Arc::new(std::collections::BTreeSet::<
             rustbgpd_evpn::DuplicateMacKey,
@@ -1581,6 +1592,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         supervisor_config,
         &evpn_instances,
         &evpn_ip_vrfs,
+        &evpn_managed_netdevs,
         rib_tx.clone(),
         metrics.clone(),
         evpn_dataplane_shutdown.clone(),
@@ -1752,6 +1764,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let (evpn_instance_status_tx, evpn_instance_status_rx) =
         tokio::sync::watch::channel(Vec::<rustbgpd_evpn::InstanceDataplaneStatus>::new());
 
+    // Latest ADR-0091 managed-netdev status rows for
+    // `EvpnService.ListManagedNetdevs`.
+    let (evpn_managed_netdev_status_tx, evpn_managed_netdev_status_rx) =
+        tokio::sync::watch::channel(Vec::<rustbgpd_evpn::ManagedNetdevStatus>::new());
+
     // Latest snapshot of `DataplaneReport.ip_vrf_routes.observations`
     // for the Gate 9 slice 6b L3 originator subscriber and for
     // Prometheus gauge updates. Stays empty on RR-only deployments and
@@ -1827,6 +1844,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         evpn_instance_status_tx.send_replace(report.instance_status);
                         evpn_fdb_nexthops_tx.send_replace(report.fdb_nexthops);
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
+                        evpn_managed_netdev_status_tx.send_replace(report.managed_netdevs);
                         // Slice 6a: publish per-VRF observed-routes
                         // gauge values and bump filtered-routes
                         // counters by the per-pass deltas. The
@@ -2204,6 +2222,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         },
         evpn_instance_status_snapshot: {
             let rx = evpn_instance_status_rx.clone();
+            Arc::new(move || rx.borrow().clone())
+        },
+        evpn_managed_netdev_status_snapshot: {
+            let rx = evpn_managed_netdev_status_rx.clone();
             Arc::new(move || rx.borrow().clone())
         },
         evpn_ip_vrf_status_snapshot: {
@@ -3135,6 +3157,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
             evpn_ip_vrfs: Vec::new(),
+            managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
             fib_tables: Vec::new(),
             bfd_profiles: Vec::new(),
             apply_bum_enforcement: false,

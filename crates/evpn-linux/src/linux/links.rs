@@ -18,7 +18,7 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::link::{
     AfSpecBridge, BridgeVlanInfo, BridgeVlanInfoFlags, BridgeVlanTunnelInfo, InfoBridge,
     InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVlan, InfoVxlan, LinkAttribute,
-    LinkExtentMask, LinkInfo, LinkMessage,
+    LinkExtentMask, LinkInfo, LinkMessage, Prop,
 };
 use rtnetlink::Handle;
 
@@ -43,6 +43,8 @@ pub(crate) struct BridgeLink {
     /// SVI task can originate Type 2 routes for the bridge's own
     /// address without reaching back into this internal cache.
     pub mac: Option<MacAddress>,
+    /// Linux alternative interface names observed on the bridge.
+    pub altnames: Vec<String>,
     /// `true` when the bridge has `vlan_filtering=1`. Legacy instances
     /// still reject this shape; ADR-0089 instances with `bridge_vlan`
     /// validate the bridge/VXLAN VLAN inventory before reporting Ready.
@@ -124,6 +126,11 @@ struct VlanUpperLink {
 /// consistent state.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LinkCache {
+    /// Every link name reported by the kernel in this dump, regardless
+    /// of link kind. Managed-netdev status and lifecycle code use this
+    /// to distinguish "bridge is absent" from "the desired bridge name
+    /// is already occupied by a non-bridge link."
+    pub all_link_names: HashSet<String>,
     /// Bridges by name. Empty if no bridges exist on the host.
     pub bridges: HashMap<String, BridgeLink>,
     /// VXLAN ifindex -> EVPN VNI back-reference. Populated alongside
@@ -505,24 +512,8 @@ fn insert_unique_ifindex_binding(
 type BridgeVlanInventory =
     HashMap<u32, (Vec<KernelBridgeVlanInfo>, Vec<KernelBridgeVlanTunnelInfo>)>;
 
-/// Walk every netlink-reported link and build the inventory cache.
-///
-/// Two-pass: pass 1 captures bridges with their VLAN-filtering state;
-/// pass 2 captures VXLAN ports and stitches them onto their master
-/// bridge. Two passes are necessary because the link list is
-/// kernel-ordered and a VXLAN port can appear before its master
-/// bridge.
-pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneError> {
-    let mut bridges: HashMap<String, BridgeLink> = HashMap::new();
-    let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
-    let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
-    let mut vlan_upper_links: HashMap<(u32, u16), Option<u32>> = HashMap::new();
-    // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
-    // rows, but on real kernels it is not a substitute for the normal
-    // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
-    // there. Keep this diagnostic substrate optional so a kernel that
-    // refuses the extension mask does not break existing readiness.
-    let vlan_inventory = match dump_bridge_vlan_inventory(handle).await {
+async fn dump_bridge_vlan_inventory_optional(handle: &Handle) -> BridgeVlanInventory {
+    match dump_bridge_vlan_inventory(handle).await {
         Ok(inventory) => inventory,
         Err(e) => {
             // Best-effort: a kernel that refuses the extension mask (or any
@@ -532,7 +523,28 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
             tracing::debug!(error = %e, "bridge VLAN inventory dump unavailable; continuing without VLAN-aware substrate");
             BridgeVlanInventory::default()
         }
-    };
+    }
+}
+
+/// Walk every netlink-reported link and build the inventory cache.
+///
+/// Two-pass: pass 1 captures bridges with their VLAN-filtering state;
+/// pass 2 captures VXLAN ports and stitches them onto their master
+/// bridge. Two passes are necessary because the link list is
+/// kernel-ordered and a VXLAN port can appear before its master
+/// bridge.
+pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneError> {
+    let mut bridges: HashMap<String, BridgeLink> = HashMap::new();
+    let mut all_link_names: HashSet<String> = HashSet::new();
+    let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
+    let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
+    let mut vlan_upper_links: HashMap<(u32, u16), Option<u32>> = HashMap::new();
+    // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
+    // rows, but on real kernels it is not a substitute for the normal
+    // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
+    // there. Keep this diagnostic substrate optional so a kernel that
+    // refuses the extension mask does not break existing readiness.
+    let vlan_inventory = dump_bridge_vlan_inventory_optional(handle).await;
     // Every link that has a Controller attribute. Post-processed by
     // `index_bridge_ports` to seed `bridge_port_to_vni` and
     // `bridge_ports_by_name` for non-VXLAN ports of known bridges.
@@ -545,6 +557,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         .map_err(|e| DataplaneError::Other(format!("link dump: {e}")))?
     {
         let (kind, name) = link_kind_and_name(&msg);
+        all_link_names.extend(name.iter().cloned());
         let (bridge_vlans, vlan_tunnels) = vlan_inventory
             .get(&msg.header.index)
             .cloned()
@@ -567,11 +580,13 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                 if let Some(name) = name {
                     let vlan_filtering = bridge_vlan_filtering(&msg);
                     let mac = extract_link_mac(&msg);
+                    let altnames = extract_altnames(&msg);
                     bridges.insert(
                         name.clone(),
                         BridgeLink {
                             ifindex,
                             mac,
+                            altnames,
                             vlan_filtering,
                             vxlan: None,
                             vxlan_ports: Vec::new(),
@@ -611,6 +626,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         index_bridge_ports(all_enslaved, &bridge_ifindex_to_name, &mut bridges);
 
     Ok(LinkCache {
+        all_link_names,
         bridges,
         vxlan_ifindex_to_vni,
         svd_vxlan_ifindexes,
@@ -828,6 +844,24 @@ fn extract_link_mac(msg: &LinkMessage) -> Option<MacAddress> {
         }
     }
     None
+}
+
+/// Extract Linux alternative interface names from
+/// `IFLA_PROP_LIST/IFLA_ALT_IFNAME`.
+fn extract_altnames(msg: &LinkMessage) -> Vec<String> {
+    let mut altnames = Vec::new();
+    for attr in &msg.attributes {
+        if let LinkAttribute::PropList(props) = attr {
+            for prop in props {
+                if let Prop::AltIfName(name) = prop {
+                    altnames.push(name.clone());
+                }
+            }
+        }
+    }
+    altnames.sort();
+    altnames.dedup();
+    altnames
 }
 
 /// Extract the observed `IFLA_BRPORT_STATE` from the link's

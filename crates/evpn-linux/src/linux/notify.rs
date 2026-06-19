@@ -721,7 +721,9 @@ mod tests {
         vxlan_ifindex_to_vni.insert(vxlan_ifindex, vni);
         let mut bridge_port_to_vni = HashMap::new();
         bridge_port_to_vni.insert(port_ifindex, vni);
+        let all_link_names = HashSet::from(["br100".to_string()]);
         LinkCache {
+            all_link_names,
             bridges,
             vxlan_ifindex_to_vni,
             svd_vxlan_ifindexes: HashSet::new(),

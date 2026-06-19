@@ -179,7 +179,7 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (9 RPCs)
+### EvpnService (10 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -188,6 +188,7 @@ shape itself does not raise the tier.
 | `ListEvpnNexthops` | `sensitive_read` | ADR-0059 FDB nexthop groups — exposes multi-homing topology, ES layout, drift-recovery status. |
 | `ListEthernetSegments` | `sensitive_read` | ADR-0083/0085 Ethernet Segment diagnose state — exposes configured ES membership, composed drain reasons, DF/BUM role rows, AC-gate state, same-ESI local-bias eligibility, and FDB-NHG refs. |
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
+| `ListManagedNetdevs` | `sensitive_read` | ADR-0091 managed EVPN netdev status — exposes desired bridge names, ownership stamps, observed ifindex / `vlan_filtering`, and orphan/foreign/unsafe state. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
 | `SetEthernetSegmentDrain` | `operator_only` | ADR-0084 manual Ethernet Segment drain/undrain. Draining withdraws the ES's Type 4/EAD routes and the member VNIs' local Type 2 routes and suppresses new local-MAC origination — traffic-impacting origination control that redirects live customer traffic onto remote PEs' backup paths (a step above the per-key, restorative duplicate-MAC clear). Owns the `operator` drain reason only (ADR-0085): reasons compose, so the response's `drained` is the composed state and `reasons` lists what holds (an operator undrain does not override a `link` drain from the interface binding). Runtime-only and in-memory; restart clears it (bound segments re-evaluate carrier at startup). |
@@ -207,12 +208,12 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 46 | 52.3% |
-| `mutating` | 19 | 21.6% |
-| `operator_only` | 23 | 26.1% |
-| **Total** | **88** | **100%** |
+| `sensitive_read` | 47 | 52.8% |
+| `mutating` | 19 | 21.3% |
+| `operator_only` | 23 | 25.8% |
+| **Total** | **89** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 88
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 89
 total is 84 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
@@ -291,7 +292,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 88-method classification
+`crates/api/src/authz.rs` contains the same 89-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

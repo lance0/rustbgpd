@@ -61,8 +61,8 @@ use std::time::Duration;
 use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
-    FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ProjectedEvpnEadPerEvi,
-    ProjectedEvpnRoute, RemoteMacTable, SameEsiBiasTable,
+    FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ManagedNetdevTable,
+    ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable, SameEsiBiasTable,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -240,6 +240,17 @@ pub struct EvpnDataplaneHandle {
     pub(crate) remote_prefix_drop_counts_rx: watch::Receiver<Arc<RemoteIpPrefixDropCounts>>,
 }
 
+/// EVPN intent tables used to seed the dataplane supervisor.
+///
+/// Bundles the independently watched config surfaces so helper
+/// signatures stay stable as ADR-managed surfaces are added.
+#[derive(Clone, Copy)]
+pub struct EvpnDataplaneTables<'a> {
+    pub instances: &'a Arc<EvpnInstanceTable>,
+    pub ip_vrfs: &'a Arc<IpVrfTable>,
+    pub managed_netdevs: &'a Arc<ManagedNetdevTable>,
+}
+
 impl EvpnDataplaneHandle {
     /// Subscribe to the [`DataplaneReport`] broadcast. Returns a
     /// receiver that will yield every future report from the
@@ -335,8 +346,9 @@ impl EvpnDataplaneHandle {
 }
 
 /// Spawn the EVPN dataplane stack. Returns `None` if
-/// `evpn_instances` is empty (RR-only deployments take this path —
-/// no netlink socket is opened, no background task is spawned).
+/// `evpn_instances`, `ip_vrfs`, and `managed_netdevs` are all empty
+/// (RR-only deployments take this path — no netlink socket is opened,
+/// no background task is spawned).
 ///
 /// Otherwise spawns:
 ///
@@ -355,6 +367,7 @@ pub async fn spawn(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
     ip_vrfs: &Arc<IpVrfTable>,
+    managed_netdevs: &Arc<ManagedNetdevTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
@@ -364,6 +377,7 @@ pub async fn spawn(
         config,
         evpn_instances,
         ip_vrfs,
+        managed_netdevs,
         rib_tx,
         metrics,
         daemon_shutdown,
@@ -382,14 +396,15 @@ pub async fn spawn_with_quarantine(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
     ip_vrfs: &Arc<IpVrfTable>,
+    managed_netdevs: &Arc<ManagedNetdevTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
     duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
 ) -> Option<EvpnDataplaneHandle> {
-    if evpn_instances.is_empty() && ip_vrfs.is_empty() {
+    if evpn_instances.is_empty() && ip_vrfs.is_empty() && managed_netdevs.is_empty() {
         info!(
-            "no EVPN L2 instances or IP-VRFs configured — dataplane actor not spawned \
+            "no EVPN L2 instances, IP-VRFs, or managed netdevs configured — dataplane actor not spawned \
              (RR-only deployment)"
         );
         return None;
@@ -411,6 +426,7 @@ pub async fn spawn_with_quarantine(
                     config,
                     evpn_instances,
                     ip_vrfs,
+                    managed_netdevs,
                     rib_tx,
                     &metrics,
                     daemon_shutdown,
@@ -435,6 +451,7 @@ pub async fn spawn_with_quarantine(
     {
         let _ = (
             config,
+            managed_netdevs,
             rib_tx,
             metrics,
             daemon_shutdown,
@@ -462,8 +479,7 @@ pub async fn spawn_with_quarantine(
 #[allow(dead_code)]
 pub fn spawn_with_dataplane<D>(
     config: SupervisorConfig,
-    evpn_instances: &Arc<EvpnInstanceTable>,
-    ip_vrfs: &Arc<IpVrfTable>,
+    tables: EvpnDataplaneTables<'_>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     daemon_shutdown: CancellationToken,
@@ -475,8 +491,9 @@ where
     let (_, duplicate_mac_quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
     spawn_with_dataplane_and_quarantine(
         config,
-        evpn_instances,
-        ip_vrfs,
+        tables.instances,
+        tables.ip_vrfs,
+        tables.managed_netdevs,
         rib_tx,
         metrics,
         daemon_shutdown,
@@ -492,6 +509,7 @@ pub fn spawn_with_dataplane_and_quarantine<D>(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
     ip_vrfs: &Arc<IpVrfTable>,
+    managed_netdevs: &Arc<ManagedNetdevTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     daemon_shutdown: CancellationToken,
@@ -565,6 +583,7 @@ where
         config.poll_interval,
         evpn_instances_rx,
         ip_vrfs_rx,
+        managed_netdevs.clone(),
         rib_tx,
         intent_tx,
         bum_enforcement_rx,
@@ -698,6 +717,7 @@ struct SupervisorIntentState {
     generation: u64,
     last_instances: Arc<EvpnInstanceTable>,
     last_ip_vrfs: Arc<IpVrfTable>,
+    managed_netdevs: Arc<ManagedNetdevTable>,
     last_table: Arc<RemoteMacTable>,
     last_ip_prefixes: Arc<RemoteIpPrefixTable>,
     last_ip_prefix_drop_counts: BTreeMap<(String, &'static str), u64>,
@@ -710,6 +730,7 @@ impl Default for SupervisorIntentState {
             generation: 0,
             last_instances: Arc::new(EvpnInstanceTable::new()),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
+            managed_netdevs: Arc::new(ManagedNetdevTable::new()),
             last_table: Arc::new(RemoteMacTable::new()),
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
@@ -807,6 +828,7 @@ async fn publish_dataplane_intent(
         bum_enforcement: Arc::new(bum_enforcement),
         ip_vrfs,
         remote_ip_prefixes,
+        managed_netdevs: state.managed_netdevs.clone(),
     });
     if intent_tx.send(intent).is_err() {
         debug!("intent receiver gone; supervisor exiting");
@@ -834,6 +856,7 @@ fn publish_cached_dataplane_intent(
         bum_enforcement: Arc::new(bum_enforcement),
         ip_vrfs: state.last_ip_vrfs.clone(),
         remote_ip_prefixes: state.last_ip_prefixes.clone(),
+        managed_netdevs: state.managed_netdevs.clone(),
     });
     if intent_tx.send(intent).is_err() {
         debug!("intent receiver gone; supervisor exiting");
@@ -870,6 +893,7 @@ async fn supervisor_loop(
     poll_interval: Duration,
     mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
     mut ip_vrfs_rx: watch::Receiver<Arc<IpVrfTable>>,
+    managed_netdevs: Arc<ManagedNetdevTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
@@ -879,7 +903,10 @@ async fn supervisor_loop(
     metrics: BgpMetrics,
     shutdown: CancellationToken,
 ) {
-    let mut state = SupervisorIntentState::default();
+    let mut state = SupervisorIntentState {
+        managed_netdevs,
+        ..SupervisorIntentState::default()
+    };
     let mut duplicate_mac_quarantine_updates_open = true;
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3263,12 +3290,14 @@ mod tests {
     async fn spawn_returns_none_for_empty_instance_table() {
         let instances = Arc::new(EvpnInstanceTable::new());
         let ip_vrfs = Arc::new(IpVrfTable::new());
+        let managed_netdevs = Arc::new(ManagedNetdevTable::new());
         let (rib_tx, _rib_rx) = mpsc::channel(8);
         let shutdown = CancellationToken::new();
         let h = spawn(
             SupervisorConfig::default(),
             &instances,
             &ip_vrfs,
+            &managed_netdevs,
             rib_tx,
             BgpMetrics::new(),
             shutdown,
@@ -3307,10 +3336,14 @@ mod tests {
             actor_config: ReconcileActorConfig::for_tests(),
         };
         let ip_vrfs = Arc::new(IpVrfTable::new());
+        let managed_netdevs = Arc::new(ManagedNetdevTable::new());
         let h = spawn_with_dataplane(
             cfg,
-            &instances,
-            &ip_vrfs,
+            EvpnDataplaneTables {
+                instances: &instances,
+                ip_vrfs: &ip_vrfs,
+                managed_netdevs: &managed_netdevs,
+            },
             rib_tx,
             &BgpMetrics::new(),
             shutdown.clone(),
@@ -3372,10 +3405,14 @@ mod tests {
             actor_config: ReconcileActorConfig::for_tests(),
         };
         let ip_vrfs = Arc::new(IpVrfTable::new());
+        let managed_netdevs = Arc::new(ManagedNetdevTable::new());
         let h = spawn_with_dataplane(
             cfg,
-            &instances,
-            &ip_vrfs,
+            EvpnDataplaneTables {
+                instances: &instances,
+                ip_vrfs: &ip_vrfs,
+                managed_netdevs: &managed_netdevs,
+            },
             rib_tx,
             &BgpMetrics::new(),
             shutdown.clone(),
@@ -3447,10 +3484,12 @@ mod tests {
         let supervisor_shutdown = shutdown.clone();
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_millis(15),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3521,11 +3560,13 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (instances_tx, instances_rx) = watch::channel(initial_instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3586,11 +3627,13 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3652,11 +3695,13 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3706,6 +3751,7 @@ mod tests {
             generation: 1,
             last_instances: cached_instances.clone(),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
+            managed_netdevs: Arc::new(ManagedNetdevTable::new()),
             last_table: Arc::new(RemoteMacTable::new()),
             last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
@@ -3758,10 +3804,12 @@ mod tests {
         let supervisor_shutdown = shutdown.clone();
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3831,11 +3879,13 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -3976,6 +4026,7 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         // One-minute poll: only the event path can produce the second
         // projection inside this test's budget.
@@ -3983,6 +4034,7 @@ mod tests {
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
@@ -4035,11 +4087,13 @@ mod tests {
             watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
             instances_rx,
             ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
             rib_tx,
             intent_tx,
             bum_rx,
