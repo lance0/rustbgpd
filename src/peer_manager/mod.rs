@@ -320,6 +320,7 @@ impl PeerManager {
                 evpn_instances: Vec::new(),
                 ethernet_segments: Vec::new(),
                 evpn_ip_vrfs: Vec::new(),
+                managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
                 fib_tables: Vec::new(),
                 bfd_profiles: Vec::new(),
                 apply_bum_enforcement: false,

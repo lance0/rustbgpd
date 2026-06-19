@@ -17,6 +17,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   readiness alongside `/metrics`. Readiness checks PeerManager and RIB
   responsiveness under the same 200 ms deadline now used by `GetHealth`,
   without requiring any peers or routes to exist.
+- **ADR-0091 managed EVPN bridge config/status substrate.** `[managed_netdevs]`
+  now accepts opt-in bridge desired state (`owner_token`,
+  `[[managed_netdevs.bridges]] name`, `vlan_filtering`), derives the durable
+  `rustbgpd:bridge:<owner>:<name>` Linux altname ownership stamp, starts the
+  EVPN dataplane actor for managed-only configs, and exposes read-only
+  desired/observed/orphan/foreign/unsafe rows through
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. This tranche
+  is diagnose-only: lifecycle create/adopt/reap remains the next ADR-0091
+  bridge slice.
 
 ## [0.41.0] — 2026-06-18
 

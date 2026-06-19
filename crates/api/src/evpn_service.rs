@@ -20,7 +20,8 @@ use rustbgpd_evpn::{
     BridgeVlan, BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstance,
     EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
     EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
-    InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, MacAddress, SameEsiBiasTable,
+    InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, MacAddress, ManagedNetdevStatus,
+    SameEsiBiasTable,
 };
 use tonic::{Request, Response, Status};
 
@@ -39,6 +40,11 @@ pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'sta
 /// deterministic snapshot.
 pub type InstanceStatusSnapshotFn =
     Arc<dyn Fn() -> Vec<InstanceDataplaneStatus> + Send + Sync + 'static>;
+
+/// Read-side hook for the latest ADR-0091 managed-netdev status
+/// snapshot. The daemon backs it with `DataplaneReport.managed_netdevs`.
+pub type ManagedNetdevStatusSnapshotFn =
+    Arc<dyn Fn() -> Vec<ManagedNetdevStatus> + Send + Sync + 'static>;
 
 /// Read-side hook for per-IP-VRF Type 5 origination counts (Gate 9
 /// slice 6b). Mirrors [`OriginatedLocalMacCountFn`] for the L3 case;
@@ -182,6 +188,7 @@ pub struct EvpnService {
     access_mode: AccessMode,
     originated_local_mac_count: OriginatedLocalMacCountFn,
     instance_status_snapshot: InstanceStatusSnapshotFn,
+    managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
@@ -208,6 +215,7 @@ impl EvpnService {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count: Arc::new(|_| 0),
             instance_status_snapshot: Arc::new(Vec::new),
+            managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
@@ -238,6 +246,7 @@ impl EvpnService {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
+            managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
@@ -340,6 +349,7 @@ impl EvpnService {
             access_mode,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
+            managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
@@ -364,6 +374,16 @@ impl EvpnService {
         instance_status_snapshot: InstanceStatusSnapshotFn,
     ) -> Self {
         self.instance_status_snapshot = instance_status_snapshot;
+        self
+    }
+
+    /// Override the managed-netdev status snapshot provider.
+    #[must_use]
+    pub fn with_managed_netdev_status_snapshot(
+        mut self,
+        managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
+    ) -> Self {
+        self.managed_netdev_status_snapshot = managed_netdev_status_snapshot;
         self
     }
 
@@ -589,6 +609,18 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             })
             .collect();
         Ok(Response::new(proto::ListIpVrfsResponse { ip_vrfs }))
+    }
+
+    async fn list_managed_netdevs(
+        &self,
+        _request: Request<proto::ListManagedNetdevsRequest>,
+    ) -> Result<Response<proto::ListManagedNetdevsResponse>, Status> {
+        let mut netdevs: Vec<proto::ManagedNetdevState> = (self.managed_netdev_status_snapshot)()
+            .iter()
+            .map(managed_netdev_to_proto)
+            .collect();
+        netdevs.sort_by(|a, b| (a.class, &a.name, !a.desired).cmp(&(b.class, &b.name, !b.desired)));
+        Ok(Response::new(proto::ListManagedNetdevsResponse { netdevs }))
     }
 
     async fn get_ip_vrf(
@@ -852,6 +884,41 @@ fn evpn_instance_to_proto(
         }
     }
     state
+}
+
+fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevState {
+    proto::ManagedNetdevState {
+        class: match row.class {
+            rustbgpd_evpn::ManagedNetdevClass::Bridge => proto::ManagedNetdevClass::Bridge as i32,
+        },
+        name: row.name.clone(),
+        desired: row.desired,
+        ownership_stamp: row.ownership_stamp.clone().unwrap_or_default(),
+        state: match row.state {
+            rustbgpd_evpn::ManagedNetdevState::Unknown => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateUnknown as i32
+            }
+            rustbgpd_evpn::ManagedNetdevState::DesiredAbsent => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateDesiredAbsent as i32
+            }
+            rustbgpd_evpn::ManagedNetdevState::OwnedSafe => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32
+            }
+            rustbgpd_evpn::ManagedNetdevState::ForeignPresent => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateForeignPresent as i32
+            }
+            rustbgpd_evpn::ManagedNetdevState::OwnedUnsafe => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedUnsafe as i32
+            }
+            rustbgpd_evpn::ManagedNetdevState::Orphaned => {
+                proto::ManagedNetdevLifecycleState::ManagedNetdevStateOrphaned as i32
+            }
+        },
+        reason: row.reason.clone(),
+        ifindex: row.ifindex,
+        observed_vlan_filtering: row.observed_vlan_filtering,
+        observed_stamps: row.observed_stamps.clone(),
+    }
 }
 
 #[must_use]
@@ -2056,6 +2123,44 @@ mod tests {
             proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32
         );
         assert_eq!(resp.message, "validated");
+    }
+
+    #[tokio::test]
+    async fn list_managed_netdevs_reads_status_snapshot() {
+        let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()))
+            .with_managed_netdev_status_snapshot(Arc::new(|| {
+                vec![ManagedNetdevStatus {
+                    class: rustbgpd_evpn::ManagedNetdevClass::Bridge,
+                    name: "br100".to_string(),
+                    desired: true,
+                    ownership_stamp: Some("rustbgpd:bridge:leaf-1:br100".to_string()),
+                    state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+                    reason: String::new(),
+                    ifindex: Some(10),
+                    observed_vlan_filtering: Some(false),
+                    observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+                }]
+            }));
+
+        let resp = svc
+            .list_managed_netdevs(Request::new(proto::ListManagedNetdevsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.netdevs.len(), 1);
+        let row = &resp.netdevs[0];
+        assert_eq!(row.class, proto::ManagedNetdevClass::Bridge as i32);
+        assert_eq!(row.name, "br100");
+        assert!(row.desired);
+        assert_eq!(row.ownership_stamp, "rustbgpd:bridge:leaf-1:br100");
+        assert_eq!(
+            row.state,
+            proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32
+        );
+        assert_eq!(row.ifindex, Some(10));
+        assert_eq!(row.observed_vlan_filtering, Some(false));
+        assert_eq!(row.observed_stamps, vec!["rustbgpd:bridge:leaf-1:br100"]);
     }
 
     // -- Gate 9 IP-VRF surface --------------------------------------

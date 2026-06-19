@@ -61,6 +61,12 @@ pub struct Config {
     /// routes into the configured non-reserved tables. Restart-required.
     #[serde(default)]
     pub fib_tables: Vec<FibTableConfig>,
+    /// Optional rustbgpd-managed EVPN Linux netdev lifecycle
+    /// (ADR-0091). Empty by default — existing deployments keep the
+    /// operator-provisioned / observe-only contract. v1 accepts only
+    /// bridge rows; VXLAN and VRF creation stay deferred.
+    #[serde(default)]
+    pub managed_netdevs: ManagedNetdevsConfig,
     /// Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by
     /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.
     #[serde(default)]
@@ -1208,6 +1214,35 @@ pub struct EvpnIpVrfConfig {
     pub overlay_index_l2vni: Option<u32>,
 }
 
+/// ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.
+///
+/// v1 accepts only `[[managed_netdevs.bridges]]` rows. The
+/// `owner_token` is required when at least one row is configured and
+/// is used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
+/// `rustbgpd:bridge:<owner_token>:<bridge_name>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedNetdevsConfig {
+    /// Stable deployment-local owner token. Empty only when no rows are
+    /// configured.
+    #[serde(default)]
+    pub owner_token: String,
+    /// Managed bridge rows. VXLAN / VRF lifecycle are intentionally not
+    /// accepted in this release.
+    #[serde(default)]
+    pub bridges: Vec<ManagedBridgeNetdevConfig>,
+}
+
+/// One managed Linux bridge row (ADR-0091 bridge-first tranche).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedBridgeNetdevConfig {
+    /// Linux bridge interface name.
+    pub name: String,
+    /// Desired protected bridge `vlan_filtering` value.
+    pub vlan_filtering: bool,
+}
+
 /// Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1447,6 +1482,8 @@ pub enum ConfigError {
     InvalidEthernetSegment { reason: String },
     #[error("invalid EVPN IP-VRF config: {reason}")]
     InvalidEvpnIpVrf { reason: String },
+    #[error("invalid managed netdev config: {reason}")]
+    InvalidManagedNetdev { reason: String },
     #[error("invalid FIB table config: {reason}")]
     InvalidFibTable { reason: String },
     #[error("invalid BFD config: {reason}")]

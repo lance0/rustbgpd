@@ -174,6 +174,7 @@ fn intent(
         bum_enforcement: Arc::new(BumEnforcementTable::new()),
         ip_vrfs: Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
         remote_ip_prefixes: Arc::new(rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new()),
+        managed_netdevs: Arc::new(rustbgpd_evpn::ManagedNetdevTable::new()),
     })
 }
 
@@ -190,6 +191,7 @@ fn intent_with_bum_enforcement(
         bum_enforcement: Arc::new(bum_enforcement),
         ip_vrfs: Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
         remote_ip_prefixes: Arc::new(rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new()),
+        managed_netdevs: Arc::new(rustbgpd_evpn::ManagedNetdevTable::new()),
     })
 }
 
@@ -2446,6 +2448,7 @@ fn l3_intent(
         bum_enforcement: Arc::new(BumEnforcementTable::new()),
         ip_vrfs: Arc::new(ip_vrfs),
         remote_ip_prefixes: Arc::new(remote_ip_prefixes),
+        managed_netdevs: Arc::new(rustbgpd_evpn::ManagedNetdevTable::new()),
     })
 }
 

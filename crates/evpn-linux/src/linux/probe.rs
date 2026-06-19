@@ -332,7 +332,9 @@ mod tests {
             vxlan_to_vni.insert(v.ifindex, v.vni);
         }
         bridges.insert(name.to_string(), link);
+        let all_link_names = HashSet::from([name.to_string()]);
         LinkCache {
+            all_link_names,
             bridges,
             vxlan_ifindex_to_vni: vxlan_to_vni,
             svd_vxlan_ifindexes: HashSet::new(),

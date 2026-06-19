@@ -10287,3 +10287,79 @@ fn reload_matrix_documents_every_peer_group_field() {
         );
     }
 }
+
+#[test]
+fn managed_netdevs_default_empty_and_resolve_bridge_stamp() {
+    let config = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n",
+        valid_toml()
+    ))
+    .unwrap();
+
+    let table = config.resolve_managed_netdevs().unwrap();
+    assert_eq!(table.owner_token(), Some("leaf-1"));
+    let bridge = table.bridge("br100").unwrap();
+    assert_eq!(bridge.name, "br100");
+    assert!(bridge.vlan_filtering);
+    assert_eq!(bridge.ownership_stamp, "rustbgpd:bridge:leaf-1:br100");
+
+    let empty = parse(valid_toml()).unwrap();
+    assert!(empty.resolve_managed_netdevs().unwrap().is_empty());
+}
+
+#[test]
+fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
+    let missing_owner = parse(&format!(
+        "{}\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        missing_owner,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let duplicate = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        duplicate,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let invalid_owner = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf 1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        invalid_owner,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+
+    let invalid_name = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br 100\"\nvlan_filtering = false\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        invalid_name,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
+}
+
+#[test]
+fn managed_netdevs_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = false\n",
+        valid_toml()
+    ))
+    .unwrap();
+
+    let diff = diff_config(&old, &new);
+    assert!(diff.managed_netdevs_changed);
+    assert!(diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["managed_netdevs_changed"], true);
+    let text = format_config_diff(&diff);
+    assert!(text.contains("[managed_netdevs] changed"));
+}

@@ -39,8 +39,9 @@ use std::time::Duration;
 use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
-    InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, RemoteMacTable,
-    SingleActiveCounters,
+    InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, ManagedBridgeNetdev,
+    ManagedNetdevClass, ManagedNetdevState, ManagedNetdevStatus, ManagedNetdevTable,
+    RemoteMacTable, SingleActiveCounters, parse_ownership_stamp,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -58,7 +59,8 @@ use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
 use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget};
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
+    InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, OwnedEntry, OwnedEntryKind,
+    OwnedSet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,6 +81,16 @@ enum L3OpKey {
         group_key: crate::group_state::L3NhgKey,
         prefix: EvpnIpPrefixValue,
     },
+}
+
+struct ReconcileReportPayload {
+    instance_status: Vec<InstanceDataplaneStatus>,
+    applied: Vec<AppliedOp>,
+    failed: Vec<FailedOp>,
+    bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
+    ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
+    ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
+    managed_netdevs: Vec<ManagedNetdevStatus>,
 }
 
 /// Tunable cadence for the reconcile loop. Production values come from
@@ -263,6 +275,10 @@ struct ActorState {
     /// was withdrawn) are also pruned so a future re-entry produces
     /// a fresh warn.
     warned_ipv6_fallback: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// Managed-netdev rows we've already warned about for the current
+    /// fail-closed condition. Pruned when the row becomes safe or
+    /// disappears, so a later re-entry warns again.
+    warned_managed_netdevs: BTreeSet<(ManagedNetdevClass, String, &'static str)>,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -450,6 +466,7 @@ impl ActorState {
             nhg_permanent_failures: BTreeMap::new(),
             pending_deletes: BTreeSet::new(),
             warned_ipv6_fallback: BTreeSet::new(),
+            warned_managed_netdevs: BTreeSet::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -682,14 +699,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 let status = build_instance_status(&intent.instances, &probes);
                 let bum_enforcement =
                     build_bum_enforcement_status(&intent.bum_enforcement, &KernelSnapshot::new());
-                self.emit_report(
-                    status,
-                    vec![],
-                    vec![],
+                let managed_netdevs = build_managed_netdev_status(&intent.managed_netdevs, None);
+                self.emit_report(ReconcileReportPayload {
+                    instance_status: status,
+                    applied: vec![],
+                    failed: vec![],
                     bum_enforcement,
                     ip_vrf_status,
                     ip_vrf_routes,
-                )
+                    managed_netdevs,
+                })
                 .await;
                 return;
             }
@@ -804,14 +823,17 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         // state, not "no links exist".
                         let bum_enforcement =
                             build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
-                        self.emit_report(
-                            status,
-                            vec![],
-                            vec![],
+                        let managed_netdevs =
+                            build_managed_netdev_status(&intent.managed_netdevs, Some(&snapshot));
+                        self.emit_report(ReconcileReportPayload {
+                            instance_status: status,
+                            applied: vec![],
+                            failed: vec![],
                             bum_enforcement,
                             ip_vrf_status,
                             ip_vrf_routes,
-                        )
+                            managed_netdevs,
+                        })
                         .await;
                         return;
                     }
@@ -855,14 +877,19 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             let status = build_instance_status(&intent.instances, &probes);
                             let bum_enforcement =
                                 build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
-                            self.emit_report(
-                                status,
-                                vec![],
-                                vec![],
+                            let managed_netdevs = build_managed_netdev_status(
+                                &intent.managed_netdevs,
+                                Some(&snapshot),
+                            );
+                            self.emit_report(ReconcileReportPayload {
+                                instance_status: status,
+                                applied: vec![],
+                                failed: vec![],
                                 bum_enforcement,
                                 ip_vrf_status,
                                 ip_vrf_routes,
-                            )
+                                managed_netdevs,
+                            })
                             .await;
                             return;
                         }
@@ -1501,14 +1528,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         let status = build_instance_status(&intent.instances, &probes);
-        self.emit_report(
-            status,
+        let managed_netdevs = build_managed_netdev_status(&intent.managed_netdevs, Some(&snapshot));
+        self.emit_report(ReconcileReportPayload {
+            instance_status: status,
             applied,
             failed,
             bum_enforcement,
             ip_vrf_status,
             ip_vrf_routes,
-        )
+            managed_netdevs,
+        })
         .await;
     }
 
@@ -3119,15 +3148,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// Send a report, dropping it if the daemon-side receiver has gone
     /// away (it shouldn't during normal operation, but it's not worth
     /// crashing the actor over).
-    async fn emit_report(
-        &mut self,
-        instance_status: Vec<InstanceDataplaneStatus>,
-        applied: Vec<AppliedOp>,
-        failed: Vec<FailedOp>,
-        bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
-        ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
-        ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
-    ) {
+    async fn emit_report(&mut self, payload: ReconcileReportPayload) {
+        self.warn_managed_netdev_status_once(&payload.managed_netdevs);
+
         // Gate 9 slice 6c: snapshot installed-route counts per VRF
         // for the gRPC `IpVrfState.installed_routes_count` surface
         // and the Prometheus `evpn_ip_vrf_installed_routes` gauge.
@@ -3143,8 +3166,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // zero. Without this pre-population, a VRF that drained
         // would never reappear in the map and the gauge would retain
         // a stale non-zero value until daemon restart.
-        let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> =
-            ip_vrf_status.iter().map(|row| (row.vrf_id, 0)).collect();
+        let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> = payload
+            .ip_vrf_status
+            .iter()
+            .map(|row| (row.vrf_id, 0))
+            .collect();
         for ((vrf_id, _prefix), install) in &self.state.l3_owned.installs {
             if install.route_installed {
                 *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
@@ -3156,12 +3182,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
             reconcile_generation: self.state.reconcile_generation,
-            instance_status,
-            applied,
-            failed,
-            bum_enforcement,
-            ip_vrf_status,
-            ip_vrf_routes,
+            instance_status: payload.instance_status,
+            applied: payload.applied,
+            failed: payload.failed,
+            bum_enforcement: payload.bum_enforcement,
+            ip_vrf_status: payload.ip_vrf_status,
+            ip_vrf_routes: payload.ip_vrf_routes,
+            managed_netdevs: payload.managed_netdevs,
             ip_vrf_installed_routes,
             ip_vrf_install_drop_counts: self.state.last_l3_drop_counts.clone(),
             fdb_nexthops: build_fdb_nexthop_status(&self.state),
@@ -3172,6 +3199,35 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
         }
+    }
+
+    fn warn_managed_netdev_status_once(&mut self, rows: &[ManagedNetdevStatus]) {
+        let mut current = BTreeSet::new();
+        for row in rows {
+            if !matches!(
+                row.state,
+                ManagedNetdevState::ForeignPresent
+                    | ManagedNetdevState::OwnedUnsafe
+                    | ManagedNetdevState::Orphaned
+            ) {
+                continue;
+            }
+            let key = (row.class, row.name.clone(), row.state.as_str());
+            current.insert(key.clone());
+            if self.state.warned_managed_netdevs.insert(key) {
+                tracing::warn!(
+                    class = row.class.as_str(),
+                    name = row.name.as_str(),
+                    desired = row.desired,
+                    state = row.state.as_str(),
+                    reason = row.reason.as_str(),
+                    "managed-netdev fail-closed state observed"
+                );
+            }
+        }
+        self.state
+            .warned_managed_netdevs
+            .retain(|key| current.contains(key));
     }
 
     /// Shutdown drain (ADR-0054 §7). Restore every BUM-suppressed CE
@@ -3368,6 +3424,184 @@ async fn wait_until(deadline: Option<Instant>) {
         Some(when) => sleep_until(when).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Build the ADR-0091 managed-netdev status block from desired config
+/// and the latest read-only kernel snapshot.
+fn build_managed_netdev_status(
+    managed: &ManagedNetdevTable,
+    snapshot: Option<&KernelSnapshot>,
+) -> Vec<ManagedNetdevStatus> {
+    let mut rows = Vec::new();
+    let mut desired_names = BTreeSet::new();
+
+    for bridge in managed.bridges() {
+        desired_names.insert(bridge.name.clone());
+        let link = snapshot.and_then(|kernel| kernel.links.get(&bridge.name));
+        let name_occupied = snapshot.is_some_and(|kernel| kernel.link_name_exists(&bridge.name));
+        rows.push(desired_managed_bridge_status(
+            bridge,
+            link,
+            snapshot.is_some(),
+            name_occupied,
+        ));
+    }
+
+    if let Some(snapshot) = snapshot
+        && managed.owner_token().is_some()
+    {
+        for (name, link) in &snapshot.links {
+            if desired_names.contains(name) {
+                continue;
+            }
+            let observed_stamps = rustbgpd_stamps(&link.altnames);
+            if observed_stamps.is_empty() {
+                continue;
+            }
+            rows.push(orphaned_managed_bridge_status(name, link, observed_stamps));
+        }
+    }
+
+    rows.sort_by(|a, b| {
+        (
+            a.class,
+            a.name.as_str(),
+            std::cmp::Reverse(a.desired),
+            a.state.as_str(),
+        )
+            .cmp(&(
+                b.class,
+                b.name.as_str(),
+                std::cmp::Reverse(b.desired),
+                b.state.as_str(),
+            ))
+    });
+    rows
+}
+
+fn desired_managed_bridge_status(
+    bridge: &ManagedBridgeNetdev,
+    link: Option<&KernelLinkInfo>,
+    snapshot_available: bool,
+    name_occupied: bool,
+) -> ManagedNetdevStatus {
+    let Some(link) = link else {
+        let (state, reason) = if snapshot_available {
+            if name_occupied {
+                (
+                    ManagedNetdevState::ForeignPresent,
+                    "desired bridge name is occupied by a non-bridge link".to_string(),
+                )
+            } else {
+                (
+                    ManagedNetdevState::DesiredAbsent,
+                    "bridge is not present".to_string(),
+                )
+            }
+        } else {
+            (
+                ManagedNetdevState::Unknown,
+                "kernel snapshot unavailable".to_string(),
+            )
+        };
+        return ManagedNetdevStatus {
+            class: ManagedNetdevClass::Bridge,
+            name: bridge.name.clone(),
+            desired: true,
+            ownership_stamp: Some(bridge.ownership_stamp.clone()),
+            state,
+            reason,
+            ifindex: None,
+            observed_vlan_filtering: None,
+            observed_stamps: Vec::new(),
+        };
+    };
+
+    let observed_stamps = rustbgpd_stamps(&link.altnames);
+    let (state, reason) = classify_desired_managed_bridge(bridge, link, &observed_stamps);
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::Bridge,
+        name: bridge.name.clone(),
+        desired: true,
+        ownership_stamp: Some(bridge.ownership_stamp.clone()),
+        state,
+        reason,
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: Some(link.vlan_filtering),
+        observed_stamps,
+    }
+}
+
+fn classify_desired_managed_bridge(
+    bridge: &ManagedBridgeNetdev,
+    link: &KernelLinkInfo,
+    observed_stamps: &[String],
+) -> (ManagedNetdevState, String) {
+    let has_expected_stamp = observed_stamps
+        .iter()
+        .any(|stamp| stamp == &bridge.ownership_stamp);
+    if !has_expected_stamp {
+        return if observed_stamps.is_empty() {
+            (
+                ManagedNetdevState::ForeignPresent,
+                "bridge exists without the expected rustbgpd ownership stamp".to_string(),
+            )
+        } else {
+            (
+                ManagedNetdevState::OwnedUnsafe,
+                format!(
+                    "bridge carries rustbgpd ownership stamp(s) but not expected stamp {:?}",
+                    bridge.ownership_stamp
+                ),
+            )
+        };
+    }
+    if observed_stamps.len() != 1 {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "bridge carries expected ownership stamp plus additional rustbgpd stamp(s): {observed_stamps:?}"
+            ),
+        );
+    }
+    if link.vlan_filtering != bridge.vlan_filtering {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "vlan_filtering mismatch: observed {}, desired {}",
+                link.vlan_filtering, bridge.vlan_filtering
+            ),
+        );
+    }
+    (ManagedNetdevState::OwnedSafe, String::new())
+}
+
+fn orphaned_managed_bridge_status(
+    name: &str,
+    link: &KernelLinkInfo,
+    observed_stamps: Vec<String>,
+) -> ManagedNetdevStatus {
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::Bridge,
+        name: name.to_string(),
+        desired: false,
+        ownership_stamp: None,
+        state: ManagedNetdevState::Orphaned,
+        reason: "rustbgpd-stamped bridge is not configured".to_string(),
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: Some(link.vlan_filtering),
+        observed_stamps,
+    }
+}
+
+fn rustbgpd_stamps(altnames: &[String]) -> Vec<String> {
+    let mut stamps: Vec<String> = altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname).map(|stamp| stamp.raw))
+        .collect();
+    stamps.sort();
+    stamps.dedup();
+    stamps
 }
 
 /// Build the per-IP-VRF status block for a [`DataplaneReport`] (Gate 9).
@@ -4535,4 +4769,113 @@ fn op_to_applied(op: &DataplaneOp) -> AppliedOp {
 #[allow(dead_code)]
 fn empty_snapshot() -> KernelSnapshot {
     KernelSnapshot::new()
+}
+
+#[cfg(test)]
+mod managed_netdev_tests {
+    use super::*;
+    use crate::snapshot::KernelLinkInfo;
+
+    fn link(name: &str, ifindex: u32, vlan_filtering: bool, altnames: Vec<&str>) -> KernelLinkInfo {
+        KernelLinkInfo {
+            ifindex,
+            bridge_name: name.to_string(),
+            vlan_filtering,
+            altnames: altnames.into_iter().map(str::to_string).collect(),
+            ..KernelLinkInfo::default()
+        }
+    }
+
+    #[test]
+    fn managed_netdev_status_classifies_desired_rows() {
+        let table = ManagedNetdevTable::from_bridge_map(
+            "leaf-1".to_string(),
+            BTreeMap::from([("br100".to_string(), true)]),
+        );
+
+        let unknown = build_managed_netdev_status(&table, None);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].state, ManagedNetdevState::Unknown);
+
+        let absent = build_managed_netdev_status(&table, Some(&KernelSnapshot::new()));
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].state, ManagedNetdevState::DesiredAbsent);
+
+        let mut non_bridge_collision = KernelSnapshot::new();
+        non_bridge_collision.insert_link_name("br100");
+        let foreign_name = build_managed_netdev_status(&table, Some(&non_bridge_collision));
+        assert_eq!(foreign_name.len(), 1);
+        assert_eq!(foreign_name[0].state, ManagedNetdevState::ForeignPresent);
+        assert_eq!(
+            foreign_name[0].reason,
+            "desired bridge name is occupied by a non-bridge link"
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link("br100", 10, true, vec![]));
+        let foreign = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(foreign[0].state, ManagedNetdevState::ForeignPresent);
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link("br100", 10, true, vec!["rustbgpd:bridge:other:br100"]),
+        )]));
+        let wrong_stamp = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(wrong_stamp[0].state, ManagedNetdevState::OwnedUnsafe);
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link(
+                "br100",
+                10,
+                true,
+                vec![
+                    "rustbgpd:bridge:leaf-1:br100",
+                    "rustbgpd:bridge:other:br100",
+                ],
+            ),
+        )]));
+        let extra_stamp = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(extra_stamp[0].state, ManagedNetdevState::OwnedUnsafe);
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link("br100", 10, false, vec!["rustbgpd:bridge:leaf-1:br100"]),
+        )]));
+        let attr_mismatch = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(attr_mismatch[0].state, ManagedNetdevState::OwnedUnsafe);
+
+        snapshot.set_links(BTreeMap::from([(
+            "br100".to_string(),
+            link("br100", 10, true, vec!["rustbgpd:bridge:leaf-1:br100"]),
+        )]));
+        let safe = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(safe[0].state, ManagedNetdevState::OwnedSafe);
+    }
+
+    #[test]
+    fn managed_netdev_status_reports_orphaned_stamped_bridges() {
+        let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link(
+            "br200",
+            20,
+            false,
+            vec!["rustbgpd:bridge:leaf-1:br200", "operator-alias"],
+        ));
+        snapshot.insert_link(link("br300", 30, false, vec!["operator-alias"]));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "br200");
+        assert!(!rows[0].desired);
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(
+            rows[0].observed_stamps,
+            vec!["rustbgpd:bridge:leaf-1:br200"]
+        );
+
+        let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
+        assert!(unmanaged.is_empty());
+    }
 }

@@ -2187,6 +2187,10 @@ service EvpnService {
   // resolved, with the live readiness verdict from the reconcile
   // actor's most recent `probe_ip_vrfs` pass.
   rpc ListIpVrfs(ListIpVrfsRequest) returns (ListIpVrfsResponse);
+  // ADR-0091 — list desired and rustbgpd-stamped managed EVPN
+  // netdevs joined with the latest read-only kernel link snapshot.
+  // This diagnose surface never creates, adopts, or deletes links.
+  rpc ListManagedNetdevs(ListManagedNetdevsRequest) returns (ListManagedNetdevsResponse);
   // Gate 9 — fetch one IP-VRF by operator-facing `name`.
   // Returns `NotFound` when the name is not in the resolved table.
   rpc GetIpVrf(GetIpVrfRequest) returns (IpVrfState);
@@ -2260,6 +2264,39 @@ message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+}
+
+message ListManagedNetdevsRequest {}
+
+message ListManagedNetdevsResponse {
+  repeated ManagedNetdevState netdevs = 1;
+}
+
+enum ManagedNetdevClass {
+  MANAGED_NETDEV_CLASS_UNKNOWN = 0;
+  MANAGED_NETDEV_CLASS_BRIDGE = 1;
+}
+
+enum ManagedNetdevLifecycleState {
+  MANAGED_NETDEV_STATE_UNKNOWN = 0;
+  MANAGED_NETDEV_STATE_DESIRED_ABSENT = 1;
+  MANAGED_NETDEV_STATE_OWNED_SAFE = 2;
+  MANAGED_NETDEV_STATE_FOREIGN_PRESENT = 3;
+  MANAGED_NETDEV_STATE_OWNED_UNSAFE = 4;
+  MANAGED_NETDEV_STATE_ORPHANED = 5;
+}
+
+// One desired or observed ADR-0091 managed netdev row.
+message ManagedNetdevState {
+  ManagedNetdevClass class = 1;
+  string name = 2;
+  bool desired = 3;
+  string ownership_stamp = 4;
+  ManagedNetdevLifecycleState state = 5;
+  string reason = 6;
+  optional uint32 ifindex = 7;
+  optional bool observed_vlan_filtering = 8;
+  repeated string observed_stamps = 9;
 }
 
 message ListEvpnNexthopsRequest {}

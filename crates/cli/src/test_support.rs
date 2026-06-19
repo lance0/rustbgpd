@@ -687,6 +687,26 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         }))
     }
 
+    async fn list_managed_netdevs(
+        &self,
+        _request: Request<server_proto::ListManagedNetdevsRequest>,
+    ) -> Result<Response<server_proto::ListManagedNetdevsResponse>, Status> {
+        Ok(Response::new(server_proto::ListManagedNetdevsResponse {
+            netdevs: vec![server_proto::ManagedNetdevState {
+                class: server_proto::ManagedNetdevClass::Bridge as i32,
+                name: "br100".to_string(),
+                desired: true,
+                ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+                state: server_proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe
+                    as i32,
+                reason: String::new(),
+                ifindex: Some(10),
+                observed_vlan_filtering: Some(true),
+                observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+            }],
+        }))
+    }
+
     async fn list_evpn_nexthops(
         &self,
         _request: Request<server_proto::ListEvpnNexthopsRequest>,

@@ -787,11 +787,104 @@ impl Config {
         // table; the daemon-side supervisor calls
         // `resolve_evpn_ip_vrfs` on demand.
         let _ = self.resolve_evpn_ip_vrfs()?;
+        validate_managed_netdevs(self)?;
         validate_fib_tables(self)?;
         validate_bfd(self)?;
 
         Ok(())
     }
+}
+
+fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
+    let managed = &config.managed_netdevs;
+    let owner_token = managed.owner_token.as_str();
+    if !owner_token.is_empty() {
+        validate_managed_token(owner_token, "managed_netdevs.owner_token")?;
+    }
+    if !managed.bridges.is_empty() && owner_token.is_empty() {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: "managed_netdevs.owner_token is required when bridges are configured"
+                .to_string(),
+        });
+    }
+
+    let mut names = std::collections::HashSet::new();
+    for bridge in &managed.bridges {
+        validate_managed_link_name(&bridge.name)?;
+        if !names.insert(bridge.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed bridge name {:?}", bridge.name),
+            });
+        }
+        let stamp = rustbgpd_evpn::bridge_ownership_stamp(owner_token, &bridge.name);
+        if stamp.len() > rustbgpd_evpn::MAX_ALT_IFNAME_LEN {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed bridge {:?}: derived ownership altname {:?} is {} bytes; maximum is {}",
+                    bridge.name,
+                    stamp,
+                    stamp.len(),
+                    rustbgpd_evpn::MAX_ALT_IFNAME_LEN
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_token(value: &str, field: &str) -> Result<(), ConfigError> {
+    if value.len() > rustbgpd_evpn::MAX_OWNER_TOKEN_LEN {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!(
+                "{field} is {} bytes; maximum is {}",
+                value.len(),
+                rustbgpd_evpn::MAX_OWNER_TOKEN_LEN
+            ),
+        });
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!("{field} must contain only ASCII letters, digits, '_', '-', or '.'"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_managed_link_name(name: &str) -> Result<(), ConfigError> {
+    if name.is_empty() {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: "managed bridge name must not be empty".to_string(),
+        });
+    }
+    if name == "." || name == ".." {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!("managed bridge name {name:?} is reserved"),
+        });
+    }
+    if name.len() > rustbgpd_evpn::MAX_IFNAME_LEN {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!(
+                "managed bridge name {:?} is {} bytes; Linux ifname maximum is {}",
+                name,
+                name.len(),
+                rustbgpd_evpn::MAX_IFNAME_LEN
+            ),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason: format!(
+                "managed bridge name {name:?} must contain only ASCII letters, digits, '_', '-', or '.'"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_fib_tables(config: &Config) -> Result<(), ConfigError> {

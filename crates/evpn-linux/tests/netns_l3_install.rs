@@ -237,6 +237,7 @@ fn actor_intent(
         bum_enforcement: Arc::new(BumEnforcementTable::new()),
         ip_vrfs: Arc::new(ip_vrfs),
         remote_ip_prefixes: Arc::new(remote_ip_prefixes),
+        managed_netdevs: Arc::new(rustbgpd_evpn::ManagedNetdevTable::new()),
     })
 }
 

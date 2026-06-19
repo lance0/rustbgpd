@@ -202,7 +202,13 @@ has it, no broad performance sprints without profile evidence.
   `external` / `vnifilter` VXLAN devices, accepts an unambiguous
   `(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
   programs single-dst and FDB-NHG rows with `NDA_SRC_VNI`, and parses
-  explicit-VNI rows on known SVD ifindexes. The `svd_fdb_vni` netns proof
+  explicit-VNI rows on known SVD ifindexes. **ADR-0091 bridge-class
+  config/status substrate landed:** `[managed_netdevs]` accepts opt-in bridge
+  desired state, derives the durable `rustbgpd:bridge:<owner>:<name>` altname
+  stamp, and exposes desired/observed/orphan/foreign/unsafe status through
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`; lifecycle
+  create/adopt/reap remains the next bridge slice, with VXLAN and VRF classes
+  still deferred. The `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
   inference plus owned-state convergence. Service-provider EVPN breadth
@@ -340,8 +346,14 @@ has it, no broad performance sprints without profile evidence.
   upper devices, while bridge-ifindex ARP/ND on a `vlan_filtering=1` bridge
   remains fail-closed unless a future FDB-correlation design proves freshness
   and ambiguity handling. True RFC VLAN-aware bundle / non-zero Ethernet Tag
-  remains a separate ADR gate, and managed netdev creation stays separate
-  operator ergonomics work. A dedicated counter for unattributable-VLAN local-MAC
+  remains a separate ADR gate, and managed netdev lifecycle execution stays
+  separate operator ergonomics work. **ADR-0091 bridge-class config/status
+  landed:** `[managed_netdevs]` bridge rows are validated as restart-required
+  startup desired state, Linux link dumps parse rustbgpd altname stamps, and
+  `ListManagedNetdevs` / `rbgp evpn managed-netdevs` report
+  `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
+  `orphaned`, or `unknown` without creating/deleting links. A dedicated counter
+  for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is
   already metered by `evpn_local_observations_dropped_total{reason}`. The

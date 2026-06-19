@@ -523,6 +523,7 @@ impl Dataplane for LinuxDataplane {
         for ((vni, _vlan, _mac), entry) in fdb_entries {
             snap.insert_fdb(vni, entry);
         }
+        snap.set_link_names(cache.all_link_names.iter().cloned().collect());
         for (name, link) in &cache.bridges {
             // Only surface bridges with exactly one VXLAN port so
             // the diff loop's NotReady inference matches the probe
@@ -534,8 +535,10 @@ impl Dataplane for LinuxDataplane {
                 None
             };
             snap.insert_link(crate::snapshot::KernelLinkInfo {
+                ifindex: link.ifindex,
                 bridge_name: name.clone(),
                 vlan_filtering: link.vlan_filtering,
+                altnames: link.altnames.clone(),
                 vxlan,
                 svd_vxlan_ports: link.svd_vxlan_ports.clone(),
                 ce_port_ifindexes: link.ce_port_ifindexes.clone(),

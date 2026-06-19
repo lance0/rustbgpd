@@ -943,6 +943,8 @@ enum EvpnAction {
     Instances,
     /// List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP).
     Nexthops,
+    /// List managed EVPN netdev ownership/status rows (ADR-0091).
+    ManagedNetdevs,
     /// List configured IP-VRFs (Gate 9, ADR-0058) and their
     /// readiness verdict from the most recent reconcile pass.
     Vrfs {
@@ -1708,6 +1710,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             Some(EvpnAction::Runtime) => commands::evpn::runtime(connection, json).await,
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
             Some(EvpnAction::Nexthops) => commands::evpn::list_nexthops(connection, json).await,
+            Some(EvpnAction::ManagedNetdevs) => {
+                commands::evpn::list_managed_netdevs(connection, json).await
+            }
             Some(EvpnAction::Vrfs { name }) => match name {
                 Some(name) => commands::evpn::get_ip_vrf(connection, name, json).await,
                 None => commands::evpn::list_ip_vrfs(connection, json).await,
@@ -2326,6 +2331,18 @@ mod tests {
             cli.command,
             Command::Evpn {
                 action: Some(EvpnAction::Nexthops),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_evpn_managed_netdevs() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "managed-netdevs"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: Some(EvpnAction::ManagedNetdevs),
                 ..
             }
         ));
