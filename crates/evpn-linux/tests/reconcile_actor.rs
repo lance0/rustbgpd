@@ -25,7 +25,7 @@ use rustbgpd_evpn::{
     EvpnIpPrefixValue, Ipv4Prefix, MacAddress, ManagedNetdevState, ManagedNetdevTable,
     RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
 };
-use rustbgpd_evpn_linux::snapshot::KernelVxlanInfo;
+use rustbgpd_evpn_linux::snapshot::{KernelVxlanInfo, KernelVxlanLinkInfo};
 use rustbgpd_evpn_linux::{
     DataplaneOp, InMemoryDataplane, InMemoryHandle, InstanceProbe, KernelEvent, KernelFdbEntry,
     KernelFdbFlags, KernelLinkInfo, ReconcileActor, ReconcileActorConfig,
@@ -225,6 +225,26 @@ fn managed_link(
     }
 }
 
+fn managed_vxlan_link(
+    name: &str,
+    ifindex: u32,
+    altnames: Vec<&str>,
+    vni: u32,
+) -> KernelVxlanLinkInfo {
+    KernelVxlanLinkInfo {
+        ifindex,
+        name: name.to_string(),
+        altnames: altnames.into_iter().map(str::to_string).collect(),
+        vni: Some(vni),
+        local_ip: Some(ipa("10.0.0.1")),
+        dstport: Some(4789),
+        learning_disabled: Some(true),
+        collect_metadata: false,
+        vnifilter: false,
+        bridge: Some("br100".to_string()),
+    }
+}
+
 // 1. Initial reconcile pass with one Ready instance + one desired MAC
 //    produces an Add and the report applied list contains it.
 #[tokio::test]
@@ -347,6 +367,132 @@ async fn managed_bridge_lifecycle_reaps_only_safe_owner_orphans() {
         ManagedNetdevState::OwnedUnsafe
     );
     assert_eq!(report.managed_netdevs[1].name, "br-unsafe");
+    assert_eq!(
+        report.managed_netdevs[1].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_vxlan_lifecycle_creates_and_reports_owned_safe() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_links(BTreeMap::from([(
+        "br100".to_string(),
+        managed_link("br100", 10, true, Vec::new()),
+    )]));
+    let table = ManagedNetdevTable::from_maps(
+        "leaf-1".to_string(),
+        BTreeMap::new(),
+        BTreeMap::from([(
+            "vxlan100".to_string(),
+            rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                dstport: 4789,
+                bridge: "br100".to_string(),
+            },
+        )]),
+    );
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let report = wait_for_generation(&mut h, 1).await;
+    assert_eq!(report.applied.len(), 1);
+    assert!(matches!(
+        report.applied[0].kind,
+        rustbgpd_evpn::DataplaneOpKind::CreateManagedVxlan { ref name }
+            if name == "vxlan100"
+    ));
+    assert!(report.failed.is_empty());
+    assert_eq!(report.managed_netdevs.len(), 1);
+    assert_eq!(
+        report.managed_netdevs[0].state,
+        ManagedNetdevState::OwnedSafe
+    );
+
+    let snapshot = h.handle.kernel_snapshot();
+    let link = snapshot
+        .vxlans
+        .get("vxlan100")
+        .expect("created managed VXLAN");
+    assert_eq!(link.vni, Some(100));
+    assert_eq!(link.local_ip, Some(ipa("10.0.0.1")));
+    assert_eq!(link.dstport, Some(4789));
+    assert_eq!(link.learning_disabled, Some(true));
+    assert_eq!(link.bridge.as_deref(), Some("br100"));
+    assert_eq!(link.altnames, vec!["rustbgpd:vxlan:leaf-1:vxlan100"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_vxlan_lifecycle_reaps_only_safe_owner_orphans() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_vxlans(BTreeMap::from([
+        (
+            "vxlan-safe".to_string(),
+            managed_vxlan_link(
+                "vxlan-safe",
+                10,
+                vec!["rustbgpd:vxlan:leaf-1:vxlan-safe"],
+                100,
+            ),
+        ),
+        (
+            "vxlan-foreign".to_string(),
+            managed_vxlan_link("vxlan-foreign", 20, Vec::new(), 200),
+        ),
+        (
+            "vxlan-unsafe".to_string(),
+            managed_vxlan_link(
+                "vxlan-unsafe",
+                30,
+                vec![
+                    "rustbgpd:vxlan:leaf-1:vxlan-unsafe",
+                    "rustbgpd:vxlan:other:vxlan-unsafe",
+                ],
+                300,
+            ),
+        ),
+        (
+            "vxlan-other-owner".to_string(),
+            managed_vxlan_link(
+                "vxlan-other-owner",
+                40,
+                vec!["rustbgpd:vxlan:leaf-2:vxlan-other-owner"],
+                400,
+            ),
+        ),
+    ]));
+    let table =
+        ManagedNetdevTable::from_maps("leaf-1".to_string(), BTreeMap::new(), BTreeMap::new());
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let report = wait_for_generation(&mut h, 1).await;
+    assert_eq!(report.applied.len(), 1);
+    assert!(matches!(
+        report.applied[0].kind,
+        rustbgpd_evpn::DataplaneOpKind::RemoveManagedVxlan { ref name }
+            if name == "vxlan-safe"
+    ));
+    assert!(report.failed.is_empty());
+
+    let snapshot = h.handle.kernel_snapshot();
+    assert!(!snapshot.vxlans.contains_key("vxlan-safe"));
+    assert!(snapshot.vxlans.contains_key("vxlan-foreign"));
+    assert!(snapshot.vxlans.contains_key("vxlan-unsafe"));
+    assert!(snapshot.vxlans.contains_key("vxlan-other-owner"));
+
+    assert_eq!(report.managed_netdevs.len(), 2);
+    assert_eq!(report.managed_netdevs[0].name, "vxlan-other-owner");
+    assert_eq!(
+        report.managed_netdevs[0].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
+    assert_eq!(report.managed_netdevs[1].name, "vxlan-unsafe");
     assert_eq!(
         report.managed_netdevs[1].state,
         ManagedNetdevState::OwnedUnsafe

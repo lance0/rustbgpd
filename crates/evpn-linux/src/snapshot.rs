@@ -565,6 +565,13 @@ impl KernelSnapshot {
         self.links.remove(name)
     }
 
+    /// Remove a VXLAN from the link inventory, returning the previous
+    /// value if any.
+    pub fn remove_vxlan(&mut self, name: &str) -> Option<KernelVxlanLinkInfo> {
+        self.link_names.remove(name);
+        self.vxlans.remove(name)
+    }
+
     /// Replace the all-link-name inventory wholesale.
     pub fn set_link_names(&mut self, link_names: BTreeSet<String>) {
         self.link_names = link_names;

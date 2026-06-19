@@ -160,6 +160,29 @@ pub enum DataplaneOp {
         /// Durable rustbgpd ownership stamp expected on the bridge.
         ownership_stamp: String,
     },
+    /// Create a configured ADR-0091 managed fixed-VNI VXLAN and stamp
+    /// it with its durable `IFLA_ALT_IFNAME` ownership marker.
+    /// Implementations must treat an already-present exact stamp as
+    /// idempotent success only after a fresh link dump confirms the link
+    /// is the expected fixed-VNI VXLAN with matching protected
+    /// attributes.
+    CreateManagedVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+        /// Desired protected VXLAN attributes.
+        spec: rustbgpd_evpn::ManagedVxlanNetdevSpec,
+        /// Durable rustbgpd ownership stamp for this VXLAN.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped fixed-VNI VXLAN that is no longer
+    /// configured. Implementations must first confirm the live link
+    /// still carries the exact expected ownership stamp and is a VXLAN.
+    RemoveManagedVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the VXLAN.
+        ownership_stamp: String,
+    },
     /// Install a remote IP-prefix route into the IP-VRF's
     /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
     /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and

@@ -1025,6 +1025,8 @@ pub fn record_l3_success(
         | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::CreateManagedBridge { .. }
         | DataplaneOp::RemoveManagedBridge { .. }
+        | DataplaneOp::CreateManagedVxlan { .. }
+        | DataplaneOp::RemoveManagedVxlan { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }
