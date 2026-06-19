@@ -58,7 +58,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # rustsec/audit-check is the canonical action; it caches the
       # advisory DB and posts findings as PR review comments.
@@ -76,7 +76,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # EmbarkStudios' official action; installs a pinned cargo-deny
       # and runs the four checks against deny.toml. Pinned to a

@@ -61,7 +61,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history + tags for `git describe` and the A/B worktrees
 

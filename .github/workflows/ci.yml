@@ -18,7 +18,7 @@ jobs:
     # (--all-targets) + test (--workspace) + doc fits comfortably under this.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Need history so the wire-readme freshness gate can diff
           # against the previous commit / PR base.
@@ -86,7 +86,7 @@ jobs:
     # file alongside `Cargo.toml` and `Dockerfile`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
