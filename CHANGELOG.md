@@ -45,8 +45,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   foreign, wrong-owner, multi-stamped, SVD/collect-metadata, `vnifilter`, or
   protected-attribute-drifted VXLAN links. The `managed_vxlan` netns proof
   covers create, idempotent restart adoption, reap, and same-name unstamped
-  foreign preservation on a real kernel. SVD / collect-metadata VXLAN plus
-  VRF/L3VXLAN lifecycle stay deferred.
+  foreign preservation on a real kernel; the `managed_ready` proof creates a
+  managed bridge plus managed fixed-VNI VXLAN and verifies the real EVPN
+  instance probe transitions from NotReady to Ready only after both links are
+  owned-safe. SVD / collect-metadata VXLAN plus VRF/L3VXLAN lifecycle stay
+  deferred.
 
 ## [0.41.0] — 2026-06-18
 

@@ -214,8 +214,10 @@ has it, no broad performance sprints without profile evidence.
   Linux snapshot, exposes desired/observed/orphan/foreign/unsafe VXLAN
   status, creates missing fixed-VNI VXLANs on the desired bridge, adopts exact
   stamped VXLANs after restart, and safely reaps same-owner VXLAN orphans;
-  SVD / collect-metadata VXLAN and VRF/L3VXLAN classes still deferred. The
-  `svd_fdb_vni` netns proof
+  `managed_ready` proves that a rustbgpd-created bridge plus rustbgpd-created
+  fixed-VNI VXLAN make the real EVPN L2 instance probe Ready only after both
+  links are owned-safe; SVD / collect-metadata VXLAN and VRF/L3VXLAN classes
+  still deferred. The `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
   inference plus owned-state convergence. Service-provider EVPN breadth
@@ -361,7 +363,9 @@ has it, no broad performance sprints without profile evidence.
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
   bridges and fixed-VNI VXLANs, adopts exact stamped links after restart, and
-  safely reaps same-owner bridge/VXLAN orphans. A dedicated counter
+  safely reaps same-owner bridge/VXLAN orphans; `managed_ready` proves that
+  this rustbgpd-created bridge + VXLAN topology drives the real EVPN L2 probe
+  to Ready. A dedicated counter
   for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is
