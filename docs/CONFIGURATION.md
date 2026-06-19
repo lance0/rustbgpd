@@ -1984,9 +1984,9 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   duplicates on either column reject config load.
 - `bridge` (when set) must reference a Linux bridge that already exists
   or is declared in `[managed_netdevs]` for ADR-0091 bridge lifecycle
-  ownership. rustbgpd still does not create VXLAN or VRF netdevs; fixed-VNI
-  `[[managed_netdevs.vxlans]]` rows are status substrate until the VXLAN
-  lifecycle slice ships.
+  ownership. ADR-0091 bridge and fixed-VNI `[[managed_netdevs.vxlans]]`
+  lifecycle now ship (create/adopt/reap); SVD / collect-metadata VXLAN and
+  VRF netdev creation remain operator-provisioned.
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
   `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
   observed bridge must have `vlan_filtering=1`, the configured VLAN
@@ -2371,6 +2371,13 @@ bridge = "br100"                   # desired bridge master
 learning = false                   # optional default; true is rejected
 ```
 
+The VXLAN `bridge` field names the desired bridge master. It may reference a
+managed `[[managed_netdevs.bridges]]` row or an operator-provisioned bridge;
+either way it is bound by name. If the named bridge is absent or foreign (not
+the expected managed bridge) at runtime, the VXLAN is reported `owned-unsafe`
+and is not created — managed creation fails closed rather than attach a VXLAN
+to an unexpected master.
+
 The derived ownership stamps are:
 
 ```text
@@ -2382,7 +2389,8 @@ Validation rejects managed rows without `owner_token`, duplicate managed
 netdev names across bridge and VXLAN rows, invalid Linux-style link names
 (`.`, `..`, spaces, or names over 15 bytes), invalid owner tokens, and
 derived stamps longer than Linux's 127-byte altname limit. VXLAN validation
-also rejects invalid VNIs, `dstport = 0`, and `learning = true`; SVD /
+also rejects invalid VNIs (outside `1..=16_777_215`), a duplicate `vni`
+shared by two VXLAN rows, `dstport = 0`, and `learning = true`; SVD /
 collect-metadata VXLANs, managed VRFs, and managed L3VXLAN rows remain
 unsupported.
 
@@ -2396,6 +2404,12 @@ bridge `vlan_filtering` or VXLAN `vni`, `local`, `dstport`, `learning`,
 `evpn_managed_netdev_state{class,name,desired,state}` mirrors the latest
 reported state for alerting; detailed reason text is available through
 `ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
+
+Reaping is equally conservative. When the owner token stays but a VXLAN row is
+removed, only an exact same-owner stamped plain orphan is reaped. A
+de-configured rustbgpd-stamped VXLAN that has drifted into a collect-metadata
+or vnifilter mode — modes the fixed-VNI lifecycle never creates — is preserved
+(`owned-unsafe`), not reaped.
 
 Status states:
 

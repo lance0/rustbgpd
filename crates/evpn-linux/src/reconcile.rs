@@ -4071,14 +4071,22 @@ fn safe_orphan_vxlan_stamp_for_owner(
         return None;
     }
     let stamp = &stamps[0];
-    if stamp.class == ManagedNetdevClass::Vxlan
-        && stamp.owner_token == owner_token
-        && stamp.name == link.name
+    if stamp.class != ManagedNetdevClass::Vxlan
+        || stamp.owner_token != owner_token
+        || stamp.name != link.name
     {
-        Some(stamp.raw.clone())
-    } else {
-        None
+        return None;
     }
+    // collect-metadata and vnifilter are VXLAN modes the fixed-VNI lifecycle
+    // never creates, so a stamped link mutated into one of them is preserved
+    // (owned-unsafe), not reaped — consistent with
+    // `classify_desired_managed_vxlan`, which already treats those as
+    // owned-unsafe for desired links. Plain VNI/local/dstport/learning/bridge
+    // drift still reaps: a de-configured own-stamped plain VXLAN is reapable.
+    if link.collect_metadata || link.vnifilter {
+        return None;
+    }
+    Some(stamp.raw.clone())
 }
 
 /// Build the per-IP-VRF status block for a [`DataplaneReport`] (Gate 9).
@@ -5537,6 +5545,51 @@ mod managed_netdev_tests {
 
         let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
         assert!(unmanaged.is_empty());
+    }
+
+    #[test]
+    fn managed_netdev_status_preserves_orphaned_stamped_vxlan_drifted_to_unsupported_mode() {
+        let table =
+            ManagedNetdevTable::from_maps("leaf-1".to_string(), BTreeMap::new(), BTreeMap::new());
+
+        // A plain own-stamped orphan is reapable.
+        let mut plain = vxlan_link("vxlan100", 10, vec!["rustbgpd:vxlan:leaf-1:vxlan100"], 100);
+        assert!(safe_orphan_vxlan_stamp_for_owner(&plain, "leaf-1").is_some());
+
+        // The same own-stamped orphan drifted to collect-metadata is preserved
+        // (owned-unsafe), never reaped: the fixed-VNI lifecycle never creates
+        // collect-metadata devices.
+        let mut collect_metadata = plain.clone();
+        collect_metadata.collect_metadata = true;
+        assert!(safe_orphan_vxlan_stamp_for_owner(&collect_metadata, "leaf-1").is_none());
+
+        // Likewise for a vnifilter drift.
+        let mut vnifilter = plain.clone();
+        vnifilter.vnifilter = true;
+        assert!(safe_orphan_vxlan_stamp_for_owner(&vnifilter, "leaf-1").is_none());
+
+        // Surfaces through the status pass: plain orphan -> Orphaned (reapable),
+        // mode-drifted orphans -> OwnedUnsafe (preserved).
+        let mut snapshot = KernelSnapshot::new();
+        plain.ifindex = 10;
+        collect_metadata.name = "vxlan200".to_string();
+        collect_metadata.ifindex = 20;
+        collect_metadata.altnames = vec!["rustbgpd:vxlan:leaf-1:vxlan200".to_string()];
+        vnifilter.name = "vxlan300".to_string();
+        vnifilter.ifindex = 30;
+        vnifilter.altnames = vec!["rustbgpd:vxlan:leaf-1:vxlan300".to_string()];
+        snapshot.insert_vxlan(plain);
+        snapshot.insert_vxlan(collect_metadata);
+        snapshot.insert_vxlan(vnifilter);
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "vxlan100");
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(rows[1].name, "vxlan200");
+        assert_eq!(rows[1].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[2].name, "vxlan300");
+        assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
     }
 
     #[test]

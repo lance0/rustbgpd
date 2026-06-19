@@ -51,6 +51,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   owned-safe. SVD / collect-metadata VXLAN plus VRF/L3VXLAN lifecycle stay
   deferred.
 
+### Changed
+
+- **Managed VXLAN config validation rejects a duplicate `vni`.** Two
+  `[[managed_netdevs.vxlans]]` rows that share the same `vni` (even under
+  distinct names) now fail config validation with an `InvalidManagedNetdev`
+  error, mirroring the existing duplicate-name and `[[fib_tables]]`
+  duplicate-`table_id` checks.
+- **Managed VXLAN orphan reap preserves mode-drifted stamped links.** A
+  de-configured rustbgpd-stamped VXLAN orphan that has drifted into a
+  collect-metadata / external or vnifilter mode — modes the fixed-VNI lifecycle
+  never creates — is now preserved as owned-unsafe rather than reaped. A plain
+  same-owner stamped orphan is still reaped; VNI / local / dstport / learning /
+  bridge drift on a de-configured plain VXLAN remains reapable.
+
 ## [0.41.0] — 2026-06-18
 
 ### Added

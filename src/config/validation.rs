@@ -830,6 +830,7 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
             });
         }
     }
+    let mut seen_vnis = std::collections::HashSet::new();
     for vxlan in &managed.vxlans {
         validate_managed_link_name(&vxlan.name)?;
         validate_managed_link_name(&vxlan.bridge)?;
@@ -846,6 +847,14 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
                 ),
             }
         })?;
+        if !seen_vnis.insert(vxlan.vni) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VXLAN {:?}: duplicate vni {}",
+                    vxlan.name, vxlan.vni
+                ),
+            });
+        }
         if vxlan.dstport == 0 {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!(

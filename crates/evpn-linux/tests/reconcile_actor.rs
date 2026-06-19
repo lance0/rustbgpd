@@ -464,6 +464,33 @@ async fn managed_vxlan_lifecycle_reaps_only_safe_owner_orphans() {
                 400,
             ),
         ),
+        // Own-stamped orphans that drifted into a mode the fixed-VNI lifecycle
+        // never creates (collect-metadata, vnifilter) must be preserved
+        // (owned-unsafe), never reaped.
+        (
+            "vxlan-collect-md".to_string(),
+            KernelVxlanLinkInfo {
+                collect_metadata: true,
+                ..managed_vxlan_link(
+                    "vxlan-collect-md",
+                    50,
+                    vec!["rustbgpd:vxlan:leaf-1:vxlan-collect-md"],
+                    500,
+                )
+            },
+        ),
+        (
+            "vxlan-vnifilter".to_string(),
+            KernelVxlanLinkInfo {
+                vnifilter: true,
+                ..managed_vxlan_link(
+                    "vxlan-vnifilter",
+                    60,
+                    vec!["rustbgpd:vxlan:leaf-1:vxlan-vnifilter"],
+                    600,
+                )
+            },
+        ),
     ]));
     let table =
         ManagedNetdevTable::from_maps("leaf-1".to_string(), BTreeMap::new(), BTreeMap::new());
@@ -479,22 +506,41 @@ async fn managed_vxlan_lifecycle_reaps_only_safe_owner_orphans() {
             if name == "vxlan-safe"
     ));
     assert!(report.failed.is_empty());
+    // The only reap op is the plain own-stamped orphan; no mode-drifted link
+    // is reaped.
+    assert!(report.applied.iter().all(|op| !matches!(
+        op.kind,
+        rustbgpd_evpn::DataplaneOpKind::RemoveManagedVxlan { ref name }
+            if name == "vxlan-collect-md" || name == "vxlan-vnifilter"
+    )));
 
     let snapshot = h.handle.kernel_snapshot();
     assert!(!snapshot.vxlans.contains_key("vxlan-safe"));
     assert!(snapshot.vxlans.contains_key("vxlan-foreign"));
     assert!(snapshot.vxlans.contains_key("vxlan-unsafe"));
     assert!(snapshot.vxlans.contains_key("vxlan-other-owner"));
+    assert!(snapshot.vxlans.contains_key("vxlan-collect-md"));
+    assert!(snapshot.vxlans.contains_key("vxlan-vnifilter"));
 
-    assert_eq!(report.managed_netdevs.len(), 2);
-    assert_eq!(report.managed_netdevs[0].name, "vxlan-other-owner");
+    assert_eq!(report.managed_netdevs.len(), 4);
+    assert_eq!(report.managed_netdevs[0].name, "vxlan-collect-md");
     assert_eq!(
         report.managed_netdevs[0].state,
         ManagedNetdevState::OwnedUnsafe
     );
-    assert_eq!(report.managed_netdevs[1].name, "vxlan-unsafe");
+    assert_eq!(report.managed_netdevs[1].name, "vxlan-other-owner");
     assert_eq!(
         report.managed_netdevs[1].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
+    assert_eq!(report.managed_netdevs[2].name, "vxlan-unsafe");
+    assert_eq!(
+        report.managed_netdevs[2].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
+    assert_eq!(report.managed_netdevs[3].name, "vxlan-vnifilter");
+    assert_eq!(
+        report.managed_netdevs[3].state,
         ManagedNetdevState::OwnedUnsafe
     );
     h.shutdown().await;
