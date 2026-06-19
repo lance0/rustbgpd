@@ -741,6 +741,16 @@ pub enum DataplaneOpKind {
         /// `BR_STATE_FORWARDING`.
         blocked: bool,
     },
+    /// Create and stamp an ADR-0091 managed bridge.
+    CreateManagedBridge {
+        /// Linux bridge name.
+        name: String,
+    },
+    /// Remove a rustbgpd-owned ADR-0091 managed bridge.
+    RemoveManagedBridge {
+        /// Linux bridge name.
+        name: String,
+    },
     /// Install an FDB row pointing at an FDB nexthop group via
     /// `NDA_NH_ID` (ADR-0059 slice 3 aliasing-ECMP). The kernel
     /// group ID isn't reported here — operators trace it via

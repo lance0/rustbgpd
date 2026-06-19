@@ -162,6 +162,10 @@ expects the operator or host-networking layer to create them. For an
 `EvpnInstance` with `bridge = "br100"`, the initial Gate 7b dataplane
 crate verifies:
 
+ADR-0091 later adds an explicit opt-in exception for Linux bridge
+create/adopt/reap through `[managed_netdevs]`. VXLAN and VRF/L3VXLAN
+netdev creation remain outside this ADR's default boundary.
+
 1. the bridge exists;
 2. exactly one VXLAN port for the instance VNI is attached to that
    bridge;
@@ -306,7 +310,7 @@ Deletes are conservative:
 
 - withdraw remote FDB entries only when rustbgpd owns them;
 - never delete kernel-learned local MACs;
-- never delete bridge or VXLAN netdevs in Gate 7b;
+- never delete unmanaged bridge or VXLAN netdevs in Gate 7b;
 - when an instance disappears from desired intent, withdraw only
   rustbgpd-owned FDB entries for that instance and mark local learned
   observations stale upward.
@@ -319,10 +323,12 @@ exit. The initial timeout target is 5 seconds. If the timeout expires,
 the daemon exits and leaves remaining FDB entries for the kernel,
 operator tooling, or the next rustbgpd start to reconcile.
 
-The actor never deletes bridges, VXLAN links, kernel-learned local MACs,
-or foreign FDB entries on shutdown. Fast restart is handled by the next
-startup's initial dump and ownership reconciliation, not by preserving a
-special daemon-owned runtime file.
+The actor never deletes unmanaged bridges, VXLAN links, kernel-learned
+local MACs, or foreign FDB entries on shutdown. ADR-0091 managed bridges
+are still not deleted by shutdown; owner-scoped orphan reap happens only
+through normal `[managed_netdevs]` reconciliation. Fast restart is handled
+by the next startup's initial dump and ownership reconciliation, not by
+preserving a special daemon-owned runtime file.
 
 ### 8. Failures surface as status, not domain mutation
 

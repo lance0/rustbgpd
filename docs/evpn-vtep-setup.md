@@ -1,12 +1,13 @@
 # EVPN VTEP kernel setup (operator guide)
 
-rustbgpd is **observe-only** for kernel netdev topology. It programs and
-reconciles FDB / L3 FIB state on top of interfaces you provide, but it
-does **not** create or delete the bridge, VXLAN, or VRF netdevs
-(ADR-0063 non-goals; ADR-0054 §4; ADR-0088). You provision those with
-your host's network layer (`ip link`, ifupdown2, systemd-networkd,
-NetworkManager, SONiC, a CNI, ansible, …); rustbgpd probes them each
-reconcile pass and reports their state until they match the configured
+rustbgpd is **observe-only by default** for kernel netdev topology. It
+programs and reconciles FDB / L3 FIB state on top of interfaces you
+provide. ADR-0091 adds an explicit opt-in exception for Linux bridge
+create/adopt/reap through `[managed_netdevs]`; VXLAN and VRF netdev
+creation remain operator-provisioned. You normally provision topology
+with your host's network layer (`ip link`, ifupdown2, systemd-networkd,
+NetworkManager, SONiC, a CNI, ansible, …); rustbgpd probes it each
+reconcile pass and reports its state until it matches the configured
 model.
 
 Two independent readiness surfaces govern this:

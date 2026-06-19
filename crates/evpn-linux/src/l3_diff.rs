@@ -1023,6 +1023,8 @@ pub fn record_l3_success(
         | DataplaneOp::RemoveRemoteFdb { .. }
         | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::SetAcPortState { .. }
+        | DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }

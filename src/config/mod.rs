@@ -1044,10 +1044,10 @@ impl Config {
     pub fn resolve_managed_netdevs(
         &self,
     ) -> Result<rustbgpd_evpn::ManagedNetdevTable, ConfigError> {
-        if self.managed_netdevs.bridges.is_empty() {
+        let owner_token = self.managed_netdevs.owner_token.as_str();
+        if self.managed_netdevs.bridges.is_empty() && owner_token.is_empty() {
             return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
         }
-        let owner_token = self.managed_netdevs.owner_token.as_str();
         if owner_token.is_empty() {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: "managed_netdevs.owner_token is required when bridges are configured"

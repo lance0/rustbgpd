@@ -45,7 +45,7 @@ mod reload;
 #[cfg(test)]
 mod test_support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process;
@@ -77,6 +77,48 @@ use rustbgpd_api::server::{
 };
 
 const GR_RESTART_MARKER_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ManagedNetdevMetricLabel {
+    class: &'static str,
+    name: String,
+    desired: bool,
+    state: &'static str,
+}
+
+fn update_managed_netdev_metrics(
+    metrics: &BgpMetrics,
+    previous: &mut BTreeSet<ManagedNetdevMetricLabel>,
+    rows: &[rustbgpd_evpn::ManagedNetdevStatus],
+) {
+    let mut current = BTreeSet::new();
+    for row in rows {
+        let label = ManagedNetdevMetricLabel {
+            class: row.class.as_str(),
+            name: row.name.clone(),
+            desired: row.desired,
+            state: row.state.as_str(),
+        };
+        metrics.set_evpn_managed_netdev_state(
+            label.class,
+            &label.name,
+            label.desired,
+            label.state,
+            1,
+        );
+        current.insert(label);
+    }
+
+    for stale in previous.difference(&current) {
+        metrics.remove_evpn_managed_netdev_state(
+            stale.class,
+            &stale.name,
+            stale.desired,
+            stale.state,
+        );
+    }
+    *previous = current;
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GrRestartMarker {
@@ -1834,6 +1876,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 .collect();
         let metrics_for_routes = metrics.clone();
         tokio::spawn(async move {
+            let mut managed_netdev_metric_labels = BTreeSet::new();
             loop {
                 match reports.recv().await {
                     Ok(report) => {
@@ -1844,6 +1887,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         evpn_instance_status_tx.send_replace(report.instance_status);
                         evpn_fdb_nexthops_tx.send_replace(report.fdb_nexthops);
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
+                        update_managed_netdev_metrics(
+                            &metrics_for_routes,
+                            &mut managed_netdev_metric_labels,
+                            &report.managed_netdevs,
+                        );
                         evpn_managed_netdev_status_tx.send_replace(report.managed_netdevs);
                         // Slice 6a: publish per-VRF observed-routes
                         // gauge values and bump filtered-routes

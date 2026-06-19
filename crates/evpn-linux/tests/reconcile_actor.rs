@@ -22,8 +22,8 @@ use rustbgpd_evpn::ip_vrf::{
 use rustbgpd_evpn::{
     BridgeVlan, BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
     EthernetSegmentIdentifier, EthernetTagId, EvpnInstance, EvpnInstanceId, EvpnInstanceTable,
-    EvpnIpPrefixValue, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
-    RouteDistinguisher, RouteTarget,
+    EvpnIpPrefixValue, Ipv4Prefix, MacAddress, ManagedNetdevState, ManagedNetdevTable,
+    RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::snapshot::KernelVxlanInfo;
 use rustbgpd_evpn_linux::{
@@ -195,6 +195,36 @@ fn intent_with_bum_enforcement(
     })
 }
 
+fn intent_with_managed_netdevs(
+    generation: u64,
+    managed_netdevs: ManagedNetdevTable,
+) -> Arc<DataplaneIntent> {
+    Arc::new(DataplaneIntent {
+        generation,
+        instances: Arc::new(EvpnInstanceTable::new()),
+        remote_macs: Arc::new(RemoteMacTable::new()),
+        bum_enforcement: Arc::new(BumEnforcementTable::new()),
+        ip_vrfs: Arc::new(rustbgpd_evpn::ip_vrf::IpVrfTable::new()),
+        remote_ip_prefixes: Arc::new(rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new()),
+        managed_netdevs: Arc::new(managed_netdevs),
+    })
+}
+
+fn managed_link(
+    name: &str,
+    ifindex: u32,
+    vlan_filtering: bool,
+    altnames: Vec<&str>,
+) -> KernelLinkInfo {
+    KernelLinkInfo {
+        ifindex,
+        bridge_name: name.to_string(),
+        vlan_filtering,
+        altnames: altnames.into_iter().map(str::to_string).collect(),
+        ..KernelLinkInfo::default()
+    }
+}
+
 // 1. Initial reconcile pass with one Ready instance + one desired MAC
 //    produces an Add and the report applied list contains it.
 #[tokio::test]
@@ -218,6 +248,109 @@ async fn initial_reconcile_emits_apply_for_desired_mac() {
     assert_eq!(last.applied.len(), 1);
     assert!(last.failed.is_empty());
     assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_bridge_lifecycle_creates_and_reports_owned_safe() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let table = ManagedNetdevTable::from_bridge_map(
+        "leaf-1".to_string(),
+        BTreeMap::from([("br-mgd".to_string(), true)]),
+    );
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let report = wait_for_generation(&mut h, 1).await;
+    assert_eq!(report.applied.len(), 1);
+    assert!(matches!(
+        report.applied[0].kind,
+        rustbgpd_evpn::DataplaneOpKind::CreateManagedBridge { ref name }
+            if name == "br-mgd"
+    ));
+    assert!(report.failed.is_empty());
+    assert_eq!(report.managed_netdevs.len(), 1);
+    assert_eq!(
+        report.managed_netdevs[0].state,
+        ManagedNetdevState::OwnedSafe
+    );
+
+    let snapshot = h.handle.kernel_snapshot();
+    let link = snapshot
+        .links
+        .get("br-mgd")
+        .expect("created managed bridge");
+    assert!(link.vlan_filtering);
+    assert_eq!(link.altnames, vec!["rustbgpd:bridge:leaf-1:br-mgd"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_bridge_lifecycle_reaps_only_safe_owner_orphans() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_links(BTreeMap::from([
+        (
+            "br-safe".to_string(),
+            managed_link("br-safe", 10, true, vec!["rustbgpd:bridge:leaf-1:br-safe"]),
+        ),
+        (
+            "br-foreign".to_string(),
+            managed_link("br-foreign", 20, true, Vec::new()),
+        ),
+        (
+            "br-unsafe".to_string(),
+            managed_link(
+                "br-unsafe",
+                30,
+                true,
+                vec![
+                    "rustbgpd:bridge:leaf-1:br-unsafe",
+                    "rustbgpd:bridge:other:br-unsafe",
+                ],
+            ),
+        ),
+        (
+            "br-other-owner".to_string(),
+            managed_link(
+                "br-other-owner",
+                40,
+                true,
+                vec!["rustbgpd:bridge:leaf-2:br-other-owner"],
+            ),
+        ),
+    ]));
+    let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let report = wait_for_generation(&mut h, 1).await;
+    assert_eq!(report.applied.len(), 1);
+    assert!(matches!(
+        report.applied[0].kind,
+        rustbgpd_evpn::DataplaneOpKind::RemoveManagedBridge { ref name }
+            if name == "br-safe"
+    ));
+    assert!(report.failed.is_empty());
+
+    let snapshot = h.handle.kernel_snapshot();
+    assert!(!snapshot.links.contains_key("br-safe"));
+    assert!(snapshot.links.contains_key("br-foreign"));
+    assert!(snapshot.links.contains_key("br-unsafe"));
+    assert!(snapshot.links.contains_key("br-other-owner"));
+
+    assert_eq!(report.managed_netdevs.len(), 2);
+    assert_eq!(report.managed_netdevs[0].name, "br-other-owner");
+    assert_eq!(
+        report.managed_netdevs[0].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
+    assert_eq!(report.managed_netdevs[1].name, "br-unsafe");
+    assert_eq!(
+        report.managed_netdevs[1].state,
+        ManagedNetdevState::OwnedUnsafe
+    );
     h.shutdown().await;
 }
 

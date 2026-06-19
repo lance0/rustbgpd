@@ -550,7 +550,7 @@ jobs:
           script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + l3_multipath + l3_all_active_writer)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + managed_bridge + l3_multipath + l3_all_active_writer)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -580,6 +580,9 @@ jobs:
 
       - name: LAN-64 SVD collect-metadata FDB VNI netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
+
+      - name: ADR-0091 managed bridge lifecycle netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_bridge
 
       # l3_multipath / l3_all_active_writer create a `vrf` device; the slim
       # hosted Azure kernel ships vrf only via linux-modules-extra for the exact

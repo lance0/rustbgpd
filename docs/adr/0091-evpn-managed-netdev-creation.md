@@ -192,8 +192,10 @@ refuses to adopt or repair. The managed-netdev surface must expose at least:
   `adopted`, `foreign-name-collision`, `owned-but-unsafe(<attr>)`,
   `orphan-unstamped`, `creation-skipped` — readable via the dataplane/EVPN gRPC
   status and `rbgp`;
-- a **metric** (e.g. `managed_netdev_state{class,name,reason}`) so the unsafe /
-  orphan / skipped states alert in monitoring rather than hide in a log line;
+- a **metric** (e.g. `evpn_managed_netdev_state{class,name,desired,state}`)
+  so unsafe / orphan / skipped states alert in monitoring rather than hide in
+  a log line. Detailed reason text stays in gRPC/CLI status instead of a
+  Prometheus label to keep metric cardinality bounded;
 - a **startup notice** when a link with the expected name exists but is not
   rustbgpd-owned (`link <name> exists but is not rustbgpd-owned; managed
   creation skipped`), so the "working bridge the daemon ignores" case is not
@@ -272,11 +274,13 @@ foreign-vs-owned signal.
 
 ## Implementation Plan
 
-1. Parse managed-link altname stamps in the link inventory.
+1. Parse managed-link altname stamps in the link inventory. **Done.**
 2. Add `[managed_netdevs] owner_token` and `[[managed_netdevs.bridges]]`.
-3. Implement bridge create -> stamp -> adopt -> reap with an acked,
-   rollback-aware executor, including the Decision 6 status / metric / startup-
-   notice surface for owned-but-unsafe, orphan, and creation-skipped states.
+   **Done.**
+3. Implement bridge create -> stamp -> adopt -> reap through the EVPN
+   dataplane reconciler, including the Decision 6 status / metric surface for
+   owned-but-unsafe, orphan, and creation-skipped states. **Done for the bridge
+   class.**
 4. Add VXLAN class support.
 5. Add VRF / L3VXLAN class support.
 6. Add optional VLAN upper / bridge membership helpers if operator demand

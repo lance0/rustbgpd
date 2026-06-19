@@ -58,6 +58,8 @@
 #       (LAN-70 L3VNI multipath + FDB-NHG kernel-shape proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_all_active_writer
 #       (LAN-76 production actor all-active Type 5 L3 writer proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_bridge
+#       (ADR-0091 managed bridge create/adopt/reap proof)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -77,7 +79,8 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # runs the ADR-0089 VLAN-scoped FDB proof; `svd_fdb_vni` runs the
 # LAN-64 collect-metadata VXLAN explicit-FDB-VNI proof; `l3_multipath`
 # runs the LAN-70 L3VNI route-multipath + FDB-NHG proof; `l3_all_active_writer`
-# runs the LAN-76 production actor all-active L3 writer proof.
+# runs the LAN-76 production actor all-active L3 writer proof;
+# `managed_bridge` runs the ADR-0091 managed bridge lifecycle proof.
 TEST_BIN="netns_bum_filter"
 EXACT_FILTER=1
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
@@ -100,8 +103,9 @@ case "${1:-all}" in
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
     l3_multipath)       TEST_BIN="netns_l3_install"; FILTER="l3vxlan_all_active_multipath_kernel_shape" ;;
     l3_all_active_writer) TEST_BIN="netns_l3_install"; FILTER="linux_reconcile_actor_"; EXACT_FILTER=0 ;;
+    managed_bridge)     TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_create_adopt_and_reap_round_trip" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge" >&2
         exit 2
         ;;
 esac

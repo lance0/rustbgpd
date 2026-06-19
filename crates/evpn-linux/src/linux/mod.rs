@@ -65,6 +65,7 @@ mod l3;
 mod l3_adoption;
 pub mod link_carrier;
 mod links;
+mod managed_netdev;
 pub mod nexthop_raw;
 mod notify;
 mod probe;
@@ -659,6 +660,9 @@ impl Dataplane for LinuxDataplane {
         if let Some(result) = apply_l3_op(&self.handle, op).await {
             return result;
         }
+        if let Some(result) = managed_netdev::apply_managed_netdev_op(&self.handle, op).await {
+            return result;
+        }
         match op {
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 bum_filter::apply_bum_port_flags(&self.handle, *ifindex, *flags).await
@@ -679,8 +683,10 @@ impl Dataplane for LinuxDataplane {
             | DataplaneOp::AddL3Neighbor { .. }
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. } => {
-                unreachable!("plain L3 ops are handled by apply_l3_op")
+            | DataplaneOp::RemoveL3VxlanFdb { .. }
+            | DataplaneOp::CreateManagedBridge { .. }
+            | DataplaneOp::RemoveManagedBridge { .. } => {
+                unreachable!("plain L3 and managed-netdev ops are handled before this match")
             }
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —
             // the reconcile actor's coordinator routes them through
