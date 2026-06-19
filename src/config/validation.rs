@@ -819,6 +819,40 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     validate_managed_vxlans(&managed.vxlans, owner_token, &mut names)?;
     validate_managed_vrfs(&managed.vrfs, owner_token, &mut names)?;
     validate_managed_l3vxlans(&managed.l3vxlans, owner_token, &mut names)?;
+
+    // Cross-section checks need both `config` and `managed`, so they live here
+    // rather than in the per-section validators.
+
+    // A managed VRF must not claim a `[[fib_tables]]` table_id: both would
+    // install routes into the same kernel table under conflicting ownership.
+    let fib_table_ids: HashSet<u32> = config.fib_tables.iter().map(|t| t.table_id).collect();
+    for vrf in &managed.vrfs {
+        if fib_table_ids.contains(&vrf.table_id) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VRF {:?}: table_id {} collides with a [[fib_tables]] table_id",
+                    vrf.name, vrf.table_id
+                ),
+            });
+        }
+    }
+
+    // An L3VXLAN `vni` (the L3VNI) must be distinct from every fixed-VNI
+    // `[[managed_netdevs.vxlans]]` `vni` (an L2VNI): L3VNI and L2VNI must not
+    // collide.
+    let vxlan_vnis: HashSet<u32> = managed.vxlans.iter().map(|v| v.vni).collect();
+    for l3vxlan in &managed.l3vxlans {
+        if vxlan_vnis.contains(&l3vxlan.vni) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: vni {} (L3VNI) collides with a \
+                     [[managed_netdevs.vxlans]] vni (L2VNI); they must be distinct",
+                    l3vxlan.name, l3vxlan.vni
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -921,6 +955,14 @@ fn validate_managed_vrfs(
         if vrf.table_id == 0 {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!("managed VRF {:?}: table_id must be > 0", vrf.name),
+            });
+        }
+        if matches!(vrf.table_id, 252..=255) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VRF {:?}: table_id {} is reserved (252-255: compat/default/main/local)",
+                    vrf.name, vrf.table_id
+                ),
             });
         }
         if !seen_table_ids.insert(vrf.table_id) {

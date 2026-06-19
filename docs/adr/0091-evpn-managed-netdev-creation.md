@@ -224,7 +224,9 @@ refuses to adopt or repair. The managed-netdev surface must expose at least:
 - a per-managed-link **status with a structured reason** — e.g. `owned`,
   `adopted`, `foreign-name-collision`, `owned-but-unsafe(<attr>)`,
   `orphan-unstamped`, `creation-skipped` — readable via the dataplane/EVPN gRPC
-  status and `rbgp`;
+  status and `rbgp`. As shipped, a rustbgpd-stamped link whose stamp class does
+  not match its kind (a cross-class mis-stamp) is also surfaced as
+  `owned-unsafe` rather than dropped from the status scan;
 - a **metric** (e.g. `evpn_managed_netdev_state{class,name,desired,state}`)
   so unsafe / orphan / skipped states alert in monitoring rather than hide in
   a log line. Detailed reason text stays in gRPC/CLI status instead of a

@@ -2411,15 +2411,24 @@ link names (`.`, `..`, spaces, or names over 15 bytes), invalid owner tokens,
 and derived stamps longer than Linux's 127-byte altname limit. VXLAN
 validation also rejects invalid VNIs (outside `1..=16_777_215`), a duplicate
 `vni` shared by two VXLAN rows, `dstport = 0`, and `learning = true`. VRF
-validation rejects `table_id = 0` and duplicate managed VRF table ids. L3VXLAN
-validation rejects invalid VNIs, duplicate managed L3VXLAN VNIs, `dstport = 0`,
-`learning = true`, and a missing, multicast, or all-zero `router_mac`.
+validation rejects `table_id = 0`, the Linux reserved tables `252`, `253`,
+`254`, and `255` (compat/default/main/local), duplicate managed VRF table ids,
+and a managed VRF `table_id` that collides with a `[[fib_tables]]` `table_id`.
+L3VXLAN validation rejects invalid VNIs, duplicate managed L3VXLAN VNIs,
+`dstport = 0`, `learning = true`, a missing, multicast, or all-zero
+`router_mac`, and an L3VXLAN `vni` (L3VNI) that equals any
+`[[managed_netdevs.vxlans]]` `vni` (L2VNI) — the L3VNI and L2VNI must be
+distinct.
 
 rustbgpd preserves foreign links. A same-name bridge, VXLAN, VRF, or L3VXLAN
 without the exact ownership stamp is reported `foreign-present` and is not
 modified. A link with the expected stamp plus any other rustbgpd stamp, a wrong
 owner stamp, a stamp/name mismatch, or protected-attribute drift is reported
-`owned-unsafe` and is not repaired or deleted by v1. Protected attributes are:
+`owned-unsafe` and is not repaired or deleted by v1. A rustbgpd-stamped link
+whose stamp class does not match its kind — for example a bridge-kind link
+carrying only a `rustbgpd:vxlan:...` stamp, or a VXLAN-kind link carrying only a
+`rustbgpd:bridge:...` stamp — is also reported `owned-unsafe` (ADR-0091
+Decision 6); it is never silently hidden from status. Protected attributes are:
 bridge `vlan_filtering`; VXLAN `vni`, `local`, `dstport`, `learning`,
 `collect-metadata`, `vnifilter`, and `bridge` attachment; VRF `table_id`; and
 L3VXLAN `vni`, `local`, `dstport`, `learning`, `collect-metadata`,
@@ -2442,7 +2451,7 @@ Status states:
 |-------|---------|
 | `desired-absent` | Configured bridge, VXLAN, VRF, or L3VXLAN is not present in the kernel snapshot |
 | `foreign-present` | Same-name link exists without the expected rustbgpd ownership stamp |
-| `owned-unsafe` | Link carries a rustbgpd stamp that is not the expected one, or a protected attribute does not match config |
+| `owned-unsafe` | Link carries a rustbgpd stamp that is not the expected one (including a stamp whose class does not match the link kind), or a protected attribute does not match config |
 | `owned-safe` | Expected stamp and protected attributes match |
 | `orphaned` | A rustbgpd-stamped link exists with no desired config row |
 | `unknown` | No dataplane status snapshot has been published yet, or the link dump failed |
