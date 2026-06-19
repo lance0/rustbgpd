@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::health_probe::CoreReadinessProbe;
 use crate::peer_types::PeerManagerCommand;
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
@@ -63,15 +64,10 @@ impl proto::control_service_server::ControlService for ControlService {
     ) -> Result<Response<proto::HealthResponse>, Status> {
         let uptime = self.start_time.elapsed().as_secs();
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListPeers { reply: reply_tx })
+        let snapshot = CoreReadinessProbe::new(self.peer_mgr_tx.clone(), self.rib_tx.clone())
+            .snapshot()
             .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        let peers = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         // Only count peers we successfully queried as Established. A
         // `stale` PeerInfo means the per-peer `query_state` deadline fired
@@ -79,28 +75,17 @@ impl proto::control_service_server::ControlService for ControlService {
         // `state` field is a placeholder Idle, not a real reading, so it
         // would be misleading either to count it as active or to assert it
         // is not. Conservative: drop it from the active-peer count.
-        let active_peers = peers
+        let active_peers = snapshot
+            .peers
             .iter()
             .filter(|p| !p.stale && p.state == rustbgpd_fsm::SessionState::Established)
             .count();
-
-        let (rib_reply_tx, rib_reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryLocRibCount {
-                reply: rib_reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let total_routes = rib_reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
         Ok(Response::new(proto::HealthResponse {
             healthy: true,
             uptime_seconds: uptime,
             active_peers: u32::try_from(active_peers).unwrap_or(u32::MAX),
-            total_routes: u32::try_from(total_routes).unwrap_or(u32::MAX),
+            total_routes: u32::try_from(snapshot.total_routes).unwrap_or(u32::MAX),
         }))
     }
 
@@ -329,5 +314,36 @@ mod tests {
 
         assert_eq!(resp.active_peers, 1, "only Established peers counted");
         assert_eq!(resp.total_routes, 42, "total_routes from Loc-RIB");
+    }
+
+    #[tokio::test]
+    async fn get_health_times_out_when_peer_manager_is_wedged() {
+        let (peer_tx, _peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let metrics = BgpMetrics::new();
+        let svc = ControlService::new(
+            AccessMode::ReadWrite,
+            tokio::time::Instant::now(),
+            metrics,
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+
+        let err = tokio::time::timeout(
+            crate::health_probe::CORE_READINESS_DEADLINE + std::time::Duration::from_secs(1),
+            svc.get_health(Request::new(proto::HealthRequest {})),
+        )
+        .await
+        .expect("GetHealth should return after the readiness deadline")
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(
+            err.message(),
+            "peer manager probe timed out (200ms deadline)"
+        );
     }
 }

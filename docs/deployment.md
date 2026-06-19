@@ -363,8 +363,8 @@ not error on `--diff`; a clean `--diff` will not error on reload.
 
 ### Prometheus
 
-The exporter binds at `[global.telemetry] prometheus_addr`. Key
-counters operators watch:
+The exporter binds at `[global.telemetry] prometheus_addr`. The same listener
+serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
 
 - **Session liveness** — `bgp_session_established_total`,
   `bgp_session_flaps_total`, `bgp_messages_received_total`,

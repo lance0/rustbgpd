@@ -22,6 +22,7 @@ mod event_service;
 pub mod evpn_service;
 mod global_service;
 mod gnmi_service;
+pub mod health_probe;
 mod injection_service;
 pub mod json_format;
 mod neighbor_service;

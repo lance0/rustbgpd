@@ -181,6 +181,10 @@ rbgp neighbor
 rbgp rib
 rbgp bfd       # BFD sessions, if configured
 rbgp top       # live TUI dashboard
+
+# If prometheus_addr is configured, HTTP probes share that listener:
+curl -fsS http://127.0.0.1:9179/livez
+curl -fsS http://127.0.0.1:9179/readyz
 ```
 
 In production with the systemd unit, the default UDS path

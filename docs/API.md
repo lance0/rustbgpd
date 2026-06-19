@@ -1555,7 +1555,7 @@ Daemon lifecycle, health checks, and metrics.
 
 | RPC | Description |
 |-----|-------------|
-| `GetHealth` | Returns health status, uptime, active peers, total routes |
+| `GetHealth` | Returns health status, uptime, active peers, total routes; core actor probes are bounded by the same 200 ms deadline as HTTP `/readyz` |
 | `GetMetrics` | Returns Prometheus metrics as text |
 | `Shutdown` | Initiates graceful shutdown |
 | `TriggerMrtDump` | Triggers an on-demand MRT TABLE_DUMP_V2 dump |
@@ -1566,6 +1566,19 @@ Daemon lifecycle, health checks, and metrics.
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.ControlService/GetHealth
 ```
+
+If `[global.telemetry] prometheus_addr` is configured, the same HTTP listener
+also exposes unauthenticated probe endpoints:
+
+```bash
+curl -fsS http://127.0.0.1:9179/livez
+curl -fsS http://127.0.0.1:9179/readyz
+```
+
+`/livez` only proves the process is accepting HTTP connections. `/readyz`
+returns `200 ready` when PeerManager and RIB respond within 200 ms total, or
+`503 not ready: <reason>` when either core actor is unavailable, drops its
+reply, or times out. It does not require peers or routes to exist.
 
 ### Get Prometheus metrics via gRPC
 

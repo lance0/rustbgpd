@@ -1159,14 +1159,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         process::exit(1);
     });
 
-    // Spawn metrics HTTP server (if configured)
-    if let Some(prometheus_addr) = config.prometheus_addr() {
-        let metrics_clone = metrics.clone();
-        tokio::spawn(async move {
-            metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
-        });
-    }
-
     // ── ADR-0072: Durable event outbox (EventHistoryManager) ───────
     //
     // Spawned before any producer so the handle is available when
@@ -2509,6 +2501,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             Ok(Err(e)) => error!(label = %label, error = %e, "failed to add peer"),
             Err(e) => error!(label = %label, error = %e, "peer manager reply dropped"),
         }
+    }
+
+    // Spawn telemetry HTTP server (if configured). `/metrics` serves
+    // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
+    // Spawn after startup wiring and initial peer registration so readiness
+    // cannot go green while initialization is still in progress.
+    if let Some(prometheus_addr) = config.prometheus_addr() {
+        let metrics_clone = metrics.clone();
+        let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
+            peer_mgr_tx.clone(),
+            rib_tx.clone(),
+        );
+        tokio::spawn(async move {
+            metrics_server::serve_metrics(prometheus_addr, metrics_clone, readiness_probe).await;
+        });
     }
 
     // Signal handlers (unix-only, which is our target)

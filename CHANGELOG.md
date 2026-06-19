@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP liveness and readiness probes.** When
+  `[global.telemetry] prometheus_addr` is configured, the telemetry listener
+  now serves `/livez` for process liveness and `/readyz` for core actor
+  readiness alongside `/metrics`. Readiness checks PeerManager and RIB
+  responsiveness under the same 200 ms deadline now used by `GetHealth`,
+  without requiring any peers or routes to exist.
+
 ## [0.41.0] — 2026-06-18
 
 ### Added
