@@ -25,9 +25,12 @@ Options:
   --require-performance   Fail if the selected CPU is not using performance governor
   --fail-on-regression    Exit non-zero when any row is a confident regression:
                           completed attempts >= --verdict-min-attempts,
-                          min..max entirely above zero, stddev below
+                          min..max entirely above zero, the last-run 95% CI
+                          entirely above zero, stddev below
                           --regression-max-stddev-pct, and mean delta >=
-                          --regression-threshold-pct.
+                          --regression-threshold-pct. Rows that clear the delta
+                          but whose 95% CI straddles zero stay advisory
+                          (`ci-straddles-zero`).
   --regression-threshold-pct PCT
                           Mean head-vs-base delta needed for a confident
                           regression verdict (default: 3).
@@ -448,7 +451,7 @@ def propagated_ci_pct(base_est, head_est):
     return (lo, hi)
 
 
-def verdict(attempts_completed, mean_delta, stddev, minmax):
+def verdict(attempts_completed, mean_delta, stddev, minmax, last_ci):
     if attempts_completed < verdict_min_attempts or stddev is None or minmax is None:
         return "insufficient-attempts"
     if minmax[0] <= 0 <= minmax[1]:
@@ -458,7 +461,16 @@ def verdict(attempts_completed, mean_delta, stddev, minmax):
     if stddev >= regression_max_stddev_pct:
         return "inconclusive-noisy"
     if minmax[0] > 0 and mean_delta >= regression_threshold_pct:
-        return "regression"
+        # A confident regression also requires the last run's own propagated
+        # 95% CI to sit entirely above zero. The across-attempt deltas can all
+        # land positive (min..max > 0) from a small systematic skew even when a
+        # single run is not statistically separable from no-change; when that
+        # CI straddles zero (or is unavailable) the row stays advisory instead
+        # of failing the run. This is what keeps a docs-only / no-op change
+        # from tripping `--fail-on-regression` on benchmark noise.
+        if last_ci is not None and last_ci[0] > 0:
+            return "regression"
+        return "ci-straddles-zero"
     if minmax[0] > 0:
         return "positive-under-threshold"
     return "noise"
@@ -503,7 +515,7 @@ for bench_id in bench_ids:
     mean_delta = statistics.mean(deltas_pct)
     stddev = statistics.stdev(deltas_pct) if attempts_completed >= 2 else None
     minmax = (min(deltas_pct), max(deltas_pct)) if attempts_completed >= 2 else None
-    row_verdict = verdict(attempts_completed, mean_delta, stddev, minmax)
+    row_verdict = verdict(attempts_completed, mean_delta, stddev, minmax, last_ci)
     if row_verdict == "regression":
         regression_rows.append(bench_id)
 
@@ -531,8 +543,10 @@ lines = [
     + (" (alternating order: odd = base-first, even = head-first)" if attempts >= 2 else ""),
     f"- Verdict mode: {'fail on confident regression' if fail_on_regression else 'summary only'}",
     f"- Regression threshold: mean delta >= {regression_threshold_pct:g}% "
-    f"and min..max entirely above zero, stddev < {regression_max_stddev_pct:g}%, "
-    f"with >= {verdict_min_attempts} completed attempts",
+    f"with min..max and the last-run 95% CI both entirely above zero, "
+    f"stddev < {regression_max_stddev_pct:g}%, "
+    f"with >= {verdict_min_attempts} completed attempts "
+    f"(delta-only rows whose 95% CI straddles zero stay advisory)",
     f"- Metadata: `{os.environ['METADATA_FILE']}`",
     f"- Criterion artifacts: `{criterion_dir}`",
     "",
