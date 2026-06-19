@@ -235,6 +235,7 @@ fn managed_vxlan_link(
         ifindex,
         name: name.to_string(),
         altnames: altnames.into_iter().map(str::to_string).collect(),
+        up: true,
         vni: Some(vni),
         local_ip: Some(ipa("10.0.0.1")),
         dstport: Some(4789),
@@ -242,6 +243,8 @@ fn managed_vxlan_link(
         collect_metadata: false,
         vnifilter: false,
         bridge: Some("br100".to_string()),
+        master: Some("br100".to_string()),
+        mac: None,
     }
 }
 

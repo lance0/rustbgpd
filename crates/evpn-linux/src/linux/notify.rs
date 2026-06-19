@@ -726,6 +726,7 @@ mod tests {
             all_link_names,
             bridges,
             vxlan_links: HashMap::new(),
+            vrfs: HashMap::new(),
             vxlan_ifindex_to_vni,
             svd_vxlan_ifindexes: HashSet::new(),
             bridge_port_to_vni,

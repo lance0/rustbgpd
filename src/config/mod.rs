@@ -1047,6 +1047,8 @@ impl Config {
         let owner_token = self.managed_netdevs.owner_token.as_str();
         if self.managed_netdevs.bridges.is_empty()
             && self.managed_netdevs.vxlans.is_empty()
+            && self.managed_netdevs.vrfs.is_empty()
+            && self.managed_netdevs.l3vxlans.is_empty()
             && owner_token.is_empty()
         {
             return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
@@ -1079,10 +1081,50 @@ impl Config {
                 )
             })
             .collect();
-        Ok(rustbgpd_evpn::ManagedNetdevTable::from_maps(
+        let vrfs = self
+            .managed_netdevs
+            .vrfs
+            .iter()
+            .map(|vrf| {
+                (
+                    vrf.name.clone(),
+                    rustbgpd_evpn::ManagedVrfNetdevSpec {
+                        table_id: vrf.table_id,
+                    },
+                )
+            })
+            .collect();
+        let l3vxlans = self
+            .managed_netdevs
+            .l3vxlans
+            .iter()
+            .map(|l3vxlan| {
+                let router_mac = parse_mac_address(&l3vxlan.router_mac).map_err(|e| {
+                    ConfigError::InvalidManagedNetdev {
+                        reason: format!(
+                            "managed L3VXLAN {:?}: invalid router_mac {:?}: {e}",
+                            l3vxlan.name, l3vxlan.router_mac
+                        ),
+                    }
+                })?;
+                Ok((
+                    l3vxlan.name.clone(),
+                    rustbgpd_evpn::ManagedL3VxlanNetdevSpec {
+                        vni: l3vxlan.vni,
+                        local_ip: l3vxlan.local,
+                        dstport: l3vxlan.dstport,
+                        vrf: l3vxlan.vrf.clone(),
+                        router_mac,
+                    },
+                ))
+            })
+            .collect::<Result<_, ConfigError>>()?;
+        Ok(rustbgpd_evpn::ManagedNetdevTable::from_all_maps(
             owner_token.to_string(),
             bridges,
             vxlans,
+            vrfs,
+            l3vxlans,
         ))
     }
 

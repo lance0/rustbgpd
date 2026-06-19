@@ -17,8 +17,8 @@ use futures::stream::TryStreamExt;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::link::{
     AfSpecBridge, BridgeVlanInfo, BridgeVlanInfoFlags, BridgeVlanTunnelInfo, InfoBridge,
-    InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVlan, InfoVxlan, LinkAttribute,
-    LinkExtentMask, LinkInfo, LinkMessage, Prop,
+    InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoVlan, InfoVrf, InfoVxlan, LinkAttribute,
+    LinkExtentMask, LinkFlags, LinkInfo, LinkMessage, Prop,
 };
 use rtnetlink::Handle;
 
@@ -27,8 +27,8 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 use crate::error::DataplaneError;
 use crate::snapshot::{
     KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
-    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo, KernelVxlanLinkInfo,
-    vlan_rows_contain,
+    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVrfLinkInfo, KernelVxlanInfo,
+    KernelVxlanLinkInfo, vlan_rows_contain,
 };
 
 /// One bridge link the inventory cared about.
@@ -144,6 +144,9 @@ pub(crate) struct LinkCache {
     /// status uses this to classify desired VXLAN rows and stamped
     /// leftovers independently of bridge readiness.
     pub vxlan_links: HashMap<String, KernelVxlanLinkInfo>,
+    /// VRF links by name. Managed-netdev status uses this to classify desired
+    /// VRF rows and stamped leftovers independently of IP-VRF readiness.
+    pub vrfs: HashMap<String, KernelVrfLinkInfo>,
     /// VXLAN ifindex -> EVPN VNI back-reference. Populated alongside
     /// the bridge inventory so the FDB dump can derive the VNI of an
     /// FDB entry from `msg.header.ifindex` (which is the *VXLAN*
@@ -523,6 +526,19 @@ fn insert_unique_ifindex_binding(
 type BridgeVlanInventory =
     HashMap<u32, (Vec<KernelBridgeVlanInfo>, Vec<KernelBridgeVlanTunnelInfo>)>;
 
+#[derive(Default)]
+struct LinkDumpState {
+    bridges: HashMap<String, BridgeLink>,
+    all_link_names: HashSet<String>,
+    link_ifindex_to_name: HashMap<u32, String>,
+    bridge_ifindex_to_name: HashMap<u32, String>,
+    vrfs: HashMap<String, KernelVrfLinkInfo>,
+    vxlan_ports: Vec<VxlanPort>,
+    vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)>,
+    vlan_upper_links: HashMap<(u32, u16), Option<u32>>,
+    all_enslaved: Vec<EnslavedLink>,
+}
+
 async fn dump_bridge_vlan_inventory_optional(handle: &Handle) -> BridgeVlanInventory {
     match dump_bridge_vlan_inventory(handle).await {
         Ok(inventory) => inventory,
@@ -545,22 +561,13 @@ async fn dump_bridge_vlan_inventory_optional(handle: &Handle) -> BridgeVlanInven
 /// kernel-ordered and a VXLAN port can appear before its master
 /// bridge.
 pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneError> {
-    let mut bridges: HashMap<String, BridgeLink> = HashMap::new();
-    let mut all_link_names: HashSet<String> = HashSet::new();
-    let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
-    let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
-    let mut vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)> = HashMap::new();
-    let mut vlan_upper_links: HashMap<(u32, u16), Option<u32>> = HashMap::new();
+    let mut state = LinkDumpState::default();
     // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
     // rows, but on real kernels it is not a substitute for the normal
     // RTM_GETLINK walk: VXLAN InfoData/learning attributes can be absent
     // there. Keep this diagnostic substrate optional so a kernel that
     // refuses the extension mask does not break existing readiness.
     let vlan_inventory = dump_bridge_vlan_inventory_optional(handle).await;
-    // Every link that has a Controller attribute. Post-processed by
-    // `index_bridge_ports` to seed `bridge_port_to_vni` and
-    // `bridge_ports_by_name` for non-VXLAN ports of known bridges.
-    let mut all_enslaved: Vec<EnslavedLink> = Vec::new();
 
     let mut stream = handle.link().get().execute();
     while let Some(msg) = stream
@@ -568,68 +575,25 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         .await
         .map_err(|e| DataplaneError::Other(format!("link dump: {e}")))?
     {
-        let (kind, name) = link_kind_and_name(&msg);
-        all_link_names.extend(name.iter().cloned());
-        let (bridge_vlans, vlan_tunnels) = vlan_inventory
-            .get(&msg.header.index)
-            .cloned()
-            .unwrap_or_else(|| extract_bridge_vlan_inventory(&msg));
-        let ifindex = msg.header.index;
-        let master = extract_controller(&msg);
-        if let Some(master_idx) = master {
-            all_enslaved.push(EnslavedLink {
-                ifindex,
-                master: master_idx,
-                is_vxlan: matches!(kind, Some(InfoKind::Vxlan)),
-                name: name.clone(),
-                brport_state: extract_bridge_port_state(&msg),
-                vlans: bridge_vlans.clone(),
-                vlan_tunnels: vlan_tunnels.clone(),
-            });
-        }
-        match kind {
-            Some(InfoKind::Bridge) => {
-                if let Some(name) = name {
-                    let vlan_filtering = bridge_vlan_filtering(&msg);
-                    let mac = extract_link_mac(&msg);
-                    let altnames = extract_altnames(&msg);
-                    bridges.insert(
-                        name.clone(),
-                        BridgeLink {
-                            ifindex,
-                            mac,
-                            altnames,
-                            vlan_filtering,
-                            vxlan: None,
-                            vxlan_ports: Vec::new(),
-                            svd_vxlan_ports: Vec::new(),
-                            vxlan_attach_count: 0,
-                            ce_port_ifindexes: Vec::new(),
-                            vlans: bridge_vlans,
-                            vlan_tunnels,
-                            port_vlan_inventory: Vec::new(),
-                        },
-                    );
-                    bridge_ifindex_to_name.insert(ifindex, name);
-                }
-            }
-            Some(InfoKind::Vxlan) => {
-                if let Some(name) = name {
-                    record_named_vxlan_link(&msg, name, &mut vxlan_ports, &mut vxlan_links);
-                } else if let Some(port) = parse_vxlan_port(&msg) {
-                    vxlan_ports.push(port);
-                }
-            }
-            Some(InfoKind::Vlan) => {
-                record_vlan_upper_link(&msg, &mut vlan_upper_links);
-            }
-            _ => {}
-        }
+        record_link_message(&msg, &vlan_inventory, &mut state);
     }
+
+    let LinkDumpState {
+        mut bridges,
+        all_link_names,
+        link_ifindex_to_name,
+        bridge_ifindex_to_name,
+        vrfs,
+        vxlan_ports,
+        vxlan_links,
+        vlan_upper_links,
+        all_enslaved,
+    } = state;
 
     let (vxlan_ifindex_to_vni, svd_vxlan_ifindexes) =
         attach_vxlan_ports(vxlan_ports, &bridge_ifindex_to_name, &mut bridges);
-    let vxlan_links = attach_vxlan_link_status(vxlan_links, &bridge_ifindex_to_name);
+    let vxlan_links =
+        attach_vxlan_link_status(vxlan_links, &bridge_ifindex_to_name, &link_ifindex_to_name);
 
     let (bridge_port_to_vni, bridge_ports_by_name) =
         index_bridge_ports(all_enslaved, &bridge_ifindex_to_name, &mut bridges);
@@ -638,6 +602,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         all_link_names,
         bridges,
         vxlan_links,
+        vrfs,
         vxlan_ifindex_to_vni,
         svd_vxlan_ifindexes,
         bridge_port_to_vni,
@@ -650,6 +615,97 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
     })
+}
+
+fn record_link_message(
+    msg: &LinkMessage,
+    vlan_inventory: &BridgeVlanInventory,
+    state: &mut LinkDumpState,
+) {
+    let (kind, name) = link_kind_and_name(msg);
+    state.all_link_names.extend(name.iter().cloned());
+    if let Some(name) = &name {
+        state
+            .link_ifindex_to_name
+            .insert(msg.header.index, name.clone());
+    }
+
+    let (bridge_vlans, vlan_tunnels) = vlan_inventory
+        .get(&msg.header.index)
+        .cloned()
+        .unwrap_or_else(|| extract_bridge_vlan_inventory(msg));
+    let ifindex = msg.header.index;
+    if let Some(master) = extract_controller(msg) {
+        state.all_enslaved.push(EnslavedLink {
+            ifindex,
+            master,
+            is_vxlan: matches!(&kind, Some(InfoKind::Vxlan)),
+            name: name.clone(),
+            brport_state: extract_bridge_port_state(msg),
+            vlans: bridge_vlans.clone(),
+            vlan_tunnels: vlan_tunnels.clone(),
+        });
+    }
+
+    match kind {
+        Some(InfoKind::Bridge) => {
+            if let Some(name) = name {
+                record_bridge_link(
+                    msg,
+                    name,
+                    bridge_vlans,
+                    vlan_tunnels,
+                    &mut state.bridges,
+                    &mut state.bridge_ifindex_to_name,
+                );
+            }
+        }
+        Some(InfoKind::Vxlan) => {
+            if let Some(name) = name {
+                record_named_vxlan_link(msg, name, &mut state.vxlan_ports, &mut state.vxlan_links);
+            } else if let Some(port) = parse_vxlan_port(msg) {
+                state.vxlan_ports.push(port);
+            }
+        }
+        Some(InfoKind::Vrf) => {
+            if let Some(name) = name {
+                state.vrfs.insert(name.clone(), parse_vrf_link(msg, name));
+            }
+        }
+        Some(InfoKind::Vlan) => {
+            record_vlan_upper_link(msg, &mut state.vlan_upper_links);
+        }
+        _ => {}
+    }
+}
+
+fn record_bridge_link(
+    msg: &LinkMessage,
+    name: String,
+    bridge_vlans: Vec<KernelBridgeVlanInfo>,
+    vlan_tunnels: Vec<KernelBridgeVlanTunnelInfo>,
+    bridges: &mut HashMap<String, BridgeLink>,
+    bridge_ifindex_to_name: &mut HashMap<u32, String>,
+) {
+    let ifindex = msg.header.index;
+    bridges.insert(
+        name.clone(),
+        BridgeLink {
+            ifindex,
+            mac: extract_link_mac(msg),
+            altnames: extract_altnames(msg),
+            vlan_filtering: bridge_vlan_filtering(msg),
+            vxlan: None,
+            vxlan_ports: Vec::new(),
+            svd_vxlan_ports: Vec::new(),
+            vxlan_attach_count: 0,
+            ce_port_ifindexes: Vec::new(),
+            vlans: bridge_vlans,
+            vlan_tunnels,
+            port_vlan_inventory: Vec::new(),
+        },
+    );
+    bridge_ifindex_to_name.insert(ifindex, name);
 }
 
 fn record_named_vxlan_link(
@@ -681,11 +737,13 @@ fn record_vlan_upper_link(
 fn attach_vxlan_link_status(
     vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)>,
     bridge_ifindex_to_name: &HashMap<u32, String>,
+    link_ifindex_to_name: &HashMap<u32, String>,
 ) -> HashMap<String, KernelVxlanLinkInfo> {
     vxlan_links
         .into_iter()
         .map(|(name, (mut link, master))| {
             link.bridge = master.and_then(|idx| bridge_ifindex_to_name.get(&idx).cloned());
+            link.master = master.and_then(|idx| link_ifindex_to_name.get(&idx).cloned());
             (name, link)
         })
         .collect()
@@ -1117,6 +1175,7 @@ fn parse_vxlan_link(msg: &LinkMessage, name: String) -> ParsedVxlanLink {
             ifindex,
             name,
             altnames: extract_altnames(msg),
+            up: msg.header.flags.contains(LinkFlags::Up),
             vni,
             local_ip: local,
             dstport,
@@ -1124,8 +1183,37 @@ fn parse_vxlan_link(msg: &LinkMessage, name: String) -> ParsedVxlanLink {
             collect_metadata,
             vnifilter,
             bridge: None,
+            master: None,
+            mac: extract_link_mac(msg),
         },
     }
+}
+
+fn parse_vrf_link(msg: &LinkMessage, name: String) -> KernelVrfLinkInfo {
+    KernelVrfLinkInfo {
+        ifindex: msg.header.index,
+        name,
+        altnames: extract_altnames(msg),
+        up: msg.header.flags.contains(LinkFlags::Up),
+        table_id: extract_vrf_table_id(msg),
+    }
+}
+
+fn extract_vrf_table_id(msg: &LinkMessage) -> Option<u32> {
+    for attr in &msg.attributes {
+        if let LinkAttribute::LinkInfo(infos) = attr {
+            for info in infos {
+                if let LinkInfo::Data(InfoData::Vrf(items)) = info {
+                    for item in items {
+                        if let InfoVrf::TableId(id) = item {
+                            return Some(*id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_vlan_upper_link(msg: &LinkMessage) -> Option<VlanUpperLink> {
@@ -1286,6 +1374,10 @@ mod tests {
     fn parse_vxlan_port_captures_fixed_vni_device() {
         let mut msg = LinkMessage::default();
         msg.header.index = 20;
+        msg.header.flags.insert(LinkFlags::Up);
+        msg.attributes.push(LinkAttribute::Address(vec![
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ]));
         msg.attributes
             .push(LinkAttribute::IfName("vxlan100".to_string()));
         msg.attributes.push(LinkAttribute::PropList(vec![
@@ -1323,6 +1415,11 @@ mod tests {
         assert_eq!(parsed.info.learning_disabled, Some(true));
         assert!(!parsed.info.collect_metadata);
         assert!(!parsed.info.vnifilter);
+        assert!(parsed.info.up);
+        assert_eq!(
+            parsed.info.mac,
+            Some(MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]))
+        );
 
         let Some(VxlanPort::Fixed(port)) = parse_vxlan_port(&msg) else {
             panic!("expected fixed VXLAN port");
@@ -1332,6 +1429,37 @@ mod tests {
         assert_eq!(port.info.vni, 100);
         assert_eq!(port.info.local_ip, "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(port.info.learning_disabled, Some(true));
+    }
+
+    #[test]
+    fn parse_vrf_link_captures_table_stamp_and_up_state() {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 50;
+        msg.header.flags.insert(LinkFlags::Up);
+        msg.attributes
+            .push(LinkAttribute::IfName("vrf100".to_string()));
+        msg.attributes.push(LinkAttribute::PropList(vec![
+            Prop::AltIfName("operator-alias".to_string()),
+            Prop::AltIfName("rustbgpd:vrf:leaf-1:vrf100".to_string()),
+        ]));
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vrf),
+            LinkInfo::Data(InfoData::Vrf(vec![InfoVrf::TableId(5000)])),
+        ]));
+
+        let parsed = parse_vrf_link(&msg, "vrf100".to_string());
+
+        assert_eq!(parsed.ifindex, 50);
+        assert_eq!(parsed.name, "vrf100");
+        assert_eq!(
+            parsed.altnames,
+            vec![
+                "operator-alias".to_string(),
+                "rustbgpd:vrf:leaf-1:vrf100".to_string(),
+            ]
+        );
+        assert!(parsed.up);
+        assert_eq!(parsed.table_id, Some(5000));
     }
 
     #[test]

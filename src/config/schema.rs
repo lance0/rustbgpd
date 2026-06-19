@@ -1216,8 +1216,9 @@ pub struct EvpnIpVrfConfig {
 
 /// ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.
 ///
-/// v1 accepts `[[managed_netdevs.bridges]]` and fixed-VNI
-/// `[[managed_netdevs.vxlans]]` rows. The `owner_token` is required
+/// v1 accepts `[[managed_netdevs.bridges]]`, fixed-VNI
+/// `[[managed_netdevs.vxlans]]`, `[[managed_netdevs.vrfs]]`, and
+/// `[[managed_netdevs.l3vxlans]]` rows. The `owner_token` is required
 /// when at least one row is configured and is used only to derive
 /// durable `IFLA_ALT_IFNAME` ownership stamps:
 /// `rustbgpd:<class>:<owner_token>:<link_name>`.
@@ -1232,9 +1233,17 @@ pub struct ManagedNetdevsConfig {
     #[serde(default)]
     pub bridges: Vec<ManagedBridgeNetdevConfig>,
     /// Managed fixed-VNI VXLAN rows. SVD / collect-metadata VXLANs and
-    /// VRFs are intentionally not accepted in this release.
+    /// shared-device VXLANs are intentionally not accepted in this release.
     #[serde(default)]
     pub vxlans: Vec<ManagedVxlanNetdevConfig>,
+    /// Managed VRF rows. LAN-94 accepts schema/status substrate only; Linux
+    /// lifecycle create/delete lands in the next ADR-0091 slice.
+    #[serde(default)]
+    pub vrfs: Vec<ManagedVrfNetdevConfig>,
+    /// Managed L3 VXLAN rows. LAN-94 accepts schema/status substrate only;
+    /// Linux lifecycle create/delete lands in the next ADR-0091 slice.
+    #[serde(default)]
+    pub l3vxlans: Vec<ManagedL3VxlanNetdevConfig>,
 }
 
 /// One managed Linux bridge row (ADR-0091 bridge-first tranche).
@@ -1264,6 +1273,41 @@ pub struct ManagedVxlanNetdevConfig {
     /// EVPN readiness.
     pub bridge: String,
     /// Linux VXLAN learning mode. ADR-0091 fixed-VNI lifecycle requires
+    /// `false` (`nolearning`); the field exists so typos or intentional
+    /// deviations fail validation explicitly instead of silently using the
+    /// default.
+    #[serde(default)]
+    pub learning: bool,
+}
+
+/// One managed Linux VRF row (ADR-0091 VRF/L3VXLAN substrate tranche).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedVrfNetdevConfig {
+    /// Linux VRF interface name.
+    pub name: String,
+    /// Desired VRF table id (`IFLA_VRF_TABLE`).
+    pub table_id: u32,
+}
+
+/// One managed L3 VXLAN row (ADR-0091 VRF/L3VXLAN substrate tranche).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedL3VxlanNetdevConfig {
+    /// Linux L3 VXLAN interface name.
+    pub name: String,
+    /// Fixed VXLAN VNI (`1..=16_777_215`).
+    pub vni: u32,
+    /// Local source IP for VXLAN encapsulation.
+    pub local: std::net::IpAddr,
+    /// UDP destination port. Defaults to the IANA VXLAN port.
+    #[serde(default = "default_vxlan_dstport")]
+    pub dstport: u16,
+    /// VRF device this L3 VXLAN must be enslaved to.
+    pub vrf: String,
+    /// Router MAC this L3 VXLAN must carry.
+    pub router_mac: String,
+    /// Linux VXLAN learning mode. ADR-0091 L3VXLAN lifecycle requires
     /// `false` (`nolearning`); the field exists so typos or intentional
     /// deviations fail validation explicitly instead of silently using the
     /// default.

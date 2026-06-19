@@ -518,6 +518,7 @@ impl InMemoryDataplane {
                         ifindex: next_ifindex,
                         name: name.clone(),
                         altnames: vec![ownership_stamp.clone()],
+                        up: true,
                         vni: Some(spec.vni),
                         local_ip: Some(spec.local_ip),
                         dstport: Some(spec.dstport),
@@ -525,6 +526,8 @@ impl InMemoryDataplane {
                         collect_metadata: false,
                         vnifilter: false,
                         bridge: Some(spec.bridge.clone()),
+                        master: Some(spec.bridge.clone()),
+                        mac: None,
                     });
                 }
             },

@@ -891,6 +891,8 @@ fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevSta
         class: match row.class {
             rustbgpd_evpn::ManagedNetdevClass::Bridge => proto::ManagedNetdevClass::Bridge as i32,
             rustbgpd_evpn::ManagedNetdevClass::Vxlan => proto::ManagedNetdevClass::Vxlan as i32,
+            rustbgpd_evpn::ManagedNetdevClass::Vrf => proto::ManagedNetdevClass::Vrf as i32,
+            rustbgpd_evpn::ManagedNetdevClass::L3Vxlan => proto::ManagedNetdevClass::L3vxlan as i32,
         },
         name: row.name.clone(),
         desired: row.desired,
@@ -926,6 +928,10 @@ fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevSta
         observed_collect_metadata: row.observed_collect_metadata,
         observed_vnifilter: row.observed_vnifilter,
         observed_bridge: row.observed_bridge.clone(),
+        observed_table_id: row.observed_table_id,
+        observed_up: row.observed_up,
+        observed_master: row.observed_master.clone(),
+        observed_router_mac: row.observed_router_mac.map(|mac| mac.to_string()),
     }
 }
 
@@ -2136,46 +2142,7 @@ mod tests {
     #[tokio::test]
     async fn list_managed_netdevs_reads_status_snapshot() {
         let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()))
-            .with_managed_netdev_status_snapshot(Arc::new(|| {
-                vec![
-                    ManagedNetdevStatus {
-                        class: rustbgpd_evpn::ManagedNetdevClass::Bridge,
-                        name: "br100".to_string(),
-                        desired: true,
-                        ownership_stamp: Some("rustbgpd:bridge:leaf-1:br100".to_string()),
-                        state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
-                        reason: String::new(),
-                        ifindex: Some(10),
-                        observed_vlan_filtering: Some(false),
-                        observed_vni: None,
-                        observed_local_ip: None,
-                        observed_dstport: None,
-                        observed_learning_disabled: None,
-                        observed_collect_metadata: None,
-                        observed_vnifilter: None,
-                        observed_bridge: None,
-                        observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
-                    },
-                    ManagedNetdevStatus {
-                        class: rustbgpd_evpn::ManagedNetdevClass::Vxlan,
-                        name: "vxlan100".to_string(),
-                        desired: true,
-                        ownership_stamp: Some("rustbgpd:vxlan:leaf-1:vxlan100".to_string()),
-                        state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
-                        reason: String::new(),
-                        ifindex: Some(20),
-                        observed_vlan_filtering: None,
-                        observed_vni: Some(100),
-                        observed_local_ip: Some("10.0.0.1".parse().unwrap()),
-                        observed_dstport: Some(4789),
-                        observed_learning_disabled: Some(true),
-                        observed_collect_metadata: Some(false),
-                        observed_vnifilter: Some(false),
-                        observed_bridge: Some("br100".to_string()),
-                        observed_stamps: vec!["rustbgpd:vxlan:leaf-1:vxlan100".to_string()],
-                    },
-                ]
-            }));
+            .with_managed_netdev_status_snapshot(Arc::new(managed_netdev_status_fixture));
 
         let resp = svc
             .list_managed_netdevs(Request::new(proto::ListManagedNetdevsRequest {}))
@@ -2183,8 +2150,123 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.netdevs.len(), 2);
-        let row = &resp.netdevs[0];
+        assert_eq!(resp.netdevs.len(), 4);
+        assert_bridge_managed_netdev(&resp.netdevs[0]);
+        assert_vxlan_managed_netdev(&resp.netdevs[1]);
+        assert_vrf_managed_netdev(&resp.netdevs[2]);
+        assert_l3vxlan_managed_netdev(&resp.netdevs[3]);
+    }
+
+    fn managed_netdev_status_fixture() -> Vec<ManagedNetdevStatus> {
+        vec![
+            bridge_managed_netdev_status(),
+            vxlan_managed_netdev_status(),
+            vrf_managed_netdev_status(),
+            l3vxlan_managed_netdev_status(),
+        ]
+    }
+
+    fn bridge_managed_netdev_status() -> ManagedNetdevStatus {
+        ManagedNetdevStatus {
+            class: rustbgpd_evpn::ManagedNetdevClass::Bridge,
+            name: "br100".to_string(),
+            desired: true,
+            ownership_stamp: Some("rustbgpd:bridge:leaf-1:br100".to_string()),
+            state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+            reason: String::new(),
+            ifindex: Some(10),
+            observed_vlan_filtering: Some(false),
+            observed_vni: None,
+            observed_local_ip: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
+            observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+        }
+    }
+
+    fn vxlan_managed_netdev_status() -> ManagedNetdevStatus {
+        ManagedNetdevStatus {
+            class: rustbgpd_evpn::ManagedNetdevClass::Vxlan,
+            name: "vxlan100".to_string(),
+            desired: true,
+            ownership_stamp: Some("rustbgpd:vxlan:leaf-1:vxlan100".to_string()),
+            state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+            reason: String::new(),
+            ifindex: Some(20),
+            observed_vlan_filtering: None,
+            observed_vni: Some(100),
+            observed_local_ip: Some("10.0.0.1".parse().unwrap()),
+            observed_dstport: Some(4789),
+            observed_learning_disabled: Some(true),
+            observed_collect_metadata: Some(false),
+            observed_vnifilter: Some(false),
+            observed_bridge: Some("br100".to_string()),
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
+            observed_stamps: vec!["rustbgpd:vxlan:leaf-1:vxlan100".to_string()],
+        }
+    }
+
+    fn vrf_managed_netdev_status() -> ManagedNetdevStatus {
+        ManagedNetdevStatus {
+            class: rustbgpd_evpn::ManagedNetdevClass::Vrf,
+            name: "vrf100".to_string(),
+            desired: true,
+            ownership_stamp: Some("rustbgpd:vrf:leaf-1:vrf100".to_string()),
+            state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+            reason: String::new(),
+            ifindex: Some(30),
+            observed_vlan_filtering: None,
+            observed_vni: None,
+            observed_local_ip: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
+            observed_table_id: Some(5000),
+            observed_up: Some(true),
+            observed_master: None,
+            observed_router_mac: None,
+            observed_stamps: vec!["rustbgpd:vrf:leaf-1:vrf100".to_string()],
+        }
+    }
+
+    fn l3vxlan_managed_netdev_status() -> ManagedNetdevStatus {
+        ManagedNetdevStatus {
+            class: rustbgpd_evpn::ManagedNetdevClass::L3Vxlan,
+            name: "l3vxlan100".to_string(),
+            desired: true,
+            ownership_stamp: Some("rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string()),
+            state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+            reason: String::new(),
+            ifindex: Some(40),
+            observed_vlan_filtering: None,
+            observed_vni: Some(5000),
+            observed_local_ip: Some("10.0.0.1".parse().unwrap()),
+            observed_dstport: Some(4789),
+            observed_learning_disabled: Some(true),
+            observed_collect_metadata: Some(false),
+            observed_vnifilter: Some(false),
+            observed_bridge: None,
+            observed_table_id: None,
+            observed_up: Some(true),
+            observed_master: Some("vrf100".to_string()),
+            observed_router_mac: Some(MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])),
+            observed_stamps: vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string()],
+        }
+    }
+
+    fn assert_bridge_managed_netdev(row: &proto::ManagedNetdevState) {
         assert_eq!(row.class, proto::ManagedNetdevClass::Bridge as i32);
         assert_eq!(row.name, "br100");
         assert!(row.desired);
@@ -2196,7 +2278,9 @@ mod tests {
         assert_eq!(row.ifindex, Some(10));
         assert_eq!(row.observed_vlan_filtering, Some(false));
         assert_eq!(row.observed_stamps, vec!["rustbgpd:bridge:leaf-1:br100"]);
-        let vxlan = &resp.netdevs[1];
+    }
+
+    fn assert_vxlan_managed_netdev(vxlan: &proto::ManagedNetdevState) {
         assert_eq!(vxlan.class, proto::ManagedNetdevClass::Vxlan as i32);
         assert_eq!(vxlan.name, "vxlan100");
         assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
@@ -2208,6 +2292,31 @@ mod tests {
         assert_eq!(vxlan.observed_collect_metadata, Some(false));
         assert_eq!(vxlan.observed_vnifilter, Some(false));
         assert_eq!(vxlan.observed_bridge.as_deref(), Some("br100"));
+    }
+
+    fn assert_vrf_managed_netdev(vrf: &proto::ManagedNetdevState) {
+        assert_eq!(vrf.class, proto::ManagedNetdevClass::Vrf as i32);
+        assert_eq!(vrf.name, "vrf100");
+        assert_eq!(vrf.ownership_stamp, "rustbgpd:vrf:leaf-1:vrf100");
+        assert_eq!(vrf.ifindex, Some(30));
+        assert_eq!(vrf.observed_table_id, Some(5000));
+        assert_eq!(vrf.observed_up, Some(true));
+    }
+
+    fn assert_l3vxlan_managed_netdev(l3vxlan: &proto::ManagedNetdevState) {
+        assert_eq!(l3vxlan.class, proto::ManagedNetdevClass::L3vxlan as i32);
+        assert_eq!(l3vxlan.name, "l3vxlan100");
+        assert_eq!(
+            l3vxlan.ownership_stamp,
+            "rustbgpd:l3vxlan:leaf-1:l3vxlan100"
+        );
+        assert_eq!(l3vxlan.ifindex, Some(40));
+        assert_eq!(l3vxlan.observed_vni, Some(5000));
+        assert_eq!(l3vxlan.observed_master.as_deref(), Some("vrf100"));
+        assert_eq!(
+            l3vxlan.observed_router_mac.as_deref(),
+            Some("02:00:00:00:00:01")
+        );
     }
 
     // -- Gate 9 IP-VRF surface --------------------------------------

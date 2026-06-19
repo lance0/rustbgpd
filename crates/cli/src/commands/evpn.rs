@@ -625,6 +625,18 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
             if let Some(bridge) = row.observed_bridge.as_deref() {
                 detail.push(format!("bridge={bridge}"));
             }
+            if let Some(table_id) = row.observed_table_id {
+                detail.push(format!("table-id={table_id}"));
+            }
+            if let Some(up) = row.observed_up {
+                detail.push(format!("up={up}"));
+            }
+            if let Some(master) = row.observed_master.as_deref() {
+                detail.push(format!("master={master}"));
+            }
+            if let Some(router_mac) = row.observed_router_mac.as_deref() {
+                detail.push(format!("router-mac={router_mac}"));
+            }
             if !row.observed_stamps.is_empty() {
                 detail.push(format!(
                     "observed-stamps=[{}]",
@@ -644,6 +656,8 @@ fn managed_netdev_class_label(class: i32) -> &'static str {
     match ManagedNetdevClass::try_from(class) {
         Ok(ManagedNetdevClass::Bridge) => "bridge",
         Ok(ManagedNetdevClass::Vxlan) => "vxlan",
+        Ok(ManagedNetdevClass::Vrf) => "vrf",
+        Ok(ManagedNetdevClass::L3vxlan) => "l3vxlan",
         Ok(ManagedNetdevClass::Unknown) | Err(_) => "unknown",
     }
 }
@@ -698,6 +712,20 @@ fn managed_netdev_to_json(row: &ManagedNetdevState) -> serde_json::Value {
             .map_or(serde_json::Value::Null, serde_json::Value::from),
         "observed_bridge": row
             .observed_bridge
+            .as_ref()
+            .map_or(serde_json::Value::Null, |value| serde_json::Value::String(value.clone())),
+        "observed_table_id": row
+            .observed_table_id
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_up": row
+            .observed_up
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_master": row
+            .observed_master
+            .as_ref()
+            .map_or(serde_json::Value::Null, |value| serde_json::Value::String(value.clone())),
+        "observed_router_mac": row
+            .observed_router_mac
             .as_ref()
             .map_or(serde_json::Value::Null, |value| serde_json::Value::String(value.clone())),
         "observed_stamps": row.observed_stamps,
@@ -1484,6 +1512,10 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_collect_metadata: None,
             observed_vnifilter: None,
             observed_bridge: None,
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
         });
 
         assert_eq!(value["class"], "bridge");
@@ -1513,6 +1545,10 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_collect_metadata: Some(false),
             observed_vnifilter: Some(false),
             observed_bridge: Some("br100".to_string()),
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
         });
         assert_eq!(vxlan["class"], "vxlan");
         assert_eq!(vxlan["observed_vni"], 100);
@@ -1522,6 +1558,58 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(vxlan["observed_collect_metadata"], false);
         assert_eq!(vxlan["observed_vnifilter"], false);
         assert_eq!(vxlan["observed_bridge"], "br100");
+
+        let vrf = super::managed_netdev_to_json(&crate::proto::ManagedNetdevState {
+            class: crate::proto::ManagedNetdevClass::Vrf as i32,
+            name: "vrf100".to_string(),
+            desired: true,
+            ownership_stamp: "rustbgpd:vrf:leaf-1:vrf100".to_string(),
+            state: crate::proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32,
+            reason: String::new(),
+            ifindex: Some(30),
+            observed_vlan_filtering: None,
+            observed_stamps: vec!["rustbgpd:vrf:leaf-1:vrf100".to_string()],
+            observed_vni: None,
+            observed_local: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
+            observed_table_id: Some(5000),
+            observed_up: Some(true),
+            observed_master: None,
+            observed_router_mac: None,
+        });
+        assert_eq!(vrf["class"], "vrf");
+        assert_eq!(vrf["observed_table_id"], 5000);
+        assert_eq!(vrf["observed_up"], true);
+
+        let l3vxlan = super::managed_netdev_to_json(&crate::proto::ManagedNetdevState {
+            class: crate::proto::ManagedNetdevClass::L3vxlan as i32,
+            name: "l3vxlan100".to_string(),
+            desired: true,
+            ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string(),
+            state: crate::proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32,
+            reason: String::new(),
+            ifindex: Some(40),
+            observed_vlan_filtering: None,
+            observed_stamps: vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string()],
+            observed_vni: Some(5000),
+            observed_local: Some("10.0.0.1".to_string()),
+            observed_dstport: Some(4789),
+            observed_learning_disabled: Some(true),
+            observed_collect_metadata: Some(false),
+            observed_vnifilter: Some(false),
+            observed_bridge: None,
+            observed_table_id: None,
+            observed_up: Some(true),
+            observed_master: Some("vrf100".to_string()),
+            observed_router_mac: Some("02:00:00:00:00:01".to_string()),
+        });
+        assert_eq!(l3vxlan["class"], "l3vxlan");
+        assert_eq!(l3vxlan["observed_master"], "vrf100");
+        assert_eq!(l3vxlan["observed_router_mac"], "02:00:00:00:00:01");
     }
 
     #[tokio::test]
