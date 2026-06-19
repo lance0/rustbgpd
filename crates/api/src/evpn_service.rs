@@ -890,6 +890,7 @@ fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevSta
     proto::ManagedNetdevState {
         class: match row.class {
             rustbgpd_evpn::ManagedNetdevClass::Bridge => proto::ManagedNetdevClass::Bridge as i32,
+            rustbgpd_evpn::ManagedNetdevClass::Vxlan => proto::ManagedNetdevClass::Vxlan as i32,
         },
         name: row.name.clone(),
         desired: row.desired,
@@ -918,6 +919,13 @@ fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevSta
         ifindex: row.ifindex,
         observed_vlan_filtering: row.observed_vlan_filtering,
         observed_stamps: row.observed_stamps.clone(),
+        observed_vni: row.observed_vni,
+        observed_local: row.observed_local_ip.map(|ip| ip.to_string()),
+        observed_dstport: row.observed_dstport.map(u32::from),
+        observed_learning_disabled: row.observed_learning_disabled,
+        observed_collect_metadata: row.observed_collect_metadata,
+        observed_vnifilter: row.observed_vnifilter,
+        observed_bridge: row.observed_bridge.clone(),
     }
 }
 
@@ -2129,17 +2137,44 @@ mod tests {
     async fn list_managed_netdevs_reads_status_snapshot() {
         let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()))
             .with_managed_netdev_status_snapshot(Arc::new(|| {
-                vec![ManagedNetdevStatus {
-                    class: rustbgpd_evpn::ManagedNetdevClass::Bridge,
-                    name: "br100".to_string(),
-                    desired: true,
-                    ownership_stamp: Some("rustbgpd:bridge:leaf-1:br100".to_string()),
-                    state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
-                    reason: String::new(),
-                    ifindex: Some(10),
-                    observed_vlan_filtering: Some(false),
-                    observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
-                }]
+                vec![
+                    ManagedNetdevStatus {
+                        class: rustbgpd_evpn::ManagedNetdevClass::Bridge,
+                        name: "br100".to_string(),
+                        desired: true,
+                        ownership_stamp: Some("rustbgpd:bridge:leaf-1:br100".to_string()),
+                        state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+                        reason: String::new(),
+                        ifindex: Some(10),
+                        observed_vlan_filtering: Some(false),
+                        observed_vni: None,
+                        observed_local_ip: None,
+                        observed_dstport: None,
+                        observed_learning_disabled: None,
+                        observed_collect_metadata: None,
+                        observed_vnifilter: None,
+                        observed_bridge: None,
+                        observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+                    },
+                    ManagedNetdevStatus {
+                        class: rustbgpd_evpn::ManagedNetdevClass::Vxlan,
+                        name: "vxlan100".to_string(),
+                        desired: true,
+                        ownership_stamp: Some("rustbgpd:vxlan:leaf-1:vxlan100".to_string()),
+                        state: rustbgpd_evpn::ManagedNetdevState::OwnedSafe,
+                        reason: String::new(),
+                        ifindex: Some(20),
+                        observed_vlan_filtering: None,
+                        observed_vni: Some(100),
+                        observed_local_ip: Some("10.0.0.1".parse().unwrap()),
+                        observed_dstport: Some(4789),
+                        observed_learning_disabled: Some(true),
+                        observed_collect_metadata: Some(false),
+                        observed_vnifilter: Some(false),
+                        observed_bridge: Some("br100".to_string()),
+                        observed_stamps: vec!["rustbgpd:vxlan:leaf-1:vxlan100".to_string()],
+                    },
+                ]
             }));
 
         let resp = svc
@@ -2148,7 +2183,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.netdevs.len(), 1);
+        assert_eq!(resp.netdevs.len(), 2);
         let row = &resp.netdevs[0];
         assert_eq!(row.class, proto::ManagedNetdevClass::Bridge as i32);
         assert_eq!(row.name, "br100");
@@ -2161,6 +2196,18 @@ mod tests {
         assert_eq!(row.ifindex, Some(10));
         assert_eq!(row.observed_vlan_filtering, Some(false));
         assert_eq!(row.observed_stamps, vec!["rustbgpd:bridge:leaf-1:br100"]);
+        let vxlan = &resp.netdevs[1];
+        assert_eq!(vxlan.class, proto::ManagedNetdevClass::Vxlan as i32);
+        assert_eq!(vxlan.name, "vxlan100");
+        assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
+        assert_eq!(vxlan.ifindex, Some(20));
+        assert_eq!(vxlan.observed_vni, Some(100));
+        assert_eq!(vxlan.observed_local.as_deref(), Some("10.0.0.1"));
+        assert_eq!(vxlan.observed_dstport, Some(4789));
+        assert_eq!(vxlan.observed_learning_disabled, Some(true));
+        assert_eq!(vxlan.observed_collect_metadata, Some(false));
+        assert_eq!(vxlan.observed_vnifilter, Some(false));
+        assert_eq!(vxlan.observed_bridge.as_deref(), Some("br100"));
     }
 
     // -- Gate 9 IP-VRF surface --------------------------------------

@@ -27,7 +27,8 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 use crate::error::DataplaneError;
 use crate::snapshot::{
     KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
-    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo, vlan_rows_contain,
+    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVxlanInfo, KernelVxlanLinkInfo,
+    vlan_rows_contain,
 };
 
 /// One bridge link the inventory cared about.
@@ -113,6 +114,12 @@ struct SvdVxlanPort {
     info: KernelSvdVxlanInfo,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedVxlanLink {
+    master: Option<u32>,
+    info: KernelVxlanLinkInfo,
+}
+
 /// VLAN upper device (`br0.10`) before config-driven attribution.
 #[derive(Debug, Clone, Copy)]
 struct VlanUpperLink {
@@ -133,6 +140,10 @@ pub(crate) struct LinkCache {
     pub all_link_names: HashSet<String>,
     /// Bridges by name. Empty if no bridges exist on the host.
     pub bridges: HashMap<String, BridgeLink>,
+    /// VXLAN links by name, including unattached links. Managed-netdev
+    /// status uses this to classify desired VXLAN rows and stamped
+    /// leftovers independently of bridge readiness.
+    pub vxlan_links: HashMap<String, KernelVxlanLinkInfo>,
     /// VXLAN ifindex -> EVPN VNI back-reference. Populated alongside
     /// the bridge inventory so the FDB dump can derive the VNI of an
     /// FDB entry from `msg.header.ifindex` (which is the *VXLAN*
@@ -538,6 +549,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     let mut all_link_names: HashSet<String> = HashSet::new();
     let mut bridge_ifindex_to_name: HashMap<u32, String> = HashMap::new();
     let mut vxlan_ports: Vec<VxlanPort> = Vec::new();
+    let mut vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)> = HashMap::new();
     let mut vlan_upper_links: HashMap<(u32, u16), Option<u32>> = HashMap::new();
     // The AF_BRIDGE filtered dump carries bridge VLAN/tunnel extension
     // rows, but on real kernels it is not a substitute for the normal
@@ -602,18 +614,14 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                 }
             }
             Some(InfoKind::Vxlan) => {
-                if let Some(port) = parse_vxlan_port(&msg) {
+                if let Some(name) = name {
+                    record_named_vxlan_link(&msg, name, &mut vxlan_ports, &mut vxlan_links);
+                } else if let Some(port) = parse_vxlan_port(&msg) {
                     vxlan_ports.push(port);
                 }
             }
             Some(InfoKind::Vlan) => {
-                if let Some(upper) = parse_vlan_upper_link(&msg) {
-                    insert_unique_ifindex_binding(
-                        &mut vlan_upper_links,
-                        (upper.lower_ifindex, upper.vlan),
-                        upper.ifindex,
-                    );
-                }
+                record_vlan_upper_link(&msg, &mut vlan_upper_links);
             }
             _ => {}
         }
@@ -621,6 +629,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
 
     let (vxlan_ifindex_to_vni, svd_vxlan_ifindexes) =
         attach_vxlan_ports(vxlan_ports, &bridge_ifindex_to_name, &mut bridges);
+    let vxlan_links = attach_vxlan_link_status(vxlan_links, &bridge_ifindex_to_name);
 
     let (bridge_port_to_vni, bridge_ports_by_name) =
         index_bridge_ports(all_enslaved, &bridge_ifindex_to_name, &mut bridges);
@@ -628,6 +637,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     Ok(LinkCache {
         all_link_names,
         bridges,
+        vxlan_links,
         vxlan_ifindex_to_vni,
         svd_vxlan_ifindexes,
         bridge_port_to_vni,
@@ -640,6 +650,45 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
     })
+}
+
+fn record_named_vxlan_link(
+    msg: &LinkMessage,
+    name: String,
+    vxlan_ports: &mut Vec<VxlanPort>,
+    vxlan_links: &mut HashMap<String, (KernelVxlanLinkInfo, Option<u32>)>,
+) {
+    let parsed = parse_vxlan_link(msg, name);
+    if let Some(port) = parsed_vxlan_to_port(&parsed) {
+        vxlan_ports.push(port);
+    }
+    vxlan_links.insert(parsed.info.name.clone(), (parsed.info, parsed.master));
+}
+
+fn record_vlan_upper_link(
+    msg: &LinkMessage,
+    vlan_upper_links: &mut HashMap<(u32, u16), Option<u32>>,
+) {
+    if let Some(upper) = parse_vlan_upper_link(msg) {
+        insert_unique_ifindex_binding(
+            vlan_upper_links,
+            (upper.lower_ifindex, upper.vlan),
+            upper.ifindex,
+        );
+    }
+}
+
+fn attach_vxlan_link_status(
+    vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)>,
+    bridge_ifindex_to_name: &HashMap<u32, String>,
+) -> HashMap<String, KernelVxlanLinkInfo> {
+    vxlan_links
+        .into_iter()
+        .map(|(name, (mut link, master))| {
+            link.bridge = master.and_then(|idx| bridge_ifindex_to_name.get(&idx).cloned());
+            (name, link)
+        })
+        .collect()
 }
 
 fn attach_vxlan_ports(
@@ -990,10 +1039,42 @@ fn bridge_vlan_filtering(msg: &LinkMessage) -> bool {
 }
 
 fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
+    let name = link_kind_and_name(msg).1.unwrap_or_default();
+    let parsed = parse_vxlan_link(msg, name);
+    parsed_vxlan_to_port(&parsed)
+}
+
+fn parsed_vxlan_to_port(parsed: &ParsedVxlanLink) -> Option<VxlanPort> {
+    let link = &parsed.info;
+    if link.collect_metadata {
+        return Some(VxlanPort::Svd(SvdVxlanPort {
+            master: parsed.master,
+            info: KernelSvdVxlanInfo {
+                ifindex: link.ifindex,
+                vnifilter: link.vnifilter,
+                local_ip: link.local_ip,
+                learning_disabled: link.learning_disabled,
+            },
+        }));
+    }
+
+    Some(VxlanPort::Fixed(FixedVxlanPort {
+        master: parsed.master,
+        info: KernelVxlanInfo {
+            ifindex: link.ifindex,
+            vni: link.vni?,
+            local_ip: link.local_ip?,
+            learning_disabled: link.learning_disabled,
+        },
+    }))
+}
+
+fn parse_vxlan_link(msg: &LinkMessage, name: String) -> ParsedVxlanLink {
     let ifindex = msg.header.index;
     let mut master = None;
     let mut vni: Option<u32> = None;
     let mut local: Option<IpAddr> = None;
+    let mut dstport = None;
     let mut collect_metadata = false;
     let mut vnifilter = false;
     // None until we observe IFLA_VXLAN_LEARNING. Probe fails closed
@@ -1019,6 +1100,7 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
                                 InfoVxlan::Learning(b) => learning_disabled = Some(!*b),
                                 InfoVxlan::CollectMetadata(b) => collect_metadata = *b,
                                 InfoVxlan::Vnifilter(b) => vnifilter = *b,
+                                InfoVxlan::Port(port) => dstport = Some(*port),
                                 _ => {}
                             }
                         }
@@ -1029,27 +1111,21 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
         }
     }
 
-    if collect_metadata {
-        return Some(VxlanPort::Svd(SvdVxlanPort {
-            master,
-            info: KernelSvdVxlanInfo {
-                ifindex,
-                vnifilter,
-                local_ip: local,
-                learning_disabled,
-            },
-        }));
-    }
-
-    Some(VxlanPort::Fixed(FixedVxlanPort {
+    ParsedVxlanLink {
         master,
-        info: KernelVxlanInfo {
+        info: KernelVxlanLinkInfo {
             ifindex,
-            vni: vni?,
-            local_ip: local?,
+            name,
+            altnames: extract_altnames(msg),
+            vni,
+            local_ip: local,
+            dstport,
             learning_disabled,
+            collect_metadata,
+            vnifilter,
+            bridge: None,
         },
-    }))
+    }
 }
 
 fn parse_vlan_upper_link(msg: &LinkMessage) -> Option<VlanUpperLink> {
@@ -1210,15 +1286,43 @@ mod tests {
     fn parse_vxlan_port_captures_fixed_vni_device() {
         let mut msg = LinkMessage::default();
         msg.header.index = 20;
+        msg.attributes
+            .push(LinkAttribute::IfName("vxlan100".to_string()));
+        msg.attributes.push(LinkAttribute::PropList(vec![
+            Prop::AltIfName("rustbgpd:vxlan:leaf-1:vxlan100".to_string()),
+            Prop::AltIfName("operator-alias".to_string()),
+        ]));
         msg.attributes.push(LinkAttribute::Controller(10));
         msg.attributes.push(LinkAttribute::LinkInfo(vec![
             LinkInfo::Kind(InfoKind::Vxlan),
             LinkInfo::Data(InfoData::Vxlan(vec![
                 InfoVxlan::Id(100),
                 InfoVxlan::Local("10.0.0.1".parse().unwrap()),
+                InfoVxlan::Port(4789),
                 InfoVxlan::Learning(false),
             ])),
         ]));
+
+        let parsed = parse_vxlan_link(&msg, "vxlan100".to_string());
+        assert_eq!(parsed.master, Some(10));
+        assert_eq!(parsed.info.ifindex, 20);
+        assert_eq!(parsed.info.name, "vxlan100");
+        assert_eq!(
+            parsed.info.altnames,
+            vec![
+                "operator-alias".to_string(),
+                "rustbgpd:vxlan:leaf-1:vxlan100".to_string()
+            ]
+        );
+        assert_eq!(parsed.info.vni, Some(100));
+        assert_eq!(
+            parsed.info.local_ip,
+            Some("10.0.0.1".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(parsed.info.dstport, Some(4789));
+        assert_eq!(parsed.info.learning_disabled, Some(true));
+        assert!(!parsed.info.collect_metadata);
+        assert!(!parsed.info.vnifilter);
 
         let Some(VxlanPort::Fixed(port)) = parse_vxlan_port(&msg) else {
             panic!("expected fixed VXLAN port");

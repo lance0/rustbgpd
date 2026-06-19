@@ -33,7 +33,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart adoption, reap, and same-name unstamped foreign preservation on a
   real kernel. `evpn_managed_netdev_state{class,name,desired,state}` exposes
   bounded Prometheus state for alerting; detailed reason text stays in
-  `ListManagedNetdevs` / `rbgp`. Managed VXLAN and VRF classes remain deferred.
+  `ListManagedNetdevs` / `rbgp`. Managed VXLAN lifecycle and VRF classes
+  remain deferred.
+- **ADR-0091 fixed-VNI VXLAN config/status substrate.** `[managed_netdevs]`
+  now accepts fixed-VNI `[[managed_netdevs.vxlans]]` rows with protected
+  `name`, `vni`, `local`, `dstport`, `bridge`, and `learning = false`
+  attributes, derives `rustbgpd:vxlan:<owner>:<name>` ownership stamps, parses
+  named VXLAN links from the Linux link snapshot, and reports desired,
+  observed, foreign, unsafe, orphaned, or unknown VXLAN status through
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. This is
+  read-only substrate: fixed-VNI VXLAN create/adopt/reap lifecycle remains the
+  next ADR-0091 slice, and SVD / collect-metadata VXLAN plus VRF/L3VXLAN
+  lifecycle stay deferred.
 
 ## [0.41.0] — 2026-06-18
 

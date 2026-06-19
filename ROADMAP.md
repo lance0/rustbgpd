@@ -208,7 +208,12 @@ has it, no broad performance sprints without profile evidence.
   desired/observed/orphan/foreign/unsafe status through
   `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`, creates
   missing managed bridges, adopts exact stamped bridges after restart, and
-  safely reaps same-owner orphans; VXLAN and VRF classes still deferred. The
+  safely reaps same-owner orphans. **ADR-0091 fixed-VNI VXLAN
+  schema/status substrate landed:** `[managed_netdevs]` accepts fixed-VNI
+  VXLAN desired rows, derives `rustbgpd:vxlan:<owner>:<name>` stamps, parses
+  named VXLAN links from the Linux snapshot, and exposes desired/observed/
+  orphan/foreign/unsafe VXLAN status without kernel mutation; VXLAN lifecycle
+  and VRF classes still deferred. The
   `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
@@ -347,14 +352,16 @@ has it, no broad performance sprints without profile evidence.
   upper devices, while bridge-ifindex ARP/ND on a `vlan_filtering=1` bridge
   remains fail-closed unless a future FDB-correlation design proves freshness
   and ambiguity handling. True RFC VLAN-aware bundle / non-zero Ethernet Tag
-  remains a separate ADR gate. **ADR-0091 bridge-class lifecycle landed:**
-  `[managed_netdevs]` bridge rows are validated as restart-required startup
-  desired state, Linux link dumps parse rustbgpd altname stamps, and
-  `ListManagedNetdevs` / `rbgp evpn managed-netdevs` report
+  remains a separate ADR gate. **ADR-0091 managed-netdev bridge lifecycle +
+  fixed-VNI VXLAN status landed:** `[managed_netdevs]` bridge and fixed-VNI
+  VXLAN rows are validated as restart-required startup desired state, Linux
+  link dumps parse rustbgpd altname stamps plus named VXLAN protected
+  attributes, and `ListManagedNetdevs` / `rbgp evpn managed-netdevs` report
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
   bridges, adopts exact stamped bridges after restart, and safely reaps
-  same-owner orphans. A dedicated counter
+  same-owner bridge orphans, while fixed-VNI VXLAN rows are status-only until
+  the lifecycle slice. A dedicated counter
   for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is

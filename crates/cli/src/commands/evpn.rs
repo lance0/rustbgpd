@@ -604,6 +604,27 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
             if let Some(vlan_filtering) = row.observed_vlan_filtering {
                 detail.push(format!("vlan-filtering={vlan_filtering}"));
             }
+            if let Some(vni) = row.observed_vni {
+                detail.push(format!("vni={vni}"));
+            }
+            if let Some(local) = row.observed_local.as_deref() {
+                detail.push(format!("local={local}"));
+            }
+            if let Some(dstport) = row.observed_dstport {
+                detail.push(format!("dstport={dstport}"));
+            }
+            if let Some(learning_disabled) = row.observed_learning_disabled {
+                detail.push(format!("learning-disabled={learning_disabled}"));
+            }
+            if let Some(collect_metadata) = row.observed_collect_metadata {
+                detail.push(format!("collect-metadata={collect_metadata}"));
+            }
+            if let Some(vnifilter) = row.observed_vnifilter {
+                detail.push(format!("vnifilter={vnifilter}"));
+            }
+            if let Some(bridge) = row.observed_bridge.as_deref() {
+                detail.push(format!("bridge={bridge}"));
+            }
             if !row.observed_stamps.is_empty() {
                 detail.push(format!(
                     "observed-stamps=[{}]",
@@ -622,6 +643,7 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
 fn managed_netdev_class_label(class: i32) -> &'static str {
     match ManagedNetdevClass::try_from(class) {
         Ok(ManagedNetdevClass::Bridge) => "bridge",
+        Ok(ManagedNetdevClass::Vxlan) => "vxlan",
         Ok(ManagedNetdevClass::Unknown) | Err(_) => "unknown",
     }
 }
@@ -655,6 +677,29 @@ fn managed_netdev_to_json(row: &ManagedNetdevState) -> serde_json::Value {
         "observed_vlan_filtering": row
             .observed_vlan_filtering
             .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_vni": row
+            .observed_vni
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_local": row
+            .observed_local
+            .as_ref()
+            .map_or(serde_json::Value::Null, |value| serde_json::Value::String(value.clone())),
+        "observed_dstport": row
+            .observed_dstport
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_learning_disabled": row
+            .observed_learning_disabled
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_collect_metadata": row
+            .observed_collect_metadata
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_vnifilter": row
+            .observed_vnifilter
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_bridge": row
+            .observed_bridge
+            .as_ref()
+            .map_or(serde_json::Value::Null, |value| serde_json::Value::String(value.clone())),
         "observed_stamps": row.observed_stamps,
     })
 }
@@ -1432,6 +1477,13 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             ifindex: Some(10),
             observed_vlan_filtering: Some(false),
             observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
+            observed_vni: None,
+            observed_local: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
         });
 
         assert_eq!(value["class"], "bridge");
@@ -1441,7 +1493,35 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["state"], "owned-safe");
         assert_eq!(value["ifindex"], 10);
         assert_eq!(value["observed_vlan_filtering"], false);
+        assert!(value["observed_vni"].is_null());
         assert_eq!(value["observed_stamps"][0], "rustbgpd:bridge:leaf-1:br100");
+
+        let vxlan = super::managed_netdev_to_json(&crate::proto::ManagedNetdevState {
+            class: crate::proto::ManagedNetdevClass::Vxlan as i32,
+            name: "vxlan100".to_string(),
+            desired: true,
+            ownership_stamp: "rustbgpd:vxlan:leaf-1:vxlan100".to_string(),
+            state: crate::proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32,
+            reason: String::new(),
+            ifindex: Some(20),
+            observed_vlan_filtering: None,
+            observed_stamps: vec!["rustbgpd:vxlan:leaf-1:vxlan100".to_string()],
+            observed_vni: Some(100),
+            observed_local: Some("10.0.0.1".to_string()),
+            observed_dstport: Some(4789),
+            observed_learning_disabled: Some(true),
+            observed_collect_metadata: Some(false),
+            observed_vnifilter: Some(false),
+            observed_bridge: Some("br100".to_string()),
+        });
+        assert_eq!(vxlan["class"], "vxlan");
+        assert_eq!(vxlan["observed_vni"], 100);
+        assert_eq!(vxlan["observed_local"], "10.0.0.1");
+        assert_eq!(vxlan["observed_dstport"], 4789);
+        assert_eq!(vxlan["observed_learning_disabled"], true);
+        assert_eq!(vxlan["observed_collect_metadata"], false);
+        assert_eq!(vxlan["observed_vnifilter"], false);
+        assert_eq!(vxlan["observed_bridge"], "br100");
     }
 
     #[tokio::test]

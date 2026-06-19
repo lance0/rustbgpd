@@ -525,6 +525,13 @@ impl Dataplane for LinuxDataplane {
             snap.insert_fdb(vni, entry);
         }
         snap.set_link_names(cache.all_link_names.iter().cloned().collect());
+        snap.set_vxlans(
+            cache
+                .vxlan_links
+                .iter()
+                .map(|(name, link)| (name.clone(), link.clone()))
+                .collect(),
+        );
         for (name, link) in &cache.bridges {
             // Only surface bridges with exactly one VXLAN port so
             // the diff loop's NotReady inference matches the probe

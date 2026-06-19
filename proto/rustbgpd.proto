@@ -2275,6 +2275,7 @@ message ListManagedNetdevsResponse {
 enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_UNKNOWN = 0;
   MANAGED_NETDEV_CLASS_BRIDGE = 1;
+  MANAGED_NETDEV_CLASS_VXLAN = 2;
 }
 
 enum ManagedNetdevLifecycleState {
@@ -2297,6 +2298,13 @@ message ManagedNetdevState {
   optional uint32 ifindex = 7;
   optional bool observed_vlan_filtering = 8;
   repeated string observed_stamps = 9;
+  optional uint32 observed_vni = 10;
+  optional string observed_local = 11;
+  optional uint32 observed_dstport = 12;
+  optional bool observed_learning_disabled = 13;
+  optional bool observed_collect_metadata = 14;
+  optional bool observed_vnifilter = 15;
+  optional string observed_bridge = 16;
 }
 
 message ListEvpnNexthopsRequest {}

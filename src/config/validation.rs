@@ -801,10 +801,11 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     if !owner_token.is_empty() {
         validate_managed_token(owner_token, "managed_netdevs.owner_token")?;
     }
-    if !managed.bridges.is_empty() && owner_token.is_empty() {
+    if (!managed.bridges.is_empty() || !managed.vxlans.is_empty()) && owner_token.is_empty() {
         return Err(ConfigError::InvalidManagedNetdev {
-            reason: "managed_netdevs.owner_token is required when bridges are configured"
-                .to_string(),
+            reason:
+                "managed_netdevs.owner_token is required when managed netdev rows are configured"
+                    .to_string(),
         });
     }
 
@@ -822,6 +823,51 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
                 reason: format!(
                     "managed bridge {:?}: derived ownership altname {:?} is {} bytes; maximum is {}",
                     bridge.name,
+                    stamp,
+                    stamp.len(),
+                    rustbgpd_evpn::MAX_ALT_IFNAME_LEN
+                ),
+            });
+        }
+    }
+    for vxlan in &managed.vxlans {
+        validate_managed_link_name(&vxlan.name)?;
+        validate_managed_link_name(&vxlan.bridge)?;
+        if !names.insert(vxlan.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed netdev name {:?}", vxlan.name),
+            });
+        }
+        rustbgpd_evpn::EvpnInstanceId::new(vxlan.vni).map_err(|e| {
+            ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VXLAN {:?}: invalid vni {}: {e}",
+                    vxlan.name, vxlan.vni
+                ),
+            }
+        })?;
+        if vxlan.dstport == 0 {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VXLAN {:?}: dstport must be in 1..=65535",
+                    vxlan.name
+                ),
+            });
+        }
+        if vxlan.learning {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VXLAN {:?}: learning=true is unsupported; use learning=false (`nolearning`)",
+                    vxlan.name
+                ),
+            });
+        }
+        let stamp = rustbgpd_evpn::vxlan_ownership_stamp(owner_token, &vxlan.name);
+        if stamp.len() > rustbgpd_evpn::MAX_ALT_IFNAME_LEN {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VXLAN {:?}: derived ownership altname {:?} is {} bytes; maximum is {}",
+                    vxlan.name,
                     stamp,
                     stamp.len(),
                     rustbgpd_evpn::MAX_ALT_IFNAME_LEN
@@ -856,18 +902,18 @@ fn validate_managed_token(value: &str, field: &str) -> Result<(), ConfigError> {
 fn validate_managed_link_name(name: &str) -> Result<(), ConfigError> {
     if name.is_empty() {
         return Err(ConfigError::InvalidManagedNetdev {
-            reason: "managed bridge name must not be empty".to_string(),
+            reason: "managed netdev name must not be empty".to_string(),
         });
     }
     if name == "." || name == ".." {
         return Err(ConfigError::InvalidManagedNetdev {
-            reason: format!("managed bridge name {name:?} is reserved"),
+            reason: format!("managed netdev name {name:?} is reserved"),
         });
     }
     if name.len() > rustbgpd_evpn::MAX_IFNAME_LEN {
         return Err(ConfigError::InvalidManagedNetdev {
             reason: format!(
-                "managed bridge name {:?} is {} bytes; Linux ifname maximum is {}",
+                "managed netdev name {:?} is {} bytes; Linux ifname maximum is {}",
                 name,
                 name.len(),
                 rustbgpd_evpn::MAX_IFNAME_LEN
@@ -880,7 +926,7 @@ fn validate_managed_link_name(name: &str) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::InvalidManagedNetdev {
             reason: format!(
-                "managed bridge name {name:?} must contain only ASCII letters, digits, '_', '-', or '.'"
+                "managed netdev name {name:?} must contain only ASCII letters, digits, '_', '-', or '.'"
             ),
         });
     }

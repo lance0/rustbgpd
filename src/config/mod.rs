@@ -1045,12 +1045,15 @@ impl Config {
         &self,
     ) -> Result<rustbgpd_evpn::ManagedNetdevTable, ConfigError> {
         let owner_token = self.managed_netdevs.owner_token.as_str();
-        if self.managed_netdevs.bridges.is_empty() && owner_token.is_empty() {
+        if self.managed_netdevs.bridges.is_empty()
+            && self.managed_netdevs.vxlans.is_empty()
+            && owner_token.is_empty()
+        {
             return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
         }
         if owner_token.is_empty() {
             return Err(ConfigError::InvalidManagedNetdev {
-                reason: "managed_netdevs.owner_token is required when bridges are configured"
+                reason: "managed_netdevs.owner_token is required when managed netdev rows are configured"
                     .to_string(),
             });
         }
@@ -1060,9 +1063,26 @@ impl Config {
             .iter()
             .map(|bridge| (bridge.name.clone(), bridge.vlan_filtering))
             .collect();
-        Ok(rustbgpd_evpn::ManagedNetdevTable::from_bridge_map(
+        let vxlans = self
+            .managed_netdevs
+            .vxlans
+            .iter()
+            .map(|vxlan| {
+                (
+                    vxlan.name.clone(),
+                    rustbgpd_evpn::ManagedVxlanNetdevSpec {
+                        vni: vxlan.vni,
+                        local_ip: vxlan.local,
+                        dstport: vxlan.dstport,
+                        bridge: vxlan.bridge.clone(),
+                    },
+                )
+            })
+            .collect();
+        Ok(rustbgpd_evpn::ManagedNetdevTable::from_maps(
             owner_token.to_string(),
             bridges,
+            vxlans,
         ))
     }
 

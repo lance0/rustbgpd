@@ -290,7 +290,8 @@ foreign-vs-owned signal.
    dataplane reconciler, including the Decision 6 status / metric surface for
    owned-but-unsafe, orphan, and creation-skipped states. **Done for the bridge
    class.**
-4. Add VXLAN class support.
+4. Add VXLAN class support. **Done for fixed-VNI schema/status; lifecycle
+   create/adopt/reap remains next.**
 5. Add VRF / L3VXLAN class support.
 6. Add optional VLAN upper / bridge membership helpers if operator demand
    remains after bridge/VXLAN/VRF creation.
