@@ -51,23 +51,25 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
-  Remaining big investments are the remaining ADR-0063 runtime
-  convergence shapes and lower-priority VTEP operability gaps such as
-  bridge-ifindex MAC+IP VLAN correlation, true shared-VNI / non-zero
-  Ethernet Tag service, and rustbgpd-managed netdev creation. ADR-0088
-  records the boundary for those operability
-  gaps; ADR-0089's first VNI-per-broadcast-domain VLAN-aware bridge slice
-  now validates an explicit `bridge_vlan` binding, programs VLAN-scoped
-  remote-MAC FDB rows, attributes AF_BRIDGE local-MAC observations by
-  `NDA_VLAN`, and attributes AF_INET / AF_INET6 MAC+IP observations that
-  arrive on real VLAN upper devices such as `brvlan.10`. M70 adds the FRR
-  cross-vendor receipt for the same-MAC
+  ADR-0087/0090 close the near-term overlay-index ladder through native
+  GW-IP origination, ESI origination, single-active receive, and all-active
+  receive proofs (M68/M71/M72). Remaining big investments are the remaining
+  ADR-0063 runtime convergence exceptions and lower-priority VTEP operability
+  gaps such as bridge-ifindex MAC+IP VLAN correlation, true shared-VNI /
+  non-zero Ethernet Tag service, and rustbgpd-managed netdev creation.
+  ADR-0088 records the boundary for those operability gaps; ADR-0089's first
+  VNI-per-broadcast-domain VLAN-aware bridge slice now validates an explicit
+  `bridge_vlan` binding, programs VLAN-scoped remote-MAC FDB rows, attributes
+  AF_BRIDGE local-MAC observations by `NDA_VLAN`, and attributes AF_INET /
+  AF_INET6 MAC+IP observations that arrive on real VLAN upper devices such as
+  `brvlan.10`. M70 adds the FRR cross-vendor receipt for the same-MAC
   two-VNI remote-FDB path on a rustbgpd-owned `vlan_filtering=1` bridge,
-  and `macip_vlan_attribution` proves same-MAC+IP two-VNI isolation through
-  VLAN upper devices. Raw bridge-ifindex ARP/ND on `vlan_filtering=1` bridges
-  still fails closed because Linux does not report bridge VLAN identity there,
-  while managed netdev creation stays fail-closed until explicit ownership
-  semantics exist.
+  `macip_vlan_attribution` proves same-MAC+IP two-VNI isolation through VLAN
+  upper devices, and `svd_fdb_vni` proves SVD / collect-metadata Ready,
+  same-MAC two-VNI isolation, and scoped delete on a real kernel. Raw
+  bridge-ifindex ARP/ND on `vlan_filtering=1` bridges still fails closed
+  because Linux does not report bridge VLAN identity there, while managed
+  netdev creation stays fail-closed until explicit ownership semantics exist.
 
 ## Current Position
 
@@ -832,30 +834,24 @@ Shipped pieces (v0.18.0):
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC surfaces
   let operators read the readiness state without scraping logs.
 
-Still ahead:
+Closed arcs and remaining bounds:
 
-- Overlay-index IRB follow-through: GW-IP receive-side recursive resolution
-  (non-zero Type 5 Gateway Address through matching Type 2 MAC/IP state),
-  bounded drop metrics, aggregated per-VRF / per-reason drop counts in
-  gRPC / CLI status, native GW-IP origination (ADR-0087), ESI origination,
-  single-active ESI receive recursion, and the FRR consume-side M68 GW-IP
-  proof now ship; M71 adds the real-peer single-active ESI
-  protected-recursion proof, and the ADR-0090 all-active L3 writer now installs
-  valid all-active target sets through route-level ECMP plus L3VXLAN FDB-NHG.
-  M72 adds the cross-vendor / real-peer all-active proof for the receive arc.
-  Broader service-provider EVPN route families
-  remain demand-shaped.
-- Runtime instance mutation completion (ADR-0063 / #268): single L2VNI add,
-  single L2VNI delete when the VNI is not an Ethernet Segment member, single
-  L2VNI redefine, single IP-VRF add/delete/redefine with unchanged
-  L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, and
-  additive build-up, atomic tenant teardown (delete-only ES-member L2VNI +
-  Ethernet Segment and/or linked IP-VRF in one pass), `ip_vrf` relink, and
-  L2VNI-only add/delete/redefine compositions with intrinsic IP-VRF link
-  metadata for added/deleted VNIs commit live via `ApplyEvpnRuntime` and SIGHUP
-  reload; L3VNI/device/table IP-VRF identity changes are restart-required by
-  design and ES/IP-VRF row mixed edits fail closed with a "split the request"
-  error.
+- Overlay-index IRB follow-through is no longer a near-term gap: GW-IP
+  receive-side recursive resolution, bounded drop metrics, aggregated per-VRF /
+  per-reason drop counts in gRPC / CLI status, native GW-IP origination
+  (ADR-0087), ESI origination, single-active ESI receive recursion, the
+  FRR consume-side M68 GW-IP proof, the M71 real-peer single-active ESI proof,
+  ADR-0090's all-active L3 writer, and the M72 real-peer all-active proof now
+  ship. Broader service-provider EVPN route families remain demand-shaped.
+- Runtime instance mutation bounds (ADR-0063 / #268): single L2VNI add/delete/
+  redefine, single IP-VRF add/delete/redefine with unchanged L3VNI/device/table
+  identity, single Ethernet Segment add/delete/redefine, additive build-up,
+  atomic tenant teardown (delete-only ES-member L2VNI + Ethernet Segment and/or
+  linked IP-VRF in one pass), `ip_vrf` relink, and L2VNI-only add/delete/
+  redefine compositions with intrinsic IP-VRF link metadata for added/deleted
+  VNIs commit live via `ApplyEvpnRuntime` and SIGHUP reload. L3VNI/device/table
+  IP-VRF identity changes are restart-required by design, and ES/IP-VRF row
+  mixed edits fail closed with a "split the request" error.
 
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M46 / M47 / M48 / M49 /

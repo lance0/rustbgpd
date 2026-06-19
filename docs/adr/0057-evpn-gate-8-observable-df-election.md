@@ -57,8 +57,9 @@ The Gate 8 surface is:
   `preference_winner` (preference, then lowest originator IP) has no
   prior-DF/incumbent state, so it cannot implement RFC 9785 "don't preempt
   the incumbent" — using DP as a static promotion key would make it
-  offensive extra preference weight. Stateful non-revertive election (and
-  single-active backup-path pre-install) remains deferred.
+  offensive extra preference weight. Stateful non-revertive election remains
+  deferred. Receiver-side single-active backup-path pre-install later shipped
+  under ADR-0083 and is proved by M65.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns
@@ -134,8 +135,10 @@ The Gate 8 surface is:
   M40 protected self-hosted smoke against FRR EVPN-MH 10.3.1) for
   all-active ES reachability. Receiver-side aliasing suppresses
   those ECMP alternatives when the remote EAD-per-ES advertises the
-  Single-Active flag. Proactive backup-path programming for
-  single-active remains a follow-up.
+  Single-Active flag. Proactive receiver-side backup-path programming for
+  single-active later shipped under ADR-0083/M65. True same-ESI local-bias
+  handling on the local PE side, and any L3/symmetric-IRB extension of that
+  local-bias behavior, stay separate from this L2 receive-side backup path.
 - **Mass withdraw — receive-side filter closed in Gate 8b.** The
   dataplane supervisor snapshots EAD-per-ES reachability and drops
   non-zero-ESI Type 2 routes whose `(origin VTEP next-hop, ESI)` is

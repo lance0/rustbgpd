@@ -27,6 +27,18 @@ operator-facing index that answers "what has actually been proved?"
 | BIRD / GoBGP / StayRTR diversity | Mixed CI/manual | BIRD TCP-AO and GoBGP coverage are documented; RTR-dependent RPKI/ASPA cases and broader platform-diversity runs remain local/manual where extra fixtures are required. |
 | Long-wall-clock gates | Manual/local | GR/LLGR soak-style gates and M33 scale churn are intentionally not PR-CI jobs because they consume substantial wall-clock. |
 
+Compact M36-M72 index (details and assertions stay in
+[`INTEROP.md`](INTEROP.md#ci-coverage)):
+
+| Receipts | Coverage |
+|----------|----------|
+| M36, M37, M37+IP | EVPN L2 VTEP FDB programming plus local Type 2 / Type 3 / MAC+IP origination. |
+| M38, M40, M46, M49, M65, M66, M67, M69 | EVPN multi-homing: DF election, aliasing/FDB-NHG, single-active backup swap, runtime drain, link drain, and FRR preference-DF interop. |
+| M39, M39b, M47, M48, M60, M61, M68, M70, M71, M72 | EVPN L3VNI / Type 5 / runtime convergence / adoption / VLAN-aware / overlay-index dataplane receipts. |
+| M42, M50, M51, M52, M53, M58, M62 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, BFD, BGP unnumbered, and BLACKHOLE adoption. |
+| M43 | Conditional TCP-AO smoke; probed and skipped only when the selected runner kernel lacks support. |
+| Other M41-M64 rows in this span | Foundation interop receipts such as BLACKHOLE FIB discard, gRPC/gNMI, EVPN Type 5 injection, BGP Roles/ORF/ASPA, inbound backpressure, and IPv6-only peering remain catalogued in `INTEROP.md`. |
+
 ## Scale and benchmark receipts
 
 | Receipt | Status | Notes |

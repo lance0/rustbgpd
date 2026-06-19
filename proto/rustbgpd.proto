@@ -2149,22 +2149,21 @@ message TriggerMrtDumpResponse {
 // ---------------------------------------------------------------------------
 // EvpnService — Local EVPN instance state (Phase 2 VTEP alpha).
 //
-// Mostly read-only in this slice. The daemon's local EVI/VNI state is the
-// declarative `[[evpn_instances]]` config plus the runtime resolved
-// `EvpnInstanceTable`. Linux kernel reconciliation, Type 2/3 local
-// origination, and Gate 9 Type 5 / IP-VRF state consume the resolved
-// tables through daemon actors. Runtime instance mutation remains a
-// follow-up and must use the command-driven semantics in ADR-0063,
-// not a direct shared-table swap. The duplicate-MAC clear RPC is a
-// bounded actor command against local suppression state, not an
-// instance-table mutation. Empty when the daemon is acting purely as
-// an EVPN route reflector — RR mode does not need local instance state.
+// The daemon's local EVI/VNI state is the declarative `[[evpn_instances]]`
+// config plus the committed runtime model exposed by ADR-0063. Linux kernel
+// reconciliation, Type 2/3 local origination, Gate 9 Type 5 / IP-VRF state,
+// and Ethernet Segment actors consume the resolved tables through daemon
+// actors. Runtime mutation uses the command-driven full-model
+// `ApplyEvpnRuntime` coordinator, not a direct shared-table swap. The
+// duplicate-MAC clear RPC is a bounded actor command against local suppression
+// state, not an instance-table mutation. Empty when the daemon is acting purely
+// as an EVPN route reflector — RR mode does not need local instance state.
 // ---------------------------------------------------------------------------
 
 service EvpnService {
   // ADR-0063 — read the committed EVPN runtime generation. This is
-  // the foundation for future command-driven runtime mutation, but
-  // this RPC is read-only and does not mutate the startup snapshot.
+  // the read-only view of the coordinator state; this RPC does not
+  // mutate the committed model.
   rpc GetEvpnRuntime(GetEvpnRuntimeRequest) returns (EvpnRuntimeState);
   rpc ListEvpnInstances(ListEvpnInstancesRequest) returns (ListEvpnInstancesResponse);
   // ADR-0059 — list the FDB nexthop groups rustbgpd currently owns
@@ -2212,11 +2211,15 @@ service EvpnService {
   // ADR-0063 — validate or apply a full candidate EVPN runtime model
   // through the coordinator. The request carries full candidate TOML
   // so the daemon can reuse the config layer's validation and table
-  // resolution. A single L2VNI add or a single IP-VRF add converges
-  // live and commits a new generation; other non-noop shapes (delete,
-  // redefine, Ethernet Segment changes, mixed or multi-add) fail closed
-  // without advancing generation (tracked in issue #210). Use
-  // validate_only to inspect the plan without mutating.
+  // resolution. Current live shapes include single L2VNI add/delete/
+  // redefine, single IP-VRF add/delete/redefine with unchanged
+  // L3VNI/device/table identity, single Ethernet Segment add/delete/
+  // redefine, additive build-up, atomic tenant teardown, `ip_vrf`
+  // relink, and L2VNI-only mixed compositions with intrinsic IP-VRF
+  // link metadata for added/deleted VNIs. L3VNI/device/table identity
+  // changes are restart-required, and ES/IP-VRF row mixed edits fail
+  // closed without advancing generation. Use validate_only to inspect
+  // the plan without mutating.
   rpc ApplyEvpnRuntime(ApplyEvpnRuntimeRequest) returns (ApplyEvpnRuntimeResponse);
 }
 

@@ -30,8 +30,8 @@ slices**, with the durable state model first:
 Slice 1 lets every later phase consume a stable typed model instead
 of bolting kernel state onto whatever shape the schema took. It also
 lets ADR-0050's RR-only invariant ("no local EVI state") flip into
-"local EVI state allowed but not yet driving origination" without a
-second config-shape break.
+"local EVI state allowed, but the foundation slice itself does not yet
+drive origination" without a second config-shape break.
 
 ## Decision
 
@@ -127,10 +127,12 @@ No mutation in this slice — the daemon's instance table is built
 once at startup from `Config::resolve_evpn_instances` and shared via
 `Arc<EvpnInstanceTable>` across listeners.
 
-Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is a follow-up
-that gates on the kernel-reconciliation slice — adding a runtime
-`AddEvpnInstance` RPC before the kernel can consume the change would
-ship a footgun.
+Mutation was deliberately deferred out of this per-row surface. ADR-0063 later
+superseded any `AddEvpnInstance` / `DeleteEvpnInstance` plan with the
+full-model `EvpnService.ApplyEvpnRuntime` coordinator: callers submit a
+candidate EVPN runtime model, the daemon reuses config validation, computes a
+plan, converges the affected actors, and commits a new generation only after the
+live shape succeeds.
 
 ### CLI: `rustbgpctl evpn instances`
 
@@ -172,8 +174,7 @@ local EVIs and don't need the domain crate's surface.
 
 `EvpnInstance` / `EvpnInstanceTable` express *intent*, not
 behavior. No `inst.create_vxlan_device()`, no `table.program_fdb()`
-methods. The future dataplane crate (working name
-`crates/evpn-linux` or `crates/dataplane`) will own kernel
+methods. The Linux dataplane crate, `crates/evpn-linux`, owns kernel
 observation, diff, and netlink/FDB programming. It consumes
 `EvpnInstanceTable` as input — it never produces or mutates the
 desired-state model.
@@ -192,7 +193,7 @@ crates/wire ← crates/transport → crates/rib
               crates/evpn (local VTEP only)
                     │
                     ▼
-        future crates/evpn-linux  (dataplane)
+            crates/evpn-linux  (dataplane)
 ```
 
 `crates/evpn` may depend on `crates/wire` (already does, for
@@ -268,20 +269,21 @@ helpers between this domain enum and
 
 - **VLAN-Aware Bundle service interface deferred.** RFC 7432 also
   defines a many-tags-per-EVI shape. The wire codec already round-
-  trips Ethernet-Tag in every route type, so adding that mode later
-  is purely a domain-model expansion.
-- **No persistence path.** Like the existing `[[neighbors]]` config
-  persistence (ADR-0043), runtime EVPN-instance mutation will reuse
-  the same atomic-write TOML pattern when it lands. Out of scope for
-  this slice because mutation is out of scope.
+  trips Ethernet-Tag in every route type. ADR-0089 later supplied the
+  VNI-per-broadcast-domain `bridge_vlan` attribution path, but true
+  shared-VNI / non-zero Ethernet Tag service still needs a separate
+  domain-model expansion.
+- **No per-row persistence path.** Runtime mutation later landed through
+  ADR-0063's full-model `ApplyEvpnRuntime` / SIGHUP convergence model rather
+  than through per-row `AddEvpnInstance` / `DeleteEvpnInstance` RPCs.
 
 ## Follow-on architectural work
 
-The Gate 7b (kernel-reconciliation) branch must define the
-dataplane boundary **before** writing much Linux logic. A separate
-ADR will land at the start of that branch covering:
+The Gate 7b (kernel-reconciliation) branch defined the dataplane boundary
+**before** writing much Linux logic. ADR-0054 landed at the start of that branch
+and covers:
 
-- The `crates/evpn-linux` (or equivalent) crate's surface — what it
+- The `crates/evpn-linux` crate's surface — what it
   consumes from `crates/evpn`, what it observes from the kernel,
   what it returns up.
 - The desired-vs-actual diff loop semantics (push, pull, or
@@ -290,11 +292,9 @@ ADR will land at the start of that branch covering:
   domain crate know its intent failed to apply, or does only
   telemetry see it?).
 
-That ADR is intentionally not written here — early architecture
-decisions for a layer with no code yet tend to ossify the wrong
-shape. The boundary above is enough to keep the foundation slice
-from leaking kernel concerns; the dataplane ADR starts when there's
-real code to anchor it.
+That ADR is intentionally separate from this foundation record: the boundary
+above kept the foundation slice from leaking kernel concerns, and ADR-0054 then
+anchored the real `crates/evpn-linux` implementation.
 
 ## Cross-References
 

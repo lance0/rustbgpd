@@ -309,9 +309,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   near-term VXLAN/Linux alpha gaps (notably overlay-index protected-recursion
   interop beyond the shipped GW-IP proof; ESI origination and single-active
   receive now ship, the single-active receive path now has the M71 GoBGP
-  interop proof, while all-active ESI receive remains pending) from demand-shaped
-  service-provider EVPN breadth such as route types 6-11, PBB-EVPN,
-  multicast EVPN/MVPN, VPWS/E-Tree, and MPLS/SRv6 service encapsulation.
+  interop proof, and all-active ESI receive was split to the ADR-0090/M72
+  follow-up that closes in v0.41.0) from demand-shaped service-provider EVPN
+  breadth such as route types 6-11, PBB-EVPN, multicast EVPN/MVPN, VPWS/E-Tree,
+  and MPLS/SRv6 service encapsulation.
   The docs also correct stale wording that tied EVPN Add-Path to RFC 9252:
   RFC 9252 is SRv6 BGP overlay services; future EVPN Add-Path work would use
   the general RFC 7911 Add-Path capability for AFI 25 / SAFI 70.
@@ -320,9 +321,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still drop fail-closed after ESI origination and single-active receive
   shipped. The receive-side substrate carries Type-5 ESI and Ethernet Tag
   metadata and exposes a L2VNI-scoped EAD-per-EVI resolver index; the
-  single-active receive path now has the M71 real-peer interop proof, and
-  the remaining work is L3 multipath/NHG receive policy for the all-active
-  case before rustbgpd can claim full RFC 9136 §4.3 protected recursion.
+  single-active receive path now has the M71 real-peer interop proof. In
+  v0.40.0 the remaining work was L3 multipath/NHG receive policy for the
+  all-active case; ADR-0090/M72 close that receipt gate in v0.41.0.
 - **Tightened the ADR-0077 route-family substrate boundary.** Future
   BGP-LS, VPNv4/v6, RTC, and labeled-unicast work now has an explicit
   review rule: substrate-only PRs must remain unreachable from peers and

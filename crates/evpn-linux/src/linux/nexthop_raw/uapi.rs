@@ -8,9 +8,9 @@
 //! ADR-0059 §3 pins the exact constants table this module exposes;
 //! cross-reference if any value here changes.
 //!
-//! All `pub(crate)` — slice 3 calls through the higher-level
+//! All `pub(crate)` — callers go through the higher-level
 //! [`super::NexthopSocket`] surface, never the raw UAPI types.
-#![allow(dead_code)] // RTM_GETNEXTHOP / NHA_OIF reserved for slice 3+
+#![allow(dead_code)] // Dump-tolerance constants are pinned even when not emitted.
 
 /// Create or update a nexthop entry (`RTM_NEWNEXTHOP`).
 pub(crate) const RTM_NEWNEXTHOP: u16 = 104;
@@ -18,8 +18,9 @@ pub(crate) const RTM_NEWNEXTHOP: u16 = 104;
 /// Delete a nexthop entry (`RTM_DELNEXTHOP`).
 pub(crate) const RTM_DELNEXTHOP: u16 = 105;
 
-/// Dump existing nexthop entries (`RTM_GETNEXTHOP`). Reserved for
-/// the slice 3 periodic drift-recovery walk; unused in slice 2.
+/// Dump existing nexthop entries (`RTM_GETNEXTHOP`). Used by the
+/// ADR-0059 L2 FDB-NHG adoption/drift path and the ADR-0090 L3
+/// all-active Type 5 adoption/drift path.
 pub(crate) const RTM_GETNEXTHOP: u16 = 106;
 
 /// `NHA_UNSPEC` — placeholder type 0, never emitted.
@@ -51,7 +52,7 @@ pub(crate) const NHA_FDB: u16 = 11;
 
 /// `NHA_GROUP_TYPE` — `u16` discriminator for group flavor
 /// (MPATH vs resilient). Kernel may include this on dump even when
-/// we don't set it on add; slice 3b's parser tolerates and ignores.
+/// we don't set it on add; the dump parser tolerates and ignores it.
 pub(crate) const NHA_GROUP_TYPE: u16 = 3;
 
 /// `NHA_OP_FLAGS` — bitmask added in newer kernels; emitted on
@@ -144,7 +145,7 @@ mod tests {
         assert_eq!(NHA_OIF, 4);
         assert_eq!(NHA_GATEWAY, 6);
         assert_eq!(NHA_FDB, 11);
-        // ADR-0059 slice 3b dump-path tolerance — kernel may emit
+        // ADR-0059 dump-path tolerance — kernel may emit
         // these on `RTM_GETNEXTHOP` even when we don't set them on
         // add, so the parser ignores them by id. Drift here breaks
         // the dump filter silently, so pin the values.
