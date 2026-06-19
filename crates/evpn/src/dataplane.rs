@@ -502,9 +502,12 @@ pub struct DataplaneReport {
     /// failover events (group swaps + ordered teardowns). Same
     /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
     pub single_active_counters: SingleActiveCounters,
-    /// ADR-0091 managed-netdev desired/observed status rows. Empty when no
-    /// `[managed_netdevs]` config is present and no rustbgpd ownership stamps
-    /// are observed.
+    /// ADR-0091 managed-netdev desired/observed status rows. Rows are
+    /// produced only when `[managed_netdevs]` is configured (a desired
+    /// bridge row, or an owner token under which observed rustbgpd
+    /// ownership stamps can be reported as orphaned/unsafe). Always
+    /// empty when `[managed_netdevs]` is absent — observed ownership
+    /// stamps alone never populate this field.
     pub managed_netdevs: Vec<ManagedNetdevStatus>,
 }
 

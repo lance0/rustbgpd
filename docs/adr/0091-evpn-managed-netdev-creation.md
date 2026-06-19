@@ -76,6 +76,15 @@ the logical fields are fixed:
   block's stable identity;
 - `owner-token`: operator-configured daemon / installation token.
 
+As shipped, the bridge class encodes this as a colon-delimited altname:
+
+```text
+rustbgpd:bridge:<owner-token>:<bridge-name>
+```
+
+where the configured bridge name serves as the bridge class's
+`stable-config-id`.
+
 The owner token is not a secret. It does not defend against privileged local
 root or an operator deliberately spoofing the marker. Its job is accidental
 collision avoidance: two rustbgpd daemons, two configs, or a renamed object
