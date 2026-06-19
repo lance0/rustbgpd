@@ -71,7 +71,23 @@ A future implementation must combine:
 Seeded dump rows are not fresh. They can initialize state for deletes or
 diagnostics, but they cannot authorize a new MAC+IP origination.
 
-### 2. Attribute only one fresh, configured, local candidate
+### 2. Bound the FDB event ledger
+
+The FDB event ledger must never grow without limit. A future implementation
+must define both:
+
+- a **TTL bound** for event entries; and
+- a **hard size bound** (global and/or per bridge).
+
+The TTL must be at least as long as the freshness window, and may be longer if
+needed for move/delete diagnostics. Eviction is fail-closed: an evicted or
+expired ledger entry cannot authorize correlation. Under size pressure, evict
+the oldest event-time / least-recently-used entries first, increment an
+eviction/drop reason, and let the later raw bridge neighbor event fall through
+the normal "not attributable" path. A VM migration storm, STP reconvergence, or
+port flap must not turn this optional feature into unbounded memory growth.
+
+### 3. Attribute only one fresh, configured, local candidate
 
 For a raw bridge AF_INET / AF_INET6 neighbor add, a future implementation may
 emit only when all of the following hold:
@@ -86,9 +102,10 @@ emit only when all of the following hold:
 - the freshness window is satisfied.
 
 Any miss, duplicate VLAN, unconfigured VLAN, stale event, seeded-only row,
-VXLAN/remote row, dump error, or neighbor-before-FDB ordering drops.
+VXLAN/remote row, dump error, evicted ledger row, or neighbor-before-FDB
+ordering drops.
 
-### 3. Deletes and moves use prior add-cache state
+### 4. Deletes and moves use prior add-cache state
 
 Neighbor delete events must not newly infer VLAN from the FDB. A delete may
 withdraw only if a prior accepted add cached the exact `(ifindex, IP) ->
@@ -104,7 +121,7 @@ or remote peers apply MAC-mobility sequencing — the local daemon would never
 withdraw it. The original ADR-0089 VLAN-upper path does not have this gap
 because the upper-device ifindex carries the VLAN directly.
 
-### 4. The freshness window is a heuristic and must be calibrated before implementation
+### 5. The freshness window is a heuristic and must be calibrated before implementation
 
 The kernel provides **no ordering guarantee** across the AF_INET / AF_INET6 and
 AF_BRIDGE `RTNLGRP_NEIGH` multicast groups: the ARP/ND event can arrive before,
@@ -116,9 +133,9 @@ On a busy system that may land in **seconds, not milliseconds**, which makes the
 feature even more conservative (more drops). The window must still be strict
 enough to prevent MAC-move and duplicate-VLAN misattribution.
 
-### 5. Dropped correlations must be observable, distinct from "host has no IP"
+### 6. Dropped correlations must be observable, distinct from "host has no IP"
 
-Because every condition in Decision-2's list must hold simultaneously, any FDB
+Because every condition in Decision 3's list must hold simultaneously, any FDB
 churn (VM migration, STP topology change, port flap) makes the feature drop a
 meaningful fraction of MAC+IP observations on a busy system. The operator then
 sees a Type 2 MAC route with **no** corresponding MAC+IP route for some hosts,
@@ -141,11 +158,11 @@ Decision 6.
 
 - Adds a race-sensitive inference path if implemented later.
 - Requires more state than the VLAN-upper path: FDB event ledger,
-  freshness timestamps, on-demand FDB validation, and a prior-add cache that
-  also drives move-withdrawals (Decision 3).
+  freshness timestamps, on-demand FDB validation, size/TTL eviction, and a
+  prior-add cache that also drives move-withdrawals (Decision 4).
 - Even a conservative implementation may be too strict for some busy systems;
   misses are easily confused with "host has no IP" without the per-reason drop
-  surface (Decision 5).
+  surface (Decision 6).
 
 ## Dependencies and relationships
 
@@ -183,6 +200,8 @@ can safely reason about it.
   - duplicate VLAN candidates drop;
   - unconfigured VLAN drops;
   - seeded-only FDB row drops;
+  - TTL-expired and size-evicted FDB ledger rows drop and increment an
+    observable eviction/drop reason;
   - neighbor-before-FDB drops;
   - VXLAN/extern-learn/remote FDB rows drop;
   - delete withdraws only from prior accepted add-cache state.

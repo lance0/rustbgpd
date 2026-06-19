@@ -88,6 +88,14 @@ orphans every existing managed link and forces a delete-and-recreate — a
 a credential to rotate on a schedule; a non-disruptive migration flow (re-stamp
 in place under both tokens, then retire the old) is explicit future work.
 
+Stamping must be idempotent from rustbgpd's perspective even though the kernel
+operation is not. Adding an already-present `IFLA_ALT_IFNAME` can return
+`EEXIST`; the executor must treat that as success only after a fresh link dump
+confirms the exact expected stamp is present on the expected link. If a
+different rustbgpd ownership altname is present, or the exact stamp appears on
+the wrong kind / protected attributes, that is an owned-but-unsafe conflict,
+not a reason to create over the device.
+
 ### 3. Adopt/reap only on exact identity and attribute match
 
 A managed link is adoptable or reapable only when all of the following match:
@@ -282,6 +290,9 @@ foreign-vs-owned signal.
 - Crash before stamp leaves an unstamped link that is preserved on restart.
 - Stamped wrong-kind or wrong-attribute link reports owned-but-unsafe and is
   not repaired in place.
+- Re-stamping a link that already has the exact expected altname treats kernel
+  `EEXIST` as already-stamped success after dump confirmation; a conflicting
+  rustbgpd ownership altname reports owned-but-unsafe.
 - Same ifname / same stamp in another netns is not visible or adopted by the
   first daemon.
 - Dependency ordering is correct on create and teardown.
