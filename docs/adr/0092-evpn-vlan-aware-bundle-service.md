@@ -95,12 +95,18 @@ this ADR's first implementation tranche.
 
 The first bundle slice must either:
 
-- reject Type 5 routes with non-zero Ethernet Tag in bundle mode with an
-  observable fail-closed reason, or
+- reject such Type 5 routes at **import (Adj-RIB-In)** with a structured,
+  per-route drop reason surfaced through the existing remote-prefix-drop /
+  policy-reason counters — the same shape as the OTC-block and overlay-index
+  drop reasons — and **never** via a session-level NOTIFICATION (tearing down an
+  otherwise healthy session on an unsupported route is interop-hostile and
+  debugging-hostile), or
 - land a separate L3 follow-on ADR that defines the Type 5 semantics before
   enabling them.
 
-No Type 5 bundle behavior is authorized implicitly by Type 2/3 support.
+No Type 5 bundle behavior is authorized implicitly by Type 2/3 support. The same
+"fail closed = structured import-level drop, not NOTIFICATION" rule applies to
+every unsupported bundle shape (see Decision 4).
 
 ### 4. Multi-homing is tag-scoped but deferred from the MVP
 
@@ -118,9 +124,42 @@ Tag-0 ADR-0089 instances and bundle instances may coexist across different
 EVIs/RDs. They must not both claim the same local `(bridge, bridge_vlan)` or
 same `(EVI, Ethernet Tag)` identity.
 
+Within a single bundle, the member map must also be internally unique: config
+validation **rejects** two members that share the same `(bridge, bridge_vlan)`
+(differing only in Ethernet Tag) or the same VNI. A duplicate `(bridge,
+bridge_vlan)` is a local forwarding conflict, not a valid bundle, and must fail
+validation rather than program ambiguous state.
+
 Migration from Tag-0 VNI-per-BD to bundle mode is not an in-place semantic
 reinterpretation. Operators configure a new bundle EVI/member map, validate
-readiness/import behavior, and then move traffic deliberately.
+readiness/import behavior, and then move traffic deliberately. This leaves a
+**transition window**: while the old Tag-0 EVI drains and the bundle EVI takes
+over, the VTEP does not originate for the affected MACs under the new EVI until
+they re-learn there. A coordinated cutover (drain the old EVI, then re-learn /
+originate under the bundle EVI) is therefore expected; this ADR does **not**
+promise a hitless in-place flip, and a Graceful-Restart-assisted or otherwise
+hitless migration is future work.
+
+### 6. Interop ground truth: GoBGP-synthetic first, then a non-FRR vendor
+
+Non-zero-Ethernet-Tag bundle behavior varies across vendors, so this ADR names
+its proof targets before implementation rather than leaving "cross-vendor
+receipt" abstract:
+
+- **FRR is not a bundle target.** FRR — and FRR-based NOSes (Cumulus, SONiC,
+  Dell OS10) — implement EVPN as the **VLAN-Based** service (one VNI per
+  L2VNI), not VLAN-Aware Bundle. An FRR peer, including FRR running on a lab
+  switch, is a valuable general EVPN / VLAN-Based interop rig and (with ASIC
+  offload) the right vehicle for local-bias (ADR-0065) — but it cannot
+  originate or validate non-zero-Tag bundle routes.
+- **GoBGP is the synthetic CI proof** (the M71/M72 pattern): it can originate
+  controllable non-zero-Ethernet-Tag Type 1/2/3 routes, giving a CI-gated
+  receive-side proof that rustbgpd imports and programs the bundle correctly.
+  This is the first slice's required proof.
+- **A real cross-vendor receipt needs a non-FRR NOS** that implements
+  VLAN-Aware Bundle (e.g. Nokia SR Linux / SR OS, Cisco NX-OS, Juniper, Arista).
+  That is the eventual ground truth and is demand-/hardware-shaped; the bundle
+  service stays alpha until one is in hand.
 
 ## Consequences
 
@@ -136,8 +175,9 @@ readiness/import behavior, and then move traffic deliberately.
 ### Negative
 
 - This is a large, multi-sprint feature if implemented.
-- FRR/Cumulus-style Linux topology docs do not provide the non-zero-tag
-  interop proof; a different peer/proof target is needed.
+- FRR and FRR-based NOSes are VLAN-Based-only, so they cannot prove
+  non-zero-Tag bundle behavior; the proof is GoBGP-synthetic in CI plus an
+  eventual non-FRR vendor receipt (Decision 6).
 - Multi-homing and Type 5 cannot be safely bundled into the first slice
   without expanding the design substantially.
 
@@ -198,9 +238,15 @@ proofs.
 - Import/export tests proving `(EVI, Tag)` isolation.
 - Linux dataplane tests proving the member map resolves to the right
   VLAN-scoped FDB rows.
-- Fail-closed tests for unsupported Type 5 and multi-homing bundle shapes.
-- Cross-vendor receipt with a peer that advertises and accepts non-zero
-  Ethernet Tag bundle routes.
+- Config validation rejects a bundle whose member map repeats a
+  `(bridge, bridge_vlan)` or a VNI (Decision 5).
+- Fail-closed tests for unsupported Type 5 and multi-homing bundle shapes,
+  asserting a **structured Adj-RIB-In drop reason / counter** — never a session
+  NOTIFICATION (Decisions 3-4).
+- GoBGP-synthetic receive-side proof: a peer originating non-zero-Ethernet-Tag
+  Type 1/2/3 routes is imported and programmed to the right VLAN-scoped FDB
+  rows (CI-gated, M71/M72 pattern). A non-FRR vendor receipt is the eventual
+  cross-vendor ground truth (Decision 6).
 
 ## References
 

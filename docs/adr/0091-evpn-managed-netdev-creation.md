@@ -81,9 +81,12 @@ root or an operator deliberately spoofing the marker. Its job is accidental
 collision avoidance: two rustbgpd daemons, two configs, or a renamed object
 must not silently adopt each other's links.
 
-Changing the owner token is an ownership migration. The daemon must not use a
-new token to adopt links stamped with the old token unless an explicit future
-migration flow says so.
+Changing the owner token is an ownership migration, **not a routine rotation**.
+Because the daemon will not adopt links stamped with the old token, changing it
+orphans every existing managed link and forces a delete-and-recreate — a
+**dataplane outage** for those devices. `owner_token` is install identity, not
+a credential to rotate on a schedule; a non-disruptive migration flow (re-stamp
+in place under both tokens, then retire the old) is explicit future work.
 
 ### 3. Adopt/reap only on exact identity and attribute match
 
@@ -158,6 +161,38 @@ Runtime mutation, SIGHUP reload, gNMI `Set`, and `ApplyEvpnRuntime` must
 remain fail-closed for managed-netdev fields until the corresponding class
 executor and rollback/adoption proof exists.
 
+Because the config loader uses `deny_unknown_fields`, a `[managed_netdevs]`
+block is **forward-incompatible by construction**: an older rustbgpd binary that
+predates this feature rejects the config and refuses to start rather than
+silently ignore the block. That fail-closed downgrade is intended — a binary
+that cannot honor managed-netdev ownership must not run a config that assumes it
+— but it means operators must roll the binary forward before the config, and
+roll the config back before the binary. This must be called out in the upgrade
+notes for the release that introduces the block.
+
+### 6. Fail-closed states must be observable, not silent
+
+The owned-but-unsafe outcome (Decision 3), the crash-window orphan (Decision 4),
+and any "managed creation skipped" outcome must be discoverable without reading
+logs. A `tracing::warn!` alone is operationally invisible — and these are the
+**most likely production failure modes**: an operator flips `vlan_filtering` out
+of band, a kernel upgrade changes a default, or a crash lands in the
+create-before-stamp window, and the result is a device the daemon silently
+refuses to adopt or repair. The managed-netdev surface must expose at least:
+
+- a per-managed-link **status with a structured reason** — e.g. `owned`,
+  `adopted`, `foreign-name-collision`, `owned-but-unsafe(<attr>)`,
+  `orphan-unstamped`, `creation-skipped` — readable via the dataplane/EVPN gRPC
+  status and `rbgp`;
+- a **metric** (e.g. `managed_netdev_state{class,name,reason}`) so the unsafe /
+  orphan / skipped states alert in monitoring rather than hide in a log line;
+- a **startup notice** when a link with the expected name exists but is not
+  rustbgpd-owned (`link <name> exists but is not rustbgpd-owned; managed
+  creation skipped`), so the "working bridge the daemon ignores" case is not
+  silently confusing.
+
+No managed-netdev fail-closed outcome may be log-only.
+
 ## Consequences
 
 ### Positive
@@ -174,7 +209,15 @@ executor and rollback/adoption proof exists.
 
 - Adds a new kernel object class to the reconciliation surface.
 - Creates an unavoidable create-before-stamp crash window; the required
-  behavior is safe but leaves an operator-visible ambiguous link.
+  behavior is safe but leaves an operator-visible ambiguous link that the
+  startup notice (Decision 6) must surface.
+- Owner-token change is a delete-and-recreate **dataplane outage**, not a
+  routine rotation (Decision 2).
+- A `[managed_netdevs]` config is forward-incompatible: an older binary rejects
+  it under `deny_unknown_fields` (Decision 5) — a deliberate fail-closed
+  downgrade that needs an upgrade-note callout.
+- Requires a real status/metric/event surface for fail-closed states
+  (Decision 6); a log-only implementation is not acceptable.
 - Does not protect against privileged local spoofing of the altname marker.
   That is outside the threat model for local Linux netdev ownership.
 
@@ -224,7 +267,8 @@ foreign-vs-owned signal.
 1. Parse managed-link altname stamps in the link inventory.
 2. Add `[managed_netdevs] owner_token` and `[[managed_netdevs.bridges]]`.
 3. Implement bridge create -> stamp -> adopt -> reap with an acked,
-   rollback-aware executor.
+   rollback-aware executor, including the Decision 6 status / metric / startup-
+   notice surface for owned-but-unsafe, orphan, and creation-skipped states.
 4. Add VXLAN class support.
 5. Add VRF / L3VXLAN class support.
 6. Add optional VLAN upper / bridge membership helpers if operator demand
@@ -241,6 +285,9 @@ foreign-vs-owned signal.
 - Same ifname / same stamp in another netns is not visible or adopted by the
   first daemon.
 - Dependency ordering is correct on create and teardown.
+- Owned-but-unsafe, orphan-unstamped, and creation-skipped each surface a
+  structured status reason and metric (Decision 6) — asserted, not log-only —
+  and the startup notice fires for an unstamped same-name link.
 
 ## References
 
