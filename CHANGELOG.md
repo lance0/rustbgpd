@@ -74,6 +74,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never creates — is now preserved as owned-unsafe rather than reaped. A plain
   same-owner stamped orphan is still reaped; VNI / local / dstport / learning /
   bridge drift on a de-configured plain VXLAN remains reapable.
+- **Managed VRF/L3VXLAN config validation hardening.** A `[[managed_netdevs.vrfs]]`
+  `table_id` is now rejected when it names a Linux reserved table (`252`–`255`:
+  compat/default/main/local) or collides with a `[[fib_tables]]` `table_id`, and
+  a `[[managed_netdevs.l3vxlans]]` `vni` (L3VNI) is rejected when it equals any
+  `[[managed_netdevs.vxlans]]` `vni` (L2VNI). These land ahead of the deferred
+  VRF/L3VXLAN lifecycle so a colliding config fails closed at load time.
+
+### Fixed
+
+- **Cross-class mis-stamped managed netdevs surface as owned-unsafe.** The
+  unconfigured/orphan managed-netdev status scan previously filtered each kernel
+  link to ownership stamps of the class matching its kind, so a rustbgpd-stamped
+  link carrying only a stamp of the wrong class for its kind (e.g. a bridge-kind
+  link with only a `rustbgpd:vxlan:...` altname, or a VXLAN-kind link with only a
+  `rustbgpd:bridge:...` altname) was dropped from status entirely. It is now
+  reported as `owned-unsafe`, satisfying ADR-0091 Decision 6 that fail-closed
+  states are observable, never silent. The class-exact reap gate is unchanged; the
+  owned-unsafe reason text is reworded to name all owned-unsafe causes (wrong
+  class, multiple stamps, or stamp/name mismatch).
 
 ## [0.41.0] — 2026-06-18
 

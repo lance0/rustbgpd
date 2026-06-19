@@ -3633,7 +3633,14 @@ fn unconfigured_managed_netdev_statuses(
         if desired.bridges.contains(name) {
             continue;
         }
-        let stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Bridge);
+        // Normal path: the bridge-class stamps. ADR-0091 Decision 6 fallback:
+        // if a bridge-kind link carries no bridge-class stamp but does carry a
+        // rustbgpd stamp of another class, surface it (as owned-unsafe via the
+        // kind's status fn) rather than silently dropping it.
+        let mut stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Bridge);
+        if stamps.is_empty() {
+            stamps = rustbgpd_stamps(&link.altnames);
+        }
         if !stamps.is_empty() {
             rows.push(unconfigured_managed_bridge_status(
                 name,
@@ -3650,7 +3657,13 @@ fn unconfigured_managed_netdev_statuses(
         if desired.vrfs.contains(name) {
             continue;
         }
-        let stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Vrf);
+        // Normal path: the vrf-class stamps. ADR-0091 Decision 6 fallback: a
+        // vrf-kind link carrying only a wrong-class rustbgpd stamp must still
+        // surface (owned-unsafe), never be silently dropped.
+        let mut stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Vrf);
+        if stamps.is_empty() {
+            stamps = rustbgpd_stamps(&link.altnames);
+        }
         if !stamps.is_empty() {
             rows.push(unconfigured_managed_vrf_status(
                 name,
@@ -3669,6 +3682,11 @@ fn push_unconfigured_vxlan_status(
     desired: &DesiredManagedNetdevNames,
     rows: &mut Vec<ManagedNetdevStatus>,
 ) {
+    // A vxlan-kind link legitimately hosts either the Vxlan or the L3Vxlan
+    // class, so both class-matching emits are kept. Track whether either fired
+    // so the all-class fallback below never double-emits on a link that already
+    // produced a vxlan or l3vxlan row.
+    let mut emitted = false;
     if !desired.vxlans.contains(name) {
         let stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Vxlan);
         if !stamps.is_empty() {
@@ -3678,6 +3696,7 @@ fn push_unconfigured_vxlan_status(
                 stamps,
                 managed.owner_token(),
             ));
+            emitted = true;
         }
     }
     if !desired.l3vxlans.contains(name) {
@@ -3687,6 +3706,25 @@ fn push_unconfigured_vxlan_status(
                 name,
                 link,
                 stamps,
+                managed.owner_token(),
+            ));
+            emitted = true;
+        }
+    }
+    // ADR-0091 Decision 6: a vxlan-kind link carrying only a wrong-class
+    // rustbgpd stamp (e.g. a `rustbgpd:bridge:...` / `rustbgpd:vrf:...`) must
+    // still surface. Emit exactly ONE fallback row (reported as class Vxlan,
+    // since this is a vxlan-kind link), never two. Only fire when the link is
+    // unconfigured for both classes: a desired vxlan/l3vxlan already has its row
+    // from the desired-status pass, so skipping it here avoids a duplicate.
+    let unconfigured = !desired.vxlans.contains(name) && !desired.l3vxlans.contains(name);
+    if unconfigured && !emitted {
+        let all = rustbgpd_stamps(&link.altnames);
+        if !all.is_empty() {
+            rows.push(unconfigured_managed_vxlan_status(
+                name,
+                link,
+                all,
                 managed.owner_token(),
             ));
         }
@@ -3886,7 +3924,9 @@ fn unconfigured_managed_bridge_status(
     } else {
         (
             ManagedNetdevState::OwnedUnsafe,
-            "rustbgpd-stamped bridge is not configured but is not safe to reap".to_string(),
+            "rustbgpd-stamped bridge is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, or stamp/name mismatch)"
+                .to_string(),
         )
     };
     ManagedNetdevStatus {
@@ -4096,7 +4136,9 @@ fn unconfigured_managed_vxlan_status(
     } else {
         (
             ManagedNetdevState::OwnedUnsafe,
-            "rustbgpd-stamped VXLAN is not configured but is not safe to reap".to_string(),
+            "rustbgpd-stamped VXLAN is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, or stamp/name mismatch)"
+                .to_string(),
         )
     };
     ManagedNetdevStatus {
@@ -4258,7 +4300,9 @@ fn unconfigured_managed_vrf_status(
     } else {
         (
             ManagedNetdevState::OwnedUnsafe,
-            "rustbgpd-stamped VRF is not configured but is not owned by this daemon".to_string(),
+            "rustbgpd-stamped VRF is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, or stamp/name mismatch)"
+                .to_string(),
         )
     };
     ManagedNetdevStatus {
@@ -4477,7 +4521,8 @@ fn unconfigured_managed_l3vxlan_status(
     } else {
         (
             ManagedNetdevState::OwnedUnsafe,
-            "rustbgpd-stamped L3VXLAN is not configured but is not owned by this daemon"
+            "rustbgpd-stamped L3VXLAN is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, or stamp/name mismatch)"
                 .to_string(),
         )
     };
@@ -5992,6 +6037,78 @@ mod managed_netdev_tests {
 
         let unmanaged = build_managed_netdev_status(&ManagedNetdevTable::new(), Some(&snapshot));
         assert!(unmanaged.is_empty());
+    }
+
+    // ADR-0091 Decision 6: a rustbgpd-stamped link whose stamp class does not
+    // match its kind must surface as owned-unsafe, never be silently dropped.
+    #[test]
+    fn managed_netdev_status_surfaces_cross_class_mis_stamped_bridge_link() {
+        let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        // A bridge-kind link carrying ONLY a vxlan-class stamp (wrong class for a
+        // bridge), not in the desired set.
+        snapshot.insert_link(link(
+            "br200",
+            20,
+            false,
+            vec!["rustbgpd:vxlan:leaf-1:br200"],
+        ));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 1, "the mis-stamped link must not be dropped");
+        assert_eq!(rows[0].name, "br200");
+        assert_eq!(rows[0].class, ManagedNetdevClass::Bridge);
+        assert_eq!(rows[0].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[0].observed_stamps, vec!["rustbgpd:vxlan:leaf-1:br200"]);
+    }
+
+    #[test]
+    fn managed_netdev_status_surfaces_cross_class_mis_stamped_vxlan_link_once() {
+        let table =
+            ManagedNetdevTable::from_maps("leaf-1".to_string(), BTreeMap::new(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        // A vxlan-kind link carrying ONLY a bridge-class stamp (wrong class for
+        // both the Vxlan and L3Vxlan class-matching paths).
+        snapshot.insert_vxlan(vxlan_link(
+            "vxlan200",
+            20,
+            vec!["rustbgpd:bridge:leaf-1:vxlan200"],
+            200,
+        ));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(
+            rows.len(),
+            1,
+            "the mis-stamped vxlan link must produce exactly one fallback row, not zero and not two"
+        );
+        assert_eq!(rows[0].name, "vxlan200");
+        assert_eq!(rows[0].class, ManagedNetdevClass::Vxlan);
+        assert_eq!(rows[0].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(
+            rows[0].observed_stamps,
+            vec!["rustbgpd:bridge:leaf-1:vxlan200"]
+        );
+    }
+
+    // Regression guard: the normal (class-matching) path is unchanged — a
+    // correctly-stamped unconfigured bridge still reports Orphaned.
+    #[test]
+    fn managed_netdev_status_correctly_stamped_unconfigured_bridge_still_orphaned() {
+        let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link(
+            "br200",
+            20,
+            false,
+            vec!["rustbgpd:bridge:leaf-1:br200"],
+        ));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "br200");
+        assert_eq!(rows[0].class, ManagedNetdevClass::Bridge);
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
     }
 
     #[test]

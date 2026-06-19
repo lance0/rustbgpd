@@ -10525,6 +10525,90 @@ fn managed_netdevs_reject_invalid_vrf_and_l3vxlan_fields() {
 }
 
 #[test]
+fn managed_netdevs_reject_reserved_vrf_table_id() {
+    for id in [252, 253, 254, 255] {
+        let reserved = parse(&format!(
+            "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = {id}\n",
+            valid_toml()
+        ));
+        match reserved {
+            Err(ConfigError::InvalidManagedNetdev { reason }) => {
+                assert!(
+                    reason.contains("reserved"),
+                    "unexpected reason for table_id {id}: {reason}"
+                );
+            }
+            other => panic!("expected reserved-table rejection for {id}, got {other:?}"),
+        }
+    }
+
+    // A non-reserved table_id still loads.
+    let ok = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n",
+        valid_toml()
+    ));
+    assert!(ok.is_ok(), "got {ok:?}");
+}
+
+#[test]
+fn managed_netdevs_reject_vrf_table_id_colliding_with_fib_table() {
+    let collision = parse(&format!(
+        "{}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 5000\nmetric = 200\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n",
+        valid_toml()
+    ));
+    match collision {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(reason.contains("fib_tables"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected vrf/fib_tables collision rejection, got {other:?}"),
+    }
+
+    // Distinct table_ids load cleanly.
+    let ok = parse(&format!(
+        "{}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n",
+        valid_toml()
+    ));
+    assert!(ok.is_ok(), "got {ok:?}");
+}
+
+#[test]
+fn managed_netdevs_reject_l3vxlan_vni_colliding_with_vxlan_vni() {
+    let collision = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
+        valid_toml()
+    ));
+    match collision {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("L3VNI") && reason.contains("L2VNI"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected l3vxlan/vxlan VNI collision rejection, got {other:?}"),
+    }
+
+    // Distinct L2/L3 VNIs load cleanly.
+    let ok = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
+        valid_toml()
+    ));
+    assert!(ok.is_ok(), "got {ok:?}");
+}
+
+#[test]
+fn managed_netdevs_valid_multi_class_config_loads() {
+    let config = parse(&format!(
+        "{}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf-blue\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan5000\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf-blue\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
+        valid_toml()
+    ))
+    .expect("valid multi-class managed-netdev config should load");
+    assert_eq!(config.managed_netdevs.bridges.len(), 1);
+    assert_eq!(config.managed_netdevs.vxlans.len(), 1);
+    assert_eq!(config.managed_netdevs.vrfs.len(), 1);
+    assert_eq!(config.managed_netdevs.l3vxlans.len(), 1);
+}
+
+#[test]
 fn managed_netdevs_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();
     let new = parse(&format!(
