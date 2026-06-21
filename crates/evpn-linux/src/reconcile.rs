@@ -1061,6 +1061,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     | DataplaneOp::RemoveManagedBridge { .. }
                     | DataplaneOp::CreateManagedVxlan { .. }
                     | DataplaneOp::RemoveManagedVxlan { .. }
+                    | DataplaneOp::CreateManagedVrf { .. }
+                    | DataplaneOp::RemoveManagedVrf { .. }
+                    | DataplaneOp::CreateManagedL3Vxlan { .. }
+                    | DataplaneOp::RemoveManagedL3Vxlan { .. }
             )
         });
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
@@ -1665,7 +1669,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 DataplaneOp::CreateManagedBridge { .. }
                 | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::CreateManagedVxlan { .. }
-                | DataplaneOp::RemoveManagedVxlan { .. } => {
+                | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedVrf { .. }
+                | DataplaneOp::RemoveManagedVrf { .. }
+                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     check_permanent_suppression(
                         &mut self.state.managed_permanent_failures,
@@ -1701,7 +1709,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 DataplaneOp::CreateManagedBridge { .. }
                 | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::CreateManagedVxlan { .. }
-                | DataplaneOp::RemoveManagedVxlan { .. } => {
+                | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedVrf { .. }
+                | DataplaneOp::RemoveManagedVrf { .. }
+                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     self.state.managed_retry.next_due_for(key)
                 }
@@ -1754,7 +1766,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 DataplaneOp::CreateManagedBridge { .. }
                                 | DataplaneOp::RemoveManagedBridge { .. }
                                 | DataplaneOp::CreateManagedVxlan { .. }
-                                | DataplaneOp::RemoveManagedVxlan { .. } => {
+                                | DataplaneOp::RemoveManagedVxlan { .. }
+                                | DataplaneOp::CreateManagedVrf { .. }
+                                | DataplaneOp::RemoveManagedVrf { .. }
+                                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_failure(key, now_ms)
                                 }
@@ -1806,7 +1822,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 DataplaneOp::CreateManagedBridge { .. }
                                 | DataplaneOp::RemoveManagedBridge { .. }
                                 | DataplaneOp::CreateManagedVxlan { .. }
-                                | DataplaneOp::RemoveManagedVxlan { .. } => {
+                                | DataplaneOp::RemoveManagedVxlan { .. }
+                                | DataplaneOp::CreateManagedVrf { .. }
+                                | DataplaneOp::RemoveManagedVrf { .. }
+                                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_success(key);
                                     self.state
@@ -3194,7 +3214,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             DataplaneOp::CreateManagedBridge { .. }
             | DataplaneOp::RemoveManagedBridge { .. }
             | DataplaneOp::CreateManagedVxlan { .. }
-            | DataplaneOp::RemoveManagedVxlan { .. } => {
+            | DataplaneOp::RemoveManagedVxlan { .. }
+            | DataplaneOp::CreateManagedVrf { .. }
+            | DataplaneOp::RemoveManagedVrf { .. }
+            | DataplaneOp::CreateManagedL3Vxlan { .. }
+            | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                 let key = managed_op_key(op).expect("managed op has a key");
                 self.state.managed_retry.record_success(key);
             }
@@ -3738,6 +3762,8 @@ fn compute_managed_netdev_ops(
     let mut ops = Vec::new();
     let mut desired_bridge_names = BTreeSet::new();
     let mut desired_vxlan_names = BTreeSet::new();
+    let mut desired_vrf_names = BTreeSet::new();
+    let mut desired_l3vxlan_names = BTreeSet::new();
 
     for bridge in managed.bridges() {
         desired_bridge_names.insert(bridge.name.clone());
@@ -3756,6 +3782,27 @@ fn compute_managed_netdev_ops(
                 name: vxlan.name.clone(),
                 spec: vxlan.spec.clone(),
                 ownership_stamp: vxlan.ownership_stamp.clone(),
+            });
+        }
+    }
+    for vrf in managed.vrfs() {
+        desired_vrf_names.insert(vrf.name.clone());
+        if !snapshot.vrfs.contains_key(&vrf.name) && !snapshot.link_name_exists(&vrf.name) {
+            ops.push(DataplaneOp::CreateManagedVrf {
+                name: vrf.name.clone(),
+                spec: vrf.spec.clone(),
+                ownership_stamp: vrf.ownership_stamp.clone(),
+            });
+        }
+    }
+    for l3vxlan in managed.l3vxlans() {
+        desired_l3vxlan_names.insert(l3vxlan.name.clone());
+        if !snapshot.vxlans.contains_key(&l3vxlan.name) && !snapshot.link_name_exists(&l3vxlan.name)
+        {
+            ops.push(DataplaneOp::CreateManagedL3Vxlan {
+                name: l3vxlan.name.clone(),
+                spec: l3vxlan.spec.clone(),
+                ownership_stamp: l3vxlan.ownership_stamp.clone(),
             });
         }
     }
@@ -3785,8 +3832,47 @@ fn compute_managed_netdev_ops(
             });
         }
     }
+    for (name, link) in &snapshot.vxlans {
+        if desired_l3vxlan_names.contains(name) {
+            continue;
+        }
+        if let Some(ownership_stamp) = safe_orphan_l3vxlan_stamp_for_owner(link, owner_token) {
+            ops.push(DataplaneOp::RemoveManagedL3Vxlan {
+                name: name.clone(),
+                ownership_stamp,
+            });
+        }
+    }
+    for (name, link) in &snapshot.vrfs {
+        if desired_vrf_names.contains(name) {
+            continue;
+        }
+        let Some(ownership_stamp) = safe_orphan_vrf_stamp_for_owner(link, owner_token) else {
+            continue;
+        };
+        if vrf_has_unremovable_vxlan_slave(snapshot, name, owner_token, &desired_l3vxlan_names) {
+            continue;
+        }
+        ops.push(DataplaneOp::RemoveManagedVrf {
+            name: name.clone(),
+            ownership_stamp,
+        });
+    }
 
     ops
+}
+
+fn vrf_has_unremovable_vxlan_slave(
+    snapshot: &KernelSnapshot,
+    vrf_name: &str,
+    owner_token: &str,
+    desired_l3vxlan_names: &BTreeSet<String>,
+) -> bool {
+    snapshot.vxlans.iter().any(|(name, link)| {
+        link.master.as_deref() == Some(vrf_name)
+            && (desired_l3vxlan_names.contains(name)
+                || safe_orphan_l3vxlan_stamp_for_owner(link, owner_token).is_none())
+    })
 }
 
 fn desired_managed_bridge_status(
@@ -4281,6 +4367,12 @@ fn classify_desired_managed_vrf(
             ),
         );
     }
+    if !link.up {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            "VRF is administratively down; managed lifecycle requires UP".to_string(),
+        );
+    }
     (ManagedNetdevState::OwnedSafe, String::new())
 }
 
@@ -4502,6 +4594,12 @@ fn classify_desired_managed_l3vxlan(
             ),
         );
     }
+    if !link.up {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            "L3VXLAN is administratively down; managed lifecycle requires UP".to_string(),
+        );
+    }
     (ManagedNetdevState::OwnedSafe, String::new())
 }
 
@@ -4662,6 +4760,13 @@ fn safe_orphan_l3vxlan_stamp_for_owner(
         && stamp.owner_token == owner_token
         && stamp.name == link.name
     {
+        // collect-metadata and vnifilter are VXLAN modes the managed
+        // L3VXLAN lifecycle never creates, so a de-configured stamped link
+        // that drifted into one of them is preserved as owned-unsafe rather
+        // than reaped.
+        if link.collect_metadata || link.vnifilter {
+            return None;
+        }
         Some(stamp.raw.clone())
     } else {
         None
@@ -5568,6 +5673,10 @@ fn managed_op_key(op: &DataplaneOp) -> Option<ManagedNetdevOpKey> {
         DataplaneOp::RemoveManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(2, name)),
         DataplaneOp::CreateManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(3, name)),
         DataplaneOp::RemoveManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(4, name)),
+        DataplaneOp::CreateManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(5, name)),
+        DataplaneOp::RemoveManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(6, name)),
+        DataplaneOp::CreateManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(7, name)),
+        DataplaneOp::RemoveManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(8, name)),
         _ => None,
     }
 }
@@ -5723,6 +5832,10 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedVrf { .. }
+        | DataplaneOp::RemoveManagedVrf { .. }
+        | DataplaneOp::CreateManagedL3Vxlan { .. }
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5776,6 +5889,10 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedVrf { .. }
+        | DataplaneOp::RemoveManagedVrf { .. }
+        | DataplaneOp::CreateManagedL3Vxlan { .. }
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5818,6 +5935,18 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         }
         DataplaneOp::RemoveManagedVxlan { name, .. } => {
             DataplaneOpKind::RemoveManagedVxlan { name: name.clone() }
+        }
+        DataplaneOp::CreateManagedVrf { name, .. } => {
+            DataplaneOpKind::CreateManagedVrf { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedVrf { name, .. } => {
+            DataplaneOpKind::RemoveManagedVrf { name: name.clone() }
+        }
+        DataplaneOp::CreateManagedL3Vxlan { name, .. } => {
+            DataplaneOpKind::CreateManagedL3Vxlan { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedL3Vxlan { name, .. } => {
+            DataplaneOpKind::RemoveManagedL3Vxlan { name: name.clone() }
         }
         // Gate 9 L3 ops use a parallel accounting surface
         // (`AppliedL3Op` lands with the reconciler diff loop). They
@@ -6279,6 +6408,56 @@ mod managed_netdev_tests {
     }
 
     #[test]
+    fn managed_netdev_status_preserves_orphaned_stamped_l3vxlan_drifted_to_unsupported_mode() {
+        let table = ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+
+        let mut plain = vxlan_link(
+            "l3vxlan100",
+            10,
+            vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100"],
+            5000,
+        );
+        plain.bridge = None;
+        plain.master = Some("vrf100".to_string());
+        plain.mac = Some(MacAddress::new([0x02, 0, 0, 0, 0, 1]));
+        assert!(safe_orphan_l3vxlan_stamp_for_owner(&plain, "leaf-1").is_some());
+
+        let mut collect_metadata = plain.clone();
+        collect_metadata.collect_metadata = true;
+        assert!(safe_orphan_l3vxlan_stamp_for_owner(&collect_metadata, "leaf-1").is_none());
+
+        let mut vnifilter = plain.clone();
+        vnifilter.vnifilter = true;
+        assert!(safe_orphan_l3vxlan_stamp_for_owner(&vnifilter, "leaf-1").is_none());
+
+        let mut snapshot = KernelSnapshot::new();
+        collect_metadata.name = "l3vxlan200".to_string();
+        collect_metadata.ifindex = 20;
+        collect_metadata.altnames = vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan200".to_string()];
+        vnifilter.name = "l3vxlan300".to_string();
+        vnifilter.ifindex = 30;
+        vnifilter.altnames = vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan300".to_string()];
+        snapshot.insert_vxlan(plain);
+        snapshot.insert_vxlan(collect_metadata);
+        snapshot.insert_vxlan(vnifilter);
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "l3vxlan100");
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(rows[1].name, "l3vxlan200");
+        assert_eq!(rows[1].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[2].name, "l3vxlan300");
+        assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
+    }
+
+    #[test]
     fn managed_netdev_status_classifies_desired_vrf_and_l3vxlan_rows() {
         let table = vrf_l3vxlan_table();
 
@@ -6386,7 +6565,7 @@ mod managed_netdev_tests {
     }
 
     #[test]
-    fn managed_netdev_status_reports_orphaned_vrf_and_l3vxlan_without_lifecycle_ops() {
+    fn managed_netdev_status_reports_orphaned_vrf_and_l3vxlan_with_reap_ops() {
         let table = ManagedNetdevTable::from_all_maps(
             "leaf-1".to_string(),
             BTreeMap::new(),
@@ -6420,9 +6599,19 @@ mod managed_netdev_tests {
         assert!(rows.iter().any(|row| {
             row.class == ManagedNetdevClass::Vrf && row.state == ManagedNetdevState::Orphaned
         }));
-        assert!(
-            compute_managed_netdev_ops(&table, &snapshot).is_empty(),
-            "LAN-94 surfaces VRF/L3VXLAN status only; lifecycle ops remain LAN-95"
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &snapshot),
+            vec![
+                DataplaneOp::RemoveManagedL3Vxlan {
+                    name: "l3vxlan200".to_string(),
+                    ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan200".to_string(),
+                },
+                DataplaneOp::RemoveManagedVrf {
+                    name: "vrf200".to_string(),
+                    ownership_stamp: "rustbgpd:vrf:leaf-1:vrf200".to_string(),
+                },
+            ],
+            "L3VXLAN orphans must be reaped before their VRF"
         );
     }
 
@@ -6481,6 +6670,57 @@ mod managed_netdev_tests {
         let mut occupied = KernelSnapshot::new();
         occupied.insert_link_name("br100");
         occupied.insert_link_name("vxlan100");
+        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+    }
+
+    #[test]
+    fn managed_netdev_ops_create_vrf_before_l3vxlan_only_when_absent() {
+        let table = vrf_l3vxlan_table();
+        let ops = compute_managed_netdev_ops(&table, &KernelSnapshot::new());
+        assert_eq!(
+            ops,
+            vec![
+                DataplaneOp::CreateManagedVrf {
+                    name: "vrf100".to_string(),
+                    spec: rustbgpd_evpn::ManagedVrfNetdevSpec { table_id: 5000 },
+                    ownership_stamp: "rustbgpd:vrf:leaf-1:vrf100".to_string(),
+                },
+                DataplaneOp::CreateManagedL3Vxlan {
+                    name: "l3vxlan100".to_string(),
+                    spec: rustbgpd_evpn::ManagedL3VxlanNetdevSpec {
+                        vni: 5000,
+                        local_ip: "10.0.0.1".parse().unwrap(),
+                        dstport: 4789,
+                        vrf: "vrf100".to_string(),
+                        router_mac: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+                    },
+                    ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string(),
+                },
+            ]
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_vrf(vrf_link(
+            "vrf100",
+            30,
+            vec!["rustbgpd:vrf:leaf-1:vrf100"],
+            5000,
+        ));
+        let mut l3vxlan = vxlan_link(
+            "l3vxlan100",
+            40,
+            vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100"],
+            5000,
+        );
+        l3vxlan.bridge = None;
+        l3vxlan.master = Some("vrf100".to_string());
+        l3vxlan.mac = Some(MacAddress::new([0x02, 0, 0, 0, 0, 1]));
+        snapshot.insert_vxlan(l3vxlan);
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+
+        let mut occupied = KernelSnapshot::new();
+        occupied.insert_link_name("vrf100");
+        occupied.insert_link_name("l3vxlan100");
         assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
     }
 

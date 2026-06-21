@@ -57,10 +57,9 @@ order:
 4. optional VLAN upper / bridge membership helpers after the base classes.
 
 The first implementation slice was bridge create/adopt/reap. The second
-slice adds fixed-VNI VXLAN create/adopt/reap. The VRF/L3VXLAN schema/status
-substrate is present, but VRF/L3VXLAN create/adopt/reap lifecycle remains a
-separate slice with its own proof. SVD / collect-metadata VXLAN lifecycle is
-also a separate proof gate.
+slice adds fixed-VNI VXLAN create/adopt/reap. The third slice adds
+VRF/L3VXLAN create/adopt/reap and the `managed_ip_vrf_ready` proof. SVD /
+collect-metadata VXLAN lifecycle is still a separate proof gate.
 
 ### 2. `IFLA_ALT_IFNAME` is the durable ownership marker
 
@@ -319,8 +318,9 @@ foreign-vs-owned signal.
 4. Add VXLAN class support. **Done for fixed-VNI schema/status and
    create/adopt/reap lifecycle.** SVD / collect-metadata VXLAN remains
    deferred.
-5. Add VRF / L3VXLAN class support. **Done for schema/status and ownership
-   stamps; lifecycle create/adopt/reap remains deferred.**
+5. Add VRF / L3VXLAN class support. **Done for schema/status, ownership
+   stamps, create/adopt/reap lifecycle, and the `managed_ip_vrf_ready` real
+   kernel proof.**
 6. Add optional VLAN upper / bridge membership helpers if operator demand
    remains after bridge/VXLAN/VRF creation.
 

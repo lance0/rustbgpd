@@ -701,7 +701,11 @@ impl Dataplane for LinuxDataplane {
             | DataplaneOp::CreateManagedBridge { .. }
             | DataplaneOp::RemoveManagedBridge { .. }
             | DataplaneOp::CreateManagedVxlan { .. }
-            | DataplaneOp::RemoveManagedVxlan { .. } => {
+            | DataplaneOp::RemoveManagedVxlan { .. }
+            | DataplaneOp::CreateManagedVrf { .. }
+            | DataplaneOp::RemoveManagedVrf { .. }
+            | DataplaneOp::CreateManagedL3Vxlan { .. }
+            | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
                 unreachable!("plain L3 and managed-netdev ops are handled before this match")
             }
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —

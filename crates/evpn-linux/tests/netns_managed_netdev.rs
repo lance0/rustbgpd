@@ -10,14 +10,20 @@
 //! - preserve a same-name unstamped foreign bridge.
 //! - create a fixed-VNI VXLAN attached to an existing bridge;
 //! - stamp/adopt/reap the exact owned VXLAN;
-//! - preserve a same-name unstamped foreign VXLAN.
+//! - preserve a same-name unstamped foreign VXLAN;
+//! - create a VRF and L3VXLAN pair with the configured protected
+//!   attributes;
+//! - stamp/adopt/reap the exact owned VRF/L3VXLAN pair; and
+//! - prove the managed pair can satisfy IP-VRF readiness.
 
 #![cfg(target_os = "linux")]
 
 use std::process::Command;
 
+use rustbgpd_evpn::ip_vrf::IpVrfStatus;
 use rustbgpd_evpn::{
-    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, ManagedVxlanNetdevSpec, RouteDistinguisher,
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, MacAddress,
+    ManagedL3VxlanNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec, RouteDistinguisher,
     RouteTarget,
 };
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, InstanceProbe, LinuxDataplane};
@@ -259,6 +265,172 @@ async fn managed_bridge_and_vxlan_make_instance_ready_round_trip_inner() {
     assert_eq!(after.get(vni), Some(&InstanceProbe::Ready));
 }
 
+#[tokio::test]
+async fn managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("managed-ip-vrf-ready") {
+        managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("managed-ip-vrf-ready");
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "managed-ip-vrf-ready")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip_inner() {
+    let router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x50, 0x00]);
+    let l3vni = IpVrfId::new(5000).unwrap();
+    let ip_vrfs = one_ip_vrf_table(ip_vrf(
+        "tenant-blue",
+        l3vni,
+        "10.0.0.1",
+        router_mac,
+        "vrf5000",
+        "l3vxlan5000",
+        50_000,
+    ));
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+
+    let before = dp.probe_ip_vrfs(&ip_vrfs).await;
+    assert!(
+        matches!(
+            before.get(&l3vni),
+            Some(IpVrfStatus::NotReady { reasons }) if !reasons.is_empty()
+        ),
+        "IP-VRF unexpectedly ready before managed links exist: {:?}",
+        before.get(&l3vni)
+    );
+
+    let create_vrf = DataplaneOp::CreateManagedVrf {
+        name: "vrf5000".to_string(),
+        spec: ManagedVrfNetdevSpec { table_id: 50_000 },
+        ownership_stamp: "rustbgpd:vrf:leaf-1:vrf5000".to_string(),
+    };
+    let create_l3vxlan = DataplaneOp::CreateManagedL3Vxlan {
+        name: "l3vxlan5000".to_string(),
+        spec: ManagedL3VxlanNetdevSpec {
+            vni: 5000,
+            local_ip: "10.0.0.1".parse().unwrap(),
+            dstport: 4789,
+            vrf: "vrf5000".to_string(),
+            router_mac,
+        },
+        ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan5000".to_string(),
+    };
+
+    dp.apply(&create_vrf).await.expect("create managed VRF");
+    dp.apply(&create_l3vxlan)
+        .await
+        .expect("create managed L3VXLAN");
+
+    let snapshot = dp.dump_snapshot().await.expect("dump managed L3 topology");
+    let vrf = snapshot.vrfs.get("vrf5000").expect("managed VRF exists");
+    assert_eq!(vrf.table_id, Some(50_000));
+    assert!(vrf.up);
+    assert_eq!(vrf.altnames, vec!["rustbgpd:vrf:leaf-1:vrf5000"]);
+    let vrf_ifindex = vrf.ifindex;
+
+    let l3vxlan = snapshot
+        .vxlans
+        .get("l3vxlan5000")
+        .expect("managed L3VXLAN exists");
+    assert_eq!(l3vxlan.vni, Some(5000));
+    assert_eq!(l3vxlan.local_ip, Some("10.0.0.1".parse().unwrap()));
+    assert_eq!(l3vxlan.dstport, Some(4789));
+    assert_eq!(l3vxlan.learning_disabled, Some(true));
+    assert!(!l3vxlan.collect_metadata);
+    assert!(!l3vxlan.vnifilter);
+    assert_eq!(l3vxlan.master.as_deref(), Some("vrf5000"));
+    assert_eq!(l3vxlan.mac, Some(router_mac));
+    assert!(l3vxlan.up);
+    assert_eq!(
+        l3vxlan.altnames,
+        vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan5000"]
+    );
+    let l3vxlan_ifindex = l3vxlan.ifindex;
+
+    let after = dp.probe_ip_vrfs(&ip_vrfs).await;
+    assert!(
+        matches!(
+            after.get(&l3vni),
+            Some(IpVrfStatus::Ready {
+                vrf_ifindex: observed_vrf,
+                l3vxlan_ifindex: observed_l3vxlan,
+                table_id: 50_000,
+                router_mac: observed_mac,
+            }) if *observed_vrf == vrf_ifindex
+                && *observed_l3vxlan == l3vxlan_ifindex
+                && *observed_mac == router_mac
+        ),
+        "IP-VRF did not become ready after managed links: {:?}",
+        after.get(&l3vni)
+    );
+
+    let mut restarted = LinuxDataplane::connect()
+        .await
+        .expect("fresh netlink connect inside netns");
+    restarted
+        .apply(&create_vrf)
+        .await
+        .expect("adopt existing managed VRF");
+    restarted
+        .apply(&create_l3vxlan)
+        .await
+        .expect("adopt existing managed L3VXLAN");
+    let adopted = restarted.dump_snapshot().await.expect("dump after adopt");
+    assert_eq!(
+        adopted.vrfs.get("vrf5000").map(|vrf| vrf.ifindex),
+        Some(vrf_ifindex)
+    );
+    assert_eq!(
+        adopted.vxlans.get("l3vxlan5000").map(|vxlan| vxlan.ifindex),
+        Some(l3vxlan_ifindex)
+    );
+
+    restarted
+        .apply(&DataplaneOp::RemoveManagedVrf {
+            name: "vrf5000".to_string(),
+            ownership_stamp: "rustbgpd:vrf:leaf-1:vrf5000".to_string(),
+        })
+        .await
+        .expect_err("VRF remove must refuse while L3VXLAN is still enslaved");
+
+    restarted
+        .apply(&DataplaneOp::RemoveManagedL3Vxlan {
+            name: "l3vxlan5000".to_string(),
+            ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan5000".to_string(),
+        })
+        .await
+        .expect("remove managed L3VXLAN");
+    restarted
+        .apply(&DataplaneOp::RemoveManagedVrf {
+            name: "vrf5000".to_string(),
+            ownership_stamp: "rustbgpd:vrf:leaf-1:vrf5000".to_string(),
+        })
+        .await
+        .expect("remove managed VRF after L3VXLAN");
+    let removed = restarted.dump_snapshot().await.expect("dump after remove");
+    assert!(!removed.vxlans.contains_key("l3vxlan5000"));
+    assert!(!removed.vrfs.contains_key("vrf5000"));
+}
+
 fn run(cmd: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new(cmd).args(args).output().expect("spawn");
     if !out.status.success() {
@@ -302,6 +474,38 @@ fn instance(v: u32, bridge: Option<&str>, vtep: &str) -> EvpnInstance {
 fn one_instance_table(inst: EvpnInstance) -> EvpnInstanceTable {
     let mut table = EvpnInstanceTable::new();
     table.insert(inst).unwrap();
+    table
+}
+
+fn ip_vrf(
+    name: &str,
+    id: IpVrfId,
+    local: &str,
+    router_mac: MacAddress,
+    vrf_device: &str,
+    l3vxlan_device: &str,
+    table_id: u32,
+) -> IpVrf {
+    IpVrf::new(
+        name.to_string(),
+        id,
+        rd(65001, id.as_u32()),
+        vec![RouteTarget::TwoOctetAs {
+            asn: 65001,
+            value: id.as_u32(),
+        }],
+        local.parse().unwrap(),
+        router_mac,
+        vrf_device.to_string(),
+        l3vxlan_device.to_string(),
+        table_id,
+    )
+    .unwrap()
+}
+
+fn one_ip_vrf_table(vrf: IpVrf) -> IpVrfTable {
+    let mut table = IpVrfTable::new();
+    table.insert(vrf).unwrap();
     table
 }
 

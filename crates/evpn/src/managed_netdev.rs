@@ -19,8 +19,7 @@ pub const MAX_IFNAME_LEN: usize = 15;
 pub const MAX_OWNER_TOKEN_LEN: usize = 63;
 
 /// Managed netdev class. ADR-0091 ships lifecycle support class by class:
-/// bridge and fixed-VNI VXLAN rows are live, while VRF and L3VXLAN rows first
-/// enter as schema/status substrate before their create/delete executor lands.
+/// bridge, fixed-VNI VXLAN, VRF, and L3VXLAN rows all have lifecycle support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedNetdevClass {
     /// Linux bridge device.

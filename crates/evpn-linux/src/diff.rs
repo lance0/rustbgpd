@@ -1558,6 +1558,10 @@ mod tests {
                 | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::CreateManagedVxlan { .. }
                 | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedVrf { .. }
+                | DataplaneOp::RemoveManagedVrf { .. }
+                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                | DataplaneOp::RemoveManagedL3Vxlan { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
                 | DataplaneOp::AddRemoteIpRouteEcmp { .. }

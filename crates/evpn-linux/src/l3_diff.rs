@@ -915,6 +915,42 @@ fn remove_fdb_owner(
         .unwrap_or_else(|| IpVrfId::new(1).expect("VNI 1 is always valid"))
 }
 
+fn record_route_install_success(
+    owned: &mut L3OwnedState,
+    vrf_id: IpVrfId,
+    prefix: EvpnIpPrefixValue,
+    ready_l3vxlan_ifindex: &BTreeMap<IpVrfId, u32>,
+    ip_vrfs: &IpVrfTable,
+    intent: &RemoteIpPrefixTable,
+    ecmp: bool,
+) {
+    let entry = intent
+        .iter()
+        .find_map(|((id, p), e)| (*id == vrf_id && *p == prefix).then_some(e));
+    let vrf = ip_vrfs.iter().find(|v| v.id == vrf_id);
+    let ifindex = ready_l3vxlan_ifindex.get(&vrf_id).copied();
+    if let (Some(entry), Some(vrf), Some(ifindex)) = (entry, vrf, ifindex) {
+        let targets = if ecmp {
+            L3RouteTargetSet::from_entry(entry)
+        } else {
+            L3RouteTargetSet::Single {
+                next_hop: entry.next_hop,
+            }
+        };
+        owned.record_install(
+            (vrf_id, prefix),
+            InstallState {
+                route_installed: true,
+                next_hop: targets.first(),
+                targets,
+                router_mac: entry.router_mac,
+                l3vxlan_ifindex: ifindex,
+                table_id: vrf.table_id,
+            },
+        );
+    }
+}
+
 /// Apply a successful op to the owned state. Called once per
 /// `Ok(())` from `Dataplane::apply`. Failed ops leave the state
 /// unchanged so the next reconcile pass retries.
@@ -932,47 +968,26 @@ pub fn record_l3_success(
 ) {
     match op {
         DataplaneOp::AddRemoteIpRoute { vrf_id, prefix, .. } => {
-            let entry = intent
-                .iter()
-                .find_map(|((id, p), e)| (id == vrf_id && p == prefix).then_some(e));
-            let vrf = ip_vrfs.iter().find(|v| v.id == *vrf_id);
-            let ifindex = ready_l3vxlan_ifindex.get(vrf_id).copied();
-            if let (Some(entry), Some(vrf), Some(ifindex)) = (entry, vrf, ifindex) {
-                owned.record_install(
-                    (*vrf_id, *prefix),
-                    InstallState {
-                        route_installed: true,
-                        next_hop: entry.next_hop,
-                        targets: L3RouteTargetSet::Single {
-                            next_hop: entry.next_hop,
-                        },
-                        router_mac: entry.router_mac,
-                        l3vxlan_ifindex: ifindex,
-                        table_id: vrf.table_id,
-                    },
-                );
-            }
+            record_route_install_success(
+                owned,
+                *vrf_id,
+                *prefix,
+                ready_l3vxlan_ifindex,
+                ip_vrfs,
+                intent,
+                false,
+            );
         }
         DataplaneOp::AddRemoteIpRouteEcmp { vrf_id, prefix, .. } => {
-            let entry = intent
-                .iter()
-                .find_map(|((id, p), e)| (id == vrf_id && p == prefix).then_some(e));
-            let vrf = ip_vrfs.iter().find(|v| v.id == *vrf_id);
-            let ifindex = ready_l3vxlan_ifindex.get(vrf_id).copied();
-            if let (Some(entry), Some(vrf), Some(ifindex)) = (entry, vrf, ifindex) {
-                let targets = L3RouteTargetSet::from_entry(entry);
-                owned.record_install(
-                    (*vrf_id, *prefix),
-                    InstallState {
-                        route_installed: true,
-                        next_hop: targets.first(),
-                        targets,
-                        router_mac: entry.router_mac,
-                        l3vxlan_ifindex: ifindex,
-                        table_id: vrf.table_id,
-                    },
-                );
-            }
+            record_route_install_success(
+                owned,
+                *vrf_id,
+                *prefix,
+                ready_l3vxlan_ifindex,
+                ip_vrfs,
+                intent,
+                true,
+            );
         }
         DataplaneOp::RemoveRemoteIpRoute { vrf_id, prefix, .. }
         | DataplaneOp::RemoveRemoteIpRouteEcmp { vrf_id, prefix, .. } => {
@@ -1027,6 +1042,10 @@ pub fn record_l3_success(
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedVrf { .. }
+        | DataplaneOp::RemoveManagedVrf { .. }
+        | DataplaneOp::CreateManagedL3Vxlan { .. }
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }

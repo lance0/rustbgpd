@@ -1939,9 +1939,8 @@ default — RR-only deployments leave it empty.
 > the `bridge` / `local_vtep_ip` fields below must match. ADR-0091 is the
 > explicit opt-in exception for bridge creation/adoption/reap through
 > `[managed_netdevs]`; fixed-VNI VXLAN rows can also create/adopt/reap
-> traditional one-VNI VXLAN devices. Managed VRF / L3VXLAN rows are accepted
-> for schema validation and ownership/status reporting, but VRF / L3VXLAN
-> creation remains deferred.
+> traditional one-VNI VXLAN devices, and managed VRF / L3VXLAN rows can create
+> the VRF plus per-VRF L3 VXLAN topology used by `[[evpn_ip_vrfs]]`.
 > ADR-0089 enables the first VLAN-aware bridge programming target through
 > a local bridge-VLAN / VNI binding while keeping EVPN Ethernet Tag ID at
 > `0`.
@@ -1985,10 +1984,9 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   duplicates on either column reject config load.
 - `bridge` (when set) must reference a Linux bridge that already exists
   or is declared in `[managed_netdevs]` for ADR-0091 bridge lifecycle
-  ownership. ADR-0091 bridge and fixed-VNI `[[managed_netdevs.vxlans]]`
-  lifecycle now ship (create/adopt/reap); SVD / collect-metadata VXLAN and
-  VRF / L3VXLAN lifecycle remain operator-provisioned, though managed VRF /
-  L3VXLAN rows are valid for status and protected-attribute diagnostics.
+  ownership. ADR-0091 bridge, fixed-VNI `[[managed_netdevs.vxlans]]`, VRF, and
+  L3VXLAN lifecycle now ship (create/adopt/reap); SVD / collect-metadata VXLAN
+  creation remains operator-provisioned.
 - `bridge_vlan` (when set) must be in `1..=4094` and requires
   `bridge`. At runtime it selects the ADR-0089 VLAN-aware path: the
   observed bridge must have `vlan_filtering=1`, the configured VLAN
@@ -2346,12 +2344,12 @@ ADR-0091 managed EVPN netdevs are opt-in and class-scoped. The current
 surface accepts bridge rows, fixed-VNI VXLAN rows, VRF rows, and L3VXLAN rows,
 derives durable Linux altname ownership stamps, and reports status through
 `EvpnService.ListManagedNetdevs` / `rbgp evpn managed-netdevs`. Bridge and
-fixed-VNI VXLAN rows are active lifecycle intent: the dataplane actor creates
-missing links, stamps them with the derived altname, treats exact stamped links
-as crash-restart adoption, and reaps exact same-owner orphans when the config
-keeps the owner token but removes the row. VRF and L3VXLAN rows are
-schema/status substrate in this tranche; their create/adopt/reap lifecycle
-remains deferred.
+fixed-VNI VXLAN, VRF, and L3VXLAN rows are active lifecycle intent: the
+dataplane actor creates missing links, stamps them with the derived altname,
+treats exact stamped links as crash-restart adoption, and reaps exact same-owner
+orphans when the config keeps the owner token but removes the row. Reap order is
+dependency-aware: L3VXLAN rows are removed before their VRF, and a stamped VRF
+is never removed while slave links remain attached.
 
 Any `[managed_netdevs]` add/remove/change is restart-required in this
 tranche for SIGHUP, config transactions, gNMI Set, and
@@ -2415,10 +2413,14 @@ validation rejects `table_id = 0`, the Linux reserved tables `252`, `253`,
 `254`, and `255` (compat/default/main/local), duplicate managed VRF table ids,
 and a managed VRF `table_id` that collides with a `[[fib_tables]]` `table_id`.
 L3VXLAN validation rejects invalid VNIs, duplicate managed L3VXLAN VNIs,
-`dstport = 0`, `learning = true`, a missing, multicast, or all-zero
+`dstport = 0`, `learning = true`, a `vrf` value that does not reference a
+configured `[[managed_netdevs.vrfs]]` row, a missing, multicast, or all-zero
 `router_mac`, and an L3VXLAN `vni` (L3VNI) that equals any
 `[[managed_netdevs.vxlans]]` `vni` (L2VNI) — the L3VNI and L2VNI must be
-distinct.
+distinct. If a managed VRF name matches an `[[evpn_ip_vrfs]].vrf_device`, the
+managed `table_id` must equal that IP-VRF's table id. If a managed L3VXLAN name
+matches an `[[evpn_ip_vrfs]].l3vxlan_device`, the managed `vni`, `local`, and
+`router_mac` must equal the IP-VRF's L3VNI, local VTEP IP, and Router MAC.
 
 rustbgpd preserves foreign links. A same-name bridge, VXLAN, VRF, or L3VXLAN
 without the exact ownership stamp is reported `foreign-present` and is not
@@ -2437,13 +2439,11 @@ L3VXLAN `vni`, `local`, `dstport`, `learning`, `collect-metadata`,
 reported state for alerting; detailed reason text is available through
 `ListManagedNetdevs` / `rbgp evpn managed-netdevs`.
 
-Reaping is equally conservative. When the owner token stays but a bridge or
-fixed-VNI VXLAN row is removed, only an exact same-owner stamped plain orphan
-is reaped. A de-configured rustbgpd-stamped VXLAN that has drifted into a
-collect-metadata or vnifilter mode — modes the fixed-VNI lifecycle never
-creates — is preserved (`owned-unsafe`), not reaped. VRF and L3VXLAN orphan
-rows are reported for status only in this tranche and are not reaped until
-their lifecycle proof lands.
+Reaping is equally conservative. When the owner token stays but a bridge,
+fixed-VNI VXLAN, VRF, or L3VXLAN row is removed, only an exact same-owner
+stamped plain orphan is reaped. A de-configured rustbgpd-stamped VXLAN or
+L3VXLAN that has drifted into a collect-metadata or vnifilter mode — modes the
+fixed-VNI lifecycles never create — is preserved (`owned-unsafe`), not reaped.
 
 Status states:
 

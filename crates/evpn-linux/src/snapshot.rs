@@ -614,6 +614,13 @@ impl KernelSnapshot {
         self.vxlans.remove(name)
     }
 
+    /// Remove a VRF from the link inventory, returning the previous
+    /// value if any.
+    pub fn remove_vrf(&mut self, name: &str) -> Option<KernelVrfLinkInfo> {
+        self.link_names.remove(name);
+        self.vrfs.remove(name)
+    }
+
     /// Replace the all-link-name inventory wholesale.
     pub fn set_link_names(&mut self, link_names: BTreeSet<String>) {
         self.link_names = link_names;

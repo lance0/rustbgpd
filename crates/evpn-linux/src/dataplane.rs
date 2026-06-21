@@ -183,6 +183,51 @@ pub enum DataplaneOp {
         /// Durable rustbgpd ownership stamp expected on the VXLAN.
         ownership_stamp: String,
     },
+    /// Create a configured ADR-0091 managed VRF and stamp it with
+    /// its durable `IFLA_ALT_IFNAME` ownership marker.
+    /// Implementations must treat an already-present exact stamp as
+    /// idempotent success only after a fresh link dump confirms the link
+    /// is the expected VRF with matching protected attributes.
+    CreateManagedVrf {
+        /// Linux VRF link name.
+        name: String,
+        /// Desired protected VRF attributes.
+        spec: rustbgpd_evpn::ManagedVrfNetdevSpec,
+        /// Durable rustbgpd ownership stamp for this VRF.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped VRF that is no longer configured.
+    /// Implementations must first confirm the live link still carries
+    /// the exact expected ownership stamp and is a VRF.
+    RemoveManagedVrf {
+        /// Linux VRF link name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the VRF.
+        ownership_stamp: String,
+    },
+    /// Create a configured ADR-0091 managed L3 VXLAN and stamp it with
+    /// its durable `IFLA_ALT_IFNAME` ownership marker.
+    /// Implementations must treat an already-present exact stamp as
+    /// idempotent success only after a fresh link dump confirms the link
+    /// is the expected fixed-VNI L3 VXLAN with matching protected
+    /// attributes.
+    CreateManagedL3Vxlan {
+        /// Linux L3 VXLAN link name.
+        name: String,
+        /// Desired protected L3 VXLAN attributes.
+        spec: rustbgpd_evpn::ManagedL3VxlanNetdevSpec,
+        /// Durable rustbgpd ownership stamp for this L3 VXLAN.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped L3 VXLAN that is no longer configured.
+    /// Implementations must first confirm the live link still carries
+    /// the exact expected ownership stamp and is a VXLAN.
+    RemoveManagedL3Vxlan {
+        /// Linux L3 VXLAN link name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the L3 VXLAN.
+        ownership_stamp: String,
+    },
     /// Install a remote IP-prefix route into the IP-VRF's
     /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
     /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and

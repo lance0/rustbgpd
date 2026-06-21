@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
@@ -852,7 +852,116 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
             });
         }
     }
+    validate_managed_l3vxlan_vrf_references(managed)?;
+    validate_managed_ip_vrf_bindings(config)?;
 
+    Ok(())
+}
+
+fn validate_managed_l3vxlan_vrf_references(
+    managed: &ManagedNetdevsConfig,
+) -> Result<(), ConfigError> {
+    let managed_vrfs: HashSet<&str> = managed.vrfs.iter().map(|vrf| vrf.name.as_str()).collect();
+    for l3vxlan in &managed.l3vxlans {
+        if !managed_vrfs.contains(l3vxlan.vrf.as_str()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: vrf {:?} must reference a configured [[managed_netdevs.vrfs]] row",
+                    l3vxlan.name, l3vxlan.vrf
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_ip_vrf_bindings(config: &Config) -> Result<(), ConfigError> {
+    let managed_vrfs: HashMap<&str, &ManagedVrfNetdevConfig> = config
+        .managed_netdevs
+        .vrfs
+        .iter()
+        .map(|vrf| (vrf.name.as_str(), vrf))
+        .collect();
+    let managed_l3vxlans: HashMap<&str, &ManagedL3VxlanNetdevConfig> = config
+        .managed_netdevs
+        .l3vxlans
+        .iter()
+        .map(|l3vxlan| (l3vxlan.name.as_str(), l3vxlan))
+        .collect();
+
+    for ip_vrf in &config.evpn_ip_vrfs {
+        if let Some(vrf) = managed_vrfs.get(ip_vrf.vrf_device.as_str())
+            && vrf.table_id != ip_vrf.table_id
+        {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed VRF {:?} table_id {} does not match IP-VRF table_id {}",
+                    ip_vrf.name, vrf.name, vrf.table_id, ip_vrf.table_id
+                ),
+            });
+        }
+
+        let Some(l3vxlan) = managed_l3vxlans.get(ip_vrf.l3vxlan_device.as_str()) else {
+            continue;
+        };
+        if l3vxlan.vrf != ip_vrf.vrf_device {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed L3VXLAN {:?} vrf {:?} does not match IP-VRF vrf_device {:?}",
+                    ip_vrf.name, l3vxlan.name, l3vxlan.vrf, ip_vrf.vrf_device
+                ),
+            });
+        }
+        if l3vxlan.vni != ip_vrf.vni {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed L3VXLAN {:?} vni {} does not match IP-VRF vni {}",
+                    ip_vrf.name, l3vxlan.name, l3vxlan.vni, ip_vrf.vni
+                ),
+            });
+        }
+        let local_vtep_ip = ip_vrf
+            .local_vtep_ip
+            .parse::<std::net::IpAddr>()
+            .map_err(|e| ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: invalid local_vtep_ip {:?}: {e}",
+                    ip_vrf.name, ip_vrf.local_vtep_ip
+                ),
+            })?;
+        if l3vxlan.local != local_vtep_ip {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed L3VXLAN {:?} local {} does not match IP-VRF local_vtep_ip {}",
+                    ip_vrf.name, l3vxlan.name, l3vxlan.local, ip_vrf.local_vtep_ip
+                ),
+            });
+        }
+        let ip_vrf_router_mac = parse_mac_address(&ip_vrf.router_mac).map_err(|e| {
+            ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: invalid router_mac {:?}: {e}",
+                    ip_vrf.name, ip_vrf.router_mac
+                ),
+            }
+        })?;
+        let managed_router_mac = parse_mac_address(&l3vxlan.router_mac).map_err(|e| {
+            ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed L3VXLAN {:?}: invalid router_mac {:?}: {e}",
+                    l3vxlan.name, l3vxlan.router_mac
+                ),
+            }
+        })?;
+        if managed_router_mac != ip_vrf_router_mac {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed L3VXLAN {:?} router_mac {:?} does not match IP-VRF router_mac {:?}",
+                    ip_vrf.name, l3vxlan.name, l3vxlan.router_mac, ip_vrf.router_mac
+                ),
+            });
+        }
+    }
     Ok(())
 }
 

@@ -48,8 +48,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   foreign preservation on a real kernel; the `managed_ready` proof creates a
   managed bridge plus managed fixed-VNI VXLAN and verifies the real EVPN
   instance probe transitions from NotReady to Ready only after both links are
-  owned-safe. SVD / collect-metadata VXLAN plus VRF/L3VXLAN lifecycle stay
-  deferred.
+  owned-safe. SVD / collect-metadata VXLAN remains deferred.
 - **ADR-0091 managed VRF/L3VXLAN schema and status substrate.**
   `[managed_netdevs]` now accepts `[[managed_netdevs.vrfs]]` and
   `[[managed_netdevs.l3vxlans]]` rows, derives
@@ -57,9 +56,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ownership stamps, validates protected VRF/L3VXLAN identity attributes,
   parses observed VRF/L3VXLAN link state from Linux link dumps, and exposes
   desired/observed/orphan/foreign/unsafe status through
-  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. VRF and
-  L3VXLAN create/adopt/reap lifecycle remains deferred to the next managed
-  netdev slice.
+  `EvpnService.ListManagedNetdevs` and `rbgp evpn managed-netdevs`. This is
+  the substrate for the lifecycle slice below.
+- **ADR-0091 managed VRF/L3VXLAN lifecycle.** The Linux dataplane actor now
+  creates configured managed VRFs and L3VXLANs, stamps them with their derived
+  ownership altnames, treats exact stamped links as crash-restart adoption, and
+  reaps exact same-owner orphans in safe dependency order (`L3VXLAN` before
+  `VRF`). Managed L3VXLAN rows must reference a configured managed VRF, and
+  managed rows that match `[[evpn_ip_vrfs]]` device names must agree on table
+  id, L3VNI, local VTEP IP, and Router MAC. The `managed_ip_vrf_ready` netns
+  proof creates a managed VRF plus managed L3VXLAN on a real kernel, verifies
+  protected attributes and idempotent adoption, proves the IP-VRF readiness
+  probe transitions from NotReady to Ready, and confirms VRF deletion refuses
+  while the L3VXLAN remains enslaved. SVD / collect-metadata VXLAN creation and
+  VLAN upper helpers remain separate managed-netdev gates.
 
 ### Changed
 
@@ -78,8 +88,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `table_id` is now rejected when it names a Linux reserved table (`252`–`255`:
   compat/default/main/local) or collides with a `[[fib_tables]]` `table_id`, and
   a `[[managed_netdevs.l3vxlans]]` `vni` (L3VNI) is rejected when it equals any
-  `[[managed_netdevs.vxlans]]` `vni` (L2VNI). These land ahead of the deferred
-  VRF/L3VXLAN lifecycle so a colliding config fails closed at load time.
+  `[[managed_netdevs.vxlans]]` `vni` (L2VNI). These make lifecycle configs fail
+  closed at load time before the dataplane actor can create conflicting links.
 
 ### Fixed
 
