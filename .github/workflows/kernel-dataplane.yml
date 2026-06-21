@@ -550,7 +550,7 @@ jobs:
           script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + managed_bridge + managed_vxlan + managed_ready + l3_multipath + l3_all_active_writer)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + managed_bridge + managed_vxlan + managed_ready + managed_ip_vrf_ready + l3_multipath + l3_all_active_writer)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -558,11 +558,11 @@ jobs:
 
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
-      # netns never leaks to the host namespace. All selectors except
-      # l3_multipath/l3_all_active_writer are vrf-free and need no host setup
-      # beyond Docker (preinstalled); the L3 selectors create a `vrf` device, so
-      # the step below loads the vrf module on the host kernel the containers
-      # share (skipping the L3 selectors if it cannot be loaded).
+      # netns never leaks to the host namespace. Most selectors are vrf-free and
+      # need no host setup beyond Docker (preinstalled); managed_ip_vrf_ready,
+      # l3_multipath, and l3_all_active_writer create a `vrf` device, so the step
+      # below loads the vrf module on the host kernel the containers share
+      # (skipping the L3 selectors if it cannot be loaded).
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 
@@ -622,6 +622,10 @@ jobs:
       - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
         if: steps.vrf.outputs.vrf-available == 'true'
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath
+
+      - name: ADR-0091 managed VRF plus L3VXLAN readiness netns test
+        if: steps.vrf.outputs.vrf-available == 'true'
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_ip_vrf_ready
 
       - name: LAN-76 all-active Type 5 L3 writer netns proof
         if: steps.vrf.outputs.vrf-available == 'true'

@@ -738,6 +738,7 @@ mod tests {
             vxlan_port_vlan_to_vni: HashMap::new(),
             vxlan_ports_requiring_vlan_attribution: HashSet::new(),
             bridge_ports_by_name: HashMap::new(),
+            master_slaves_by_name: HashMap::new(),
         }
     }
 

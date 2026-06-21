@@ -7,14 +7,16 @@
 
 use std::net::IpAddr;
 
-use rtnetlink::{Handle, LinkBridge, LinkVxlan};
-use rustbgpd_evpn::{ManagedVxlanNetdevSpec, parse_ownership_stamp};
+use rtnetlink::{Handle, LinkBridge, LinkVrf, LinkVxlan};
+use rustbgpd_evpn::{
+    ManagedL3VxlanNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec, parse_ownership_stamp,
+};
 
 use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 
 use super::links::{self, BridgeLink};
-use crate::snapshot::KernelVxlanLinkInfo;
+use crate::snapshot::{KernelVrfLinkInfo, KernelVxlanLinkInfo};
 
 const ERRNO_EEXIST: i32 = libc::EEXIST;
 const ERRNO_ENODEV: i32 = libc::ENODEV;
@@ -43,6 +45,24 @@ pub(super) async fn apply_managed_netdev_op(
             name,
             ownership_stamp,
         } => Some(remove_vxlan(handle, name, ownership_stamp).await),
+        DataplaneOp::CreateManagedVrf {
+            name,
+            spec,
+            ownership_stamp,
+        } => Some(create_vrf(handle, name, spec, ownership_stamp).await),
+        DataplaneOp::RemoveManagedVrf {
+            name,
+            ownership_stamp,
+        } => Some(remove_vrf(handle, name, ownership_stamp).await),
+        DataplaneOp::CreateManagedL3Vxlan {
+            name,
+            spec,
+            ownership_stamp,
+        } => Some(create_l3vxlan(handle, name, spec, ownership_stamp).await),
+        DataplaneOp::RemoveManagedL3Vxlan {
+            name,
+            ownership_stamp,
+        } => Some(remove_l3vxlan(handle, name, ownership_stamp).await),
         _ => None,
     }
 }
@@ -244,6 +264,205 @@ async fn remove_vxlan(
     }
 }
 
+async fn create_vrf(
+    handle: &Handle,
+    name: &str,
+    spec: &ManagedVrfNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let mut fresh = fresh_vrf_state(handle, name).await?;
+    if let Some(vrf) = fresh.vrf.as_ref() {
+        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+    }
+    if fresh.name_exists {
+        return Err(foreign_vrf_collision(name));
+    }
+
+    let create_result = handle
+        .link()
+        .add(LinkVrf::new(name, spec.table_id).up().build())
+        .execute()
+        .await;
+    let created = match create_result {
+        Ok(()) => true,
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => false,
+        Err(err) => return Err(classify_link_apply_error(&err, "managed VRF create")),
+    };
+
+    fresh = fresh_vrf_state(handle, name).await?;
+    let Some(vrf) = fresh.vrf.as_ref() else {
+        return if fresh.name_exists {
+            Err(foreign_vrf_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed VRF {name} vanished after create"
+            )))
+        };
+    };
+
+    if !created {
+        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+    }
+    if vrf.altnames.iter().any(|alt| alt == ownership_stamp) {
+        return ensure_exact_owned_vrf(name, vrf, spec, ownership_stamp);
+    }
+
+    let stamp_result = handle
+        .link()
+        .property_add(vrf.ifindex)
+        .alt_ifname(&[ownership_stamp])
+        .execute()
+        .await;
+    match stamp_result {
+        Ok(()) => {}
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
+        Err(err) => {
+            return Err(classify_link_apply_error(&err, "managed VRF altname stamp"));
+        }
+    }
+
+    let fresh = fresh_vrf_state(handle, name).await?;
+    let Some(vrf) = fresh.vrf else {
+        return if fresh.name_exists {
+            Err(foreign_vrf_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed VRF {name} vanished after stamp"
+            )))
+        };
+    };
+    ensure_exact_owned_vrf(name, &vrf, spec, ownership_stamp)
+}
+
+async fn remove_vrf(
+    handle: &Handle,
+    name: &str,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let fresh = fresh_vrf_state(handle, name).await?;
+    let Some(vrf) = fresh.vrf else {
+        return Ok(());
+    };
+    ensure_exact_vrf_stamp(name, &vrf, ownership_stamp)?;
+    if !fresh.slave_names.is_empty() {
+        return Err(unsafe_managed_vrf(format!(
+            "managed VRF {name} cannot be removed while slave link(s) remain attached: {:?}",
+            fresh.slave_names
+        )));
+    }
+
+    match handle.link().del(vrf.ifindex).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, "managed VRF remove")),
+    }
+}
+
+async fn create_l3vxlan(
+    handle: &Handle,
+    name: &str,
+    spec: &ManagedL3VxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let mut fresh = fresh_l3vxlan_state(handle, name).await?;
+    if let Some(vxlan) = fresh.vxlan.as_ref() {
+        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+    }
+    if fresh.name_exists {
+        return Err(foreign_l3vxlan_collision(name));
+    }
+
+    let vrf_ifindex = fresh
+        .vrfs
+        .get(&spec.vrf)
+        .map(|vrf| vrf.ifindex)
+        .ok_or_else(|| {
+            missing_l3vxlan_vrf(name, &spec.vrf, fresh.all_link_names.contains(&spec.vrf))
+        })?;
+
+    let mut builder = LinkVxlan::new(name, spec.vni)
+        .port(spec.dstport)
+        .learning(false)
+        .controller(vrf_ifindex)
+        .address(spec.router_mac.octets().to_vec())
+        .up();
+    builder = match spec.local_ip {
+        IpAddr::V4(addr) => builder.local(addr),
+        IpAddr::V6(addr) => builder.local6(addr),
+    };
+
+    let create_result = handle.link().add(builder.build()).execute().await;
+    let created = match create_result {
+        Ok(()) => true,
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => false,
+        Err(err) => return Err(classify_link_apply_error(&err, "managed L3VXLAN create")),
+    };
+
+    fresh = fresh_l3vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return if fresh.name_exists {
+            Err(foreign_l3vxlan_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed L3VXLAN {name} vanished after create"
+            )))
+        };
+    };
+
+    if !created {
+        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+    }
+    if vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
+        return ensure_exact_owned_l3vxlan(name, vxlan, spec, ownership_stamp);
+    }
+
+    let stamp_result = handle
+        .link()
+        .property_add(vxlan.ifindex)
+        .alt_ifname(&[ownership_stamp])
+        .execute()
+        .await;
+    match stamp_result {
+        Ok(()) => {}
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
+        Err(err) => {
+            return Err(classify_link_apply_error(
+                &err,
+                "managed L3VXLAN altname stamp",
+            ));
+        }
+    }
+
+    let fresh = fresh_l3vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan else {
+        return if fresh.name_exists {
+            Err(foreign_l3vxlan_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed L3VXLAN {name} vanished after stamp"
+            )))
+        };
+    };
+    ensure_exact_owned_l3vxlan(name, &vxlan, spec, ownership_stamp)
+}
+
+async fn remove_l3vxlan(
+    handle: &Handle,
+    name: &str,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let Some(vxlan) = fresh_l3vxlan_state(handle, name).await?.vxlan else {
+        return Ok(());
+    };
+    ensure_exact_vxlan_stamp(name, &vxlan, ownership_stamp)?;
+
+    match handle.link().del(vxlan.ifindex).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, "managed L3VXLAN remove")),
+    }
+}
+
 struct FreshBridgeState {
     bridge: Option<BridgeLink>,
     name_exists: bool,
@@ -252,6 +471,19 @@ struct FreshBridgeState {
 struct FreshVxlanState {
     vxlan: Option<KernelVxlanLinkInfo>,
     bridges: std::collections::HashMap<String, BridgeLink>,
+    all_link_names: std::collections::HashSet<String>,
+    name_exists: bool,
+}
+
+struct FreshVrfState {
+    vrf: Option<KernelVrfLinkInfo>,
+    slave_names: Vec<String>,
+    name_exists: bool,
+}
+
+struct FreshL3VxlanState {
+    vxlan: Option<KernelVxlanLinkInfo>,
+    vrfs: std::collections::HashMap<String, KernelVrfLinkInfo>,
     all_link_names: std::collections::HashSet<String>,
     name_exists: bool,
 }
@@ -272,6 +504,32 @@ async fn fresh_vxlan_state(handle: &Handle, name: &str) -> Result<FreshVxlanStat
     Ok(FreshVxlanState {
         vxlan: cache.vxlan_links.get(name).cloned(),
         bridges: cache.bridges,
+        all_link_names: cache.all_link_names.clone(),
+        name_exists: cache.all_link_names.contains(name),
+    })
+}
+
+async fn fresh_vrf_state(handle: &Handle, name: &str) -> Result<FreshVrfState, DataplaneError> {
+    let cache = links::dump_links(handle).await?;
+    Ok(FreshVrfState {
+        vrf: cache.vrfs.get(name).cloned(),
+        slave_names: cache
+            .master_slaves_by_name
+            .get(name)
+            .cloned()
+            .unwrap_or_default(),
+        name_exists: cache.all_link_names.contains(name),
+    })
+}
+
+async fn fresh_l3vxlan_state(
+    handle: &Handle,
+    name: &str,
+) -> Result<FreshL3VxlanState, DataplaneError> {
+    let cache = links::dump_links(handle).await?;
+    Ok(FreshL3VxlanState {
+        vxlan: cache.vxlan_links.get(name).cloned(),
+        vrfs: cache.vrfs,
         all_link_names: cache.all_link_names.clone(),
         name_exists: cache.all_link_names.contains(name),
     })
@@ -381,6 +639,107 @@ fn ensure_exact_vxlan_stamp(
     )))
 }
 
+fn ensure_exact_owned_vrf(
+    name: &str,
+    vrf: &KernelVrfLinkInfo,
+    spec: &ManagedVrfNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_exact_vrf_stamp(name, vrf, ownership_stamp)?;
+    if vrf.table_id != Some(spec.table_id) {
+        return Err(unsafe_managed_vrf(format!(
+            "managed VRF {name} table_id changed during apply: observed {:?}, desired {}",
+            vrf.table_id, spec.table_id
+        )));
+    }
+    if !vrf.up {
+        return Err(unsafe_managed_vrf(format!(
+            "managed VRF {name} is administratively down after apply"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_exact_vrf_stamp(
+    name: &str,
+    vrf: &KernelVrfLinkInfo,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let stamps: Vec<_> = vrf
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name {
+        return Ok(());
+    }
+    Err(unsafe_managed_vrf(format!(
+        "managed VRF {name} ownership stamp changed during apply: observed {:?}, expected {ownership_stamp}",
+        vrf.altnames
+    )))
+}
+
+fn ensure_exact_owned_l3vxlan(
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedL3VxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_exact_vxlan_stamp(name, vxlan, ownership_stamp)?;
+    if vxlan.vni != Some(spec.vni) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} VNI changed during apply: observed {:?}, desired {}",
+            vxlan.vni, spec.vni
+        )));
+    }
+    if vxlan.local_ip != Some(spec.local_ip) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} local IP changed during apply: observed {:?}, desired {}",
+            vxlan.local_ip, spec.local_ip
+        )));
+    }
+    if vxlan.dstport != Some(spec.dstport) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} dstport changed during apply: observed {:?}, desired {}",
+            vxlan.dstport, spec.dstport
+        )));
+    }
+    if vxlan.learning_disabled != Some(true) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} learning changed during apply: observed {:?}, desired nolearning",
+            vxlan.learning_disabled
+        )));
+    }
+    if vxlan.collect_metadata {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} became collect-metadata/external during apply"
+        )));
+    }
+    if vxlan.vnifilter {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} enabled vnifilter during apply"
+        )));
+    }
+    if vxlan.master.as_deref() != Some(spec.vrf.as_str()) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} VRF attachment changed during apply: observed {:?}, desired {}",
+            vxlan.master, spec.vrf
+        )));
+    }
+    if vxlan.mac != Some(spec.router_mac) {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} router MAC changed during apply: observed {:?}, desired {:?}",
+            vxlan.mac, spec.router_mac
+        )));
+    }
+    if !vxlan.up {
+        return Err(unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} is administratively down after apply"
+        )));
+    }
+    Ok(())
+}
+
 fn is_errno(err: &rtnetlink::Error, errno: i32) -> bool {
     if let rtnetlink::Error::NetlinkError(message) = err {
         i32::try_from(message.raw_code().unsigned_abs()).unwrap_or(0) == errno
@@ -440,5 +799,36 @@ fn missing_vxlan_bridge(name: &str, bridge: &str, bridge_name_exists: bool) -> D
 }
 
 fn unsafe_managed_vxlan(message: String) -> DataplaneError {
+    DataplaneError::InvalidArgument(message)
+}
+
+fn foreign_vrf_collision(name: &str) -> DataplaneError {
+    unsafe_managed_vrf(format!(
+        "managed VRF {name} cannot be created: desired name is occupied by a non-VRF link"
+    ))
+}
+
+fn unsafe_managed_vrf(message: String) -> DataplaneError {
+    DataplaneError::InvalidArgument(message)
+}
+
+fn foreign_l3vxlan_collision(name: &str) -> DataplaneError {
+    unsafe_managed_l3vxlan(format!(
+        "managed L3VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+    ))
+}
+
+fn missing_l3vxlan_vrf(name: &str, vrf: &str, vrf_name_exists: bool) -> DataplaneError {
+    if vrf_name_exists {
+        return unsafe_managed_l3vxlan(format!(
+            "managed L3VXLAN {name} cannot be created: desired VRF name {vrf} is occupied by a non-VRF link"
+        ));
+    }
+    transient_link_race(format!(
+        "managed L3VXLAN {name} cannot be created: desired VRF {vrf} is absent"
+    ))
+}
+
+fn unsafe_managed_l3vxlan(message: String) -> DataplaneError {
     DataplaneError::InvalidArgument(message)
 }

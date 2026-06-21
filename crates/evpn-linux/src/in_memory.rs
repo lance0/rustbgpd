@@ -35,7 +35,7 @@ use crate::l3_adoption::{
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
-    KernelVxlanLinkInfo,
+    KernelVrfLinkInfo, KernelVxlanLinkInfo,
 };
 
 /// Test fake of [`Dataplane`].
@@ -541,6 +541,126 @@ impl InMemoryDataplane {
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed VXLAN {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
+            DataplaneOp::CreateManagedVrf {
+                name,
+                spec,
+                ownership_stamp,
+            } => match state.kernel.vrfs.get_mut(name) {
+                Some(link) if managed_vrf_exact(link, name, spec, ownership_stamp) => {}
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VRF {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed VRF {name} cannot be created: desired name is occupied by a non-VRF link"
+                        )));
+                    }
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                        .chain(state.kernel.vrfs.values().map(|link| link.ifindex))
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_vrf(KernelVrfLinkInfo {
+                        ifindex: next_ifindex,
+                        name: name.clone(),
+                        altnames: vec![ownership_stamp.clone()],
+                        up: true,
+                        table_id: Some(spec.table_id),
+                    });
+                }
+            },
+            DataplaneOp::RemoveManagedVrf {
+                name,
+                ownership_stamp,
+            } => match state.kernel.vrfs.get(name) {
+                Some(link) if managed_vrf_has_exact_stamp(link, name, ownership_stamp) => {
+                    state.kernel.remove_vrf(name);
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VRF {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
+            DataplaneOp::CreateManagedL3Vxlan {
+                name,
+                spec,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get_mut(name) {
+                Some(link) if managed_l3vxlan_exact(link, name, spec, ownership_stamp) => {}
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed L3VXLAN {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed L3VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+                        )));
+                    }
+                    if !state.kernel.vrfs.contains_key(&spec.vrf) {
+                        if state.kernel.link_name_exists(&spec.vrf) {
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "managed L3VXLAN {name} cannot be created: desired VRF name {} is occupied by a non-VRF link",
+                                spec.vrf
+                            )));
+                        }
+                        return Err(crate::error::DataplaneError::Other(format!(
+                            "managed L3VXLAN {name} cannot be created: desired VRF {} is absent",
+                            spec.vrf
+                        )));
+                    }
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                        .chain(state.kernel.vrfs.values().map(|link| link.ifindex))
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_vxlan(KernelVxlanLinkInfo {
+                        ifindex: next_ifindex,
+                        name: name.clone(),
+                        altnames: vec![ownership_stamp.clone()],
+                        up: true,
+                        vni: Some(spec.vni),
+                        local_ip: Some(spec.local_ip),
+                        dstport: Some(spec.dstport),
+                        learning_disabled: Some(true),
+                        collect_metadata: false,
+                        vnifilter: false,
+                        bridge: None,
+                        master: Some(spec.vrf.clone()),
+                        mac: Some(spec.router_mac),
+                    });
+                }
+            },
+            DataplaneOp::RemoveManagedL3Vxlan {
+                name,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get(name) {
+                Some(link) if managed_vxlan_has_exact_stamp(link, name, ownership_stamp) => {
+                    state.kernel.remove_vxlan(name);
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed L3VXLAN {name} changed before remove"
                     )));
                 }
                 None => {}
@@ -1426,6 +1546,45 @@ fn managed_vxlan_has_exact_stamp(
         .filter_map(|altname| parse_ownership_stamp(altname))
         .collect();
     stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
+}
+
+fn managed_vrf_exact(
+    link: &KernelVrfLinkInfo,
+    name: &str,
+    spec: &rustbgpd_evpn::ManagedVrfNetdevSpec,
+    ownership_stamp: &str,
+) -> bool {
+    managed_vrf_has_exact_stamp(link, name, ownership_stamp) && link.table_id == Some(spec.table_id)
+}
+
+fn managed_vrf_has_exact_stamp(
+    link: &KernelVrfLinkInfo,
+    name: &str,
+    ownership_stamp: &str,
+) -> bool {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
+}
+
+fn managed_l3vxlan_exact(
+    link: &KernelVxlanLinkInfo,
+    name: &str,
+    spec: &rustbgpd_evpn::ManagedL3VxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> bool {
+    managed_vxlan_has_exact_stamp(link, name, ownership_stamp)
+        && link.vni == Some(spec.vni)
+        && link.local_ip == Some(spec.local_ip)
+        && link.dstport == Some(spec.dstport)
+        && link.learning_disabled == Some(true)
+        && !link.collect_metadata
+        && !link.vnifilter
+        && link.master.as_deref() == Some(spec.vrf.as_str())
+        && link.mac == Some(spec.router_mac)
 }
 
 #[cfg(test)]

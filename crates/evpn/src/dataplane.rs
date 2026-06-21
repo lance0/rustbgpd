@@ -764,6 +764,26 @@ pub enum DataplaneOpKind {
         /// Linux VXLAN link name.
         name: String,
     },
+    /// Create and stamp an ADR-0091 managed VRF.
+    CreateManagedVrf {
+        /// Linux VRF link name.
+        name: String,
+    },
+    /// Remove a rustbgpd-owned ADR-0091 managed VRF.
+    RemoveManagedVrf {
+        /// Linux VRF link name.
+        name: String,
+    },
+    /// Create and stamp an ADR-0091 managed L3 VXLAN.
+    CreateManagedL3Vxlan {
+        /// Linux L3 VXLAN link name.
+        name: String,
+    },
+    /// Remove a rustbgpd-owned ADR-0091 managed L3 VXLAN.
+    RemoveManagedL3Vxlan {
+        /// Linux L3 VXLAN link name.
+        name: String,
+    },
     /// Install an FDB row pointing at an FDB nexthop group via
     /// `NDA_NH_ID` (ADR-0059 slice 3 aliasing-ECMP). The kernel
     /// group ID isn't reported here — operators trace it via

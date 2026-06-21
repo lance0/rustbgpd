@@ -203,6 +203,11 @@ pub(crate) struct LinkCache {
     /// bridge topology is otherwise `NotReady` (e.g. mid-bring-up),
     /// so a non-DF port is never silently left forwarding.
     pub bridge_ports_by_name: HashMap<String, crate::snapshot::KernelBridgePortInfo>,
+    /// Master device name -> enslaved link names observed in the same
+    /// dump. Managed VRF lifecycle uses this as a deletion guard: a
+    /// rustbgpd-stamped VRF is not safe to delete while any slave
+    /// remains attached.
+    pub master_slaves_by_name: HashMap<String, Vec<String>>,
 }
 
 /// Kernel target for programming one remote-MAC FDB row.
@@ -595,8 +600,9 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
     let vxlan_links =
         attach_vxlan_link_status(vxlan_links, &bridge_ifindex_to_name, &link_ifindex_to_name);
 
+    let master_slaves_by_name = index_master_slaves(&all_enslaved, &link_ifindex_to_name);
     let (bridge_port_to_vni, bridge_ports_by_name) =
-        index_bridge_ports(all_enslaved, &bridge_ifindex_to_name, &mut bridges);
+        index_bridge_ports(&all_enslaved, &bridge_ifindex_to_name, &mut bridges);
 
     Ok(LinkCache {
         all_link_names,
@@ -614,6 +620,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         vxlan_port_vlan_to_vni: HashMap::new(),
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
         bridge_ports_by_name,
+        master_slaves_by_name,
     })
 }
 
@@ -849,6 +856,7 @@ async fn dump_bridge_vlan_inventory(
 
 /// One enslaved link from the dump's first pass — the raw material
 /// for [`index_bridge_ports`].
+#[derive(Clone)]
 struct EnslavedLink {
     ifindex: u32,
     master: u32,
@@ -869,7 +877,7 @@ struct EnslavedLink {
 /// is broader: any named non-VXLAN port of a known bridge is an
 /// AC-gate candidate, VNI-resolved or not (see the field docs).
 fn index_bridge_ports(
-    all_enslaved: Vec<EnslavedLink>,
+    all_enslaved: &[EnslavedLink],
     bridge_ifindex_to_name: &HashMap<u32, String>,
     bridges: &mut HashMap<String, BridgeLink>,
 ) -> (
@@ -897,7 +905,7 @@ fn index_bridge_ports(
         if port.is_vxlan {
             continue;
         }
-        if let Some(name) = port.name {
+        if let Some(name) = port.name.clone() {
             bridge_ports_by_name.insert(
                 name,
                 crate::snapshot::KernelBridgePortInfo {
@@ -925,6 +933,31 @@ fn index_bridge_ports(
             .sort_by(|a, b| (a.ifindex, &a.name).cmp(&(b.ifindex, &b.name)));
     }
     (bridge_port_to_vni, bridge_ports_by_name)
+}
+
+fn index_master_slaves(
+    all_enslaved: &[EnslavedLink],
+    link_ifindex_to_name: &HashMap<u32, String>,
+) -> HashMap<String, Vec<String>> {
+    let mut by_master: HashMap<String, Vec<String>> = HashMap::new();
+    for link in all_enslaved {
+        let Some(master_name) = link_ifindex_to_name.get(&link.master) else {
+            continue;
+        };
+        let slave_name = link
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("ifindex:{}", link.ifindex));
+        by_master
+            .entry(master_name.clone())
+            .or_default()
+            .push(slave_name);
+    }
+    for names in by_master.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    by_master
 }
 
 /// Extract the Controller (master) ifindex attribute, if present.
@@ -1586,7 +1619,7 @@ mod tests {
         bridge_ifindex_to_name.insert(10, "br100".to_string());
 
         let (bridge_port_to_vni, bridge_ports_by_name) = index_bridge_ports(
-            vec![
+            &[
                 EnslavedLink {
                     ifindex: 20,
                     master: 10,

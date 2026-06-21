@@ -162,10 +162,10 @@ expects the operator or host-networking layer to create them. For an
 `EvpnInstance` with `bridge = "br100"`, the initial Gate 7b dataplane
 crate verifies:
 
-ADR-0091 later adds an explicit opt-in exception for Linux bridge and
-fixed-VNI VXLAN create/adopt/reap through `[managed_netdevs]`, plus
-VRF/L3VXLAN schema/status substrate. SVD / collect-metadata VXLAN lifecycle
-and VRF/L3VXLAN lifecycle remain outside this ADR's default boundary.
+ADR-0091 later adds an explicit opt-in exception for Linux bridge,
+fixed-VNI VXLAN, VRF, and L3VXLAN create/adopt/reap through
+`[managed_netdevs]`. SVD / collect-metadata VXLAN lifecycle remains outside
+this ADR's default boundary.
 
 1. the bridge exists;
 2. exactly one VXLAN port for the instance VNI is attached to that
