@@ -586,6 +586,23 @@ impl InMemoryDataplane {
                 ownership_stamp,
             } => match state.kernel.vrfs.get(name) {
                 Some(link) if managed_vrf_has_exact_stamp(link, name, ownership_stamp) => {
+                    // Mirror the prod `remove_vrf` refusal: never delete a
+                    // VRF while a slave link is still enslaved to it. In the
+                    // fake's kernel model an enslaved L3VXLAN records the VRF
+                    // name in its `master` back-reference.
+                    let mut slaves: Vec<&str> = state
+                        .kernel
+                        .vxlans
+                        .values()
+                        .filter(|vxlan| vxlan.master.as_deref() == Some(name.as_str()))
+                        .map(|vxlan| vxlan.name.as_str())
+                        .collect();
+                    if !slaves.is_empty() {
+                        slaves.sort_unstable();
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed VRF {name} cannot be removed while slave link(s) remain attached: {slaves:?}"
+                        )));
+                    }
                     state.kernel.remove_vrf(name);
                 }
                 Some(_) => {
@@ -1723,6 +1740,65 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!h.kernel_snapshot().vxlans.contains_key("vxlan100"));
+    }
+
+    #[tokio::test]
+    async fn managed_vrf_remove_refuses_while_slave_attached() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+
+        dp.apply(&DataplaneOp::CreateManagedVrf {
+            name: "vrf-blue".to_string(),
+            spec: rustbgpd_evpn::ManagedVrfNetdevSpec { table_id: 5000 },
+            ownership_stamp: "rustbgpd:vrf:leaf-1:vrf-blue".to_string(),
+        })
+        .await
+        .expect("VRF create must succeed");
+        dp.apply(&DataplaneOp::CreateManagedL3Vxlan {
+            name: "l3vxlan5000".to_string(),
+            spec: rustbgpd_evpn::ManagedL3VxlanNetdevSpec {
+                vni: 5000,
+                local_ip: ip("10.0.0.1"),
+                dstport: 4789,
+                vrf: "vrf-blue".to_string(),
+                router_mac: mac(1),
+            },
+            ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan5000".to_string(),
+        })
+        .await
+        .expect("L3VXLAN create must succeed");
+
+        // The L3VXLAN is now enslaved to the VRF: removal must refuse
+        // permanently and leave the VRF in place (matches prod
+        // `remove_vrf`).
+        let err = dp
+            .apply(&DataplaneOp::RemoveManagedVrf {
+                name: "vrf-blue".to_string(),
+                ownership_stamp: "rustbgpd:vrf:leaf-1:vrf-blue".to_string(),
+            })
+            .await
+            .expect_err("VRF remove must refuse while a slave is attached");
+        assert_eq!(err.class(), crate::error::FailureClass::Permanent);
+        assert!(
+            err.to_string().contains("slave link(s) remain attached"),
+            "unexpected error: {err}"
+        );
+        assert!(h.kernel_snapshot().vrfs.contains_key("vrf-blue"));
+
+        // Detach the slave; removal now succeeds.
+        dp.apply(&DataplaneOp::RemoveManagedL3Vxlan {
+            name: "l3vxlan5000".to_string(),
+            ownership_stamp: "rustbgpd:l3vxlan:leaf-1:l3vxlan5000".to_string(),
+        })
+        .await
+        .expect("L3VXLAN remove must succeed");
+        dp.apply(&DataplaneOp::RemoveManagedVrf {
+            name: "vrf-blue".to_string(),
+            ownership_stamp: "rustbgpd:vrf:leaf-1:vrf-blue".to_string(),
+        })
+        .await
+        .expect("VRF remove must succeed once no slaves remain");
+        assert!(!h.kernel_snapshot().vrfs.contains_key("vrf-blue"));
     }
 
     #[tokio::test]

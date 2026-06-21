@@ -10684,6 +10684,64 @@ router_mac = "{router_mac}"
 }
 
 #[test]
+fn managed_netdevs_reject_ip_vrf_l3vxlan_vrf_mismatch() {
+    // Two managed VRFs; the IP-VRF expects `vrf-blue` but the managed
+    // L3VXLAN it binds is enslaved to `vrf-green`. vni/local/router_mac
+    // and the `vrf-blue` table_id all match the IP-VRF, so the only
+    // remaining divergence is the VRF the L3VXLAN attaches to — without
+    // this check the lifecycle enslaves to the wrong VRF and IP-VRF
+    // readiness (master == vrf_device) can never reach Ready.
+    let candidate = |l3vxlan_vrf: &str| {
+        parse(&format!(
+            r#"{}
+[[evpn_ip_vrfs]]
+name = "blue"
+vni = 5000
+rd = "10.0.0.1:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "l3vxlan5000"
+table_id = 5000
+
+[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vrfs]]
+name = "vrf-blue"
+table_id = 5000
+
+[[managed_netdevs.vrfs]]
+name = "vrf-green"
+table_id = 6000
+
+[[managed_netdevs.l3vxlans]]
+name = "l3vxlan5000"
+vni = 5000
+local = "10.0.0.1"
+vrf = "{l3vxlan_vrf}"
+router_mac = "02:00:00:00:00:01"
+"#,
+            valid_toml()
+        ))
+    };
+
+    match candidate("vrf-green") {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("vrf") && reason.contains("vrf_device"),
+                "unexpected vrf-mismatch reason: {reason}"
+            );
+        }
+        other => panic!("expected L3VXLAN vrf/vrf_device mismatch rejection, got {other:?}"),
+    }
+
+    let ok = candidate("vrf-blue");
+    assert!(ok.is_ok(), "matching L3VXLAN vrf should load, got {ok:?}");
+}
+
+#[test]
 fn managed_netdevs_valid_multi_class_config_loads() {
     let config = parse(&format!(
         "{}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf-blue\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan5000\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf-blue\"\nrouter_mac = \"02:00:00:00:00:01\"\n",

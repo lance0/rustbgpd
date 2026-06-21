@@ -904,6 +904,14 @@ fn validate_managed_ip_vrf_bindings(config: &Config) -> Result<(), ConfigError> 
         let Some(l3vxlan) = managed_l3vxlans.get(ip_vrf.l3vxlan_device.as_str()) else {
             continue;
         };
+        if l3vxlan.vrf != ip_vrf.vrf_device {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "evpn_ip_vrfs[{}]: managed L3VXLAN {:?} vrf {:?} does not match IP-VRF vrf_device {:?}",
+                    ip_vrf.name, l3vxlan.name, l3vxlan.vrf, ip_vrf.vrf_device
+                ),
+            });
+        }
         if l3vxlan.vni != ip_vrf.vni {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!(
