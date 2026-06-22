@@ -6568,6 +6568,39 @@ mod managed_netdev_tests {
         );
     }
 
+    #[test]
+    fn managed_netdev_status_surfaces_cross_class_mis_stamped_vlan_upper_link() {
+        let table = ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        // A VLAN-upper-kind link carrying ONLY a bridge-class stamp (wrong class
+        // for a VLAN upper), not in the desired set.
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            30,
+            vec!["rustbgpd:bridge:leaf-1:br100.10"],
+            Some("br100"),
+            Some(10),
+            true,
+        ));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 1, "the mis-stamped link must not be dropped");
+        assert_eq!(rows[0].name, "br100.10");
+        assert_eq!(rows[0].class, ManagedNetdevClass::VlanUpper);
+        assert_eq!(rows[0].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(
+            rows[0].observed_stamps,
+            vec!["rustbgpd:bridge:leaf-1:br100.10"]
+        );
+    }
+
     // Regression guard: the normal (class-matching) path is unchanged — a
     // correctly-stamped unconfigured bridge still reports Orphaned.
     #[test]
