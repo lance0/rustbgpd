@@ -19,7 +19,8 @@ pub const MAX_IFNAME_LEN: usize = 15;
 pub const MAX_OWNER_TOKEN_LEN: usize = 63;
 
 /// Managed netdev class. ADR-0091 ships lifecycle support class by class:
-/// bridge, fixed-VNI VXLAN, VRF, and L3VXLAN rows all have lifecycle support.
+/// bridge, fixed-VNI VXLAN, VRF, L3VXLAN, and VLAN-upper rows all have
+/// lifecycle support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedNetdevClass {
     /// Linux bridge device.
@@ -30,6 +31,8 @@ pub enum ManagedNetdevClass {
     Vrf,
     /// Linux L3 VXLAN device enslaved to a VRF.
     L3Vxlan,
+    /// Linux VLAN upper device (`ip link add link BR name BR.VID type vlan`).
+    VlanUpper,
 }
 
 impl ManagedNetdevClass {
@@ -41,6 +44,7 @@ impl ManagedNetdevClass {
             Self::Vxlan => "vxlan",
             Self::Vrf => "vrf",
             Self::L3Vxlan => "l3vxlan",
+            Self::VlanUpper => "vlan-upper",
         }
     }
 }
@@ -126,6 +130,26 @@ pub struct ManagedL3VxlanNetdev {
     pub ownership_stamp: String,
 }
 
+/// Desired protected attributes for one managed VLAN upper link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVlanUpperNetdevSpec {
+    /// Parent Linux bridge this VLAN upper must be created on.
+    pub bridge: String,
+    /// Linux VLAN id (`1..=4094`).
+    pub vlan: u16,
+}
+
+/// One configured VLAN upper row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVlanUpperNetdev {
+    /// Linux VLAN upper interface name.
+    pub name: String,
+    /// Desired protected attributes.
+    pub spec: ManagedVlanUpperNetdevSpec,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
 /// Resolved managed-netdev desired state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedNetdevTable {
@@ -134,6 +158,7 @@ pub struct ManagedNetdevTable {
     vxlans: BTreeMap<String, ManagedVxlanNetdev>,
     vrfs: BTreeMap<String, ManagedVrfNetdev>,
     l3vxlans: BTreeMap<String, ManagedL3VxlanNetdev>,
+    vlan_uppers: BTreeMap<String, ManagedVlanUpperNetdev>,
 }
 
 impl ManagedNetdevTable {
@@ -162,6 +187,7 @@ impl ManagedNetdevTable {
             vxlans,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
         )
     }
 
@@ -173,6 +199,7 @@ impl ManagedNetdevTable {
         vxlans: BTreeMap<String, ManagedVxlanNetdevSpec>,
         vrfs: BTreeMap<String, ManagedVrfNetdevSpec>,
         l3vxlans: BTreeMap<String, ManagedL3VxlanNetdevSpec>,
+        vlan_uppers: BTreeMap<String, ManagedVlanUpperNetdevSpec>,
     ) -> Self {
         let bridges = bridges
             .into_iter()
@@ -230,12 +257,27 @@ impl ManagedNetdevTable {
                 )
             })
             .collect();
+        let vlan_uppers = vlan_uppers
+            .into_iter()
+            .map(|(name, spec)| {
+                let ownership_stamp = vlan_upper_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedVlanUpperNetdev {
+                        name,
+                        spec,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
         Self {
             owner_token: Some(owner_token),
             bridges,
             vxlans,
             vrfs,
             l3vxlans,
+            vlan_uppers,
         }
     }
 
@@ -243,7 +285,7 @@ impl ManagedNetdevTable {
     ///
     /// An owner token without rows is still non-empty: it lets the
     /// dataplane actor reap rustbgpd-owned leftovers for that owner when
-    /// the operator removes the last managed bridge row.
+    /// the operator removes the last managed-netdev row.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.owner_token.is_none()
@@ -251,6 +293,7 @@ impl ManagedNetdevTable {
             && self.vxlans.is_empty()
             && self.vrfs.is_empty()
             && self.l3vxlans.is_empty()
+            && self.vlan_uppers.is_empty()
     }
 
     /// Owner token when `[managed_netdevs]` is configured.
@@ -302,6 +345,17 @@ impl ManagedNetdevTable {
     pub fn l3vxlan(&self, name: &str) -> Option<&ManagedL3VxlanNetdev> {
         self.l3vxlans.get(name)
     }
+
+    /// Desired VLAN upper rows in deterministic name order.
+    pub fn vlan_uppers(&self) -> impl Iterator<Item = &ManagedVlanUpperNetdev> {
+        self.vlan_uppers.values()
+    }
+
+    /// Find one desired VLAN upper by name.
+    #[must_use]
+    pub fn vlan_upper(&self, name: &str) -> Option<&ManagedVlanUpperNetdev> {
+        self.vlan_uppers.get(name)
+    }
 }
 
 /// Derived bridge ownership stamp.
@@ -340,6 +394,15 @@ pub fn l3vxlan_ownership_stamp(owner_token: &str, l3vxlan_name: &str) -> String 
     )
 }
 
+/// Derived VLAN upper ownership stamp.
+#[must_use]
+pub fn vlan_upper_ownership_stamp(owner_token: &str, vlan_upper_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{vlan_upper_name}",
+        ManagedNetdevClass::VlanUpper.as_str()
+    )
+}
+
 /// Parsed rustbgpd ownership stamp from a link altname.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedNetdevStamp {
@@ -366,6 +429,7 @@ pub fn parse_ownership_stamp(raw: &str) -> Option<ManagedNetdevStamp> {
         "vxlan" => ManagedNetdevClass::Vxlan,
         "vrf" => ManagedNetdevClass::Vrf,
         "l3vxlan" => ManagedNetdevClass::L3Vxlan,
+        "vlan-upper" => ManagedNetdevClass::VlanUpper,
         _ => return None,
     };
     let owner_token = parts.next()?;
@@ -448,6 +512,8 @@ pub struct ManagedNetdevStatus {
     pub observed_vnifilter: Option<bool>,
     /// Observed bridge master for VXLAN rows.
     pub observed_bridge: Option<String>,
+    /// Observed Linux VLAN id for VLAN upper rows.
+    pub observed_vlan: Option<u16>,
     /// Observed VRF table id for VRF rows.
     pub observed_table_id: Option<u32>,
     /// Observed administrative link-up state for VRF and L3VXLAN rows.
@@ -499,6 +565,16 @@ mod tests {
         assert_eq!(parsed.class, ManagedNetdevClass::L3Vxlan);
         assert_eq!(parsed.owner_token, "leaf-1");
         assert_eq!(parsed.name, "l3vxlan100");
+    }
+
+    #[test]
+    fn vlan_upper_stamp_round_trips() {
+        let stamp = vlan_upper_ownership_stamp("leaf-1", "br100.10");
+        assert_eq!(stamp, "rustbgpd:vlan-upper:leaf-1:br100.10");
+        let parsed = parse_ownership_stamp(&stamp).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::VlanUpper);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "br100.10");
     }
 
     #[test]

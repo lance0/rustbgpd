@@ -41,8 +41,8 @@ use rustbgpd_evpn::{
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
     InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, ManagedBridgeNetdev,
     ManagedL3VxlanNetdev, ManagedNetdevClass, ManagedNetdevState, ManagedNetdevStatus,
-    ManagedNetdevTable, ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable, SingleActiveCounters,
-    parse_ownership_stamp,
+    ManagedNetdevTable, ManagedVlanUpperNetdev, ManagedVrfNetdev, ManagedVxlanNetdev,
+    RemoteMacTable, SingleActiveCounters, parse_ownership_stamp,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -60,8 +60,8 @@ use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
 use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTarget};
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVrfLinkInfo,
-    KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
+    InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo,
+    KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1065,6 +1065,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     | DataplaneOp::RemoveManagedVrf { .. }
                     | DataplaneOp::CreateManagedL3Vxlan { .. }
                     | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                    | DataplaneOp::CreateManagedVlanUpper { .. }
+                    | DataplaneOp::RemoveManagedVlanUpper { .. }
             )
         });
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
@@ -1673,7 +1675,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 | DataplaneOp::CreateManagedVrf { .. }
                 | DataplaneOp::RemoveManagedVrf { .. }
                 | DataplaneOp::CreateManagedL3Vxlan { .. }
-                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+                | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                | DataplaneOp::CreateManagedVlanUpper { .. }
+                | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     check_permanent_suppression(
                         &mut self.state.managed_permanent_failures,
@@ -1713,7 +1717,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 | DataplaneOp::CreateManagedVrf { .. }
                 | DataplaneOp::RemoveManagedVrf { .. }
                 | DataplaneOp::CreateManagedL3Vxlan { .. }
-                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+                | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                | DataplaneOp::CreateManagedVlanUpper { .. }
+                | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                     let key = managed_op_key(op).expect("managed op has a key");
                     self.state.managed_retry.next_due_for(key)
                 }
@@ -1770,7 +1776,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 | DataplaneOp::CreateManagedVrf { .. }
                                 | DataplaneOp::RemoveManagedVrf { .. }
                                 | DataplaneOp::CreateManagedL3Vxlan { .. }
-                                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+                                | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                                | DataplaneOp::CreateManagedVlanUpper { .. }
+                                | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_failure(key, now_ms)
                                 }
@@ -1826,7 +1834,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 | DataplaneOp::CreateManagedVrf { .. }
                                 | DataplaneOp::RemoveManagedVrf { .. }
                                 | DataplaneOp::CreateManagedL3Vxlan { .. }
-                                | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+                                | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                                | DataplaneOp::CreateManagedVlanUpper { .. }
+                                | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                                     let key = managed_op_key(op).expect("managed op has a key");
                                     self.state.managed_retry.record_success(key);
                                     self.state
@@ -3218,7 +3228,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             | DataplaneOp::CreateManagedVrf { .. }
             | DataplaneOp::RemoveManagedVrf { .. }
             | DataplaneOp::CreateManagedL3Vxlan { .. }
-            | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+            | DataplaneOp::RemoveManagedL3Vxlan { .. }
+            | DataplaneOp::CreateManagedVlanUpper { .. }
+            | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                 let key = managed_op_key(op).expect("managed op has a key");
                 self.state.managed_retry.record_success(key);
             }
@@ -3600,6 +3612,7 @@ struct DesiredManagedNetdevNames {
     vxlans: BTreeSet<String>,
     vrfs: BTreeSet<String>,
     l3vxlans: BTreeSet<String>,
+    vlan_uppers: BTreeSet<String>,
 }
 
 fn desired_managed_netdev_statuses(
@@ -3642,6 +3655,15 @@ fn desired_managed_netdev_statuses(
             snapshot.and_then(|kernel| kernel.vxlans.get(&l3vxlan.name)),
             snapshot.is_some(),
             snapshot.is_some_and(|kernel| kernel.link_name_exists(&l3vxlan.name)),
+        ));
+    }
+    for vlan_upper in managed.vlan_uppers() {
+        desired.vlan_uppers.insert(vlan_upper.name.clone());
+        rows.push(desired_managed_vlan_upper_status(
+            vlan_upper,
+            snapshot.and_then(|kernel| kernel.vlan_uppers.get(&vlan_upper.name)),
+            snapshot.is_some(),
+            snapshot.is_some_and(|kernel| kernel.link_name_exists(&vlan_upper.name)),
         ));
     }
     desired
@@ -3690,6 +3712,23 @@ fn unconfigured_managed_netdev_statuses(
         }
         if !stamps.is_empty() {
             rows.push(unconfigured_managed_vrf_status(
+                name,
+                link,
+                stamps,
+                managed.owner_token(),
+            ));
+        }
+    }
+    for (name, link) in &snapshot.vlan_uppers {
+        if desired.vlan_uppers.contains(name) {
+            continue;
+        }
+        let mut stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::VlanUpper);
+        if stamps.is_empty() {
+            stamps = rustbgpd_stamps(&link.altnames);
+        }
+        if !stamps.is_empty() {
+            rows.push(unconfigured_managed_vlan_upper_status(
                 name,
                 link,
                 stamps,
@@ -3760,13 +3799,24 @@ fn compute_managed_netdev_ops(
     snapshot: &KernelSnapshot,
 ) -> Vec<DataplaneOp> {
     let mut ops = Vec::new();
-    let mut desired_bridge_names = BTreeSet::new();
-    let mut desired_vxlan_names = BTreeSet::new();
-    let mut desired_vrf_names = BTreeSet::new();
-    let mut desired_l3vxlan_names = BTreeSet::new();
+    let desired = compute_managed_netdev_create_ops(managed, snapshot, &mut ops);
+    let Some(owner_token) = managed.owner_token() else {
+        return ops;
+    };
+
+    compute_managed_netdev_orphan_reap_ops(snapshot, &desired, owner_token, &mut ops);
+    ops
+}
+
+fn compute_managed_netdev_create_ops(
+    managed: &ManagedNetdevTable,
+    snapshot: &KernelSnapshot,
+    ops: &mut Vec<DataplaneOp>,
+) -> DesiredManagedNetdevNames {
+    let mut desired = DesiredManagedNetdevNames::default();
 
     for bridge in managed.bridges() {
-        desired_bridge_names.insert(bridge.name.clone());
+        desired.bridges.insert(bridge.name.clone());
         if !snapshot.links.contains_key(&bridge.name) && !snapshot.link_name_exists(&bridge.name) {
             ops.push(DataplaneOp::CreateManagedBridge {
                 name: bridge.name.clone(),
@@ -3776,7 +3826,7 @@ fn compute_managed_netdev_ops(
         }
     }
     for vxlan in managed.vxlans() {
-        desired_vxlan_names.insert(vxlan.name.clone());
+        desired.vxlans.insert(vxlan.name.clone());
         if !snapshot.vxlans.contains_key(&vxlan.name) && !snapshot.link_name_exists(&vxlan.name) {
             ops.push(DataplaneOp::CreateManagedVxlan {
                 name: vxlan.name.clone(),
@@ -3786,7 +3836,7 @@ fn compute_managed_netdev_ops(
         }
     }
     for vrf in managed.vrfs() {
-        desired_vrf_names.insert(vrf.name.clone());
+        desired.vrfs.insert(vrf.name.clone());
         if !snapshot.vrfs.contains_key(&vrf.name) && !snapshot.link_name_exists(&vrf.name) {
             ops.push(DataplaneOp::CreateManagedVrf {
                 name: vrf.name.clone(),
@@ -3796,7 +3846,7 @@ fn compute_managed_netdev_ops(
         }
     }
     for l3vxlan in managed.l3vxlans() {
-        desired_l3vxlan_names.insert(l3vxlan.name.clone());
+        desired.l3vxlans.insert(l3vxlan.name.clone());
         if !snapshot.vxlans.contains_key(&l3vxlan.name) && !snapshot.link_name_exists(&l3vxlan.name)
         {
             ops.push(DataplaneOp::CreateManagedL3Vxlan {
@@ -3806,12 +3856,41 @@ fn compute_managed_netdev_ops(
             });
         }
     }
+    for vlan_upper in managed.vlan_uppers() {
+        desired.vlan_uppers.insert(vlan_upper.name.clone());
+        if !snapshot.vlan_uppers.contains_key(&vlan_upper.name)
+            && !snapshot.link_name_exists(&vlan_upper.name)
+        {
+            ops.push(DataplaneOp::CreateManagedVlanUpper {
+                name: vlan_upper.name.clone(),
+                spec: vlan_upper.spec.clone(),
+                ownership_stamp: vlan_upper.ownership_stamp.clone(),
+            });
+        }
+    }
 
-    let Some(owner_token) = managed.owner_token() else {
-        return ops;
-    };
+    desired
+}
+
+fn compute_managed_netdev_orphan_reap_ops(
+    snapshot: &KernelSnapshot,
+    desired: &DesiredManagedNetdevNames,
+    owner_token: &str,
+    ops: &mut Vec<DataplaneOp>,
+) {
+    for (name, link) in &snapshot.vlan_uppers {
+        if desired.vlan_uppers.contains(name) {
+            continue;
+        }
+        if let Some(ownership_stamp) = safe_orphan_vlan_upper_stamp_for_owner(link, owner_token) {
+            ops.push(DataplaneOp::RemoveManagedVlanUpper {
+                name: name.clone(),
+                ownership_stamp,
+            });
+        }
+    }
     for (name, link) in &snapshot.links {
-        if desired_bridge_names.contains(name) {
+        if desired.bridges.contains(name) {
             continue;
         }
         if let Some(ownership_stamp) = safe_orphan_bridge_stamp_for_owner(link, owner_token) {
@@ -3822,7 +3901,7 @@ fn compute_managed_netdev_ops(
         }
     }
     for (name, link) in &snapshot.vxlans {
-        if desired_vxlan_names.contains(name) {
+        if desired.vxlans.contains(name) {
             continue;
         }
         if let Some(ownership_stamp) = safe_orphan_vxlan_stamp_for_owner(link, owner_token) {
@@ -3833,7 +3912,7 @@ fn compute_managed_netdev_ops(
         }
     }
     for (name, link) in &snapshot.vxlans {
-        if desired_l3vxlan_names.contains(name) {
+        if desired.l3vxlans.contains(name) {
             continue;
         }
         if let Some(ownership_stamp) = safe_orphan_l3vxlan_stamp_for_owner(link, owner_token) {
@@ -3844,13 +3923,13 @@ fn compute_managed_netdev_ops(
         }
     }
     for (name, link) in &snapshot.vrfs {
-        if desired_vrf_names.contains(name) {
+        if desired.vrfs.contains(name) {
             continue;
         }
         let Some(ownership_stamp) = safe_orphan_vrf_stamp_for_owner(link, owner_token) else {
             continue;
         };
-        if vrf_has_unremovable_vxlan_slave(snapshot, name, owner_token, &desired_l3vxlan_names) {
+        if vrf_has_unremovable_vxlan_slave(snapshot, name, owner_token, &desired.l3vxlans) {
             continue;
         }
         ops.push(DataplaneOp::RemoveManagedVrf {
@@ -3858,8 +3937,6 @@ fn compute_managed_netdev_ops(
             ownership_stamp,
         });
     }
-
-    ops
 }
 
 fn vrf_has_unremovable_vxlan_slave(
@@ -3910,6 +3987,7 @@ fn desired_managed_bridge_status(
             ifindex: None,
             observed_vlan_filtering: None,
             observed_vni: None,
+            observed_vlan: None,
             observed_local_ip: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -3936,6 +4014,7 @@ fn desired_managed_bridge_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: Some(link.vlan_filtering),
         observed_vni: None,
+        observed_vlan: None,
         observed_local_ip: None,
         observed_dstport: None,
         observed_learning_disabled: None,
@@ -4025,6 +4104,7 @@ fn unconfigured_managed_bridge_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: Some(link.vlan_filtering),
         observed_vni: None,
+        observed_vlan: None,
         observed_local_ip: None,
         observed_dstport: None,
         observed_learning_disabled: None,
@@ -4074,6 +4154,7 @@ fn desired_managed_vxlan_status(
             ifindex: None,
             observed_vlan_filtering: None,
             observed_vni: None,
+            observed_vlan: None,
             observed_local_ip: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -4100,6 +4181,7 @@ fn desired_managed_vxlan_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: link.vni,
+        observed_vlan: None,
         observed_local_ip: link.local_ip,
         observed_dstport: link.dstport,
         observed_learning_disabled: link.learning_disabled,
@@ -4237,6 +4319,7 @@ fn unconfigured_managed_vxlan_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: link.vni,
+        observed_vlan: None,
         observed_local_ip: link.local_ip,
         observed_dstport: link.dstport,
         observed_learning_disabled: link.learning_disabled,
@@ -4286,6 +4369,7 @@ fn desired_managed_vrf_status(
             ifindex: None,
             observed_vlan_filtering: None,
             observed_vni: None,
+            observed_vlan: None,
             observed_local_ip: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -4312,6 +4396,7 @@ fn desired_managed_vrf_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: None,
+        observed_vlan: None,
         observed_local_ip: None,
         observed_dstport: None,
         observed_learning_disabled: None,
@@ -4407,6 +4492,7 @@ fn unconfigured_managed_vrf_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: None,
+        observed_vlan: None,
         observed_local_ip: None,
         observed_dstport: None,
         observed_learning_disabled: None,
@@ -4456,6 +4542,7 @@ fn desired_managed_l3vxlan_status(
             ifindex: None,
             observed_vlan_filtering: None,
             observed_vni: None,
+            observed_vlan: None,
             observed_local_ip: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -4482,6 +4569,7 @@ fn desired_managed_l3vxlan_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: link.vni,
+        observed_vlan: None,
         observed_local_ip: link.local_ip,
         observed_dstport: link.dstport,
         observed_learning_disabled: link.learning_disabled,
@@ -4634,6 +4722,7 @@ fn unconfigured_managed_l3vxlan_status(
         ifindex: Some(link.ifindex),
         observed_vlan_filtering: None,
         observed_vni: link.vni,
+        observed_vlan: None,
         observed_local_ip: link.local_ip,
         observed_dstport: link.dstport,
         observed_learning_disabled: link.learning_disabled,
@@ -4644,6 +4733,188 @@ fn unconfigured_managed_l3vxlan_status(
         observed_up: Some(link.up),
         observed_master: link.master.clone(),
         observed_router_mac: link.mac,
+        observed_stamps,
+    }
+}
+
+fn desired_managed_vlan_upper_status(
+    vlan_upper: &ManagedVlanUpperNetdev,
+    link: Option<&KernelVlanUpperLinkInfo>,
+    snapshot_available: bool,
+    name_occupied: bool,
+) -> ManagedNetdevStatus {
+    let Some(link) = link else {
+        let (state, reason) = if snapshot_available {
+            if name_occupied {
+                (
+                    ManagedNetdevState::ForeignPresent,
+                    "desired VLAN upper name is occupied by a non-VLAN-upper link".to_string(),
+                )
+            } else {
+                (
+                    ManagedNetdevState::DesiredAbsent,
+                    "VLAN upper is not present".to_string(),
+                )
+            }
+        } else {
+            (
+                ManagedNetdevState::Unknown,
+                "kernel snapshot unavailable".to_string(),
+            )
+        };
+        return ManagedNetdevStatus {
+            class: ManagedNetdevClass::VlanUpper,
+            name: vlan_upper.name.clone(),
+            desired: true,
+            ownership_stamp: Some(vlan_upper.ownership_stamp.clone()),
+            state,
+            reason,
+            ifindex: None,
+            observed_vlan_filtering: None,
+            observed_vni: None,
+            observed_vlan: None,
+            observed_local_ip: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
+            observed_stamps: Vec::new(),
+        };
+    };
+
+    let observed_stamps = rustbgpd_stamps(&link.altnames);
+    let (state, reason) = classify_desired_managed_vlan_upper(vlan_upper, link, &observed_stamps);
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::VlanUpper,
+        name: vlan_upper.name.clone(),
+        desired: true,
+        ownership_stamp: Some(vlan_upper.ownership_stamp.clone()),
+        state,
+        reason,
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: None,
+        observed_vni: None,
+        observed_vlan: link.vlan,
+        observed_local_ip: None,
+        observed_dstport: None,
+        observed_learning_disabled: None,
+        observed_collect_metadata: None,
+        observed_vnifilter: None,
+        observed_bridge: link.bridge.clone(),
+        observed_table_id: None,
+        observed_up: Some(link.up),
+        observed_master: None,
+        observed_router_mac: None,
+        observed_stamps,
+    }
+}
+
+fn classify_desired_managed_vlan_upper(
+    vlan_upper: &ManagedVlanUpperNetdev,
+    link: &KernelVlanUpperLinkInfo,
+    observed_stamps: &[String],
+) -> (ManagedNetdevState, String) {
+    let has_expected_stamp = observed_stamps
+        .iter()
+        .any(|stamp| stamp == &vlan_upper.ownership_stamp);
+    if !has_expected_stamp {
+        return if observed_stamps.is_empty() {
+            (
+                ManagedNetdevState::ForeignPresent,
+                "VLAN upper exists without the expected rustbgpd ownership stamp".to_string(),
+            )
+        } else {
+            (
+                ManagedNetdevState::OwnedUnsafe,
+                format!(
+                    "VLAN upper carries rustbgpd ownership stamp(s) but not expected stamp {:?}",
+                    vlan_upper.ownership_stamp
+                ),
+            )
+        };
+    }
+    if observed_stamps.len() != 1 {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "VLAN upper carries expected ownership stamp plus additional rustbgpd stamp(s): {observed_stamps:?}"
+            ),
+        );
+    }
+    if link.bridge.as_deref() != Some(vlan_upper.spec.bridge.as_str()) {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "bridge attachment mismatch: observed {:?}, desired {}",
+                link.bridge, vlan_upper.spec.bridge
+            ),
+        );
+    }
+    if link.vlan != Some(vlan_upper.spec.vlan) {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "vlan mismatch: observed {:?}, desired {}",
+                link.vlan, vlan_upper.spec.vlan
+            ),
+        );
+    }
+    if !link.up {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            "VLAN upper is administratively down; managed lifecycle requires UP".to_string(),
+        );
+    }
+    (ManagedNetdevState::OwnedSafe, String::new())
+}
+
+fn unconfigured_managed_vlan_upper_status(
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    observed_stamps: Vec<String>,
+    owner_token: Option<&str>,
+) -> ManagedNetdevStatus {
+    let safe_orphan = owner_token
+        .is_none_or(|owner| safe_orphan_vlan_upper_stamp_for_owner(link, owner).is_some());
+    let (state, reason) = if safe_orphan {
+        (
+            ManagedNetdevState::Orphaned,
+            "rustbgpd-stamped VLAN upper is not configured".to_string(),
+        )
+    } else {
+        (
+            ManagedNetdevState::OwnedUnsafe,
+            "rustbgpd-stamped VLAN upper is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, missing lower/VLAN, or stamp/name mismatch)"
+                .to_string(),
+        )
+    };
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::VlanUpper,
+        name: name.to_string(),
+        desired: false,
+        ownership_stamp: None,
+        state,
+        reason,
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: None,
+        observed_vni: None,
+        observed_vlan: link.vlan,
+        observed_local_ip: None,
+        observed_dstport: None,
+        observed_learning_disabled: None,
+        observed_collect_metadata: None,
+        observed_vnifilter: None,
+        observed_bridge: link.bridge.clone(),
+        observed_table_id: None,
+        observed_up: Some(link.up),
+        observed_master: None,
+        observed_router_mac: None,
         observed_stamps,
     }
 }
@@ -4767,6 +5038,32 @@ fn safe_orphan_l3vxlan_stamp_for_owner(
         if link.collect_metadata || link.vnifilter {
             return None;
         }
+        Some(stamp.raw.clone())
+    } else {
+        None
+    }
+}
+
+fn safe_orphan_vlan_upper_stamp_for_owner(
+    link: &KernelVlanUpperLinkInfo,
+    owner_token: &str,
+) -> Option<String> {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() != 1 {
+        return None;
+    }
+    let stamp = &stamps[0];
+    if stamp.class == ManagedNetdevClass::VlanUpper
+        && stamp.owner_token == owner_token
+        && stamp.name == link.name
+        && link.lower_ifindex.is_some()
+        && link.bridge.is_some()
+        && link.vlan.is_some()
+    {
         Some(stamp.raw.clone())
     } else {
         None
@@ -5677,6 +5974,8 @@ fn managed_op_key(op: &DataplaneOp) -> Option<ManagedNetdevOpKey> {
         DataplaneOp::RemoveManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(6, name)),
         DataplaneOp::CreateManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(7, name)),
         DataplaneOp::RemoveManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(8, name)),
+        DataplaneOp::CreateManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(9, name)),
+        DataplaneOp::RemoveManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(10, name)),
         _ => None,
     }
 }
@@ -5836,6 +6135,8 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
         | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5893,6 +6194,8 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
         | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddRemoteIpRouteEcmp { .. }
@@ -5948,6 +6251,12 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         DataplaneOp::RemoveManagedL3Vxlan { name, .. } => {
             DataplaneOpKind::RemoveManagedL3Vxlan { name: name.clone() }
         }
+        DataplaneOp::CreateManagedVlanUpper { name, .. } => {
+            DataplaneOpKind::CreateManagedVlanUpper { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedVlanUpper { name, .. } => {
+            DataplaneOpKind::RemoveManagedVlanUpper { name: name.clone() }
+        }
         // Gate 9 L3 ops use a parallel accounting surface
         // (`AppliedL3Op` lands with the reconciler diff loop). They
         // never reach the L2 `op_to_kind` path under the current
@@ -5997,7 +6306,9 @@ fn empty_snapshot() -> KernelSnapshot {
 #[cfg(test)]
 mod managed_netdev_tests {
     use super::*;
-    use crate::snapshot::{KernelLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo};
+    use crate::snapshot::{
+        KernelLinkInfo, KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo,
+    };
 
     fn link(name: &str, ifindex: u32, vlan_filtering: bool, altnames: Vec<&str>) -> KernelLinkInfo {
         KernelLinkInfo {
@@ -6037,6 +6348,25 @@ mod managed_netdev_tests {
         }
     }
 
+    fn vlan_upper_link(
+        name: &str,
+        ifindex: u32,
+        altnames: Vec<&str>,
+        bridge: Option<&str>,
+        vlan: Option<u16>,
+        up: bool,
+    ) -> KernelVlanUpperLinkInfo {
+        KernelVlanUpperLinkInfo {
+            ifindex,
+            name: name.to_string(),
+            altnames: altnames.into_iter().map(str::to_string).collect(),
+            up,
+            bridge: bridge.map(str::to_string),
+            lower_ifindex: Some(10),
+            vlan,
+        }
+    }
+
     fn vxlan_table() -> ManagedNetdevTable {
         ManagedNetdevTable::from_maps(
             "leaf-1".to_string(),
@@ -6070,6 +6400,24 @@ mod managed_netdev_tests {
                     dstport: 4789,
                     vrf: "vrf100".to_string(),
                     router_mac: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+                },
+            )]),
+            BTreeMap::new(),
+        )
+    }
+
+    fn vlan_upper_table() -> ManagedNetdevTable {
+        ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "br100.10".to_string(),
+                rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                    bridge: "br100".to_string(),
+                    vlan: 10,
                 },
             )]),
         )
@@ -6415,6 +6763,7 @@ mod managed_netdev_tests {
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
         );
 
         let mut plain = vxlan_link(
@@ -6565,9 +6914,207 @@ mod managed_netdev_tests {
     }
 
     #[test]
+    fn managed_netdev_status_classifies_desired_vlan_upper_rows() {
+        let table = vlan_upper_table();
+
+        let unknown = build_managed_netdev_status(&table, None);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].class, ManagedNetdevClass::VlanUpper);
+        assert_eq!(unknown[0].state, ManagedNetdevState::Unknown);
+
+        let absent = build_managed_netdev_status(&table, Some(&KernelSnapshot::new()));
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].state, ManagedNetdevState::DesiredAbsent);
+
+        let mut non_vlan_collision = KernelSnapshot::new();
+        non_vlan_collision.insert_link_name("br100.10");
+        let foreign_name = build_managed_netdev_status(&table, Some(&non_vlan_collision));
+        assert_eq!(foreign_name.len(), 1);
+        assert_eq!(foreign_name[0].state, ManagedNetdevState::ForeignPresent);
+        assert_eq!(
+            foreign_name[0].reason,
+            "desired VLAN upper name is occupied by a non-VLAN-upper link"
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            50,
+            vec![],
+            Some("br100"),
+            Some(10),
+            true,
+        ));
+        let foreign = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(foreign[0].state, ManagedNetdevState::ForeignPresent);
+
+        snapshot.set_vlan_uppers(BTreeMap::from([(
+            "br100.10".to_string(),
+            vlan_upper_link(
+                "br100.10",
+                50,
+                vec!["rustbgpd:vlan-upper:other:br100.10"],
+                Some("br100"),
+                Some(10),
+                true,
+            ),
+        )]));
+        let wrong_stamp = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(wrong_stamp[0].state, ManagedNetdevState::OwnedUnsafe);
+    }
+
+    #[test]
+    fn managed_netdev_status_classifies_vlan_upper_protected_attributes() {
+        let table = vlan_upper_table();
+        let mut snapshot = KernelSnapshot::new();
+
+        snapshot.set_vlan_uppers(BTreeMap::from([(
+            "br100.10".to_string(),
+            vlan_upper_link(
+                "br100.10",
+                50,
+                vec![
+                    "rustbgpd:vlan-upper:leaf-1:br100.10",
+                    "rustbgpd:vlan-upper:other:br100.10",
+                ],
+                Some("br100"),
+                Some(10),
+                true,
+            ),
+        )]));
+        let extra_stamp = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(extra_stamp[0].state, ManagedNetdevState::OwnedUnsafe);
+
+        for (case, bridge, vlan, up, expected) in [
+            (
+                "bridge",
+                Some("wrong-br"),
+                Some(10),
+                true,
+                "bridge attachment",
+            ),
+            ("vlan", Some("br100"), Some(20), true, "vlan mismatch"),
+            (
+                "up",
+                Some("br100"),
+                Some(10),
+                false,
+                "administratively down",
+            ),
+        ] {
+            snapshot.set_vlan_uppers(BTreeMap::from([(
+                "br100.10".to_string(),
+                vlan_upper_link(
+                    "br100.10",
+                    50,
+                    vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+                    bridge,
+                    vlan,
+                    up,
+                ),
+            )]));
+            let rows = build_managed_netdev_status(&table, Some(&snapshot));
+            assert_eq!(rows[0].state, ManagedNetdevState::OwnedUnsafe, "{case}");
+            assert!(
+                rows[0].reason.contains(expected),
+                "unexpected {case} reason: {}",
+                rows[0].reason
+            );
+        }
+
+        snapshot.set_vlan_uppers(BTreeMap::from([(
+            "br100.10".to_string(),
+            vlan_upper_link(
+                "br100.10",
+                50,
+                vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+                Some("br100"),
+                Some(10),
+                true,
+            ),
+        )]));
+        let safe = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(safe[0].state, ManagedNetdevState::OwnedSafe);
+        assert_eq!(safe[0].ifindex, Some(50));
+        assert_eq!(safe[0].observed_bridge.as_deref(), Some("br100"));
+        assert_eq!(safe[0].observed_vlan, Some(10));
+        assert_eq!(safe[0].observed_up, Some(true));
+    }
+
+    #[test]
+    fn managed_netdev_status_reports_orphaned_stamped_vlan_uppers() {
+        let table = ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            50,
+            vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+            Some("br100"),
+            Some(10),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.20",
+            51,
+            vec!["rustbgpd:vlan-upper:leaf-2:br100.20"],
+            Some("br100"),
+            Some(20),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.30",
+            52,
+            vec![
+                "rustbgpd:vlan-upper:leaf-1:br100.30",
+                "rustbgpd:vlan-upper:other:br100.30",
+            ],
+            Some("br100"),
+            Some(30),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "renamed-vlan",
+            53,
+            vec!["rustbgpd:vlan-upper:leaf-1:original-vlan"],
+            Some("br100"),
+            Some(40),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.50",
+            54,
+            vec!["rustbgpd:vlan-upper:leaf-1:br100.50"],
+            None,
+            Some(50),
+            true,
+        ));
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].name, "br100.10");
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(rows[1].name, "br100.20");
+        assert_eq!(rows[1].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[2].name, "br100.30");
+        assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[3].name, "br100.50");
+        assert_eq!(rows[3].state, ManagedNetdevState::OwnedUnsafe);
+        assert_eq!(rows[4].name, "renamed-vlan");
+        assert_eq!(rows[4].state, ManagedNetdevState::OwnedUnsafe);
+    }
+
+    #[test]
     fn managed_netdev_status_reports_orphaned_vrf_and_l3vxlan_with_reap_ops() {
         let table = ManagedNetdevTable::from_all_maps(
             "leaf-1".to_string(),
+            BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
@@ -6725,6 +7272,74 @@ mod managed_netdev_tests {
     }
 
     #[test]
+    fn managed_netdev_ops_create_vlan_upper_when_absent() {
+        let mut bridges = BTreeMap::new();
+        bridges.insert("br100".to_string(), true);
+        let mut vlan_uppers = BTreeMap::new();
+        vlan_uppers.insert(
+            "br100.10".to_string(),
+            rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                bridge: "br100".to_string(),
+                vlan: 10,
+            },
+        );
+        let table = ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            bridges,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            vlan_uppers,
+        );
+        let ops = compute_managed_netdev_ops(&table, &KernelSnapshot::new());
+        assert_eq!(
+            ops,
+            vec![
+                DataplaneOp::CreateManagedBridge {
+                    name: "br100".to_string(),
+                    vlan_filtering: true,
+                    ownership_stamp: "rustbgpd:bridge:leaf-1:br100".to_string(),
+                },
+                DataplaneOp::CreateManagedVlanUpper {
+                    name: "br100.10".to_string(),
+                    spec: rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                        bridge: "br100".to_string(),
+                        vlan: 10,
+                    },
+                    ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+                },
+            ]
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link(
+            "br100",
+            10,
+            true,
+            vec!["rustbgpd:bridge:leaf-1:br100"],
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            50,
+            vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+            Some("br100"),
+            Some(10),
+            true,
+        ));
+        assert!(compute_managed_netdev_ops(&table, &snapshot).is_empty());
+
+        let mut occupied = KernelSnapshot::new();
+        occupied.insert_link(link(
+            "br100",
+            10,
+            true,
+            vec!["rustbgpd:bridge:leaf-1:br100"],
+        ));
+        occupied.insert_link_name("br100.10");
+        assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+    }
+
+    #[test]
     fn managed_netdev_ops_preserve_foreign_and_unsafe_desired_links() {
         let table = ManagedNetdevTable::from_maps(
             "leaf-1".to_string(),
@@ -6840,7 +7455,6 @@ mod managed_netdev_tests {
             vec!["rustbgpd:vxlan:leaf-1:original-vxlan"],
             400,
         ));
-
         let ops = compute_managed_netdev_ops(&table, &snapshot);
         assert_eq!(
             ops,
@@ -6858,21 +7472,71 @@ mod managed_netdev_tests {
 
         let rows = build_managed_netdev_status(&table, Some(&snapshot));
         assert_eq!(rows.len(), 8);
-        assert_eq!(rows[0].name, "br100");
-        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
-        assert_eq!(rows[1].name, "br200");
-        assert_eq!(rows[1].state, ManagedNetdevState::OwnedUnsafe);
-        assert_eq!(rows[2].name, "br300");
-        assert_eq!(rows[2].state, ManagedNetdevState::OwnedUnsafe);
-        assert_eq!(rows[3].name, "renamed");
-        assert_eq!(rows[3].state, ManagedNetdevState::OwnedUnsafe);
-        assert_eq!(rows[4].name, "renamed-vxlan");
-        assert_eq!(rows[4].state, ManagedNetdevState::OwnedUnsafe);
-        assert_eq!(rows[5].name, "vxlan100");
-        assert_eq!(rows[5].state, ManagedNetdevState::Orphaned);
-        assert_eq!(rows[6].name, "vxlan200");
-        assert_eq!(rows[6].state, ManagedNetdevState::OwnedUnsafe);
-        assert_eq!(rows[7].name, "vxlan300");
-        assert_eq!(rows[7].state, ManagedNetdevState::OwnedUnsafe);
+        for (name, state) in [
+            ("br100", ManagedNetdevState::Orphaned),
+            ("br200", ManagedNetdevState::OwnedUnsafe),
+            ("br300", ManagedNetdevState::OwnedUnsafe),
+            ("renamed", ManagedNetdevState::OwnedUnsafe),
+            ("renamed-vxlan", ManagedNetdevState::OwnedUnsafe),
+            ("vxlan100", ManagedNetdevState::Orphaned),
+            ("vxlan200", ManagedNetdevState::OwnedUnsafe),
+            ("vxlan300", ManagedNetdevState::OwnedUnsafe),
+        ] {
+            let row = rows.iter().find(|row| row.name == name).unwrap();
+            assert_eq!(row.state, state, "{name}");
+        }
+    }
+
+    #[test]
+    fn managed_netdev_ops_reap_only_exact_owner_vlan_upper_orphans() {
+        let table = ManagedNetdevTable::from_bridge_map("leaf-1".to_string(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            90,
+            vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+            Some("br100"),
+            Some(10),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.20",
+            91,
+            vec!["rustbgpd:vlan-upper:leaf-2:br100.20"],
+            Some("br100"),
+            Some(20),
+            true,
+        ));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.30",
+            92,
+            vec![
+                "rustbgpd:vlan-upper:leaf-1:br100.30",
+                "rustbgpd:vlan-upper:other:br100.30",
+            ],
+            Some("br100"),
+            Some(30),
+            true,
+        ));
+
+        let ops = compute_managed_netdev_ops(&table, &snapshot);
+        assert_eq!(
+            ops,
+            vec![DataplaneOp::RemoveManagedVlanUpper {
+                name: "br100.10".to_string(),
+                ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+            }]
+        );
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(rows.len(), 3);
+        for (name, state) in [
+            ("br100.10", ManagedNetdevState::Orphaned),
+            ("br100.20", ManagedNetdevState::OwnedUnsafe),
+            ("br100.30", ManagedNetdevState::OwnedUnsafe),
+        ] {
+            let row = rows.iter().find(|row| row.name == name).unwrap();
+            assert_eq!(row.state, state, "{name}");
+        }
     }
 }

@@ -228,6 +228,28 @@ pub enum DataplaneOp {
         /// Durable rustbgpd ownership stamp expected on the L3 VXLAN.
         ownership_stamp: String,
     },
+    /// Create a configured ADR-0091 managed VLAN upper and stamp it
+    /// with its durable `IFLA_ALT_IFNAME` ownership marker.
+    /// Implementations must treat an already-present exact stamp as
+    /// idempotent success only after a fresh link dump confirms the link
+    /// is the expected VLAN upper with matching lower bridge and VLAN id.
+    CreateManagedVlanUpper {
+        /// Linux VLAN upper link name.
+        name: String,
+        /// Desired protected VLAN upper attributes.
+        spec: rustbgpd_evpn::ManagedVlanUpperNetdevSpec,
+        /// Durable rustbgpd ownership stamp for this VLAN upper.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped VLAN upper that is no longer configured.
+    /// Implementations must first confirm the live link still carries the
+    /// exact expected ownership stamp and is a VLAN upper.
+    RemoveManagedVlanUpper {
+        /// Linux VLAN upper link name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the VLAN upper.
+        ownership_stamp: String,
+    },
     /// Install a remote IP-prefix route into the IP-VRF's
     /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
     /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and

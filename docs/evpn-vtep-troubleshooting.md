@@ -123,8 +123,9 @@ Expected signals:
    for the instance VNI, and the configured VLAN on both the bridge and that
    VXLAN member; remote-MAC FDB rows are then scoped with `NDA_VLAN`.
    Unmanaged deployments still provision bridge/VXLAN netdevs out of
-   band. ADR-0091 is the explicit opt-in exception for bridge and fixed-VNI
-   VXLAN create/adopt/reap through `[managed_netdevs]`.
+   band. ADR-0091 is the explicit opt-in exception for bridge, fixed-VNI
+   VXLAN, VLAN upper, VRF, and L3VXLAN create/adopt/reap through
+   `[managed_netdevs]`.
    `rbgp evpn instances` reports the same probe result as `readiness`
    and, for `not-ready`, the concrete failed predicate. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)

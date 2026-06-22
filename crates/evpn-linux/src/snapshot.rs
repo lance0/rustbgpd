@@ -268,6 +268,26 @@ pub struct KernelVrfLinkInfo {
     pub table_id: Option<u32>,
 }
 
+/// One Linux VLAN upper link observed by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelVlanUpperLinkInfo {
+    /// Kernel ifindex of the VLAN upper link.
+    pub ifindex: u32,
+    /// Linux link name.
+    pub name: String,
+    /// Linux alternative interface names observed on the VLAN upper.
+    pub altnames: Vec<String>,
+    /// Administrative link-up state.
+    pub up: bool,
+    /// Observed parent/lower link name, if the lower ifindex was present in
+    /// the same dump.
+    pub bridge: Option<String>,
+    /// Observed parent/lower ifindex from `IFLA_LINK`.
+    pub lower_ifindex: Option<u32>,
+    /// Observed VLAN id from `IFLA_VLAN_ID`.
+    pub vlan: Option<u16>,
+}
+
 /// Properties of a collect-metadata / Single VXLAN Device (SVD) port.
 ///
 /// SVD VXLAN devices carry multiple VNIs over one ifindex, so they
@@ -481,6 +501,10 @@ pub struct KernelSnapshot {
     /// VRF links by name. Used by ADR-0091 managed-netdev status substrate
     /// to classify desired VRF rows before lifecycle create/delete lands.
     pub vrfs: BTreeMap<String, KernelVrfLinkInfo>,
+    /// VLAN upper links by name. Used by ADR-0091 managed-netdev status and
+    /// lifecycle to classify desired VLAN upper rows and rustbgpd-stamped
+    /// VLAN upper orphans independently of local-MAC attribution readiness.
+    pub vlan_uppers: BTreeMap<String, KernelVlanUpperLinkInfo>,
     /// Non-VXLAN bridge ports by link name, with observed
     /// `IFLA_BRPORT_STATE`. Consumed by the single-active AC-gate
     /// resolver (`crate::ac_gate`) to map an ADR-0085 `interface`
@@ -600,6 +624,22 @@ impl KernelSnapshot {
         self.vrfs.insert(info.name.clone(), info);
     }
 
+    /// Replace the VLAN upper inventory while preserving names of
+    /// non-VLAN-upper links already recorded via [`Self::set_link_names`].
+    pub fn set_vlan_uppers(&mut self, vlan_uppers: BTreeMap<String, KernelVlanUpperLinkInfo>) {
+        for name in self.vlan_uppers.keys() {
+            self.link_names.remove(name);
+        }
+        self.link_names.extend(vlan_uppers.keys().cloned());
+        self.vlan_uppers = vlan_uppers;
+    }
+
+    /// Add a single VLAN upper link to the inventory.
+    pub fn insert_vlan_upper(&mut self, info: KernelVlanUpperLinkInfo) {
+        self.link_names.insert(info.name.clone());
+        self.vlan_uppers.insert(info.name.clone(), info);
+    }
+
     /// Remove a bridge from the link inventory, returning the previous
     /// value if any.
     pub fn remove_link(&mut self, name: &str) -> Option<KernelLinkInfo> {
@@ -619,6 +659,13 @@ impl KernelSnapshot {
     pub fn remove_vrf(&mut self, name: &str) -> Option<KernelVrfLinkInfo> {
         self.link_names.remove(name);
         self.vrfs.remove(name)
+    }
+
+    /// Remove a VLAN upper from the link inventory, returning the previous
+    /// value if any.
+    pub fn remove_vlan_upper(&mut self, name: &str) -> Option<KernelVlanUpperLinkInfo> {
+        self.link_names.remove(name);
+        self.vlan_uppers.remove(name)
     }
 
     /// Replace the all-link-name inventory wholesale.

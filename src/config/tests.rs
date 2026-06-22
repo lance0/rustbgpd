@@ -10291,7 +10291,7 @@ fn reload_matrix_documents_every_peer_group_field() {
 #[test]
 fn managed_netdevs_default_empty_and_resolve_stamps() {
     let config = parse(&format!(
-        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
+        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vlan_uppers]]\nname = \"br100.10\"\nbridge = \"br100\"\nvlan = 10\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
         valid_toml()
     ))
     .unwrap();
@@ -10312,6 +10312,14 @@ fn managed_netdevs_default_empty_and_resolve_stamps() {
     assert_eq!(vxlan.spec.dstport, 4789);
     assert_eq!(vxlan.spec.bridge, "br100");
     assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
+    let vlan_upper = table.vlan_upper("br100.10").unwrap();
+    assert_eq!(vlan_upper.name, "br100.10");
+    assert_eq!(vlan_upper.spec.bridge, "br100");
+    assert_eq!(vlan_upper.spec.vlan, 10);
+    assert_eq!(
+        vlan_upper.ownership_stamp,
+        "rustbgpd:vlan-upper:leaf-1:br100.10"
+    );
     let vrf = table.vrf("vrf100").unwrap();
     assert_eq!(vrf.name, "vrf100");
     assert_eq!(vrf.spec.table_id, 5000);
@@ -10420,6 +10428,93 @@ fn managed_netdevs_reject_unknown_fields() {
         valid_toml()
     ));
     assert!(matches!(unknown_l3vxlan_field, Err(ConfigError::Parse(_))));
+
+    let unknown_vlan_upper_field = parse(&format!(
+        "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vlan_uppers]]\nname = \"br100.10\"\nbridge = \"br100\"\nvlan = 10\nprotocol = \"802.1ad\"\n",
+        valid_toml()
+    ));
+    assert!(matches!(
+        unknown_vlan_upper_field,
+        Err(ConfigError::Parse(_))
+    ));
+}
+
+#[test]
+fn managed_netdevs_reject_invalid_vlan_upper_fields() {
+    let candidate = |body: &str| parse(&format!("{}\n{body}", valid_toml()));
+
+    let missing_instance = candidate(
+        r#"[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.10"
+bridge = "br100"
+vlan = 10
+"#,
+    );
+    match missing_instance {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("bridge_vlan"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected missing bridge_vlan binding rejection, got {other:?}"),
+    }
+
+    let duplicate_binding = candidate(
+        r#"[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = 10
+
+[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.10"
+bridge = "br100"
+vlan = 10
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.10b"
+bridge = "br100"
+vlan = 10
+"#,
+    );
+    match duplicate_binding {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(reason.contains("duplicate"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected duplicate VLAN upper binding rejection, got {other:?}"),
+    }
+
+    let zero_vlan = candidate(
+        r#"[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = 10
+
+[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.0"
+bridge = "br100"
+vlan = 0
+"#,
+    );
+    assert!(matches!(
+        zero_vlan,
+        Err(ConfigError::InvalidManagedNetdev { .. })
+    ));
 }
 
 #[test]

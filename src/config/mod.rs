@@ -1049,6 +1049,7 @@ impl Config {
             && self.managed_netdevs.vxlans.is_empty()
             && self.managed_netdevs.vrfs.is_empty()
             && self.managed_netdevs.l3vxlans.is_empty()
+            && self.managed_netdevs.vlan_uppers.is_empty()
             && owner_token.is_empty()
         {
             return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
@@ -1119,12 +1120,27 @@ impl Config {
                 ))
             })
             .collect::<Result<_, ConfigError>>()?;
+        let vlan_uppers = self
+            .managed_netdevs
+            .vlan_uppers
+            .iter()
+            .map(|vlan_upper| {
+                (
+                    vlan_upper.name.clone(),
+                    rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                        bridge: vlan_upper.bridge.clone(),
+                        vlan: vlan_upper.vlan,
+                    },
+                )
+            })
+            .collect();
         Ok(rustbgpd_evpn::ManagedNetdevTable::from_all_maps(
             owner_token.to_string(),
             bridges,
             vxlans,
             vrfs,
             l3vxlans,
+            vlan_uppers,
         ))
     }
 

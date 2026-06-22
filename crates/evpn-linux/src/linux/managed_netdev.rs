@@ -7,16 +7,17 @@
 
 use std::net::IpAddr;
 
-use rtnetlink::{Handle, LinkBridge, LinkVrf, LinkVxlan};
+use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVlan, LinkVrf, LinkVxlan};
 use rustbgpd_evpn::{
-    ManagedL3VxlanNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec, parse_ownership_stamp,
+    ManagedL3VxlanNetdevSpec, ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec,
+    ManagedVxlanNetdevSpec, parse_ownership_stamp,
 };
 
 use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 
 use super::links::{self, BridgeLink};
-use crate::snapshot::{KernelVrfLinkInfo, KernelVxlanLinkInfo};
+use crate::snapshot::{KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo};
 
 const ERRNO_EEXIST: i32 = libc::EEXIST;
 const ERRNO_ENODEV: i32 = libc::ENODEV;
@@ -63,6 +64,15 @@ pub(super) async fn apply_managed_netdev_op(
             name,
             ownership_stamp,
         } => Some(remove_l3vxlan(handle, name, ownership_stamp).await),
+        DataplaneOp::CreateManagedVlanUpper {
+            name,
+            spec,
+            ownership_stamp,
+        } => Some(create_vlan_upper(handle, name, spec, ownership_stamp).await),
+        DataplaneOp::RemoveManagedVlanUpper {
+            name,
+            ownership_stamp,
+        } => Some(remove_vlan_upper(handle, name, ownership_stamp).await),
         _ => None,
     }
 }
@@ -463,6 +473,151 @@ async fn remove_l3vxlan(
     }
 }
 
+async fn create_vlan_upper(
+    handle: &Handle,
+    name: &str,
+    spec: &ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let mut fresh = fresh_vlan_upper_state(handle, name).await?;
+    if let Some(link) = fresh.vlan_upper.as_ref() {
+        return adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await;
+    }
+    if fresh.name_exists {
+        return Err(foreign_vlan_upper_collision(name));
+    }
+
+    let bridge_ifindex = fresh
+        .bridges
+        .get(&spec.bridge)
+        .map(|bridge| bridge.ifindex)
+        .ok_or_else(|| {
+            missing_vlan_upper_bridge(
+                name,
+                &spec.bridge,
+                fresh.all_link_names.contains(&spec.bridge),
+            )
+        })?;
+
+    let create_result = handle
+        .link()
+        .add(LinkVlan::new(name, bridge_ifindex, spec.vlan).build())
+        .execute()
+        .await;
+    let created = match create_result {
+        Ok(()) => true,
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => false,
+        Err(err) => {
+            return Err(classify_link_apply_error(&err, "managed VLAN upper create"));
+        }
+    };
+
+    fresh = fresh_vlan_upper_state(handle, name).await?;
+    let Some(link) = fresh.vlan_upper.as_ref() else {
+        return Err(missing_vlan_upper_after(name, &fresh, "create"));
+    };
+
+    if !created {
+        return adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await;
+    }
+    ensure_vlan_upper_attrs(name, link, spec)?;
+    if !link.altnames.iter().any(|alt| alt == ownership_stamp) {
+        stamp_vlan_upper(handle, link.ifindex, ownership_stamp).await?;
+    }
+    let fresh = fresh_vlan_upper_state(handle, name).await?;
+    let Some(link) = fresh.vlan_upper.as_ref() else {
+        return Err(missing_vlan_upper_after(name, &fresh, "stamp"));
+    };
+    adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await
+}
+
+async fn adopt_existing_vlan_upper(
+    handle: &Handle,
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    spec: &ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_vlan_upper_stamp_and_attrs(name, link, spec, ownership_stamp)?;
+    ensure_vlan_upper_up_and_owned(handle, name, link, spec, ownership_stamp).await
+}
+
+async fn ensure_vlan_upper_up_and_owned(
+    handle: &Handle,
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    spec: &ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    if link.up {
+        return ensure_exact_owned_vlan_upper(name, link, spec, ownership_stamp);
+    }
+    set_link_up(handle, link.ifindex, "managed VLAN upper set up").await?;
+    let fresh = fresh_vlan_upper_state(handle, name).await?;
+    let Some(link) = fresh.vlan_upper.as_ref() else {
+        return Err(missing_vlan_upper_after(name, &fresh, "set up"));
+    };
+    ensure_exact_owned_vlan_upper(name, link, spec, ownership_stamp)
+}
+
+async fn stamp_vlan_upper(
+    handle: &Handle,
+    ifindex: u32,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let stamp_result = handle
+        .link()
+        .property_add(ifindex)
+        .alt_ifname(&[ownership_stamp])
+        .execute()
+        .await;
+    match stamp_result {
+        Ok(()) => {}
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
+        Err(err) => {
+            return Err(classify_link_apply_error(
+                &err,
+                "managed VLAN upper altname stamp",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn missing_vlan_upper_after(
+    name: &str,
+    fresh: &FreshVlanUpperState,
+    action: &str,
+) -> DataplaneError {
+    if fresh.name_exists {
+        foreign_vlan_upper_collision(name)
+    } else {
+        transient_link_race(format!("managed VLAN upper {name} vanished after {action}"))
+    }
+}
+
+async fn remove_vlan_upper(
+    handle: &Handle,
+    name: &str,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let Some(link) = fresh_vlan_upper_state(handle, name).await?.vlan_upper else {
+        return Ok(());
+    };
+    ensure_exact_vlan_upper_stamp(name, &link, ownership_stamp)?;
+    if link.lower_ifindex.is_none() || link.bridge.is_none() || link.vlan.is_none() {
+        return Err(unsafe_managed_vlan_upper(format!(
+            "managed VLAN upper {name} cannot be removed: lower bridge or VLAN id is not observable"
+        )));
+    }
+
+    match handle.link().del(link.ifindex).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, "managed VLAN upper remove")),
+    }
+}
+
 struct FreshBridgeState {
     bridge: Option<BridgeLink>,
     name_exists: bool,
@@ -484,6 +639,13 @@ struct FreshVrfState {
 struct FreshL3VxlanState {
     vxlan: Option<KernelVxlanLinkInfo>,
     vrfs: std::collections::HashMap<String, KernelVrfLinkInfo>,
+    all_link_names: std::collections::HashSet<String>,
+    name_exists: bool,
+}
+
+struct FreshVlanUpperState {
+    vlan_upper: Option<KernelVlanUpperLinkInfo>,
+    bridges: std::collections::HashMap<String, BridgeLink>,
     all_link_names: std::collections::HashSet<String>,
     name_exists: bool,
 }
@@ -530,6 +692,19 @@ async fn fresh_l3vxlan_state(
     Ok(FreshL3VxlanState {
         vxlan: cache.vxlan_links.get(name).cloned(),
         vrfs: cache.vrfs,
+        all_link_names: cache.all_link_names.clone(),
+        name_exists: cache.all_link_names.contains(name),
+    })
+}
+
+async fn fresh_vlan_upper_state(
+    handle: &Handle,
+    name: &str,
+) -> Result<FreshVlanUpperState, DataplaneError> {
+    let cache = links::dump_links(handle).await?;
+    Ok(FreshVlanUpperState {
+        vlan_upper: cache.vlan_upper_link_infos.get(name).cloned(),
+        bridges: cache.bridges,
         all_link_names: cache.all_link_names.clone(),
         name_exists: cache.all_link_names.contains(name),
     })
@@ -740,6 +915,82 @@ fn ensure_exact_owned_l3vxlan(
     Ok(())
 }
 
+fn ensure_exact_owned_vlan_upper(
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    spec: &ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_vlan_upper_stamp_and_attrs(name, link, spec, ownership_stamp)?;
+    if !link.up {
+        return Err(unsafe_managed_vlan_upper(format!(
+            "managed VLAN upper {name} is administratively down after apply"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_vlan_upper_stamp_and_attrs(
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    spec: &ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    ensure_exact_vlan_upper_stamp(name, link, ownership_stamp)?;
+    ensure_vlan_upper_attrs(name, link, spec)
+}
+
+fn ensure_vlan_upper_attrs(
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    spec: &ManagedVlanUpperNetdevSpec,
+) -> Result<(), DataplaneError> {
+    if link.bridge.as_deref() != Some(spec.bridge.as_str()) {
+        return Err(unsafe_managed_vlan_upper(format!(
+            "managed VLAN upper {name} bridge attachment changed during apply: observed {:?}, desired {}",
+            link.bridge, spec.bridge
+        )));
+    }
+    if link.vlan != Some(spec.vlan) {
+        return Err(unsafe_managed_vlan_upper(format!(
+            "managed VLAN upper {name} VLAN changed during apply: observed {:?}, desired {}",
+            link.vlan, spec.vlan
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_exact_vlan_upper_stamp(
+    name: &str,
+    link: &KernelVlanUpperLinkInfo,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name {
+        return Ok(());
+    }
+    Err(unsafe_managed_vlan_upper(format!(
+        "managed VLAN upper {name} ownership stamp changed during apply: observed {:?}, expected {ownership_stamp}",
+        link.altnames
+    )))
+}
+
+async fn set_link_up(
+    handle: &Handle,
+    ifindex: u32,
+    context: &'static str,
+) -> Result<(), DataplaneError> {
+    let message = LinkUnspec::new_with_index(ifindex).up().build();
+    match handle.link().change(message).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, context)),
+    }
+}
+
 fn is_errno(err: &rtnetlink::Error, errno: i32) -> bool {
     if let rtnetlink::Error::NetlinkError(message) = err {
         i32::try_from(message.raw_code().unsigned_abs()).unwrap_or(0) == errno
@@ -830,5 +1081,26 @@ fn missing_l3vxlan_vrf(name: &str, vrf: &str, vrf_name_exists: bool) -> Dataplan
 }
 
 fn unsafe_managed_l3vxlan(message: String) -> DataplaneError {
+    DataplaneError::InvalidArgument(message)
+}
+
+fn foreign_vlan_upper_collision(name: &str) -> DataplaneError {
+    unsafe_managed_vlan_upper(format!(
+        "managed VLAN upper {name} cannot be created: desired name is occupied by a non-VLAN-upper link"
+    ))
+}
+
+fn missing_vlan_upper_bridge(name: &str, bridge: &str, bridge_name_exists: bool) -> DataplaneError {
+    if bridge_name_exists {
+        return unsafe_managed_vlan_upper(format!(
+            "managed VLAN upper {name} cannot be created: desired bridge name {bridge} is occupied by a non-bridge link"
+        ));
+    }
+    transient_link_race(format!(
+        "managed VLAN upper {name} cannot be created: desired bridge {bridge} is absent"
+    ))
+}
+
+fn unsafe_managed_vlan_upper(message: String) -> DataplaneError {
     DataplaneError::InvalidArgument(message)
 }

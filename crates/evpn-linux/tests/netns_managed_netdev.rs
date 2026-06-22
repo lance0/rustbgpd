@@ -23,8 +23,8 @@ use std::process::Command;
 use rustbgpd_evpn::ip_vrf::IpVrfStatus;
 use rustbgpd_evpn::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, MacAddress,
-    ManagedL3VxlanNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec, RouteDistinguisher,
-    RouteTarget,
+    ManagedL3VxlanNetdevSpec, ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec,
+    ManagedVxlanNetdevSpec, RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, InstanceProbe, LinuxDataplane};
 
@@ -263,6 +263,133 @@ async fn managed_bridge_and_vxlan_make_instance_ready_round_trip_inner() {
 
     let after = dp.probe(&instances).await;
     assert_eq!(after.get(vni), Some(&InstanceProbe::Ready));
+}
+
+#[tokio::test]
+async fn managed_vlan_upper_create_adopt_and_reap_round_trip() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("managed-vlan-upper") {
+        managed_vlan_upper_create_adopt_and_reap_round_trip_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("managed-vlan-upper");
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "managed_vlan_upper_create_adopt_and_reap_round_trip";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "managed-vlan-upper")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn managed_vlan_upper_create_adopt_and_reap_round_trip_inner() {
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "br100",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+        ],
+    );
+    run("ip", &["link", "set", "dev", "br100", "up"]);
+
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    let create = DataplaneOp::CreateManagedVlanUpper {
+        name: "br100.10".to_string(),
+        spec: ManagedVlanUpperNetdevSpec {
+            bridge: "br100".to_string(),
+            vlan: 10,
+        },
+        ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+    };
+    dp.apply(&create).await.expect("create managed VLAN upper");
+
+    let first = dp.dump_snapshot().await.expect("dump after create");
+    let parent = first.links.get("br100").expect("parent bridge exists");
+    let link = first
+        .vlan_uppers
+        .get("br100.10")
+        .expect("managed VLAN upper exists");
+    assert_eq!(link.vlan, Some(10));
+    assert_eq!(link.bridge.as_deref(), Some("br100"));
+    assert_eq!(link.lower_ifindex, Some(parent.ifindex));
+    assert!(link.up);
+    assert_eq!(link.altnames, vec!["rustbgpd:vlan-upper:leaf-1:br100.10"]);
+    let ifindex = link.ifindex;
+
+    let mut restarted = LinuxDataplane::connect()
+        .await
+        .expect("fresh netlink connect inside netns");
+    restarted
+        .apply(&create)
+        .await
+        .expect("adopt existing managed VLAN upper");
+    let adopted = restarted.dump_snapshot().await.expect("dump after adopt");
+    let link = adopted
+        .vlan_uppers
+        .get("br100.10")
+        .expect("managed VLAN upper adopted");
+    assert_eq!(link.ifindex, ifindex);
+    assert_eq!(link.altnames, vec!["rustbgpd:vlan-upper:leaf-1:br100.10"]);
+
+    restarted
+        .apply(&DataplaneOp::RemoveManagedVlanUpper {
+            name: "br100.10".to_string(),
+            ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+        })
+        .await
+        .expect("remove managed VLAN upper");
+    let removed = restarted.dump_snapshot().await.expect("dump after remove");
+    assert!(!removed.vlan_uppers.contains_key("br100.10"));
+
+    run(
+        "ip",
+        &[
+            "link", "add", "link", "br100", "name", "br100.20", "type", "vlan", "id", "20",
+        ],
+    );
+    let err = restarted
+        .apply(&DataplaneOp::CreateManagedVlanUpper {
+            name: "br100.20".to_string(),
+            spec: ManagedVlanUpperNetdevSpec {
+                bridge: "br100".to_string(),
+                vlan: 20,
+            },
+            ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.20".to_string(),
+        })
+        .await
+        .expect_err("unstamped same-name VLAN upper is foreign");
+    assert_eq!(err.class(), FailureClass::Permanent);
+    assert!(
+        err.to_string().contains("ownership stamp"),
+        "unexpected error: {err}"
+    );
+    let preserved = restarted
+        .dump_snapshot()
+        .await
+        .expect("dump after foreign preserve");
+    let link = preserved
+        .vlan_uppers
+        .get("br100.20")
+        .expect("foreign VLAN upper preserved");
+    assert!(link.altnames.is_empty());
 }
 
 #[tokio::test]

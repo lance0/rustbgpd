@@ -158,7 +158,9 @@ topology change from today's probe:
 - one `vlan_filtering=1` bridge;
 - one traditional VXLAN device per VNI, attached to that bridge;
 - the configured `bridge_vlan` present on that VXLAN port; and
-- no rustbgpd-managed bridge, VXLAN, VRF, or port VLAN creation.
+- no implicit rustbgpd-managed bridge, VXLAN, VLAN upper, VRF, or port VLAN
+  creation as part of the VLAN-aware programming slice; ADR-0091 owns explicit
+  opt-in managed-netdev lifecycle.
 
 In this model, the VXLAN device still identifies the VNI, and
 `NDA_VLAN` scopes the bridge FDB row to the local VLAN. This makes the

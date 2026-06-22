@@ -33,8 +33,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart adoption, reap, and same-name unstamped foreign preservation on a
   real kernel. `evpn_managed_netdev_state{class,name,desired,state}` exposes
   bounded Prometheus state for alerting; detailed reason text stays in
-  `ListManagedNetdevs` / `rbgp`. Managed SVD / collect-metadata VXLAN and
-  VRF classes remain deferred.
+  `ListManagedNetdevs` / `rbgp`. Managed SVD / collect-metadata VXLAN
+  creation remains deferred.
 - **ADR-0091 fixed-VNI VXLAN lifecycle.** `[managed_netdevs]` now accepts
   fixed-VNI `[[managed_netdevs.vxlans]]` rows with protected `name`, `vni`,
   `local`, `dstport`, `bridge`, and `learning = false` attributes, derives
@@ -68,8 +68,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proof creates a managed VRF plus managed L3VXLAN on a real kernel, verifies
   protected attributes and idempotent adoption, proves the IP-VRF readiness
   probe transitions from NotReady to Ready, and confirms VRF deletion refuses
-  while the L3VXLAN remains enslaved. SVD / collect-metadata VXLAN creation and
-  VLAN upper helpers remain separate managed-netdev gates.
+  while the L3VXLAN remains enslaved. SVD / collect-metadata VXLAN creation
+  remains deferred.
+- **ADR-0091 managed VLAN upper lifecycle.** `[managed_netdevs]` now accepts
+  `[[managed_netdevs.vlan_uppers]]` rows bound to a configured
+  `[[evpn_instances]] bridge` / `bridge_vlan` pair, derives
+  `rustbgpd:vlan-upper:<owner>:<name>` ownership stamps, creates VLAN upper
+  devices on the configured bridge, stamps them, treats exact stamped VLAN
+  uppers as crash-restart adoption, and reaps exact same-owner VLAN upper
+  orphans before their parent bridge. `ListManagedNetdevs`, `rbgp evpn
+  managed-netdevs`, and the managed-netdev Prometheus gauge now report the
+  `vlan-upper` class and observed VLAN id; the `managed_vlan_upper` netns proof
+  covers create, idempotent restart adoption, reap, and same-name unstamped
+  foreign preservation on a real kernel.
 
 ### Changed
 
@@ -243,8 +254,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ADR-0088 EVPN VLAN-aware bridge / managed netdev boundary.** The EVPN
   roadmap now records the safety boundary for the remaining Linux VTEP
   operability gap: VLAN-aware programming requires an explicit
-  EVPN-to-Linux binding, managed bridge / VXLAN / VRF creation stays opt-in
-  and class-scoped, and read-only Linux topology substrate can land before
+  EVPN-to-Linux binding, managed bridge / VXLAN / VLAN upper / VRF creation
+  stays opt-in and class-scoped, and read-only Linux topology substrate can land before
   programming behavior changes. This is a decision document only; it adds no
   runtime feature.
 - **EVPN L2 readiness API/CLI surface.** `EvpnService.ListEvpnInstances`

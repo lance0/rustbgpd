@@ -27,8 +27,8 @@ use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
 use crate::error::DataplaneError;
 use crate::snapshot::{
     KernelBridgePortVlanInfo, KernelBridgeVlanFlags, KernelBridgeVlanInfo,
-    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVrfLinkInfo, KernelVxlanInfo,
-    KernelVxlanLinkInfo, vlan_rows_contain,
+    KernelBridgeVlanTunnelInfo, KernelSvdVxlanInfo, KernelVlanUpperLinkInfo, KernelVrfLinkInfo,
+    KernelVxlanInfo, KernelVxlanLinkInfo, vlan_rows_contain,
 };
 
 /// One bridge link the inventory cared about.
@@ -121,9 +121,12 @@ struct ParsedVxlanLink {
 }
 
 /// VLAN upper device (`br0.10`) before config-driven attribution.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct VlanUpperLink {
     ifindex: u32,
+    name: String,
+    altnames: Vec<String>,
+    up: bool,
     lower_ifindex: u32,
     vlan: u16,
 }
@@ -183,6 +186,10 @@ pub(crate) struct LinkCache {
     /// `None` means duplicate uppers were observed for the same lower/VLAN
     /// pair, so MAC+IP attribution must fail closed for that pair.
     pub(crate) vlan_upper_links: HashMap<(u32, u16), Option<u32>>,
+    /// Named VLAN upper links observed in this dump. Managed-netdev status
+    /// and lifecycle use this wider shape; MAC+IP attribution keeps using the
+    /// compact `(lower_ifindex, vlan) -> ifindex` map above.
+    pub vlan_upper_link_infos: HashMap<String, KernelVlanUpperLinkInfo>,
     /// `AF_INET` / `AF_INET6` neighbour attribution for VLAN upper devices:
     /// `vlan_upper_ifindex -> VNI`. Populated only after the configured
     /// `bridge_vlan` binding and observed bridge/VXLAN VLAN membership agree.
@@ -541,6 +548,7 @@ struct LinkDumpState {
     vxlan_ports: Vec<VxlanPort>,
     vxlan_links: HashMap<String, (KernelVxlanLinkInfo, Option<u32>)>,
     vlan_upper_links: HashMap<(u32, u16), Option<u32>>,
+    vlan_upper_link_infos: HashMap<String, VlanUpperLink>,
     all_enslaved: Vec<EnslavedLink>,
 }
 
@@ -592,6 +600,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         vxlan_ports,
         vxlan_links,
         vlan_upper_links,
+        vlan_upper_link_infos,
         all_enslaved,
     } = state;
 
@@ -599,6 +608,8 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         attach_vxlan_ports(vxlan_ports, &bridge_ifindex_to_name, &mut bridges);
     let vxlan_links =
         attach_vxlan_link_status(vxlan_links, &bridge_ifindex_to_name, &link_ifindex_to_name);
+    let vlan_upper_link_infos =
+        attach_vlan_upper_link_status(vlan_upper_link_infos, &bridge_ifindex_to_name);
 
     let master_slaves_by_name = index_master_slaves(&all_enslaved, &link_ifindex_to_name);
     let (bridge_port_to_vni, bridge_ports_by_name) =
@@ -616,6 +627,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         bridge_port_vlan_to_vni: HashMap::new(),
         bridge_ports_requiring_vlan_attribution: HashSet::new(),
         vlan_upper_links,
+        vlan_upper_link_infos,
         ip_neighbour_vlan_upper_to_vni: HashMap::new(),
         vxlan_port_vlan_to_vni: HashMap::new(),
         vxlan_ports_requiring_vlan_attribution: HashSet::new(),
@@ -680,7 +692,11 @@ fn record_link_message(
             }
         }
         Some(InfoKind::Vlan) => {
-            record_vlan_upper_link(msg, &mut state.vlan_upper_links);
+            record_vlan_upper_link(
+                msg,
+                &mut state.vlan_upper_links,
+                &mut state.vlan_upper_link_infos,
+            );
         }
         _ => {}
     }
@@ -731,6 +747,7 @@ fn record_named_vxlan_link(
 fn record_vlan_upper_link(
     msg: &LinkMessage,
     vlan_upper_links: &mut HashMap<(u32, u16), Option<u32>>,
+    vlan_upper_link_infos: &mut HashMap<String, VlanUpperLink>,
 ) {
     if let Some(upper) = parse_vlan_upper_link(msg) {
         insert_unique_ifindex_binding(
@@ -738,7 +755,32 @@ fn record_vlan_upper_link(
             (upper.lower_ifindex, upper.vlan),
             upper.ifindex,
         );
+        vlan_upper_link_infos.insert(upper.name.clone(), upper);
     }
+}
+
+fn attach_vlan_upper_link_status(
+    vlan_upper_links: HashMap<String, VlanUpperLink>,
+    bridge_ifindex_to_name: &HashMap<u32, String>,
+) -> HashMap<String, KernelVlanUpperLinkInfo> {
+    vlan_upper_links
+        .into_iter()
+        .map(|(name, link)| {
+            let bridge = bridge_ifindex_to_name.get(&link.lower_ifindex).cloned();
+            (
+                name.clone(),
+                KernelVlanUpperLinkInfo {
+                    ifindex: link.ifindex,
+                    name,
+                    altnames: link.altnames,
+                    up: link.up,
+                    bridge,
+                    lower_ifindex: Some(link.lower_ifindex),
+                    vlan: Some(link.vlan),
+                },
+            )
+        })
+        .collect()
 }
 
 fn attach_vxlan_link_status(
@@ -1251,6 +1293,7 @@ fn extract_vrf_table_id(msg: &LinkMessage) -> Option<u32> {
 
 fn parse_vlan_upper_link(msg: &LinkMessage) -> Option<VlanUpperLink> {
     let ifindex = msg.header.index;
+    let name = link_kind_and_name(msg).1?;
     let mut lower_ifindex = None;
     let mut vlan = None;
 
@@ -1274,6 +1317,9 @@ fn parse_vlan_upper_link(msg: &LinkMessage) -> Option<VlanUpperLink> {
 
     Some(VlanUpperLink {
         ifindex,
+        name,
+        altnames: extract_altnames(msg),
+        up: msg.header.flags.contains(LinkFlags::Up),
         lower_ifindex: lower_ifindex?,
         vlan: vlan?,
     })
@@ -1523,6 +1569,13 @@ mod tests {
     fn parse_vlan_upper_link_captures_lower_ifindex_and_vlan_id() {
         let mut msg = LinkMessage::default();
         msg.header.index = 110;
+        msg.header.flags.insert(LinkFlags::Up);
+        msg.attributes
+            .push(LinkAttribute::IfName("br100.20".to_string()));
+        msg.attributes.push(LinkAttribute::PropList(vec![
+            Prop::AltIfName("operator-alias".to_string()),
+            Prop::AltIfName("rustbgpd:vlan-upper:leaf-1:br100.20".to_string()),
+        ]));
         msg.attributes.push(LinkAttribute::Link(10));
         msg.attributes.push(LinkAttribute::LinkInfo(vec![
             LinkInfo::Kind(InfoKind::Vlan),
@@ -1532,6 +1585,15 @@ mod tests {
         let upper = parse_vlan_upper_link(&msg).expect("vlan upper");
 
         assert_eq!(upper.ifindex, 110);
+        assert_eq!(upper.name, "br100.20");
+        assert_eq!(
+            upper.altnames,
+            vec![
+                "operator-alias".to_string(),
+                "rustbgpd:vlan-upper:leaf-1:br100.20".to_string(),
+            ]
+        );
+        assert!(upper.up);
         assert_eq!(upper.lower_ifindex, 10);
         assert_eq!(upper.vlan, 20);
     }
@@ -1542,14 +1604,24 @@ mod tests {
         without_lower.header.index = 110;
         without_lower
             .attributes
-            .push(LinkAttribute::LinkInfo(vec![LinkInfo::Data(
-                InfoData::Vlan(vec![InfoVlan::Id(20)]),
-            )]));
+            .push(LinkAttribute::IfName("br100.20".to_string()));
+        without_lower.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Vlan),
+            LinkInfo::Data(InfoData::Vlan(vec![InfoVlan::Id(20)])),
+        ]));
         assert!(parse_vlan_upper_link(&without_lower).is_none());
 
         let mut without_vlan = LinkMessage::default();
         without_vlan.header.index = 111;
+        without_vlan
+            .attributes
+            .push(LinkAttribute::IfName("br100.20".to_string()));
         without_vlan.attributes.push(LinkAttribute::Link(10));
+        without_vlan
+            .attributes
+            .push(LinkAttribute::LinkInfo(vec![LinkInfo::Kind(
+                InfoKind::Vlan,
+            )]));
         assert!(parse_vlan_upper_link(&without_vlan).is_none());
     }
 

@@ -1046,6 +1046,8 @@ pub fn record_l3_success(
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
         | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. }
         | DataplaneOp::InstallFdbNhg { .. }
         | DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::RemoveFdbNhg { .. }

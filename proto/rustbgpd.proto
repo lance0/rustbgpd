@@ -2278,6 +2278,7 @@ enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_VXLAN = 2;
   MANAGED_NETDEV_CLASS_VRF = 3;
   MANAGED_NETDEV_CLASS_L3VXLAN = 4;
+  MANAGED_NETDEV_CLASS_VLAN_UPPER = 5;
 }
 
 enum ManagedNetdevLifecycleState {
@@ -2311,6 +2312,7 @@ message ManagedNetdevState {
   optional bool observed_up = 18;
   optional string observed_master = 19;
   optional string observed_router_mac = 20;
+  optional uint32 observed_vlan = 21;
 }
 
 message ListEvpnNexthopsRequest {}

@@ -7,7 +7,7 @@ use super::parse::{
 };
 use super::schema::{
     ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
-    ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig,
+    ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig,
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
@@ -819,6 +819,7 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     validate_managed_vxlans(&managed.vxlans, owner_token, &mut names)?;
     validate_managed_vrfs(&managed.vrfs, owner_token, &mut names)?;
     validate_managed_l3vxlans(&managed.l3vxlans, owner_token, &mut names)?;
+    validate_managed_vlan_uppers(config, &managed.vlan_uppers, owner_token, &mut names)?;
 
     // Cross-section checks need both `config` and `managed`, so they live here
     // rather than in the per-section validators.
@@ -970,6 +971,7 @@ fn managed_netdevs_has_rows(managed: &ManagedNetdevsConfig) -> bool {
         || !managed.vxlans.is_empty()
         || !managed.vrfs.is_empty()
         || !managed.l3vxlans.is_empty()
+        || !managed.vlan_uppers.is_empty()
 }
 
 fn validate_managed_bridges(
@@ -1157,6 +1159,63 @@ fn validate_managed_l3vxlans(
             "managed L3VXLAN",
             &l3vxlan.name,
             &rustbgpd_evpn::l3vxlan_ownership_stamp(owner_token, &l3vxlan.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_managed_vlan_uppers(
+    config: &Config,
+    vlan_uppers: &[ManagedVlanUpperNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    let evpn_bridge_vlans: HashSet<(&str, u16)> = config
+        .evpn_instances
+        .iter()
+        .filter_map(|instance| {
+            let bridge = instance.bridge.as_deref()?;
+            let vlan = u16::try_from(instance.bridge_vlan?).ok()?;
+            Some((bridge, vlan))
+        })
+        .collect();
+    let mut seen_bindings = HashSet::new();
+    for vlan_upper in vlan_uppers {
+        validate_managed_link_name(&vlan_upper.name)?;
+        validate_managed_link_name(&vlan_upper.bridge)?;
+        if !names.insert(vlan_upper.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed netdev name {:?}", vlan_upper.name),
+            });
+        }
+        if !(1..=4094).contains(&vlan_upper.vlan) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VLAN upper {:?}: vlan {} must be in 1..=4094",
+                    vlan_upper.name, vlan_upper.vlan
+                ),
+            });
+        }
+        if !seen_bindings.insert((vlan_upper.bridge.clone(), vlan_upper.vlan)) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VLAN upper {:?}: duplicate bridge/vlan binding {}:{}",
+                    vlan_upper.name, vlan_upper.bridge, vlan_upper.vlan
+                ),
+            });
+        }
+        if !evpn_bridge_vlans.contains(&(vlan_upper.bridge.as_str(), vlan_upper.vlan)) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed VLAN upper {:?}: bridge {:?} vlan {} must match a configured [[evpn_instances]] bridge + bridge_vlan binding",
+                    vlan_upper.name, vlan_upper.bridge, vlan_upper.vlan
+                ),
+            });
+        }
+        validate_managed_stamp_len(
+            "managed VLAN upper",
+            &vlan_upper.name,
+            &rustbgpd_evpn::vlan_upper_ownership_stamp(owner_token, &vlan_upper.name),
         )?;
     }
     Ok(())

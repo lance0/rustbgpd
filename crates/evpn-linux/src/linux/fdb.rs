@@ -419,7 +419,9 @@ pub(crate) async fn apply_op(
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
-        | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. } => {
             // BUM port-flag ops are routed through `linux::bum_filter`,
             // AC-gate ops through `linux::ac_gate`, L3 ops through
             // `linux::l3`, managed-netdev ops through
@@ -500,7 +502,9 @@ pub(crate) async fn apply_op(
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
-        | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. } => {
             // Unreachable: the early-return at the top of `apply_op`
             // already handled non-single-dst-FDB ops. Arms exist so
             // the compiler can prove exhaustiveness.

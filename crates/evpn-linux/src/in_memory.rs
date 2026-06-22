@@ -35,7 +35,7 @@ use crate::l3_adoption::{
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
-    KernelVrfLinkInfo, KernelVxlanLinkInfo,
+    KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo,
 };
 
 /// Test fake of [`Dataplane`].
@@ -678,6 +678,78 @@ impl InMemoryDataplane {
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed L3VXLAN {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
+            DataplaneOp::CreateManagedVlanUpper {
+                name,
+                spec,
+                ownership_stamp,
+            } => match state.kernel.vlan_uppers.get_mut(name) {
+                Some(link) if managed_vlan_upper_exact(link, name, spec, ownership_stamp) => {
+                    if !link.up {
+                        link.up = true;
+                    }
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VLAN upper {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed VLAN upper {name} cannot be created: desired name is occupied by a non-VLAN-upper link"
+                        )));
+                    }
+                    let bridge_ifindex = if let Some(bridge) = state.kernel.links.get(&spec.bridge)
+                    {
+                        bridge.ifindex
+                    } else {
+                        if state.kernel.link_name_exists(&spec.bridge) {
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "managed VLAN upper {name} cannot be created: desired bridge name {} is occupied by a non-bridge link",
+                                spec.bridge
+                            )));
+                        }
+                        return Err(crate::error::DataplaneError::Other(format!(
+                            "managed VLAN upper {name} cannot be created: desired bridge {} is absent",
+                            spec.bridge
+                        )));
+                    };
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                        .chain(state.kernel.vrfs.values().map(|link| link.ifindex))
+                        .chain(state.kernel.vlan_uppers.values().map(|link| link.ifindex))
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_vlan_upper(KernelVlanUpperLinkInfo {
+                        ifindex: next_ifindex,
+                        name: name.clone(),
+                        altnames: vec![ownership_stamp.clone()],
+                        up: true,
+                        bridge: Some(spec.bridge.clone()),
+                        lower_ifindex: Some(bridge_ifindex),
+                        vlan: Some(spec.vlan),
+                    });
+                }
+            },
+            DataplaneOp::RemoveManagedVlanUpper {
+                name,
+                ownership_stamp,
+            } => match state.kernel.vlan_uppers.get(name) {
+                Some(link) if managed_vlan_upper_has_exact_stamp(link, name, ownership_stamp) => {
+                    state.kernel.remove_vlan_upper(name);
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed VLAN upper {name} changed before remove"
                     )));
                 }
                 None => {}
@@ -1602,6 +1674,30 @@ fn managed_l3vxlan_exact(
         && !link.vnifilter
         && link.master.as_deref() == Some(spec.vrf.as_str())
         && link.mac == Some(spec.router_mac)
+}
+
+fn managed_vlan_upper_exact(
+    link: &KernelVlanUpperLinkInfo,
+    name: &str,
+    spec: &rustbgpd_evpn::ManagedVlanUpperNetdevSpec,
+    ownership_stamp: &str,
+) -> bool {
+    managed_vlan_upper_has_exact_stamp(link, name, ownership_stamp)
+        && link.bridge.as_deref() == Some(spec.bridge.as_str())
+        && link.vlan == Some(spec.vlan)
+}
+
+fn managed_vlan_upper_has_exact_stamp(
+    link: &KernelVlanUpperLinkInfo,
+    name: &str,
+    ownership_stamp: &str,
+) -> bool {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
 }
 
 #[cfg(test)]
