@@ -151,7 +151,7 @@ read-only substrate and must satisfy the programming gate below.
 
 ### 5. Managed netdev creation must be explicit, opt-in, and class-scoped
 
-Future rustbgpd-managed bridge / VXLAN / VRF creation must be opt-in at
+Future rustbgpd-managed bridge / VXLAN / VLAN upper / VRF creation must be opt-in at
 the config/API boundary. Missing kernel devices in the default mode stay
 `NotReady`; they do not silently trigger creation.
 

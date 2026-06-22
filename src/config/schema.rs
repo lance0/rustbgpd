@@ -1217,10 +1217,10 @@ pub struct EvpnIpVrfConfig {
 /// ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.
 ///
 /// v1 accepts `[[managed_netdevs.bridges]]`, fixed-VNI
-/// `[[managed_netdevs.vxlans]]`, `[[managed_netdevs.vrfs]]`, and
-/// `[[managed_netdevs.l3vxlans]]` rows. The `owner_token` is required
-/// when at least one row is configured and is used only to derive
-/// durable `IFLA_ALT_IFNAME` ownership stamps:
+/// `[[managed_netdevs.vxlans]]`, `[[managed_netdevs.vrfs]]`,
+/// `[[managed_netdevs.l3vxlans]]`, and `[[managed_netdevs.vlan_uppers]]`
+/// rows. The `owner_token` is required when at least one row is configured and
+/// is used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
 /// `rustbgpd:<class>:<owner_token>:<link_name>`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1236,14 +1236,17 @@ pub struct ManagedNetdevsConfig {
     /// shared-device VXLANs are intentionally not accepted in this release.
     #[serde(default)]
     pub vxlans: Vec<ManagedVxlanNetdevConfig>,
-    /// Managed VRF rows. LAN-94 accepts schema/status substrate only; Linux
-    /// lifecycle create/delete lands in the next ADR-0091 slice.
+    /// Managed VRF rows.
     #[serde(default)]
     pub vrfs: Vec<ManagedVrfNetdevConfig>,
-    /// Managed L3 VXLAN rows. LAN-94 accepts schema/status substrate only;
-    /// Linux lifecycle create/delete lands in the next ADR-0091 slice.
+    /// Managed L3 VXLAN rows.
     #[serde(default)]
     pub l3vxlans: Vec<ManagedL3VxlanNetdevConfig>,
+    /// Managed VLAN upper rows. These are helper links for the existing
+    /// VLAN-upper `AF_INET` / `AF_INET6` MAC+IP attribution path and must match
+    /// a configured `[[evpn_instances]]` `bridge` + `bridge_vlan` binding.
+    #[serde(default)]
+    pub vlan_uppers: Vec<ManagedVlanUpperNetdevConfig>,
 }
 
 /// One managed Linux bridge row (ADR-0091 bridge-first tranche).
@@ -1313,6 +1316,18 @@ pub struct ManagedL3VxlanNetdevConfig {
     /// default.
     #[serde(default)]
     pub learning: bool,
+}
+
+/// One managed Linux VLAN upper row (ADR-0091 VLAN-upper tranche).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedVlanUpperNetdevConfig {
+    /// Linux VLAN upper interface name.
+    pub name: String,
+    /// Parent Linux bridge name.
+    pub bridge: String,
+    /// Linux VLAN id (`1..=4094`).
+    pub vlan: u16,
 }
 
 const fn default_vxlan_dstport() -> u16 {

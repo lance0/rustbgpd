@@ -539,6 +539,13 @@ impl Dataplane for LinuxDataplane {
                 .map(|(name, link)| (name.clone(), link.clone()))
                 .collect(),
         );
+        snap.set_vlan_uppers(
+            cache
+                .vlan_upper_link_infos
+                .iter()
+                .map(|(name, link)| (name.clone(), link.clone()))
+                .collect(),
+        );
         for (name, link) in &cache.bridges {
             // Only surface bridges with exactly one VXLAN port so
             // the diff loop's NotReady inference matches the probe
@@ -705,7 +712,9 @@ impl Dataplane for LinuxDataplane {
             | DataplaneOp::CreateManagedVrf { .. }
             | DataplaneOp::RemoveManagedVrf { .. }
             | DataplaneOp::CreateManagedL3Vxlan { .. }
-            | DataplaneOp::RemoveManagedL3Vxlan { .. } => {
+            | DataplaneOp::RemoveManagedL3Vxlan { .. }
+            | DataplaneOp::CreateManagedVlanUpper { .. }
+            | DataplaneOp::RemoveManagedVlanUpper { .. } => {
                 unreachable!("plain L3 and managed-netdev ops are handled before this match")
             }
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —

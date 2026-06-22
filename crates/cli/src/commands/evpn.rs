@@ -607,6 +607,9 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
             if let Some(vni) = row.observed_vni {
                 detail.push(format!("vni={vni}"));
             }
+            if let Some(vlan) = row.observed_vlan {
+                detail.push(format!("vlan={vlan}"));
+            }
             if let Some(local) = row.observed_local.as_deref() {
                 detail.push(format!("local={local}"));
             }
@@ -658,6 +661,7 @@ fn managed_netdev_class_label(class: i32) -> &'static str {
         Ok(ManagedNetdevClass::Vxlan) => "vxlan",
         Ok(ManagedNetdevClass::Vrf) => "vrf",
         Ok(ManagedNetdevClass::L3vxlan) => "l3vxlan",
+        Ok(ManagedNetdevClass::VlanUpper) => "vlan-upper",
         Ok(ManagedNetdevClass::Unknown) | Err(_) => "unknown",
     }
 }
@@ -693,6 +697,9 @@ fn managed_netdev_to_json(row: &ManagedNetdevState) -> serde_json::Value {
             .map_or(serde_json::Value::Null, serde_json::Value::from),
         "observed_vni": row
             .observed_vni
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+        "observed_vlan": row
+            .observed_vlan
             .map_or(serde_json::Value::Null, serde_json::Value::from),
         "observed_local": row
             .observed_local
@@ -1506,6 +1513,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_vlan_filtering: Some(false),
             observed_stamps: vec!["rustbgpd:bridge:leaf-1:br100".to_string()],
             observed_vni: None,
+            observed_vlan: None,
             observed_local: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -1539,6 +1547,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_vlan_filtering: None,
             observed_stamps: vec!["rustbgpd:vxlan:leaf-1:vxlan100".to_string()],
             observed_vni: Some(100),
+            observed_vlan: None,
             observed_local: Some("10.0.0.1".to_string()),
             observed_dstport: Some(4789),
             observed_learning_disabled: Some(true),
@@ -1570,6 +1579,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_vlan_filtering: None,
             observed_stamps: vec!["rustbgpd:vrf:leaf-1:vrf100".to_string()],
             observed_vni: None,
+            observed_vlan: None,
             observed_local: None,
             observed_dstport: None,
             observed_learning_disabled: None,
@@ -1596,6 +1606,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             observed_vlan_filtering: None,
             observed_stamps: vec!["rustbgpd:l3vxlan:leaf-1:l3vxlan100".to_string()],
             observed_vni: Some(5000),
+            observed_vlan: None,
             observed_local: Some("10.0.0.1".to_string()),
             observed_dstport: Some(4789),
             observed_learning_disabled: Some(true),
@@ -1610,6 +1621,34 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(l3vxlan["class"], "l3vxlan");
         assert_eq!(l3vxlan["observed_master"], "vrf100");
         assert_eq!(l3vxlan["observed_router_mac"], "02:00:00:00:00:01");
+
+        let vlan_upper = super::managed_netdev_to_json(&crate::proto::ManagedNetdevState {
+            class: crate::proto::ManagedNetdevClass::VlanUpper as i32,
+            name: "br100.10".to_string(),
+            desired: true,
+            ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+            state: crate::proto::ManagedNetdevLifecycleState::ManagedNetdevStateOwnedSafe as i32,
+            reason: String::new(),
+            ifindex: Some(50),
+            observed_vlan_filtering: None,
+            observed_stamps: vec!["rustbgpd:vlan-upper:leaf-1:br100.10".to_string()],
+            observed_vni: None,
+            observed_vlan: Some(10),
+            observed_local: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: Some("br100".to_string()),
+            observed_table_id: None,
+            observed_up: Some(true),
+            observed_master: None,
+            observed_router_mac: None,
+        });
+        assert_eq!(vlan_upper["class"], "vlan-upper");
+        assert_eq!(vlan_upper["observed_bridge"], "br100");
+        assert_eq!(vlan_upper["observed_vlan"], 10);
+        assert_eq!(vlan_upper["observed_up"], true);
     }
 
     #[tokio::test]

@@ -1562,6 +1562,8 @@ mod tests {
                 | DataplaneOp::RemoveManagedVrf { .. }
                 | DataplaneOp::CreateManagedL3Vxlan { .. }
                 | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                | DataplaneOp::CreateManagedVlanUpper { .. }
+                | DataplaneOp::RemoveManagedVlanUpper { .. }
                 | DataplaneOp::AddRemoteIpRoute { .. }
                 | DataplaneOp::RemoveRemoteIpRoute { .. }
                 | DataplaneOp::AddRemoteIpRouteEcmp { .. }

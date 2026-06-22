@@ -81,7 +81,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
 - Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`,
   `dataplane_vlan_fdb`, `macip_vlan_attribution`, `svd_fdb_vni`,
-  `managed_bridge`, `managed_vxlan`, `managed_ready`,
+  `managed_bridge`, `managed_vxlan`, `managed_vlan_upper`, `managed_ready`,
   `managed_ip_vrf_ready`, `l3_multipath`, and `l3_all_active_writer`.
 
 The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a

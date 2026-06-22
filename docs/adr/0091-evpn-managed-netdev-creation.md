@@ -54,12 +54,13 @@ order:
 1. bridge,
 2. VXLAN,
 3. VRF / L3VXLAN,
-4. optional VLAN upper / bridge membership helpers after the base classes.
+4. VLAN upper helpers bound to explicit EVPN `bridge_vlan` rows.
 
 The first implementation slice was bridge create/adopt/reap. The second
 slice adds fixed-VNI VXLAN create/adopt/reap. The third slice adds
-VRF/L3VXLAN create/adopt/reap and the `managed_ip_vrf_ready` proof. SVD /
-collect-metadata VXLAN lifecycle is still a separate proof gate.
+VRF/L3VXLAN create/adopt/reap and the `managed_ip_vrf_ready` proof. The fourth
+slice adds VLAN upper create/adopt/reap and the `managed_vlan_upper` proof.
+SVD / collect-metadata VXLAN lifecycle is still a separate proof gate.
 
 ### 2. `IFLA_ALT_IFNAME` is the durable ownership marker
 
@@ -73,17 +74,19 @@ rustbgpd_owned_<class>_<stable-config-id>_<owner-token>
 The exact encoding can be adjusted for length and character constraints, but
 the logical fields are fixed:
 
-- `class`: managed object class, such as `bridge`, `vxlan`, or `vrf`;
+- `class`: managed object class, such as `bridge`, `vxlan`, `vlan-upper`, or
+  `vrf`;
 - `stable-config-id`: deterministic identifier derived from the managed
   block's stable identity;
 - `owner-token`: operator-configured daemon / installation token.
 
-As shipped, bridge, fixed-VNI VXLAN, VRF, and L3VXLAN classes encode this as
-a colon-delimited altname:
+As shipped, bridge, fixed-VNI VXLAN, VLAN upper, VRF, and L3VXLAN classes
+encode this as a colon-delimited altname:
 
 ```text
 rustbgpd:bridge:<owner-token>:<bridge-name>
 rustbgpd:vxlan:<owner-token>:<vxlan-name>
+rustbgpd:vlan-upper:<owner-token>:<vlan-upper-name>
 rustbgpd:vrf:<owner-token>:<vrf-name>
 rustbgpd:l3vxlan:<owner-token>:<l3vxlan-name>
 ```
@@ -178,6 +181,11 @@ dstport = 4789
 learning = false
 bridge = "br_default"
 
+[[managed_netdevs.vlan_uppers]]
+name = "br_default.10"
+bridge = "br_default"
+vlan = 10
+
 [[managed_netdevs.vrfs]]
 name = "vrf-blue"
 table_id = 1001
@@ -192,10 +200,12 @@ router_mac = "02:00:00:00:00:01"
 learning = false
 ```
 
-The fixed-VNI VXLAN and L3VXLAN blocks are deliberately separate: fixed-VNI
-VXLAN rows create L2 bridge members, while L3VXLAN rows are the per-VRF VTEP
-device used by IRB. SVD / collect-metadata VXLAN lifecycle remains a more
-specific future class. The ownership model stays the same.
+The fixed-VNI VXLAN, VLAN upper, and L3VXLAN blocks are deliberately separate:
+fixed-VNI VXLAN rows create L2 bridge members, VLAN upper rows create
+per-bridge VLAN helper interfaces for local MAC+IP attribution, and L3VXLAN
+rows are the per-VRF VTEP device used by IRB. SVD / collect-metadata VXLAN
+lifecycle remains a more specific future class. The ownership model stays the
+same.
 
 Runtime mutation, SIGHUP reload, gNMI `Set`, and `ApplyEvpnRuntime` must
 remain fail-closed for managed-netdev fields until the corresponding class
@@ -321,13 +331,17 @@ foreign-vs-owned signal.
 5. Add VRF / L3VXLAN class support. **Done for schema/status, ownership
    stamps, create/adopt/reap lifecycle, and the `managed_ip_vrf_ready` real
    kernel proof.**
-6. Add optional VLAN upper / bridge membership helpers if operator demand
-   remains after bridge/VXLAN/VRF creation.
+6. Add VLAN upper helper class support. **Done for schema/status, ownership
+   stamps, create/adopt/reap lifecycle, and the `managed_vlan_upper` real
+   kernel proof.** Bridge VLAN membership programming remains out of scope.
 
 ## Test Obligations
 
 - netns bridge proof: create -> stamp -> dump -> simulated restart adopt ->
   config removal reap.
+- netns VLAN upper proof: create on parent bridge -> stamp -> dump ->
+  simulated restart adopt -> config removal reap -> same-name unstamped foreign
+  preserve.
 - netns fixed-VNI VXLAN proof: create on the desired bridge -> stamp -> dump
   -> simulated restart adopt -> config removal reap.
 - Same-name unstamped foreign bridge is never modified or deleted.

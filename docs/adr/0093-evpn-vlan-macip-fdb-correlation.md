@@ -39,9 +39,9 @@ The shipped behavior remains correct:
 - Drops are normal "not ours / not attributable" classifier outcomes, not
   dataplane errors.
 
-### 2. Defer this feature behind managed VLAN-upper creation
+### 2. Keep this feature behind managed VLAN-upper adoption
 
-ADR-0091 managed netdev creation can create VLAN upper devices for operators
+ADR-0091 managed netdev creation now creates VLAN upper devices for operators
 who want rustbgpd to own the Linux topology. That path uses the already-proven
 MAC+IP attribution model and avoids this race-sensitive correlation problem.
 
@@ -49,11 +49,12 @@ Raw bridge FDB correlation is therefore lower priority and demand-shaped. It
 matters only for hand-built raw `vlan_filtering=1` bridge deployments where
 the operator does not use VLAN uppers and still needs MAC+IP origination.
 
-Concretely, the demand may approach **zero** once ADR-0091 ships VLAN-upper
-creation: operators who let rustbgpd own the topology get MAC+IP attribution for
-free via the proven upper-device path. This ADR may therefore be **retired
-without implementation** if ADR-0091 VLAN-upper adoption is high. It stays
-Proposed precisely so that retirement is a deliberate call, not an implicit one.
+Concretely, the demand may approach **zero** where operators use ADR-0091
+VLAN-upper creation: operators who let rustbgpd own the topology get MAC+IP
+attribution for free via the proven upper-device path. This ADR may therefore
+be **retired without implementation** if ADR-0091 VLAN-upper adoption is high.
+It stays Proposed precisely so that retirement is a deliberate call, not an
+implicit one.
 
 ## Candidate Design If Later Accepted
 
@@ -168,8 +169,8 @@ Decision 6.
 
 - **Builds on:** ADR-0089 (VLAN-aware bridge model, `NDA_VLAN` FDB parsing,
   VLAN upper attribution).
-- **Deferred behind:** ADR-0091 managed netdev creation, because managed VLAN
-  uppers cover the common safe path.
+- **Demand-shaped behind:** ADR-0091 managed VLAN-upper adoption, because
+  managed VLAN uppers cover the common safe path.
 - **Independent of:** ADR-0092 true VLAN-Aware Bundle service.
 
 ## Rejected Alternatives

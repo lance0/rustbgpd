@@ -734,6 +734,7 @@ mod tests {
             bridge_port_vlan_to_vni: HashMap::new(),
             bridge_ports_requiring_vlan_attribution: HashSet::new(),
             vlan_upper_links: HashMap::new(),
+            vlan_upper_link_infos: HashMap::new(),
             ip_neighbour_vlan_upper_to_vni: HashMap::new(),
             vxlan_port_vlan_to_vni: HashMap::new(),
             vxlan_ports_requiring_vlan_attribution: HashSet::new(),

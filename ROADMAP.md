@@ -190,7 +190,7 @@ has it, no broad performance sprints without profile evidence.
   standards work is broader protected-recursion interop, especially the
   all-active ESI path; demand-shaped
   VXLAN operability includes VLAN-aware bridge support and rustbgpd-managed
-  bridge / VXLAN / VRF netdev creation. **ADR-0088 records that boundary:**
+  bridge / VXLAN / VLAN upper / VRF netdev creation. **ADR-0088 records that boundary:**
   VLAN-aware bridges require an explicit EVPN-to-Linux binding, and managed
   netdev creation must be opt-in and one ownership class at a time.
   **ADR-0089's first programming target landed:** VNI-per-broadcast-domain
@@ -223,8 +223,14 @@ has it, no broad performance sprints without profile evidence.
   links after restart, reap exact same-owner orphans in L3VXLAN-before-VRF
   order, and preserve foreign or owned-unsafe links. `managed_ip_vrf_ready`
   proves on a real kernel that the rustbgpd-created VRF plus L3VXLAN topology
-  drives the IP-VRF readiness probe from NotReady to Ready. SVD /
-  collect-metadata VXLAN lifecycle is still deferred.
+  drives the IP-VRF readiness probe from NotReady to Ready.
+  **ADR-0091 VLAN upper lifecycle landed:** `[managed_netdevs]` accepts VLAN
+  upper rows bound to configured `[[evpn_instances]] bridge` / `bridge_vlan`
+  pairs, creates `ip link add link BR name BR.VLAN type vlan id VID` helpers,
+  stamps and adopts exact links after restart, and reaps same-owner VLAN upper
+  orphans before their parent bridge. `managed_vlan_upper` proves create /
+  adopt / reap / foreign-preserve on a real kernel. SVD / collect-metadata
+  VXLAN lifecycle is still deferred.
   The `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
@@ -340,7 +346,7 @@ has it, no broad performance sprints without profile evidence.
   remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
   follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support and
-  rustbgpd-managed bridge / VXLAN / VRF netdev creation are now scoped by
+  rustbgpd-managed bridge / VXLAN / VLAN upper / VRF netdev creation are now scoped by
   ADR-0088, with ADR-0089 selecting the first VLAN-aware programming
   subset: traditional multi-VXLAN-device Linux bridges, local
   `bridge_vlan` attribution, and EVPN Ethernet Tag ID `0`. **Readiness +
@@ -364,14 +370,16 @@ has it, no broad performance sprints without profile evidence.
   remains fail-closed unless a future FDB-correlation design proves freshness
   and ambiguity handling. True RFC VLAN-aware bundle / non-zero Ethernet Tag
   remains a separate ADR gate. **ADR-0091 managed-netdev bridge +
-  fixed-VNI VXLAN lifecycle landed:** `[managed_netdevs]` bridge and fixed-VNI
-  VXLAN rows are validated as restart-required startup desired state, Linux
-  link dumps parse rustbgpd altname stamps plus named VXLAN protected
+  fixed-VNI VXLAN + VLAN upper lifecycle landed:** `[managed_netdevs]` bridge,
+  fixed-VNI VXLAN, and VLAN upper rows are validated as restart-required
+  startup desired state, Linux link dumps parse rustbgpd altname stamps plus
+  named VXLAN / VLAN upper protected
   attributes, and `ListManagedNetdevs` / `rbgp evpn managed-netdevs` report
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
-  bridges, fixed-VNI VXLANs, VRFs, and L3VXLANs, adopts exact stamped links
-  after restart, and safely reaps same-owner orphans in dependency order.
+  bridges, fixed-VNI VXLANs, VLAN uppers, VRFs, and L3VXLANs, adopts exact
+  stamped links after restart, and safely reaps same-owner orphans in
+  dependency order.
   `managed_ready` proves that this rustbgpd-created bridge + VXLAN topology
   drives the real EVPN L2 probe to Ready, and `managed_ip_vrf_ready` proves
   that the rustbgpd-created VRF + L3VXLAN topology drives the real IP-VRF
