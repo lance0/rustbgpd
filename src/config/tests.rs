@@ -10391,10 +10391,15 @@ fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
         "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan 100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
-    assert!(matches!(
-        invalid_name,
-        Err(ConfigError::InvalidManagedNetdev { .. })
-    ));
+    match invalid_name {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("must contain only ASCII"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected invalid VXLAN name rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -10614,10 +10619,15 @@ bridge = "br100"
 vlan = 10
 "#,
     );
-    assert!(matches!(
-        invalid_name,
-        Err(ConfigError::InvalidManagedNetdev { .. })
-    ));
+    match invalid_name {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("must contain only ASCII"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected invalid VLAN-upper name rejection, got {other:?}"),
+    }
 }
 
 #[test]
