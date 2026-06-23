@@ -1170,6 +1170,16 @@ impl Config {
                                 svd.name, svd.bridge, inst.vni, vlan
                             ),
                         })?;
+                    if let Some(&existing) = bindings.get(&bridge_vlan)
+                        && existing != inst.vni
+                    {
+                        return Err(ConfigError::InvalidManagedNetdev {
+                            reason: format!(
+                                "managed SVD VXLAN {:?}: bridge {:?} bridge_vlan {} maps to conflicting VNIs {} and {}; each VLAN must map to exactly one VNI",
+                                svd.name, svd.bridge, bridge_vlan, existing, inst.vni
+                            ),
+                        });
+                    }
                     bindings.insert(bridge_vlan, inst.vni);
                 }
                 Ok((

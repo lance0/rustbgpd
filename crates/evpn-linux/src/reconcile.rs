@@ -6951,6 +6951,43 @@ mod managed_netdev_tests {
     }
 
     #[test]
+    fn managed_netdev_status_surfaces_unconfigured_svd_stamped_vxlan_link_once() {
+        let table =
+            ManagedNetdevTable::from_maps("leaf-1".to_string(), BTreeMap::new(), BTreeMap::new());
+        let mut snapshot = KernelSnapshot::new();
+        // A vxlan-kind link stamped as an SVD VXLAN (collect-metadata + vnifilter
+        // + nolearning, no fixed VNI) that is NOT in the desired table: a clean
+        // single-owner orphan that should be reapable.
+        let mut svd = vxlan_link(
+            "vxlan-svd",
+            20,
+            vec!["rustbgpd:svd-vxlan:leaf-1:vxlan-svd"],
+            0,
+        );
+        svd.vni = None;
+        svd.collect_metadata = true;
+        svd.vnifilter = true;
+        // Anti-tautology: confirm the link is a safe single-owner SVD orphan so we
+        // know we are asserting the Orphaned branch, not OwnedUnsafe.
+        assert!(safe_orphan_svd_vxlan_stamp_for_owner(&svd, "leaf-1").is_some());
+        snapshot.insert_vxlan(svd);
+
+        let rows = build_managed_netdev_status(&table, Some(&snapshot));
+        assert_eq!(
+            rows.len(),
+            1,
+            "the unconfigured SVD-stamped vxlan link must produce exactly one row, not zero and not two"
+        );
+        assert_eq!(rows[0].name, "vxlan-svd");
+        assert_eq!(rows[0].class, ManagedNetdevClass::SvdVxlan);
+        assert_eq!(rows[0].state, ManagedNetdevState::Orphaned);
+        assert_eq!(
+            rows[0].observed_stamps,
+            vec!["rustbgpd:svd-vxlan:leaf-1:vxlan-svd"]
+        );
+    }
+
+    #[test]
     fn managed_netdev_status_surfaces_cross_class_mis_stamped_vlan_upper_link() {
         let table = ManagedNetdevTable::from_all_maps(
             "leaf-1".to_string(),

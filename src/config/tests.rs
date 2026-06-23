@@ -10717,6 +10717,43 @@ fn managed_netdevs_reject_fixed_vxlan_vni_colliding_with_svd_binding() {
 }
 
 #[test]
+fn managed_netdevs_reject_svd_binding_same_vlan_conflicting_vnis() {
+    let conflict = parse(&format!(
+        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[[evpn_instances]]\nvni = 200\nrd = \"10.0.0.100:200\"\nroute_targets = [\"65000:200\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.svd_vxlans]]\nname = \"vxlan-svd\"\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
+        valid_toml()
+    ));
+    match conflict {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("conflicting"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected SVD bridge_vlan VNI conflict rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn managed_netdevs_accept_svd_binding_distinct_vlans() {
+    let config = parse(&format!(
+        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[[evpn_instances]]\nvni = 200\nrd = \"10.0.0.100:200\"\nroute_targets = [\"65000:200\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 20\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.svd_vxlans]]\nname = \"vxlan-svd\"\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
+        valid_toml()
+    ))
+    .unwrap();
+    let table = config.resolve_managed_netdevs().unwrap();
+    let svd_vxlan = table.svd_vxlan("vxlan-svd").unwrap();
+    assert_eq!(svd_vxlan.spec.bindings.len(), 2);
+    let mapped: std::collections::BTreeMap<u16, u32> = svd_vxlan
+        .spec
+        .bindings
+        .iter()
+        .map(|b| (b.bridge_vlan, b.vni))
+        .collect();
+    assert_eq!(mapped.get(&10), Some(&100));
+    assert_eq!(mapped.get(&20), Some(&200));
+}
+
+#[test]
 fn managed_netdevs_reject_invalid_vrf_and_l3vxlan_fields() {
     let zero_table = parse(&format!(
         "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 0\n",

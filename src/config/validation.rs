@@ -1110,7 +1110,7 @@ fn validate_managed_svd_vxlans(
                 ),
             });
         }
-        let mut bindings = HashSet::new();
+        let mut bindings: HashMap<u16, u32> = HashMap::new();
         for inst in config
             .evpn_instances
             .iter()
@@ -1125,7 +1125,18 @@ fn validate_managed_svd_vxlans(
                     svd.name, svd.bridge, inst.vni, vlan
                 ),
             })?;
-            bindings.insert((vlan, inst.vni));
+            if let Some(&existing) = bindings.get(&vlan) {
+                if existing != inst.vni {
+                    return Err(ConfigError::InvalidManagedNetdev {
+                        reason: format!(
+                            "managed SVD VXLAN {:?}: bridge {:?} bridge_vlan {} maps to conflicting VNIs {} and {}; each VLAN must map to exactly one VNI",
+                            svd.name, svd.bridge, vlan, existing, inst.vni
+                        ),
+                    });
+                }
+            } else {
+                bindings.insert(vlan, inst.vni);
+            }
         }
         if bindings.is_empty() {
             return Err(ConfigError::InvalidManagedNetdev {
