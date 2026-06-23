@@ -1284,7 +1284,11 @@ branch is between features.
   `[patch.crates-io]` pin, bump the pair together in one PR, rerun the #538 matrix
   (raw `IFLA_PROTINFO` AC-gate encode + `link_carrier` flag reads are the surfaces
   to re-verify), and merge. #452 stays the upstream-watch tracker. Verified during
-  the FIB route-drift eventing work (#482).
+  the FIB route-drift eventing work (#482). **Upstream nudge filed 2026-06-23:**
+  rust-netlink/rtnetlink#173 — a "New release 0.22.0" version-bump + CHANGELOG PR
+  against their `main` (which already carries the 0.31 dep) — requests the release
+  that unblocks this; execute the close-out above if/when any `rtnetlink` 0.22+
+  publishes.
 - [ ] **Workspace `cargo doc` warning posture.** CI runs
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
   as the standing local pre-flight expectation so broken intra-doc links surface
@@ -1295,6 +1299,28 @@ branch is between features.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, but
   `crates/api/src/event_service.rs` remains borderline. Keep splitting only where
   it reduces real conflict or review cost.
+- [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
+  whole-codebase review found no correctness or security defects; the actionable
+  residue is documentation/policy drift, all low-risk:
+  - ARCHITECTURE.md design-invariant #3 understates the intentional
+    unbounded-channel set — it names only the collision-notification channel, but
+    `bfd_runtime` (state-change fan-out), `peer_manager` (internal + session-notify),
+    `main` / `reload.rs` (config + internal-command coordinator), and
+    `transport::session::writer` (priority) all carry justified unbounded channels.
+    Re-enumerate the intentional set so the invariant stays a usable review gate.
+  - ARCHITECTURE.md ownership table: note that the EVPN originator subsystem
+    (`evpn_originator`, `evpn_l3_originator`) uses `Arc<RwLock>` generation counters
+    by design — the "no shared mutable routing state" invariant is narrowly about
+    the RIB hot path, not lower-frequency kernel-observation daemon glue.
+  - `#![deny(unsafe_code)]` is missing on `crates/event-history` (lib) and
+    `crates/cli` (bin) although CONTRIBUTING.md says "every crate"; both are
+    unsafe-free today — add for consistency + future-proofing.
+  - SECURITY.md "No unsafe code. Every crate enforces `#![deny(unsafe_code)]`"
+    overstates: `crates/transport` carries a scoped `#[allow(unsafe_code)]` on
+    `socket_opts` (TCP_MD5SIG / IP_MINTTL / TCP-AO FFI — the only unsafe in the
+    tree). Reword to acknowledge the documented exception.
+  - Optional periodic hygiene: trim the `thiserror` 1.x duplicate (1.0.69 + 2.0.18
+    both resolved) at the next dependency refresh.
 
 ---
 
