@@ -2188,8 +2188,9 @@ service EvpnService {
   // actor's most recent `probe_ip_vrfs` pass.
   rpc ListIpVrfs(ListIpVrfsRequest) returns (ListIpVrfsResponse);
   // ADR-0091 — list desired and rustbgpd-stamped managed EVPN
-  // netdevs joined with the latest read-only kernel link snapshot.
-  // This diagnose surface never creates, adopts, or deletes links.
+  // netdevs joined with the latest kernel link snapshot. This RPC is
+  // read-only status; managed-netdev lifecycle execution happens in
+  // the dataplane reconciler from committed config.
   rpc ListManagedNetdevs(ListManagedNetdevsRequest) returns (ListManagedNetdevsResponse);
   // Gate 9 — fetch one IP-VRF by operator-facing `name`.
   // Returns `NotFound` when the name is not in the resolved table.
