@@ -10391,10 +10391,15 @@ fn managed_netdevs_reject_missing_owner_duplicate_and_invalid_names() {
         "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan 100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
         valid_toml()
     ));
-    assert!(matches!(
-        invalid_name,
-        Err(ConfigError::InvalidManagedNetdev { .. })
-    ));
+    match invalid_name {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("must contain only ASCII"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected invalid VXLAN name rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -10515,6 +10520,114 @@ vlan = 0
         zero_vlan,
         Err(ConfigError::InvalidManagedNetdev { .. })
     ));
+}
+
+#[test]
+fn managed_netdevs_reject_invalid_vlan_upper_bindings_and_names() {
+    let candidate = |body: &str| parse(&format!("{}\n{body}", valid_toml()));
+
+    // vlan above the Linux upper bound: the range check fires before the
+    // binding check, so no matching [[evpn_instances]] is needed.
+    let vlan_too_high = candidate(
+        r#"[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.95"
+bridge = "br100"
+vlan = 4095
+"#,
+    );
+    match vlan_too_high {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(reason.contains("1..=4094"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected out-of-range VLAN upper rejection, got {other:?}"),
+    }
+
+    // An in-range vlan whose (bridge, vlan) pair does not match any configured
+    // EVI binding is rejected: a *wrong* binding, not merely a missing one.
+    let mismatched_binding = candidate(
+        r#"[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = 10
+
+[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100.20"
+bridge = "br100"
+vlan = 20
+"#,
+    );
+    match mismatched_binding {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("must match a configured [[evpn_instances]]"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected mismatched EVI binding rejection, got {other:?}"),
+    }
+
+    // Names dedup across all managed-netdev classes: a bridge and a VLAN upper
+    // sharing a name collide. Bridges validate before VLAN uppers, so the
+    // collision is detected on the VLAN upper insert.
+    let cross_class_duplicate_name = candidate(
+        r#"[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br100"
+bridge_vlan = 10
+
+[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.bridges]]
+name = "shared0"
+vlan_filtering = true
+
+[[managed_netdevs.vlan_uppers]]
+name = "shared0"
+bridge = "br100"
+vlan = 10
+"#,
+    );
+    match cross_class_duplicate_name {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(reason.contains("duplicate"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected cross-class duplicate name rejection, got {other:?}"),
+    }
+
+    // An invalid link name (a space is not an allowed ifname character) is
+    // rejected by validate_managed_link_name.
+    let invalid_name = candidate(
+        r#"[managed_netdevs]
+owner_token = "leaf-1"
+
+[[managed_netdevs.vlan_uppers]]
+name = "br100 10"
+bridge = "br100"
+vlan = 10
+"#,
+    );
+    match invalid_name {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("must contain only ASCII"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected invalid VLAN-upper name rejection, got {other:?}"),
+    }
 }
 
 #[test]

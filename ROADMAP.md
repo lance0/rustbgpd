@@ -373,8 +373,8 @@ has it, no broad performance sprints without profile evidence.
   fixed-VNI VXLAN + VLAN upper lifecycle landed:** `[managed_netdevs]` bridge,
   fixed-VNI VXLAN, and VLAN upper rows are validated as restart-required
   startup desired state, Linux link dumps parse rustbgpd altname stamps plus
-  named VXLAN / VLAN upper protected
-  attributes, and `ListManagedNetdevs` / `rbgp evpn managed-netdevs` report
+  named VXLAN / VLAN upper protected attributes, and `ListManagedNetdevs` /
+  `rbgp evpn managed-netdevs` report
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
   bridges, fixed-VNI VXLANs, VLAN uppers, VRFs, and L3VXLANs, adopts exact
