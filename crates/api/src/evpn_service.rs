@@ -891,6 +891,9 @@ fn managed_netdev_to_proto(row: &ManagedNetdevStatus) -> proto::ManagedNetdevSta
         class: match row.class {
             rustbgpd_evpn::ManagedNetdevClass::Bridge => proto::ManagedNetdevClass::Bridge as i32,
             rustbgpd_evpn::ManagedNetdevClass::Vxlan => proto::ManagedNetdevClass::Vxlan as i32,
+            rustbgpd_evpn::ManagedNetdevClass::SvdVxlan => {
+                proto::ManagedNetdevClass::SvdVxlan as i32
+            }
             rustbgpd_evpn::ManagedNetdevClass::Vrf => proto::ManagedNetdevClass::Vrf as i32,
             rustbgpd_evpn::ManagedNetdevClass::L3Vxlan => proto::ManagedNetdevClass::L3vxlan as i32,
             rustbgpd_evpn::ManagedNetdevClass::VlanUpper => {

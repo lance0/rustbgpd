@@ -764,6 +764,16 @@ pub enum DataplaneOpKind {
         /// Linux VXLAN link name.
         name: String,
     },
+    /// Create and stamp an ADR-0091 managed collect-metadata / SVD VXLAN.
+    CreateManagedSvdVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+    },
+    /// Remove a rustbgpd-owned ADR-0091 managed collect-metadata / SVD VXLAN.
+    RemoveManagedSvdVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+    },
     /// Create and stamp an ADR-0091 managed VRF.
     CreateManagedVrf {
         /// Linux VRF link name.

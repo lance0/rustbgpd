@@ -228,8 +228,10 @@ pub struct KernelVxlanLinkInfo {
     pub altnames: Vec<String>,
     /// Administrative link-up state.
     pub up: bool,
-    /// Fixed VNI when reported. `None` for malformed or collect-metadata
-    /// devices that do not carry one fixed VNI.
+    /// Fixed VNI when reported. `None` for malformed devices that do not
+    /// carry one fixed VNI; some kernels echo `Some(0)` for
+    /// collect-metadata devices, so use [`KernelVxlanLinkInfo::has_no_fixed_vni`]
+    /// when checking SVD suitability.
     pub vni: Option<u32>,
     /// Local source IP when reported.
     pub local_ip: Option<IpAddr>,
@@ -251,6 +253,17 @@ pub struct KernelVxlanLinkInfo {
     pub master: Option<String>,
     /// Link-layer address reported on the VXLAN device.
     pub mac: Option<MacAddress>,
+}
+
+impl KernelVxlanLinkInfo {
+    /// True when the link is usable as collect-metadata / SVD VXLAN rather
+    /// than carrying one fixed VNI. Some kernels echo `IFLA_VXLAN_ID = 0`
+    /// for external VXLAN devices, so SVD callers treat `None` and
+    /// collect-metadata `Some(0)` as the same no-fixed-VNI state.
+    #[must_use]
+    pub fn has_no_fixed_vni(&self) -> bool {
+        self.vni.is_none() || (self.collect_metadata && self.vni == Some(0))
+    }
 }
 
 /// One VRF link observed by name in the kernel link dump.

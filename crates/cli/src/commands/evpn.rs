@@ -659,6 +659,7 @@ fn managed_netdev_class_label(class: i32) -> &'static str {
     match ManagedNetdevClass::try_from(class) {
         Ok(ManagedNetdevClass::Bridge) => "bridge",
         Ok(ManagedNetdevClass::Vxlan) => "vxlan",
+        Ok(ManagedNetdevClass::SvdVxlan) => "svd-vxlan",
         Ok(ManagedNetdevClass::Vrf) => "vrf",
         Ok(ManagedNetdevClass::L3vxlan) => "l3vxlan",
         Ok(ManagedNetdevClass::VlanUpper) => "vlan-upper",

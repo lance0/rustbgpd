@@ -229,8 +229,14 @@ has it, no broad performance sprints without profile evidence.
   pairs, creates `ip link add link BR name BR.VLAN type vlan id VID` helpers,
   stamps and adopts exact links after restart, and reaps same-owner VLAN upper
   orphans before their parent bridge. `managed_vlan_upper` proves create /
-  adopt / reap / foreign-preserve on a real kernel. SVD / collect-metadata
-  VXLAN lifecycle is still deferred.
+  adopt / reap / foreign-preserve on a real kernel. **ADR-0091 SVD /
+  collect-metadata VXLAN lifecycle landed:** `[managed_netdevs]` accepts SVD
+  VXLAN rows, derives bridge-VLAN -> VNI tunnel mappings from configured
+  EVPN instances, creates `external` / `vnifilter` / `nolearning` VXLAN
+  devices, stamps and adopts exact links after restart, preserves foreign or
+  owned-unsafe drift, and reaps exact same-owner SVD VXLAN orphans.
+  `managed_svd_vxlan` proves create / adopt / reap / foreign-preserve on a
+  real kernel.
   The `svd_fdb_vni` netns proof
   covers Ready + add + same-MAC two-VNI isolation + scoped delete on a real
   kernel; sparse `NDA_VLAN` / `NDA_DST` echoes are handled by configured-VLAN
@@ -370,10 +376,11 @@ has it, no broad performance sprints without profile evidence.
   remains fail-closed unless a future FDB-correlation design proves freshness
   and ambiguity handling. True RFC VLAN-aware bundle / non-zero Ethernet Tag
   remains a separate ADR gate. **ADR-0091 managed-netdev bridge +
-  fixed-VNI VXLAN + VLAN upper lifecycle landed:** `[managed_netdevs]` bridge,
-  fixed-VNI VXLAN, and VLAN upper rows are validated as restart-required
-  startup desired state, Linux link dumps parse rustbgpd altname stamps plus
-  named VXLAN / VLAN upper protected attributes, and `ListManagedNetdevs` /
+  VXLAN + SVD + VLAN upper + VRF/L3VXLAN lifecycle landed:**
+  `[managed_netdevs]` bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN,
+  VLAN upper, VRF, and L3VXLAN rows are validated as restart-required startup
+  desired state, Linux link dumps parse rustbgpd altname stamps plus named
+  VXLAN / SVD / VLAN upper protected attributes, and `ListManagedNetdevs` /
   `rbgp evpn managed-netdevs` report
   `desired-absent`, `foreign-present`, `owned-unsafe`, `owned-safe`,
   `orphaned`, or `unknown`; the dataplane actor creates missing managed
@@ -381,9 +388,10 @@ has it, no broad performance sprints without profile evidence.
   stamped links after restart, and safely reaps same-owner orphans in
   dependency order.
   `managed_ready` proves that this rustbgpd-created bridge + VXLAN topology
-  drives the real EVPN L2 probe to Ready, and `managed_ip_vrf_ready` proves
-  that the rustbgpd-created VRF + L3VXLAN topology drives the real IP-VRF
-  readiness probe to Ready. A dedicated counter
+  drives the real EVPN L2 probe to Ready, `managed_svd_vxlan` proves SVD
+  create / adopt / reap / foreign-preserve on a real kernel, and
+  `managed_ip_vrf_ready` proves that the rustbgpd-created VRF + L3VXLAN
+  topology drives the real IP-VRF readiness probe to Ready. A dedicated counter
   for unattributable-VLAN local-MAC
   classifier misses is intentionally not a feature: those events fail closed as
   normal "not ours" outcomes, while downstream originator backpressure is

@@ -10291,7 +10291,7 @@ fn reload_matrix_documents_every_peer_group_field() {
 #[test]
 fn managed_netdevs_default_empty_and_resolve_stamps() {
     let config = parse(&format!(
-        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vlan_uppers]]\nname = \"br100.10\"\nbridge = \"br100\"\nvlan = 10\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
+        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.bridges]]\nname = \"br100\"\nvlan_filtering = true\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan200\"\nvni = 200\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.svd_vxlans]]\nname = \"vxlan-svd\"\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.vlan_uppers]]\nname = \"br100.10\"\nbridge = \"br100\"\nvlan = 10\n\n[[managed_netdevs.vrfs]]\nname = \"vrf100\"\ntable_id = 5000\n\n[[managed_netdevs.l3vxlans]]\nname = \"l3vxlan100\"\nvni = 5000\nlocal = \"10.0.0.1\"\nvrf = \"vrf100\"\nrouter_mac = \"02:00:00:00:00:01\"\n",
         valid_toml()
     ))
     .unwrap();
@@ -10302,16 +10302,31 @@ fn managed_netdevs_default_empty_and_resolve_stamps() {
     assert_eq!(bridge.name, "br100");
     assert!(bridge.vlan_filtering);
     assert_eq!(bridge.ownership_stamp, "rustbgpd:bridge:leaf-1:br100");
-    let vxlan = table.vxlan("vxlan100").unwrap();
-    assert_eq!(vxlan.name, "vxlan100");
-    assert_eq!(vxlan.spec.vni, 100);
+    let vxlan = table.vxlan("vxlan200").unwrap();
+    assert_eq!(vxlan.name, "vxlan200");
+    assert_eq!(vxlan.spec.vni, 200);
     assert_eq!(
         vxlan.spec.local_ip,
         "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
     );
     assert_eq!(vxlan.spec.dstport, 4789);
     assert_eq!(vxlan.spec.bridge, "br100");
-    assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan100");
+    assert_eq!(vxlan.ownership_stamp, "rustbgpd:vxlan:leaf-1:vxlan200");
+    let svd_vxlan = table.svd_vxlan("vxlan-svd").unwrap();
+    assert_eq!(svd_vxlan.name, "vxlan-svd");
+    assert_eq!(
+        svd_vxlan.spec.local_ip,
+        Some("10.0.0.1".parse::<std::net::IpAddr>().unwrap())
+    );
+    assert_eq!(svd_vxlan.spec.dstport, 4789);
+    assert_eq!(svd_vxlan.spec.bridge, "br100");
+    assert_eq!(svd_vxlan.spec.bindings.len(), 1);
+    assert_eq!(svd_vxlan.spec.bindings[0].bridge_vlan, 10);
+    assert_eq!(svd_vxlan.spec.bindings[0].vni, 100);
+    assert_eq!(
+        svd_vxlan.ownership_stamp,
+        "rustbgpd:svd-vxlan:leaf-1:vxlan-svd"
+    );
     let vlan_upper = table.vlan_upper("br100.10").unwrap();
     assert_eq!(vlan_upper.name, "br100.10");
     assert_eq!(vlan_upper.spec.bridge, "br100");
@@ -10682,6 +10697,23 @@ fn managed_netdevs_reject_duplicate_vxlan_vni() {
         valid_toml()
     ));
     assert!(distinct_vnis.is_ok(), "got {distinct_vnis:?}");
+}
+
+#[test]
+fn managed_netdevs_reject_fixed_vxlan_vni_colliding_with_svd_binding() {
+    let collision = parse(&format!(
+        "{}\n[[evpn_instances]]\nvni = 100\nrd = \"10.0.0.100:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.100\"\nbridge = \"br100\"\nbridge_vlan = 10\n\n[managed_netdevs]\nowner_token = \"leaf-1\"\n\n[[managed_netdevs.vxlans]]\nname = \"vxlan100\"\nvni = 100\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n\n[[managed_netdevs.svd_vxlans]]\nname = \"vxlan-svd\"\nlocal = \"10.0.0.1\"\nbridge = \"br100\"\n",
+        valid_toml()
+    ));
+    match collision {
+        Err(ConfigError::InvalidManagedNetdev { reason }) => {
+            assert!(
+                reason.contains("fixed-VNI") && reason.contains("SVD"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected fixed-vxlan/svd VNI collision rejection, got {other:?}"),
+    }
 }
 
 #[test]

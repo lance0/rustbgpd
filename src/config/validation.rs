@@ -7,7 +7,8 @@ use super::parse::{
 };
 use super::schema::{
     ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
-    ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig,
+    ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig,
+    ManagedVxlanNetdevConfig,
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
@@ -817,6 +818,7 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     let mut names = HashSet::new();
     validate_managed_bridges(&managed.bridges, owner_token, &mut names)?;
     validate_managed_vxlans(&managed.vxlans, owner_token, &mut names)?;
+    validate_managed_svd_vxlans(config, &managed.svd_vxlans, owner_token, &mut names)?;
     validate_managed_vrfs(&managed.vrfs, owner_token, &mut names)?;
     validate_managed_l3vxlans(&managed.l3vxlans, owner_token, &mut names)?;
     validate_managed_vlan_uppers(config, &managed.vlan_uppers, owner_token, &mut names)?;
@@ -838,10 +840,28 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
-    // An L3VXLAN `vni` (the L3VNI) must be distinct from every fixed-VNI
-    // `[[managed_netdevs.vxlans]]` `vni` (an L2VNI): L3VNI and L2VNI must not
-    // collide.
-    let vxlan_vnis: HashSet<u32> = managed.vxlans.iter().map(|v| v.vni).collect();
+    // Fixed-VNI and SVD VXLAN lifecycle rows both own L2VNI dataplane
+    // topology, so one VNI must not be managed by both paths. L3VXLAN `vni`
+    // (the L3VNI) must also stay distinct from every L2VNI.
+    let fixed_vxlan_vnis: HashSet<u32> = managed.vxlans.iter().map(|v| v.vni).collect();
+    let mut vxlan_vnis = fixed_vxlan_vnis.clone();
+    for svd in &managed.svd_vxlans {
+        for inst in config.evpn_instances.iter().filter(|inst| {
+            inst.bridge.as_deref() == Some(svd.bridge.as_str()) && inst.bridge_vlan.is_some()
+        }) {
+            if fixed_vxlan_vnis.contains(&inst.vni) {
+                return Err(ConfigError::InvalidManagedNetdev {
+                    reason: format!(
+                        "managed SVD VXLAN {:?}: derived VNI {} collides with a \
+                         [[managed_netdevs.vxlans]] vni; fixed-VNI and SVD lifecycle \
+                         rows must not manage the same L2VNI",
+                        svd.name, inst.vni
+                    ),
+                });
+            }
+            vxlan_vnis.insert(inst.vni);
+        }
+    }
     for l3vxlan in &managed.l3vxlans {
         if vxlan_vnis.contains(&l3vxlan.vni) {
             return Err(ConfigError::InvalidManagedNetdev {
@@ -969,6 +989,7 @@ fn validate_managed_ip_vrf_bindings(config: &Config) -> Result<(), ConfigError> 
 fn managed_netdevs_has_rows(managed: &ManagedNetdevsConfig) -> bool {
     !managed.bridges.is_empty()
         || !managed.vxlans.is_empty()
+        || !managed.svd_vxlans.is_empty()
         || !managed.vrfs.is_empty()
         || !managed.l3vxlans.is_empty()
         || !managed.vlan_uppers.is_empty()
@@ -1045,6 +1066,79 @@ fn validate_managed_vxlans(
             "managed VXLAN",
             &vxlan.name,
             &rustbgpd_evpn::vxlan_ownership_stamp(owner_token, &vxlan.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_managed_svd_vxlans(
+    config: &Config,
+    svd_vxlans: &[ManagedSvdVxlanNetdevConfig],
+    owner_token: &str,
+    names: &mut HashSet<String>,
+) -> Result<(), ConfigError> {
+    let mut seen_bridges = HashSet::new();
+    for svd in svd_vxlans {
+        validate_managed_link_name(&svd.name)?;
+        validate_managed_link_name(&svd.bridge)?;
+        if !names.insert(svd.name.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!("duplicate managed netdev name {:?}", svd.name),
+            });
+        }
+        if !seen_bridges.insert(svd.bridge.clone()) {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed SVD VXLAN {:?}: duplicate bridge {:?}",
+                    svd.name, svd.bridge
+                ),
+            });
+        }
+        if svd.dstport == 0 {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed SVD VXLAN {:?}: dstport must be in 1..=65535",
+                    svd.name
+                ),
+            });
+        }
+        if svd.learning {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed SVD VXLAN {:?}: learning=true is unsupported; use learning=false (`nolearning`)",
+                    svd.name
+                ),
+            });
+        }
+        let mut bindings = HashSet::new();
+        for inst in config
+            .evpn_instances
+            .iter()
+            .filter(|inst| inst.bridge.as_deref() == Some(svd.bridge.as_str()))
+        {
+            let Some(vlan) = inst.bridge_vlan else {
+                continue;
+            };
+            let vlan = u16::try_from(vlan).map_err(|_| ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed SVD VXLAN {:?}: bridge {:?} instance VNI {} has invalid bridge_vlan {}",
+                    svd.name, svd.bridge, inst.vni, vlan
+                ),
+            })?;
+            bindings.insert((vlan, inst.vni));
+        }
+        if bindings.is_empty() {
+            return Err(ConfigError::InvalidManagedNetdev {
+                reason: format!(
+                    "managed SVD VXLAN {:?}: bridge {:?} must match at least one [[evpn_instances]] row with bridge_vlan",
+                    svd.name, svd.bridge
+                ),
+            });
+        }
+        validate_managed_stamp_len(
+            "managed SVD VXLAN",
+            &svd.name,
+            &rustbgpd_evpn::svd_vxlan_ownership_stamp(owner_token, &svd.name),
         )?;
     }
     Ok(())

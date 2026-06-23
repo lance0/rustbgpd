@@ -34,8 +34,10 @@ use crate::l3_adoption::{
 };
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
-    KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo,
+    InstanceProbe, InstanceProbes, KernelBridgePortVlanInfo, KernelBridgeVlanFlags,
+    KernelBridgeVlanInfo, KernelBridgeVlanTunnelInfo, KernelFdbEntry, KernelFdbFlags,
+    KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo, KernelVrfLinkInfo,
+    KernelVxlanLinkInfo,
 };
 
 /// Test fake of [`Dataplane`].
@@ -541,6 +543,123 @@ impl InMemoryDataplane {
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed VXLAN {name} changed before remove"
+                    )));
+                }
+                None => {}
+            },
+            DataplaneOp::CreateManagedSvdVxlan {
+                name,
+                spec,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get_mut(name) {
+                Some(link) if managed_svd_vxlan_exact(link, name, spec, ownership_stamp) => {}
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed SVD VXLAN {name} changed during apply"
+                    )));
+                }
+                None => {
+                    if state.kernel.link_name_exists(name) {
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "managed SVD VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+                        )));
+                    }
+                    if !state.kernel.links.contains_key(&spec.bridge) {
+                        if state.kernel.link_name_exists(&spec.bridge) {
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "managed SVD VXLAN {name} cannot be created: desired bridge name {} is occupied by a non-bridge link",
+                                spec.bridge
+                            )));
+                        }
+                        return Err(crate::error::DataplaneError::Other(format!(
+                            "managed SVD VXLAN {name} cannot be created: desired bridge {} is absent",
+                            spec.bridge
+                        )));
+                    }
+                    let next_ifindex = state
+                        .kernel
+                        .links
+                        .values()
+                        .map(|link| link.ifindex)
+                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.kernel.insert_vxlan(KernelVxlanLinkInfo {
+                        ifindex: next_ifindex,
+                        name: name.clone(),
+                        altnames: vec![ownership_stamp.clone()],
+                        up: true,
+                        vni: None,
+                        local_ip: spec.local_ip,
+                        dstport: Some(spec.dstport),
+                        learning_disabled: Some(true),
+                        collect_metadata: true,
+                        vnifilter: true,
+                        bridge: Some(spec.bridge.clone()),
+                        master: Some(spec.bridge.clone()),
+                        mac: None,
+                    });
+                    if let Some(bridge) = state.kernel.links.get_mut(&spec.bridge) {
+                        for binding in &spec.bindings {
+                            if !bridge
+                                .vlans
+                                .iter()
+                                .any(|row| row.vid == binding.bridge_vlan)
+                            {
+                                bridge.vlans.push(KernelBridgeVlanInfo {
+                                    vid: binding.bridge_vlan,
+                                    flags: KernelBridgeVlanFlags::default(),
+                                });
+                            }
+                        }
+                        bridge.port_vlan_inventory.retain(|row| {
+                            !(row.ifindex == next_ifindex || row.name.as_deref() == Some(name))
+                        });
+                        bridge.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+                            ifindex: next_ifindex,
+                            name: Some(name.clone()),
+                            is_vxlan: true,
+                            vlans: spec
+                                .bindings
+                                .iter()
+                                .map(|binding| KernelBridgeVlanInfo {
+                                    vid: binding.bridge_vlan,
+                                    flags: KernelBridgeVlanFlags::default(),
+                                })
+                                .collect(),
+                            vlan_tunnels: spec
+                                .bindings
+                                .iter()
+                                .map(|binding| KernelBridgeVlanTunnelInfo {
+                                    tunnel_id: Some(binding.vni),
+                                    vid: Some(binding.bridge_vlan),
+                                    flags: KernelBridgeVlanFlags::default(),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            },
+            DataplaneOp::RemoveManagedSvdVxlan {
+                name,
+                ownership_stamp,
+            } => match state.kernel.vxlans.get(name) {
+                Some(link) if managed_svd_vxlan_has_exact_stamp(link, name, ownership_stamp) => {
+                    let ifindex = link.ifindex;
+                    let bridge = link.bridge.clone();
+                    state.kernel.remove_vxlan(name);
+                    if let Some(bridge) = bridge
+                        && let Some(bridge) = state.kernel.links.get_mut(&bridge)
+                    {
+                        bridge.port_vlan_inventory.retain(|row| {
+                            !(row.ifindex == ifindex || row.name.as_deref() == Some(name))
+                        });
+                    }
+                }
+                Some(_) => {
+                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                        "managed SVD VXLAN {name} changed before remove"
                     )));
                 }
                 None => {}
@@ -1625,6 +1744,35 @@ fn managed_vxlan_exact(
 }
 
 fn managed_vxlan_has_exact_stamp(
+    link: &KernelVxlanLinkInfo,
+    name: &str,
+    ownership_stamp: &str,
+) -> bool {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    stamps.len() == 1 && stamps[0].raw == ownership_stamp && stamps[0].name == name
+}
+
+fn managed_svd_vxlan_exact(
+    link: &KernelVxlanLinkInfo,
+    name: &str,
+    spec: &rustbgpd_evpn::ManagedSvdVxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> bool {
+    managed_svd_vxlan_has_exact_stamp(link, name, ownership_stamp)
+        && link.has_no_fixed_vni()
+        && link.local_ip == spec.local_ip
+        && link.dstport == Some(spec.dstport)
+        && link.learning_disabled == Some(true)
+        && link.collect_metadata
+        && link.vnifilter
+        && link.bridge.as_deref() == Some(spec.bridge.as_str())
+}
+
+fn managed_svd_vxlan_has_exact_stamp(
     link: &KernelVxlanLinkInfo,
     name: &str,
     ownership_stamp: &str,

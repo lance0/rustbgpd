@@ -19,14 +19,16 @@ pub const MAX_IFNAME_LEN: usize = 15;
 pub const MAX_OWNER_TOKEN_LEN: usize = 63;
 
 /// Managed netdev class. ADR-0091 ships lifecycle support class by class:
-/// bridge, fixed-VNI VXLAN, VRF, L3VXLAN, and VLAN-upper rows all have
-/// lifecycle support.
+/// bridge, fixed-VNI VXLAN, SVD VXLAN, VRF, L3VXLAN, and VLAN-upper rows all
+/// have lifecycle support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedNetdevClass {
     /// Linux bridge device.
     Bridge,
     /// Traditional Linux VXLAN device with one fixed VNI.
     Vxlan,
+    /// Linux collect-metadata / Single VXLAN Device (SVD) VXLAN device.
+    SvdVxlan,
     /// Linux VRF master device.
     Vrf,
     /// Linux L3 VXLAN device enslaved to a VRF.
@@ -42,6 +44,7 @@ impl ManagedNetdevClass {
         match self {
             Self::Bridge => "bridge",
             Self::Vxlan => "vxlan",
+            Self::SvdVxlan => "svd-vxlan",
             Self::Vrf => "vrf",
             Self::L3Vxlan => "l3vxlan",
             Self::VlanUpper => "vlan-upper",
@@ -81,6 +84,42 @@ pub struct ManagedVxlanNetdev {
     pub name: String,
     /// Desired protected attributes.
     pub spec: ManagedVxlanNetdevSpec,
+    /// Derived durable ownership stamp.
+    pub ownership_stamp: String,
+}
+
+/// One required VLAN/VNI binding for a managed SVD VXLAN device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManagedSvdVxlanBinding {
+    /// Linux bridge VLAN (`1..=4094`).
+    pub bridge_vlan: u16,
+    /// EVPN L2VNI carried by that bridge VLAN.
+    pub vni: u32,
+}
+
+/// Desired protected attributes for one managed collect-metadata / SVD VXLAN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSvdVxlanNetdevSpec {
+    /// Optional local source IP for encapsulated packets. If configured, it is a
+    /// protected attribute; `None` allows the common FRR-style SVD shape with no
+    /// local source pinned on the link.
+    pub local_ip: Option<IpAddr>,
+    /// UDP destination port.
+    pub dstport: u16,
+    /// VLAN-aware bridge this SVD VXLAN must be enslaved to.
+    pub bridge: String,
+    /// Required bridge VLAN -> VNI mappings derived from configured
+    /// `[[evpn_instances]]` rows on [`Self::bridge`].
+    pub bindings: Vec<ManagedSvdVxlanBinding>,
+}
+
+/// One configured collect-metadata / SVD VXLAN row in the managed-netdev table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSvdVxlanNetdev {
+    /// Linux VXLAN interface name.
+    pub name: String,
+    /// Desired protected attributes.
+    pub spec: ManagedSvdVxlanNetdevSpec,
     /// Derived durable ownership stamp.
     pub ownership_stamp: String,
 }
@@ -156,6 +195,7 @@ pub struct ManagedNetdevTable {
     owner_token: Option<String>,
     bridges: BTreeMap<String, ManagedBridgeNetdev>,
     vxlans: BTreeMap<String, ManagedVxlanNetdev>,
+    svd_vxlans: BTreeMap<String, ManagedSvdVxlanNetdev>,
     vrfs: BTreeMap<String, ManagedVrfNetdev>,
     l3vxlans: BTreeMap<String, ManagedL3VxlanNetdev>,
     vlan_uppers: BTreeMap<String, ManagedVlanUpperNetdev>,
@@ -201,6 +241,29 @@ impl ManagedNetdevTable {
         l3vxlans: BTreeMap<String, ManagedL3VxlanNetdevSpec>,
         vlan_uppers: BTreeMap<String, ManagedVlanUpperNetdevSpec>,
     ) -> Self {
+        Self::from_all_maps_with_svd(
+            owner_token,
+            bridges,
+            vxlans,
+            BTreeMap::new(),
+            vrfs,
+            l3vxlans,
+            vlan_uppers,
+        )
+    }
+
+    /// Build a table from validated, already-unique managed-netdev rows,
+    /// including collect-metadata / SVD VXLAN rows.
+    #[must_use]
+    pub fn from_all_maps_with_svd(
+        owner_token: String,
+        bridges: BTreeMap<String, bool>,
+        vxlans: BTreeMap<String, ManagedVxlanNetdevSpec>,
+        svd_vxlans: BTreeMap<String, ManagedSvdVxlanNetdevSpec>,
+        vrfs: BTreeMap<String, ManagedVrfNetdevSpec>,
+        l3vxlans: BTreeMap<String, ManagedL3VxlanNetdevSpec>,
+        vlan_uppers: BTreeMap<String, ManagedVlanUpperNetdevSpec>,
+    ) -> Self {
         let bridges = bridges
             .into_iter()
             .map(|(name, vlan_filtering)| {
@@ -222,6 +285,20 @@ impl ManagedNetdevTable {
                 (
                     name.clone(),
                     ManagedVxlanNetdev {
+                        name,
+                        spec,
+                        ownership_stamp,
+                    },
+                )
+            })
+            .collect();
+        let svd_vxlans = svd_vxlans
+            .into_iter()
+            .map(|(name, spec)| {
+                let ownership_stamp = svd_vxlan_ownership_stamp(&owner_token, &name);
+                (
+                    name.clone(),
+                    ManagedSvdVxlanNetdev {
                         name,
                         spec,
                         ownership_stamp,
@@ -275,6 +352,7 @@ impl ManagedNetdevTable {
             owner_token: Some(owner_token),
             bridges,
             vxlans,
+            svd_vxlans,
             vrfs,
             l3vxlans,
             vlan_uppers,
@@ -291,6 +369,7 @@ impl ManagedNetdevTable {
         self.owner_token.is_none()
             && self.bridges.is_empty()
             && self.vxlans.is_empty()
+            && self.svd_vxlans.is_empty()
             && self.vrfs.is_empty()
             && self.l3vxlans.is_empty()
             && self.vlan_uppers.is_empty()
@@ -322,6 +401,17 @@ impl ManagedNetdevTable {
     #[must_use]
     pub fn vxlan(&self, name: &str) -> Option<&ManagedVxlanNetdev> {
         self.vxlans.get(name)
+    }
+
+    /// Desired collect-metadata / SVD VXLAN rows in deterministic name order.
+    pub fn svd_vxlans(&self) -> impl Iterator<Item = &ManagedSvdVxlanNetdev> {
+        self.svd_vxlans.values()
+    }
+
+    /// Find one desired collect-metadata / SVD VXLAN by name.
+    #[must_use]
+    pub fn svd_vxlan(&self, name: &str) -> Option<&ManagedSvdVxlanNetdev> {
+        self.svd_vxlans.get(name)
     }
 
     /// Desired VRF rows in deterministic name order.
@@ -376,6 +466,15 @@ pub fn vxlan_ownership_stamp(owner_token: &str, vxlan_name: &str) -> String {
     )
 }
 
+/// Derived collect-metadata / SVD VXLAN ownership stamp.
+#[must_use]
+pub fn svd_vxlan_ownership_stamp(owner_token: &str, vxlan_name: &str) -> String {
+    format!(
+        "{MANAGED_NETDEV_STAMP_PREFIX}:{}:{owner_token}:{vxlan_name}",
+        ManagedNetdevClass::SvdVxlan.as_str()
+    )
+}
+
 /// Derived VRF ownership stamp.
 #[must_use]
 pub fn vrf_ownership_stamp(owner_token: &str, vrf_name: &str) -> String {
@@ -427,6 +526,7 @@ pub fn parse_ownership_stamp(raw: &str) -> Option<ManagedNetdevStamp> {
     let class = match parts.next()? {
         "bridge" => ManagedNetdevClass::Bridge,
         "vxlan" => ManagedNetdevClass::Vxlan,
+        "svd-vxlan" => ManagedNetdevClass::SvdVxlan,
         "vrf" => ManagedNetdevClass::Vrf,
         "l3vxlan" => ManagedNetdevClass::L3Vxlan,
         "vlan-upper" => ManagedNetdevClass::VlanUpper,
@@ -548,6 +648,16 @@ mod tests {
         assert_eq!(parsed.class, ManagedNetdevClass::Vxlan);
         assert_eq!(parsed.owner_token, "leaf-1");
         assert_eq!(parsed.name, "vxlan100");
+    }
+
+    #[test]
+    fn svd_vxlan_stamp_round_trips() {
+        let stamp = svd_vxlan_ownership_stamp("leaf-1", "vxlan-svd");
+        assert_eq!(stamp, "rustbgpd:svd-vxlan:leaf-1:vxlan-svd");
+        let parsed = parse_ownership_stamp(&stamp).unwrap();
+        assert_eq!(parsed.class, ManagedNetdevClass::SvdVxlan);
+        assert_eq!(parsed.owner_token, "leaf-1");
+        assert_eq!(parsed.name, "vxlan-svd");
     }
 
     #[test]

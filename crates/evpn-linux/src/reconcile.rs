@@ -41,8 +41,9 @@ use rustbgpd_evpn::{
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
     InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, ManagedBridgeNetdev,
     ManagedL3VxlanNetdev, ManagedNetdevClass, ManagedNetdevState, ManagedNetdevStatus,
-    ManagedNetdevTable, ManagedVlanUpperNetdev, ManagedVrfNetdev, ManagedVxlanNetdev,
-    RemoteMacTable, SingleActiveCounters, parse_ownership_stamp,
+    ManagedNetdevTable, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdev, ManagedVlanUpperNetdev,
+    ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable, SingleActiveCounters,
+    parse_ownership_stamp,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -62,6 +63,7 @@ use crate::l3_adoption::{AdoptedL3Route, AdoptedL3VxlanFdb, AdoptedL3VxlanFdbTar
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelLinkInfo, KernelSnapshot, KernelVlanUpperLinkInfo,
     KernelVrfLinkInfo, KernelVxlanLinkInfo, OwnedEntry, OwnedEntryKind, OwnedSet,
+    vlan_rows_contain,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1061,6 +1063,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     | DataplaneOp::RemoveManagedBridge { .. }
                     | DataplaneOp::CreateManagedVxlan { .. }
                     | DataplaneOp::RemoveManagedVxlan { .. }
+                    | DataplaneOp::CreateManagedSvdVxlan { .. }
+                    | DataplaneOp::RemoveManagedSvdVxlan { .. }
                     | DataplaneOp::CreateManagedVrf { .. }
                     | DataplaneOp::RemoveManagedVrf { .. }
                     | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -1672,6 +1676,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::CreateManagedVxlan { .. }
                 | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedSvdVxlan { .. }
+                | DataplaneOp::RemoveManagedSvdVxlan { .. }
                 | DataplaneOp::CreateManagedVrf { .. }
                 | DataplaneOp::RemoveManagedVrf { .. }
                 | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -1714,6 +1720,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 | DataplaneOp::RemoveManagedBridge { .. }
                 | DataplaneOp::CreateManagedVxlan { .. }
                 | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedSvdVxlan { .. }
+                | DataplaneOp::RemoveManagedSvdVxlan { .. }
                 | DataplaneOp::CreateManagedVrf { .. }
                 | DataplaneOp::RemoveManagedVrf { .. }
                 | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -1773,6 +1781,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 | DataplaneOp::RemoveManagedBridge { .. }
                                 | DataplaneOp::CreateManagedVxlan { .. }
                                 | DataplaneOp::RemoveManagedVxlan { .. }
+                                | DataplaneOp::CreateManagedSvdVxlan { .. }
+                                | DataplaneOp::RemoveManagedSvdVxlan { .. }
                                 | DataplaneOp::CreateManagedVrf { .. }
                                 | DataplaneOp::RemoveManagedVrf { .. }
                                 | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -1831,6 +1841,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 | DataplaneOp::RemoveManagedBridge { .. }
                                 | DataplaneOp::CreateManagedVxlan { .. }
                                 | DataplaneOp::RemoveManagedVxlan { .. }
+                                | DataplaneOp::CreateManagedSvdVxlan { .. }
+                                | DataplaneOp::RemoveManagedSvdVxlan { .. }
                                 | DataplaneOp::CreateManagedVrf { .. }
                                 | DataplaneOp::RemoveManagedVrf { .. }
                                 | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -3225,6 +3237,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             | DataplaneOp::RemoveManagedBridge { .. }
             | DataplaneOp::CreateManagedVxlan { .. }
             | DataplaneOp::RemoveManagedVxlan { .. }
+            | DataplaneOp::CreateManagedSvdVxlan { .. }
+            | DataplaneOp::RemoveManagedSvdVxlan { .. }
             | DataplaneOp::CreateManagedVrf { .. }
             | DataplaneOp::RemoveManagedVrf { .. }
             | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -3610,6 +3624,7 @@ fn build_managed_netdev_status(
 struct DesiredManagedNetdevNames {
     bridges: BTreeSet<String>,
     vxlans: BTreeSet<String>,
+    svd_vxlans: BTreeSet<String>,
     vrfs: BTreeSet<String>,
     l3vxlans: BTreeSet<String>,
     vlan_uppers: BTreeSet<String>,
@@ -3637,6 +3652,16 @@ fn desired_managed_netdev_statuses(
             snapshot.and_then(|kernel| kernel.vxlans.get(&vxlan.name)),
             snapshot.is_some(),
             snapshot.is_some_and(|kernel| kernel.link_name_exists(&vxlan.name)),
+        ));
+    }
+    for svd_vxlan in managed.svd_vxlans() {
+        desired.svd_vxlans.insert(svd_vxlan.name.clone());
+        rows.push(desired_managed_svd_vxlan_status(
+            svd_vxlan,
+            snapshot.and_then(|kernel| kernel.vxlans.get(&svd_vxlan.name)),
+            snapshot.and_then(|kernel| kernel.links.get(&svd_vxlan.spec.bridge)),
+            snapshot.is_some(),
+            snapshot.is_some_and(|kernel| kernel.link_name_exists(&svd_vxlan.name)),
         ));
     }
     for vrf in managed.vrfs() {
@@ -3745,10 +3770,10 @@ fn push_unconfigured_vxlan_status(
     desired: &DesiredManagedNetdevNames,
     rows: &mut Vec<ManagedNetdevStatus>,
 ) {
-    // A vxlan-kind link legitimately hosts either the Vxlan or the L3Vxlan
-    // class, so both class-matching emits are kept. Track whether either fired
+    // A vxlan-kind link legitimately hosts fixed-VNI, SVD, or L3VXLAN
+    // classes, so class-matching emits are kept. Track whether any fired
     // so the all-class fallback below never double-emits on a link that already
-    // produced a vxlan or l3vxlan row.
+    // produced a class row.
     let mut emitted = false;
     if !desired.vxlans.contains(name) {
         let stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::Vxlan);
@@ -3774,13 +3799,27 @@ fn push_unconfigured_vxlan_status(
             emitted = true;
         }
     }
+    if !desired.svd_vxlans.contains(name) {
+        let stamps = rustbgpd_stamps_for_class(&link.altnames, ManagedNetdevClass::SvdVxlan);
+        if !stamps.is_empty() {
+            rows.push(unconfigured_managed_svd_vxlan_status(
+                name,
+                link,
+                stamps,
+                managed.owner_token(),
+            ));
+            emitted = true;
+        }
+    }
     // ADR-0091 Decision 6: a vxlan-kind link carrying only a wrong-class
     // rustbgpd stamp (e.g. a `rustbgpd:bridge:...` / `rustbgpd:vrf:...`) must
     // still surface. Emit exactly ONE fallback row (reported as class Vxlan,
     // since this is a vxlan-kind link), never two. Only fire when the link is
-    // unconfigured for both classes: a desired vxlan/l3vxlan already has its row
-    // from the desired-status pass, so skipping it here avoids a duplicate.
-    let unconfigured = !desired.vxlans.contains(name) && !desired.l3vxlans.contains(name);
+    // unconfigured for every VXLAN-kind class: a desired row already has its
+    // row from the desired-status pass, so skipping it here avoids a duplicate.
+    let unconfigured = !desired.vxlans.contains(name)
+        && !desired.svd_vxlans.contains(name)
+        && !desired.l3vxlans.contains(name);
     if unconfigured && !emitted {
         let all = rustbgpd_stamps(&link.altnames);
         if !all.is_empty() {
@@ -3832,6 +3871,18 @@ fn compute_managed_netdev_create_ops(
                 name: vxlan.name.clone(),
                 spec: vxlan.spec.clone(),
                 ownership_stamp: vxlan.ownership_stamp.clone(),
+            });
+        }
+    }
+    for svd_vxlan in managed.svd_vxlans() {
+        desired.svd_vxlans.insert(svd_vxlan.name.clone());
+        if !snapshot.vxlans.contains_key(&svd_vxlan.name)
+            && !snapshot.link_name_exists(&svd_vxlan.name)
+        {
+            ops.push(DataplaneOp::CreateManagedSvdVxlan {
+                name: svd_vxlan.name.clone(),
+                spec: svd_vxlan.spec.clone(),
+                ownership_stamp: svd_vxlan.ownership_stamp.clone(),
             });
         }
     }
@@ -3906,6 +3957,17 @@ fn compute_managed_netdev_orphan_reap_ops(
         }
         if let Some(ownership_stamp) = safe_orphan_vxlan_stamp_for_owner(link, owner_token) {
             ops.push(DataplaneOp::RemoveManagedVxlan {
+                name: name.clone(),
+                ownership_stamp,
+            });
+        }
+    }
+    for (name, link) in &snapshot.vxlans {
+        if desired.svd_vxlans.contains(name) {
+            continue;
+        }
+        if let Some(ownership_stamp) = safe_orphan_svd_vxlan_stamp_for_owner(link, owner_token) {
+            ops.push(DataplaneOp::RemoveManagedSvdVxlan {
                 name: name.clone(),
                 ownership_stamp,
             });
@@ -4330,6 +4392,284 @@ fn unconfigured_managed_vxlan_status(
         observed_up: None,
         observed_master: None,
         observed_router_mac: None,
+        observed_stamps,
+    }
+}
+
+fn desired_managed_svd_vxlan_status(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    link: Option<&KernelVxlanLinkInfo>,
+    bridge: Option<&KernelLinkInfo>,
+    snapshot_available: bool,
+    name_occupied: bool,
+) -> ManagedNetdevStatus {
+    let Some(link) = link else {
+        let (state, reason) = if snapshot_available {
+            if name_occupied {
+                (
+                    ManagedNetdevState::ForeignPresent,
+                    "desired SVD VXLAN name is occupied by a non-VXLAN link".to_string(),
+                )
+            } else {
+                (
+                    ManagedNetdevState::DesiredAbsent,
+                    "SVD VXLAN is not present".to_string(),
+                )
+            }
+        } else {
+            (
+                ManagedNetdevState::Unknown,
+                "kernel snapshot unavailable".to_string(),
+            )
+        };
+        return ManagedNetdevStatus {
+            class: ManagedNetdevClass::SvdVxlan,
+            name: svd_vxlan.name.clone(),
+            desired: true,
+            ownership_stamp: Some(svd_vxlan.ownership_stamp.clone()),
+            state,
+            reason,
+            ifindex: None,
+            observed_vlan_filtering: None,
+            observed_vni: None,
+            observed_vlan: None,
+            observed_local_ip: None,
+            observed_dstport: None,
+            observed_learning_disabled: None,
+            observed_collect_metadata: None,
+            observed_vnifilter: None,
+            observed_bridge: None,
+            observed_table_id: None,
+            observed_up: None,
+            observed_master: None,
+            observed_router_mac: None,
+            observed_stamps: Vec::new(),
+        };
+    };
+
+    let observed_stamps = rustbgpd_stamps(&link.altnames);
+    let (state, reason) =
+        classify_desired_managed_svd_vxlan(svd_vxlan, link, bridge, &observed_stamps);
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::SvdVxlan,
+        name: svd_vxlan.name.clone(),
+        desired: true,
+        ownership_stamp: Some(svd_vxlan.ownership_stamp.clone()),
+        state,
+        reason,
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: None,
+        observed_vni: link.vni,
+        observed_vlan: None,
+        observed_local_ip: link.local_ip,
+        observed_dstport: link.dstport,
+        observed_learning_disabled: link.learning_disabled,
+        observed_collect_metadata: Some(link.collect_metadata),
+        observed_vnifilter: Some(link.vnifilter),
+        observed_bridge: link.bridge.clone(),
+        observed_table_id: None,
+        observed_up: Some(link.up),
+        observed_master: link.master.clone(),
+        observed_router_mac: link.mac,
+        observed_stamps,
+    }
+}
+
+fn classify_desired_managed_svd_vxlan(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    link: &KernelVxlanLinkInfo,
+    bridge: Option<&KernelLinkInfo>,
+    observed_stamps: &[String],
+) -> (ManagedNetdevState, String) {
+    if let Some(result) = classify_svd_stamp_state(svd_vxlan, observed_stamps) {
+        return result;
+    }
+    if let Some(result) = classify_svd_link_attrs(svd_vxlan, link) {
+        return result;
+    }
+    let Some(bridge) = bridge else {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "bridge {} is missing or not observable",
+                svd_vxlan.spec.bridge
+            ),
+        );
+    };
+    if !svd_vlan_bindings_present(bridge, link.ifindex, &link.name, &svd_vxlan.spec.bindings) {
+        return (
+            ManagedNetdevState::OwnedUnsafe,
+            "bridge VLAN/tunnel mappings do not match desired SVD bindings".to_string(),
+        );
+    }
+    (ManagedNetdevState::OwnedSafe, String::new())
+}
+
+fn classify_svd_stamp_state(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    observed_stamps: &[String],
+) -> Option<(ManagedNetdevState, String)> {
+    let has_expected_stamp = observed_stamps
+        .iter()
+        .any(|stamp| stamp == &svd_vxlan.ownership_stamp);
+    if !has_expected_stamp {
+        return Some(if observed_stamps.is_empty() {
+            (
+                ManagedNetdevState::ForeignPresent,
+                "SVD VXLAN exists without the expected rustbgpd ownership stamp".to_string(),
+            )
+        } else {
+            (
+                ManagedNetdevState::OwnedUnsafe,
+                format!(
+                    "SVD VXLAN carries rustbgpd ownership stamp(s) but not expected stamp {:?}",
+                    svd_vxlan.ownership_stamp
+                ),
+            )
+        });
+    }
+    (observed_stamps.len() != 1).then(|| {
+        (
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "SVD VXLAN carries expected ownership stamp plus additional rustbgpd stamp(s): {observed_stamps:?}"
+            ),
+        )
+    })
+}
+
+fn classify_svd_link_attrs(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    link: &KernelVxlanLinkInfo,
+) -> Option<(ManagedNetdevState, String)> {
+    if !link.has_no_fixed_vni() {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "fixed VNI mismatch: observed {:?}, desired collect-metadata/external",
+                link.vni
+            ),
+        ));
+    }
+    if link.local_ip != svd_vxlan.spec.local_ip {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "local IP mismatch: observed {:?}, desired {:?}",
+                link.local_ip, svd_vxlan.spec.local_ip
+            ),
+        ));
+    }
+    if link.dstport != Some(svd_vxlan.spec.dstport) {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "dstport mismatch: observed {:?}, desired {}",
+                link.dstport, svd_vxlan.spec.dstport
+            ),
+        ));
+    }
+    if link.learning_disabled != Some(true) {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "learning mismatch: observed {:?}, desired nolearning",
+                link.learning_disabled
+            ),
+        ));
+    }
+    if !link.collect_metadata {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            "collect-metadata/external mode is disabled; SVD lifecycle requires it".to_string(),
+        ));
+    }
+    if !link.vnifilter {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            "vnifilter is disabled; SVD lifecycle requires it".to_string(),
+        ));
+    }
+    if link.bridge.as_deref() != Some(svd_vxlan.spec.bridge.as_str()) {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            format!(
+                "bridge attachment mismatch: observed {:?}, desired {}",
+                link.bridge, svd_vxlan.spec.bridge
+            ),
+        ));
+    }
+    if !link.up {
+        return Some((
+            ManagedNetdevState::OwnedUnsafe,
+            "SVD VXLAN is administratively down; managed lifecycle requires UP".to_string(),
+        ));
+    }
+    None
+}
+
+fn svd_vlan_bindings_present(
+    bridge: &KernelLinkInfo,
+    vxlan_ifindex: u32,
+    vxlan_name: &str,
+    bindings: &[ManagedSvdVxlanBinding],
+) -> bool {
+    let Some(port) = bridge.port_vlan_inventory.iter().find(|port| {
+        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
+    }) else {
+        return false;
+    };
+    bindings.iter().all(|binding| {
+        vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
+            && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
+            && port.vlan_tunnels.iter().any(|row| {
+                row.vid == Some(binding.bridge_vlan) && row.tunnel_id == Some(binding.vni)
+            })
+    })
+}
+
+fn unconfigured_managed_svd_vxlan_status(
+    name: &str,
+    link: &KernelVxlanLinkInfo,
+    observed_stamps: Vec<String>,
+    owner_token: Option<&str>,
+) -> ManagedNetdevStatus {
+    let safe_orphan = owner_token
+        .is_none_or(|owner| safe_orphan_svd_vxlan_stamp_for_owner(link, owner).is_some());
+    let (state, reason) = if safe_orphan {
+        (
+            ManagedNetdevState::Orphaned,
+            "rustbgpd-stamped SVD VXLAN is not configured".to_string(),
+        )
+    } else {
+        (
+            ManagedNetdevState::OwnedUnsafe,
+            "rustbgpd-stamped SVD VXLAN is not configured and not a safe single-owner orphan \
+             (wrong class, multiple stamps, stamp/name mismatch, or protected mode drift)"
+                .to_string(),
+        )
+    };
+    ManagedNetdevStatus {
+        class: ManagedNetdevClass::SvdVxlan,
+        name: name.to_string(),
+        desired: false,
+        ownership_stamp: None,
+        state,
+        reason,
+        ifindex: Some(link.ifindex),
+        observed_vlan_filtering: None,
+        observed_vni: link.vni,
+        observed_vlan: None,
+        observed_local_ip: link.local_ip,
+        observed_dstport: link.dstport,
+        observed_learning_disabled: link.learning_disabled,
+        observed_collect_metadata: Some(link.collect_metadata),
+        observed_vnifilter: Some(link.vnifilter),
+        observed_bridge: link.bridge.clone(),
+        observed_table_id: None,
+        observed_up: Some(link.up),
+        observed_master: link.master.clone(),
+        observed_router_mac: link.mac,
         observed_stamps,
     }
 }
@@ -4989,6 +5329,36 @@ fn safe_orphan_vxlan_stamp_for_owner(
     // owned-unsafe for desired links. Plain VNI/local/dstport/learning/bridge
     // drift still reaps: a de-configured own-stamped plain VXLAN is reapable.
     if link.collect_metadata || link.vnifilter {
+        return None;
+    }
+    Some(stamp.raw.clone())
+}
+
+fn safe_orphan_svd_vxlan_stamp_for_owner(
+    link: &KernelVxlanLinkInfo,
+    owner_token: &str,
+) -> Option<String> {
+    let stamps: Vec<_> = link
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() != 1 {
+        return None;
+    }
+    let stamp = &stamps[0];
+    if stamp.class != ManagedNetdevClass::SvdVxlan
+        || stamp.owner_token != owner_token
+        || stamp.name != link.name
+    {
+        return None;
+    }
+    if !link.has_no_fixed_vni()
+        || !link.collect_metadata
+        || !link.vnifilter
+        || link.learning_disabled != Some(true)
+        || link.bridge.is_none()
+    {
         return None;
     }
     Some(stamp.raw.clone())
@@ -5970,12 +6340,14 @@ fn managed_op_key(op: &DataplaneOp) -> Option<ManagedNetdevOpKey> {
         DataplaneOp::RemoveManagedBridge { name, .. } => Some(ManagedNetdevOpKey::new(2, name)),
         DataplaneOp::CreateManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(3, name)),
         DataplaneOp::RemoveManagedVxlan { name, .. } => Some(ManagedNetdevOpKey::new(4, name)),
-        DataplaneOp::CreateManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(5, name)),
-        DataplaneOp::RemoveManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(6, name)),
-        DataplaneOp::CreateManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(7, name)),
-        DataplaneOp::RemoveManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(8, name)),
-        DataplaneOp::CreateManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(9, name)),
-        DataplaneOp::RemoveManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(10, name)),
+        DataplaneOp::CreateManagedSvdVxlan { name, .. } => Some(ManagedNetdevOpKey::new(5, name)),
+        DataplaneOp::RemoveManagedSvdVxlan { name, .. } => Some(ManagedNetdevOpKey::new(6, name)),
+        DataplaneOp::CreateManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(7, name)),
+        DataplaneOp::RemoveManagedVrf { name, .. } => Some(ManagedNetdevOpKey::new(8, name)),
+        DataplaneOp::CreateManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(9, name)),
+        DataplaneOp::RemoveManagedL3Vxlan { name, .. } => Some(ManagedNetdevOpKey::new(10, name)),
+        DataplaneOp::CreateManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(11, name)),
+        DataplaneOp::RemoveManagedVlanUpper { name, .. } => Some(ManagedNetdevOpKey::new(12, name)),
         _ => None,
     }
 }
@@ -6131,6 +6503,8 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -6190,6 +6564,8 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -6238,6 +6614,12 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         }
         DataplaneOp::RemoveManagedVxlan { name, .. } => {
             DataplaneOpKind::RemoveManagedVxlan { name: name.clone() }
+        }
+        DataplaneOp::CreateManagedSvdVxlan { name, .. } => {
+            DataplaneOpKind::CreateManagedSvdVxlan { name: name.clone() }
+        }
+        DataplaneOp::RemoveManagedSvdVxlan { name, .. } => {
+            DataplaneOpKind::RemoveManagedSvdVxlan { name: name.clone() }
         }
         DataplaneOp::CreateManagedVrf { name, .. } => {
             DataplaneOpKind::CreateManagedVrf { name: name.clone() }

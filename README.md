@@ -359,13 +359,11 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   paths against GoBGP route sources.
   VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
   topologies, including SVD / collect-metadata VXLAN; opt-in bridge,
-  fixed-VNI VXLAN, VLAN upper, VRF, and fixed-VNI L3VXLAN netdev lifecycle
-  (create/adopt/reap) now ship under
+  fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and
+  fixed-VNI L3VXLAN netdev lifecycle (create/adopt/reap) now ship under
   [ADR-0091](docs/adr/0091-evpn-managed-netdev-creation.md)
   (`[managed_netdevs]`), with derived altname ownership stamps and
-  `ListManagedNetdevs` status. SVD / collect-metadata
-  VXLAN lifecycle creation remains operator-provisioned per
-  [ADR-0088](docs/adr/0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md);
+  `ListManagedNetdevs` status.
   [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
   scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain
   service with Ethernet Tag ID `0`.
@@ -414,7 +412,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, rustbgpd-managed SVD / collect-metadata VXLAN lifecycle creation (managed bridge, fixed-VNI VXLAN, VLAN upper, VRF, and fixed-VNI L3VXLAN lifecycle now ship), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
