@@ -1042,6 +1042,8 @@ pub fn record_l3_success(
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }

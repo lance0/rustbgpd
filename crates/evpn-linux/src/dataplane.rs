@@ -183,6 +183,28 @@ pub enum DataplaneOp {
         /// Durable rustbgpd ownership stamp expected on the VXLAN.
         ownership_stamp: String,
     },
+    /// Create a configured ADR-0091 managed collect-metadata / SVD VXLAN and
+    /// stamp it with its durable `IFLA_ALT_IFNAME` ownership marker.
+    /// Implementations must treat an already-present exact stamp as idempotent
+    /// success only after a fresh link dump confirms the link is the expected
+    /// SVD VXLAN with matching protected attributes and derived VNI mappings.
+    CreateManagedSvdVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+        /// Desired protected SVD VXLAN attributes and derived VLAN/VNI bindings.
+        spec: rustbgpd_evpn::ManagedSvdVxlanNetdevSpec,
+        /// Durable rustbgpd ownership stamp for this SVD VXLAN.
+        ownership_stamp: String,
+    },
+    /// Delete a rustbgpd-stamped collect-metadata / SVD VXLAN that is no longer
+    /// configured. Implementations must first confirm the live link still
+    /// carries the exact expected ownership stamp and is an SVD VXLAN.
+    RemoveManagedSvdVxlan {
+        /// Linux VXLAN link name.
+        name: String,
+        /// Durable rustbgpd ownership stamp expected on the SVD VXLAN.
+        ownership_stamp: String,
+    },
     /// Create a configured ADR-0091 managed VRF and stamp it with
     /// its durable `IFLA_ALT_IFNAME` ownership marker.
     /// Implementations must treat an already-present exact stamp as

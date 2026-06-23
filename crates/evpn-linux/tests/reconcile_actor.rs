@@ -430,6 +430,73 @@ async fn managed_vxlan_lifecycle_creates_and_reports_owned_safe() {
 }
 
 #[tokio::test]
+async fn managed_svd_vxlan_lifecycle_creates_and_reports_owned_safe() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_links(BTreeMap::from([(
+        "br100".to_string(),
+        managed_link("br100", 10, true, Vec::new()),
+    )]));
+    let table = ManagedNetdevTable::from_all_maps_with_svd(
+        "leaf-1".to_string(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::from([(
+            "vxlan-svd".to_string(),
+            rustbgpd_evpn::ManagedSvdVxlanNetdevSpec {
+                local_ip: Some(ipa("10.0.0.1")),
+                dstport: 4789,
+                bridge: "br100".to_string(),
+                bindings: vec![
+                    rustbgpd_evpn::ManagedSvdVxlanBinding {
+                        bridge_vlan: 10,
+                        vni: 100,
+                    },
+                    rustbgpd_evpn::ManagedSvdVxlanBinding {
+                        bridge_vlan: 20,
+                        vni: 200,
+                    },
+                ],
+            },
+        )]),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    );
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let report = wait_for_generation(&mut h, 1).await;
+    assert_eq!(report.applied.len(), 1);
+    assert!(matches!(
+        report.applied[0].kind,
+        rustbgpd_evpn::DataplaneOpKind::CreateManagedSvdVxlan { ref name }
+            if name == "vxlan-svd"
+    ));
+    assert!(report.failed.is_empty());
+    assert_eq!(report.managed_netdevs.len(), 1);
+    assert_eq!(
+        report.managed_netdevs[0].state,
+        ManagedNetdevState::OwnedSafe
+    );
+
+    let snapshot = h.handle.kernel_snapshot();
+    let link = snapshot
+        .vxlans
+        .get("vxlan-svd")
+        .expect("created managed SVD VXLAN");
+    assert_eq!(link.vni, None);
+    assert_eq!(link.local_ip, Some(ipa("10.0.0.1")));
+    assert_eq!(link.dstport, Some(4789));
+    assert_eq!(link.learning_disabled, Some(true));
+    assert!(link.collect_metadata);
+    assert!(link.vnifilter);
+    assert_eq!(link.bridge.as_deref(), Some("br100"));
+    assert_eq!(link.altnames, vec!["rustbgpd:svd-vxlan:leaf-1:vxlan-svd"]);
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn managed_vxlan_lifecycle_reaps_only_safe_owner_orphans() {
     let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
     h.handle.set_vxlans(BTreeMap::from([

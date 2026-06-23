@@ -7,17 +7,26 @@
 
 use std::net::IpAddr;
 
-use rtnetlink::{Handle, LinkBridge, LinkUnspec, LinkVlan, LinkVrf, LinkVxlan};
+use netlink_packet_route::link::{
+    AfSpecBridge, BridgeVlanInfoFlags, BridgeVlanTunnelInfo, InfoVxlan,
+};
+use rtnetlink::{
+    Handle, LinkBridge, LinkBridgePort, LinkBridgeVlan, LinkMessageBuilder, LinkUnspec, LinkVlan,
+    LinkVrf, LinkVxlan,
+};
 use rustbgpd_evpn::{
-    ManagedL3VxlanNetdevSpec, ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec,
-    ManagedVxlanNetdevSpec, parse_ownership_stamp,
+    ManagedL3VxlanNetdevSpec, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdevSpec,
+    ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec,
+    parse_ownership_stamp,
 };
 
 use crate::dataplane::DataplaneOp;
 use crate::error::DataplaneError;
 
 use super::links::{self, BridgeLink};
-use crate::snapshot::{KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo};
+use crate::snapshot::{
+    KernelVlanUpperLinkInfo, KernelVrfLinkInfo, KernelVxlanLinkInfo, vlan_rows_contain,
+};
 
 const ERRNO_EEXIST: i32 = libc::EEXIST;
 const ERRNO_ENODEV: i32 = libc::ENODEV;
@@ -46,6 +55,15 @@ pub(super) async fn apply_managed_netdev_op(
             name,
             ownership_stamp,
         } => Some(remove_vxlan(handle, name, ownership_stamp).await),
+        DataplaneOp::CreateManagedSvdVxlan {
+            name,
+            spec,
+            ownership_stamp,
+        } => Some(create_svd_vxlan(handle, name, spec, ownership_stamp).await),
+        DataplaneOp::RemoveManagedSvdVxlan {
+            name,
+            ownership_stamp,
+        } => Some(remove_svd_vxlan(handle, name, ownership_stamp).await),
         DataplaneOp::CreateManagedVrf {
             name,
             spec,
@@ -271,6 +289,230 @@ async fn remove_vxlan(
         Ok(()) => Ok(()),
         Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
         Err(err) => Err(classify_link_apply_error(&err, "managed VXLAN remove")),
+    }
+}
+
+async fn create_svd_vxlan(
+    handle: &Handle,
+    name: &str,
+    spec: &ManagedSvdVxlanNetdevSpec,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let mut fresh = fresh_vxlan_state(handle, name).await?;
+    if let Some(vxlan) = fresh.vxlan.as_ref() {
+        return ensure_svd_vxlan_converged(
+            handle,
+            name,
+            vxlan,
+            spec,
+            ownership_stamp,
+            &fresh.bridges,
+        )
+        .await;
+    }
+    if fresh.name_exists {
+        return Err(foreign_svd_vxlan_collision(name));
+    }
+
+    let bridge_ifindex = fresh
+        .bridges
+        .get(&spec.bridge)
+        .map(|bridge| bridge.ifindex)
+        .ok_or_else(|| {
+            missing_svd_vxlan_bridge(
+                name,
+                &spec.bridge,
+                fresh.all_link_names.contains(&spec.bridge),
+            )
+        })?;
+
+    let mut builder = LinkMessageBuilder::<LinkVxlan>::new(name)
+        .port(spec.dstport)
+        .learning(false)
+        .collect_metadata(true)
+        .append_info_data(InfoVxlan::Vnifilter(true))
+        .controller(bridge_ifindex)
+        .up();
+    builder = match spec.local_ip {
+        Some(IpAddr::V4(addr)) => builder.local(addr),
+        Some(IpAddr::V6(addr)) => builder.local6(addr),
+        None => builder,
+    };
+
+    let create_result = handle.link().add(builder.build()).execute().await;
+    let created = match create_result {
+        Ok(()) => true,
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => false,
+        Err(err) => {
+            return Err(classify_link_apply_error(&err, "managed SVD VXLAN create"));
+        }
+    };
+
+    fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return if fresh.name_exists {
+            Err(foreign_svd_vxlan_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed SVD VXLAN {name} vanished after create"
+            )))
+        };
+    };
+
+    if !created {
+        return ensure_svd_vxlan_converged(
+            handle,
+            name,
+            vxlan,
+            spec,
+            ownership_stamp,
+            &fresh.bridges,
+        )
+        .await;
+    }
+    if !vxlan.altnames.iter().any(|alt| alt == ownership_stamp) {
+        let stamp_result = handle
+            .link()
+            .property_add(vxlan.ifindex)
+            .alt_ifname(&[ownership_stamp])
+            .execute()
+            .await;
+        match stamp_result {
+            Ok(()) => {}
+            Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
+            Err(err) => {
+                return Err(classify_link_apply_error(
+                    &err,
+                    "managed SVD VXLAN altname stamp",
+                ));
+            }
+        }
+    }
+
+    fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return if fresh.name_exists {
+            Err(foreign_svd_vxlan_collision(name))
+        } else {
+            Err(transient_link_race(format!(
+                "managed SVD VXLAN {name} vanished after stamp"
+            )))
+        };
+    };
+    ensure_svd_vxlan_converged(handle, name, vxlan, spec, ownership_stamp, &fresh.bridges).await
+}
+
+async fn ensure_svd_vxlan_converged(
+    handle: &Handle,
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedSvdVxlanNetdevSpec,
+    ownership_stamp: &str,
+    bridges: &std::collections::HashMap<String, BridgeLink>,
+) -> Result<(), DataplaneError> {
+    ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, bridges)?;
+    ensure_svd_vlan_bindings(handle, name, vxlan.ifindex, spec, bridges).await?;
+    let fresh = fresh_vxlan_state(handle, name).await?;
+    let Some(vxlan) = fresh.vxlan.as_ref() else {
+        return Err(transient_link_race(format!(
+            "managed SVD VXLAN {name} vanished after bridge VLAN ensure"
+        )));
+    };
+    ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)?;
+    ensure_svd_vlan_bindings_observed(name, vxlan, spec, &fresh.bridges)
+}
+
+async fn ensure_svd_vlan_bindings(
+    handle: &Handle,
+    name: &str,
+    vxlan_ifindex: u32,
+    spec: &ManagedSvdVxlanNetdevSpec,
+    bridges: &std::collections::HashMap<String, BridgeLink>,
+) -> Result<(), DataplaneError> {
+    let bridge = bridges.get(&spec.bridge).ok_or_else(|| {
+        unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} bridge {} is not observable after create",
+            spec.bridge
+        ))
+    })?;
+    handle
+        .link()
+        .set_port(LinkBridgePort::new(vxlan_ifindex).vlan_tunnel(true).build())
+        .execute()
+        .await
+        .map_err(|err| classify_link_apply_error(&err, "managed SVD VXLAN vlan_tunnel enable"))?;
+
+    for binding in &spec.bindings {
+        ensure_svd_binding(handle, bridge.ifindex, vxlan_ifindex, *binding).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_svd_binding(
+    handle: &Handle,
+    bridge_ifindex: u32,
+    vxlan_ifindex: u32,
+    binding: ManagedSvdVxlanBinding,
+) -> Result<(), DataplaneError> {
+    let vlan_flags = BridgeVlanInfoFlags::empty();
+    handle
+        .link()
+        .set(
+            LinkBridgeVlan::new(bridge_ifindex)
+                .bridge_self()
+                .vlan(binding.bridge_vlan, vlan_flags)
+                .build(),
+        )
+        .execute()
+        .await
+        .map_err(|err| classify_link_apply_error(&err, "managed SVD bridge VLAN add"))?;
+    handle
+        .link()
+        .set(
+            LinkBridgeVlan::new(vxlan_ifindex)
+                .vlan(binding.bridge_vlan, vlan_flags)
+                .build(),
+        )
+        .execute()
+        .await
+        .map_err(|err| classify_link_apply_error(&err, "managed SVD VXLAN VLAN add"))?;
+    match handle
+        .link()
+        .set(
+            LinkBridgeVlan::new(vxlan_ifindex)
+                .append_af_spec(AfSpecBridge::VlanTunnelInfo(vec![
+                    BridgeVlanTunnelInfo::Id(binding.vni),
+                    BridgeVlanTunnelInfo::Vid(binding.bridge_vlan),
+                    BridgeVlanTunnelInfo::Flags(vlan_flags),
+                ]))
+                .build(),
+        )
+        .execute()
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_EEXIST) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(
+            &err,
+            "managed SVD VXLAN tunnel mapping add",
+        )),
+    }
+}
+
+async fn remove_svd_vxlan(
+    handle: &Handle,
+    name: &str,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let Some(vxlan) = fresh_vxlan_state(handle, name).await?.vxlan else {
+        return Ok(());
+    };
+    ensure_exact_svd_vxlan_stamp(name, &vxlan, ownership_stamp)?;
+
+    match handle.link().del(vxlan.ifindex).execute().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => Ok(()),
+        Err(err) => Err(classify_link_apply_error(&err, "managed SVD VXLAN remove")),
     }
 }
 
@@ -814,6 +1056,127 @@ fn ensure_exact_vxlan_stamp(
     )))
 }
 
+fn ensure_exact_owned_svd_vxlan(
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedSvdVxlanNetdevSpec,
+    ownership_stamp: &str,
+    bridges: &std::collections::HashMap<String, BridgeLink>,
+) -> Result<(), DataplaneError> {
+    ensure_exact_svd_vxlan_stamp(name, vxlan, ownership_stamp)?;
+    if !vxlan.has_no_fixed_vni() {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} has fixed VNI {:?}; desired collect-metadata/external",
+            vxlan.vni
+        )));
+    }
+    if vxlan.local_ip != spec.local_ip {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} local IP changed during apply: observed {:?}, desired {:?}",
+            vxlan.local_ip, spec.local_ip
+        )));
+    }
+    if vxlan.dstport != Some(spec.dstport) {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} dstport changed during apply: observed {:?}, desired {}",
+            vxlan.dstport, spec.dstport
+        )));
+    }
+    if vxlan.learning_disabled != Some(true) {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} learning changed during apply: observed {:?}, desired nolearning",
+            vxlan.learning_disabled
+        )));
+    }
+    if !vxlan.collect_metadata {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} disabled collect-metadata/external during apply"
+        )));
+    }
+    if !vxlan.vnifilter {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} disabled vnifilter during apply"
+        )));
+    }
+    if vxlan.bridge.as_deref() != Some(spec.bridge.as_str()) {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} bridge attachment changed during apply: observed {:?}, desired {}",
+            vxlan.bridge, spec.bridge
+        )));
+    }
+    if !bridges.contains_key(&spec.bridge) {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} bridge {} is not observable",
+            spec.bridge
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_exact_svd_vxlan_stamp(
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    ownership_stamp: &str,
+) -> Result<(), DataplaneError> {
+    let stamps: Vec<_> = vxlan
+        .altnames
+        .iter()
+        .filter_map(|altname| parse_ownership_stamp(altname))
+        .collect();
+    if stamps.len() == 1
+        && stamps[0].raw == ownership_stamp
+        && stamps[0].name == name
+        && stamps[0].class == rustbgpd_evpn::ManagedNetdevClass::SvdVxlan
+    {
+        return Ok(());
+    }
+    Err(unsafe_managed_svd_vxlan(format!(
+        "managed SVD VXLAN {name} ownership stamp changed during apply: observed {:?}, expected {ownership_stamp}",
+        vxlan.altnames
+    )))
+}
+
+fn svd_vlan_bindings_present(
+    bridge: &BridgeLink,
+    vxlan_ifindex: u32,
+    vxlan_name: &str,
+    bindings: &[ManagedSvdVxlanBinding],
+) -> bool {
+    let Some(port) = bridge.port_vlan_inventory.iter().find(|port| {
+        port.is_vxlan && (port.ifindex == vxlan_ifindex || port.name.as_deref() == Some(vxlan_name))
+    }) else {
+        return false;
+    };
+    bindings.iter().all(|binding| {
+        vlan_rows_contain(&bridge.vlans, binding.bridge_vlan)
+            && vlan_rows_contain(&port.vlans, binding.bridge_vlan)
+            && port.vlan_tunnels.iter().any(|row| {
+                row.vid == Some(binding.bridge_vlan) && row.tunnel_id == Some(binding.vni)
+            })
+    })
+}
+
+fn ensure_svd_vlan_bindings_observed(
+    name: &str,
+    vxlan: &KernelVxlanLinkInfo,
+    spec: &ManagedSvdVxlanNetdevSpec,
+    bridges: &std::collections::HashMap<String, BridgeLink>,
+) -> Result<(), DataplaneError> {
+    let Some(bridge) = bridges.get(&spec.bridge) else {
+        return Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} bridge {} is not observable after bridge VLAN ensure",
+            spec.bridge
+        )));
+    };
+    if svd_vlan_bindings_present(bridge, vxlan.ifindex, &vxlan.name, &spec.bindings) {
+        Ok(())
+    } else {
+        Err(unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} bridge VLAN/tunnel mappings did not converge"
+        )))
+    }
+}
+
 fn ensure_exact_owned_vrf(
     name: &str,
     vrf: &KernelVrfLinkInfo,
@@ -1050,6 +1413,27 @@ fn missing_vxlan_bridge(name: &str, bridge: &str, bridge_name_exists: bool) -> D
 }
 
 fn unsafe_managed_vxlan(message: String) -> DataplaneError {
+    DataplaneError::InvalidArgument(message)
+}
+
+fn foreign_svd_vxlan_collision(name: &str) -> DataplaneError {
+    unsafe_managed_svd_vxlan(format!(
+        "managed SVD VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+    ))
+}
+
+fn missing_svd_vxlan_bridge(name: &str, bridge: &str, bridge_name_exists: bool) -> DataplaneError {
+    if bridge_name_exists {
+        return unsafe_managed_svd_vxlan(format!(
+            "managed SVD VXLAN {name} cannot be created: desired bridge name {bridge} is occupied by a non-bridge link"
+        ));
+    }
+    transient_link_race(format!(
+        "managed SVD VXLAN {name} cannot be created: desired bridge {bridge} is absent"
+    ))
+}
+
+fn unsafe_managed_svd_vxlan(message: String) -> DataplaneError {
     DataplaneError::InvalidArgument(message)
 }
 

@@ -416,6 +416,8 @@ pub(crate) async fn apply_op(
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }
@@ -499,6 +501,8 @@ pub(crate) async fn apply_op(
         | DataplaneOp::RemoveManagedBridge { .. }
         | DataplaneOp::CreateManagedVxlan { .. }
         | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
         | DataplaneOp::CreateManagedVrf { .. }
         | DataplaneOp::RemoveManagedVrf { .. }
         | DataplaneOp::CreateManagedL3Vxlan { .. }

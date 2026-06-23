@@ -1217,10 +1217,11 @@ pub struct EvpnIpVrfConfig {
 /// ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.
 ///
 /// v1 accepts `[[managed_netdevs.bridges]]`, fixed-VNI
-/// `[[managed_netdevs.vxlans]]`, `[[managed_netdevs.vrfs]]`,
-/// `[[managed_netdevs.l3vxlans]]`, and `[[managed_netdevs.vlan_uppers]]`
-/// rows. The `owner_token` is required when at least one row is configured and
-/// is used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
+/// `[[managed_netdevs.vxlans]]`, collect-metadata
+/// `[[managed_netdevs.svd_vxlans]]`, `[[managed_netdevs.vrfs]]`,
+/// `[[managed_netdevs.l3vxlans]]`, and `[[managed_netdevs.vlan_uppers]]` rows.
+/// The `owner_token` is required when at least one row is configured and is
+/// used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
 /// `rustbgpd:<class>:<owner_token>:<link_name>`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1232,10 +1233,15 @@ pub struct ManagedNetdevsConfig {
     /// Managed bridge rows.
     #[serde(default)]
     pub bridges: Vec<ManagedBridgeNetdevConfig>,
-    /// Managed fixed-VNI VXLAN rows. SVD / collect-metadata VXLANs and
-    /// shared-device VXLANs are intentionally not accepted in this release.
+    /// Managed fixed-VNI VXLAN rows.
     #[serde(default)]
     pub vxlans: Vec<ManagedVxlanNetdevConfig>,
+    /// Managed collect-metadata / Single VXLAN Device rows. Each row is shared
+    /// by the configured `[[evpn_instances]]` on its bridge that carry
+    /// `bridge_vlan`; rustbgpd derives the bridge VLAN -> VNI mappings from
+    /// those instances.
+    #[serde(default)]
+    pub svd_vxlans: Vec<ManagedSvdVxlanNetdevConfig>,
     /// Managed VRF rows.
     #[serde(default)]
     pub vrfs: Vec<ManagedVrfNetdevConfig>,
@@ -1279,6 +1285,30 @@ pub struct ManagedVxlanNetdevConfig {
     /// `false` (`nolearning`); the field exists so typos or intentional
     /// deviations fail validation explicitly instead of silently using the
     /// default.
+    #[serde(default)]
+    pub learning: bool,
+}
+
+/// One managed collect-metadata / Single VXLAN Device row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedSvdVxlanNetdevConfig {
+    /// Linux VXLAN interface name.
+    pub name: String,
+    /// Optional local source IP for VXLAN encapsulation. If omitted, rustbgpd
+    /// creates the common SVD shape without a pinned local address.
+    #[serde(default)]
+    pub local: Option<std::net::IpAddr>,
+    /// UDP destination port. Defaults to the IANA VXLAN port.
+    #[serde(default = "default_vxlan_dstport")]
+    pub dstport: u16,
+    /// VLAN-aware bridge this SVD VXLAN device must be enslaved to. Matching
+    /// `[[evpn_instances]]` rows on this bridge with `bridge_vlan` provide the
+    /// managed VLAN -> VNI mappings.
+    pub bridge: String,
+    /// Linux VXLAN learning mode. ADR-0091 SVD lifecycle requires `false`
+    /// (`nolearning`); the field exists so typos or intentional deviations fail
+    /// validation explicitly instead of silently using the default.
     #[serde(default)]
     pub learning: bool,
 }

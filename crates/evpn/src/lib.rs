@@ -145,9 +145,11 @@ pub use managed_netdev::{
     MANAGED_NETDEV_STAMP_PREFIX, MAX_ALT_IFNAME_LEN, MAX_IFNAME_LEN, MAX_OWNER_TOKEN_LEN,
     ManagedBridgeNetdev, ManagedL3VxlanNetdev, ManagedL3VxlanNetdevSpec, ManagedNetdevClass,
     ManagedNetdevStamp, ManagedNetdevState, ManagedNetdevStatus, ManagedNetdevTable,
+    ManagedSvdVxlanBinding, ManagedSvdVxlanNetdev, ManagedSvdVxlanNetdevSpec,
     ManagedVlanUpperNetdev, ManagedVlanUpperNetdevSpec, ManagedVrfNetdev, ManagedVrfNetdevSpec,
     ManagedVxlanNetdev, ManagedVxlanNetdevSpec, bridge_ownership_stamp, l3vxlan_ownership_stamp,
-    parse_ownership_stamp, vlan_upper_ownership_stamp, vrf_ownership_stamp, vxlan_ownership_stamp,
+    parse_ownership_stamp, svd_vxlan_ownership_stamp, vlan_upper_ownership_stamp,
+    vrf_ownership_stamp, vxlan_ownership_stamp,
 };
 pub use mass_withdraw::{AsPathFingerprint, AsPathTracker, MassWithdrawTrigger};
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};

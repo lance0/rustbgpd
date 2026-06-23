@@ -550,7 +550,7 @@ jobs:
           script: tests/interop/scripts/test-m68-evpn-type5-gwip-overlay-index-frr.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + managed_bridge + managed_vxlan + managed_vlan_upper + managed_ready + managed_ip_vrf_ready + l3_multipath + l3_all_active_writer)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime + dataplane_vlan_fdb + svd_fdb_vni + managed_bridge + managed_vxlan + managed_svd_vxlan + managed_vlan_upper + managed_ready + managed_ip_vrf_ready + l3_multipath + l3_all_active_writer)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -586,6 +586,9 @@ jobs:
 
       - name: ADR-0091 managed fixed-VNI VXLAN lifecycle netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_vxlan
+
+      - name: ADR-0091 managed SVD VXLAN lifecycle netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_svd_vxlan
 
       - name: ADR-0091 managed VLAN upper lifecycle netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_vlan_upper

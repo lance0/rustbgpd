@@ -33,8 +33,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart adoption, reap, and same-name unstamped foreign preservation on a
   real kernel. `evpn_managed_netdev_state{class,name,desired,state}` exposes
   bounded Prometheus state for alerting; detailed reason text stays in
-  `ListManagedNetdevs` / `rbgp`. Managed SVD / collect-metadata VXLAN
-  creation remains deferred.
+  `ListManagedNetdevs` / `rbgp`.
 - **ADR-0091 fixed-VNI VXLAN lifecycle.** `[managed_netdevs]` now accepts
   fixed-VNI `[[managed_netdevs.vxlans]]` rows with protected `name`, `vni`,
   `local`, `dstport`, `bridge`, and `learning = false` attributes, derives
@@ -48,7 +47,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   foreign preservation on a real kernel; the `managed_ready` proof creates a
   managed bridge plus managed fixed-VNI VXLAN and verifies the real EVPN
   instance probe transitions from NotReady to Ready only after both links are
-  owned-safe. SVD / collect-metadata VXLAN remains deferred.
+  owned-safe.
 - **ADR-0091 managed VRF/L3VXLAN schema and status substrate.**
   `[managed_netdevs]` now accepts `[[managed_netdevs.vrfs]]` and
   `[[managed_netdevs.l3vxlans]]` rows, derives
@@ -68,8 +67,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proof creates a managed VRF plus managed L3VXLAN on a real kernel, verifies
   protected attributes and idempotent adoption, proves the IP-VRF readiness
   probe transitions from NotReady to Ready, and confirms VRF deletion refuses
-  while the L3VXLAN remains enslaved. SVD / collect-metadata VXLAN creation
-  remains deferred.
+  while the L3VXLAN remains enslaved.
 - **ADR-0091 managed VLAN upper lifecycle.** `[managed_netdevs]` now accepts
   `[[managed_netdevs.vlan_uppers]]` rows bound to a configured
   `[[evpn_instances]] bridge` / `bridge_vlan` pair, derives
@@ -81,6 +79,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `vlan-upper` class and observed VLAN id; the `managed_vlan_upper` netns proof
   covers create, idempotent restart adoption, reap, and same-name unstamped
   foreign preservation on a real kernel.
+- **ADR-0091 managed SVD / collect-metadata VXLAN lifecycle.**
+  `[managed_netdevs]` now accepts `[[managed_netdevs.svd_vxlans]]` rows and
+  derives their bridge VLAN / VNI bindings from configured
+  `[[evpn_instances]] bridge` / `bridge_vlan` rows on the same bridge. The
+  Linux dataplane actor creates `external` / `vnifilter` / `nolearning` VXLAN
+  devices, enables bridge `vlan_tunnel`, programs bridge VLAN tunnel mappings,
+  stamps links with `rustbgpd:svd-vxlan:<owner>:<name>`, treats exact stamped
+  links as crash-restart adoption, and safely reaps exact same-owner SVD VXLAN
+  orphans while preserving foreign, wrong-owner, multi-stamped, fixed-VNI, or
+  protected-attribute-drifted links. The `managed_svd_vxlan` netns proof covers
+  create, idempotent restart adoption, bridge VLAN/tunnel inventory, reap, and
+  same-name unstamped foreign preservation on a real kernel.
 
 ### Changed
 

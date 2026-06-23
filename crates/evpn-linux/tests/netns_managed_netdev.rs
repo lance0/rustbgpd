@@ -23,8 +23,9 @@ use std::process::Command;
 use rustbgpd_evpn::ip_vrf::IpVrfStatus;
 use rustbgpd_evpn::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, MacAddress,
-    ManagedL3VxlanNetdevSpec, ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec,
-    ManagedVxlanNetdevSpec, RouteDistinguisher, RouteTarget,
+    ManagedL3VxlanNetdevSpec, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdevSpec,
+    ManagedVlanUpperNetdevSpec, ManagedVrfNetdevSpec, ManagedVxlanNetdevSpec, RouteDistinguisher,
+    RouteTarget,
 };
 use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, FailureClass, InstanceProbe, LinuxDataplane};
 
@@ -175,6 +176,175 @@ async fn managed_vxlan_create_adopt_and_reap_round_trip_inner() {
         .get("vxforeign")
         .expect("foreign VXLAN preserved");
     assert!(link.altnames.is_empty());
+}
+
+#[tokio::test]
+async fn managed_svd_vxlan_create_adopt_and_reap_round_trip() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged netns test");
+        return;
+    }
+
+    let inner_marker = std::env::var("RUSTBGPD_NETNS_INNER").ok();
+    if inner_marker.as_deref() == Some("managed-svd-vxlan") {
+        managed_svd_vxlan_create_adopt_and_reap_round_trip_inner().await;
+        return;
+    }
+
+    let ns = NetnsFixture::create("managed-svd-vxlan");
+    let exe = std::env::current_exe().expect("self-exe");
+    let test_name = "managed_svd_vxlan_create_adopt_and_reap_round_trip";
+    let status = Command::new("ip")
+        .args(["netns", "exec", &ns.name])
+        .arg(&exe)
+        .args(["--exact", "--nocapture", test_name])
+        .env("RUSTBGPD_NETNS_INNER", "managed-svd-vxlan")
+        .env("EVPN_LINUX_NETNS", "1")
+        .status()
+        .expect("spawn inner");
+    assert!(status.success(), "inner test invocation failed");
+}
+
+async fn managed_svd_vxlan_create_adopt_and_reap_round_trip_inner() {
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "brsvd",
+            "type",
+            "bridge",
+            "vlan_filtering",
+            "1",
+        ],
+    );
+
+    let spec = ManagedSvdVxlanNetdevSpec {
+        local_ip: Some("10.0.0.1".parse().unwrap()),
+        dstport: 4789,
+        bridge: "brsvd".to_string(),
+        bindings: vec![
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 10,
+                vni: 100,
+            },
+            ManagedSvdVxlanBinding {
+                bridge_vlan: 20,
+                vni: 200,
+            },
+        ],
+    };
+    let create = DataplaneOp::CreateManagedSvdVxlan {
+        name: "vxsvd".to_string(),
+        spec,
+        ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxsvd".to_string(),
+    };
+
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+    dp.apply(&create).await.expect("create managed SVD VXLAN");
+
+    let first = dp.dump_snapshot().await.expect("dump after create");
+    let link = first.vxlans.get("vxsvd").expect("managed SVD exists");
+    assert!(
+        link.has_no_fixed_vni(),
+        "unexpected fixed VNI: {:?}",
+        link.vni
+    );
+    assert_eq!(link.local_ip, Some("10.0.0.1".parse().unwrap()));
+    assert_eq!(link.dstport, Some(4789));
+    assert_eq!(link.learning_disabled, Some(true));
+    assert!(link.collect_metadata);
+    assert!(link.vnifilter);
+    assert_eq!(link.bridge.as_deref(), Some("brsvd"));
+    assert_eq!(link.altnames, vec!["rustbgpd:svd-vxlan:leaf-1:vxsvd"]);
+    let ifindex = link.ifindex;
+    let bridge = first.links.get("brsvd").expect("bridge exists");
+    assert!(bridge.vlans.iter().any(|row| row.vid == 10));
+    assert!(bridge.vlans.iter().any(|row| row.vid == 20));
+    let port = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|row| row.ifindex == ifindex)
+        .expect("SVD bridge-port VLAN inventory");
+    assert!(port.vlans.iter().any(|row| row.vid == 10));
+    assert!(port.vlans.iter().any(|row| row.vid == 20));
+    assert!(
+        port.vlan_tunnels
+            .iter()
+            .any(|row| row.vid == Some(10) && row.tunnel_id == Some(100))
+    );
+    assert!(
+        port.vlan_tunnels
+            .iter()
+            .any(|row| row.vid == Some(20) && row.tunnel_id == Some(200))
+    );
+
+    let mut restarted = LinuxDataplane::connect()
+        .await
+        .expect("fresh netlink connect inside netns");
+    restarted
+        .apply(&create)
+        .await
+        .expect("adopt existing managed SVD VXLAN");
+    let adopted = restarted.dump_snapshot().await.expect("dump after adopt");
+    let link = adopted.vxlans.get("vxsvd").expect("managed SVD adopted");
+    assert_eq!(link.ifindex, ifindex);
+    assert_eq!(link.altnames, vec!["rustbgpd:svd-vxlan:leaf-1:vxsvd"]);
+
+    restarted
+        .apply(&DataplaneOp::RemoveManagedSvdVxlan {
+            name: "vxsvd".to_string(),
+            ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxsvd".to_string(),
+        })
+        .await
+        .expect("remove managed SVD VXLAN");
+    let removed = restarted.dump_snapshot().await.expect("dump after remove");
+    assert!(!removed.vxlans.contains_key("vxsvd"));
+
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "name",
+            "vxforeign",
+            "type",
+            "vxlan",
+            "external",
+            "vnifilter",
+            "dstport",
+            "4789",
+            "nolearning",
+        ],
+    );
+    run(
+        "ip",
+        &["link", "set", "dev", "vxforeign", "master", "brsvd"],
+    );
+    let err = restarted
+        .apply(&DataplaneOp::CreateManagedSvdVxlan {
+            name: "vxforeign".to_string(),
+            spec: ManagedSvdVxlanNetdevSpec {
+                local_ip: None,
+                dstport: 4789,
+                bridge: "brsvd".to_string(),
+                bindings: vec![ManagedSvdVxlanBinding {
+                    bridge_vlan: 30,
+                    vni: 300,
+                }],
+            },
+            ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxforeign".to_string(),
+        })
+        .await
+        .expect_err("unstamped same-name SVD VXLAN is foreign");
+    assert_eq!(err.class(), FailureClass::Permanent);
+    assert!(
+        err.to_string().contains("ownership stamp"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
