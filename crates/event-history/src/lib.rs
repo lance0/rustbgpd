@@ -43,6 +43,7 @@
 //! # })
 //! ```
 
+#![deny(unsafe_code)]
 #![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 

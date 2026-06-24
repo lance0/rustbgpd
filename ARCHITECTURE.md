@@ -63,7 +63,7 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 
 ## Runtime Model
 
-One tokio task per peer session, one RibManager task, one PeerManager task. No shared mutable routing state. State-owning task boundaries primarily use bounded `tokio::mpsc`, with `oneshot` for request/reply, `broadcast` for route event streaming, and one intentional unbounded channel for collision-resolution notifications.
+One tokio task per peer session, one RibManager task, one PeerManager task. No shared mutable routing state. State-owning task boundaries primarily use bounded `tokio::mpsc`, with `oneshot` for request/reply, `broadcast` for route event streaming, and a small, documented set of intentional unbounded channels where a bounded send would deadlock the owning task (enumerated in Design Invariant #3).
 
 The daemon binary owns the runtime-config coordinator that serializes SIGHUP,
 runtime CRUD, and config transactions. `PlanConfigTransaction` is a
@@ -123,6 +123,7 @@ Each component is the single source of truth for its domain. No overlapping auth
 | **BFD actor** | BFD session liveness (`src/bfd_runtime.rs`) | Whether each BFD-tracked peer's forwarding path is up; the sole owner of BFD sockets, timers, and discriminators (drives RFC 5882 coupling) |
 | **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
 | **API** | Request/response adaptation | Nothing — it translates gRPC into commands and queries |
+| **EVPN originator** | MAC / IP-VRF route generation counters (`src/evpn_originator`, `src/evpn_l3_originator.rs`) | EVPN origination generation/sequence numbers; uses `Arc<RwLock>` by design — lower-frequency kernel-observation glue, outside the RIB hot-path "no shared mutable routing state / no locks" invariant |
 
 The API layer is explicitly *not* a source of truth. It is an adapter between gRPC callers and the authoritative components.
 
@@ -136,7 +137,7 @@ These are not negotiable. Every contributor and every PR is measured against the
 
 2. **The wire crate is independently usable.** Zero internal dependencies. `cargo add rustbgpd-wire` works without the daemon.
 
-3. **No accidental unbounded channels.** Channels are bounded by default. One intentional exception: session-notification for collision handling (unbounded to avoid `send().await` deadlock with synchronous peer-state queries).
+3. **No accidental unbounded channels.** Channels are bounded by default. A small, documented set of intentional unbounded channels exists where a bounded `send().await` would deadlock the owning session/state task — collision-resolution notifications (`peer_manager`, `transport`), peer-manager internal commands, the config/reload coordinator (`reload.rs`), the transport writer's priority channel, and BFD state-change fan-out. Each is justified in an inline comment at its construction.
 
 4. **No silent attribute drops.** Every ignored, filtered, or rejected attribute emits a structured event. Operators can explain every routing decision from logs alone.
 

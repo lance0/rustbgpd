@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-06-23
+
 ### Added
 
 - **HTTP liveness and readiness probes.** When
@@ -94,6 +96,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`#![deny(unsafe_code)]` enforced across all crates.** Added to the CLI and
+  event-history crates (both already unsafe-free), so the project-wide policy
+  holds everywhere; the sole documented exception remains `crates/transport`'s
+  `socket_opts` socket-option FFI (`TCP_MD5SIG`, `IP_MINTTL`, TCP-AO).
 - **Managed VXLAN config validation rejects a duplicate `vni`.** Two
   `[[managed_netdevs.vxlans]]` rows that share the same `vni` (even under
   distinct names) now fail config validation with an `InvalidManagedNetdev`

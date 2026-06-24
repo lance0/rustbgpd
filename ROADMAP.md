@@ -1321,6 +1321,14 @@ branch is between features.
     tree). Reword to acknowledge the documented exception.
   - Optional periodic hygiene: trim the `thiserror` 1.x duplicate (1.0.69 + 2.0.18
     both resolved) at the next dependency refresh.
+- [ ] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI crate
+  ships two bins — `rustbgpctl` (`src/main.rs`) and `rbgp` (`src/bin/rbgp.rs`,
+  which `include!`s `main.rs`). Collapse to `rbgp` alone: drop the `rustbgpctl`
+  bin, make `rbgp` the real crate root (retiring the `include!` shim — which is
+  also what forces `#![deny(unsafe_code)]` onto the bin root rather than
+  `main.rs`), and sweep the long name out of docs/help/tests. Keep a deprecation
+  window if any tooling still calls `rustbgpctl`. Not urgent — `rbgp` is already
+  the documented primary name and both bins build the same code today.
 
 ---
 

@@ -47,7 +47,11 @@ input from the network. It runs under continuous fuzzing in CI.
 - **No unbounded allocations.** All channels are bounded. Per-peer
   prefix limits enforced at insertion. UPDATE attribute sizes enforced
   at decode time.
-- **No `unsafe` code.** Every crate enforces `#![deny(unsafe_code)]`.
+- **No `unsafe` code, with one scoped exception.** Every crate enforces
+  `#![deny(unsafe_code)]`. The sole exception is `crates/transport`'s
+  `socket_opts` module, which carries a documented `#[allow(unsafe_code)]` for
+  socket-option FFI (`TCP_MD5SIG`, `IP_MINTTL`, TCP-AO) that has no safe Rust
+  API; those are the only `unsafe` blocks in the tree.
 - **Structured errors, not strings.** Every failure produces a
   machine-parseable event for forensic analysis.
 
