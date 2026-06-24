@@ -860,6 +860,21 @@ has it, no broad performance sprints without profile evidence.
   right default (most readiness consumers want "is the BGP control plane up",
   and folding a slow or optional dataplane actor into the default gate risks
   flapping pods), so the stricter probe should be opt-in, not a redefinition.
+- **Optimal Route Reflection (RFC 9107).** Lets a route reflector pick each
+  client's best path from the *client's* topological vantage point instead of the
+  RR's own — an on-identity RR feature. Heavily gated, though: RFC 9107 §3.1
+  admits only an IGP or BGP-LS as the topology source for the per-client SPF, and
+  rustbgpd runs no IGP (and won't). So ORR is at least two substrate projects
+  deep — BGP-LS **ingestion** (ADR-0077 currently scopes only BGP-LS *export*)
+  plus an in-daemon link-state DB + SPF engine — and then a per-client best-path
+  dimension (with Add-Path to distribute the multiple bests), touching the
+  single-best-path RIB core. No open-source peer ships it (FRR's request has sat
+  open since 2018; BIRD / GoBGP / OpenBGPd lack it; only Cisco / Juniper / Nokia
+  do). Not yet an open-source parity gap — but it is drawing renewed attention in
+  the SONiC / DC-NOS ecosystem rustbgpd competes in (where the NOS's FRR can
+  already source the IGP topology ORR needs), so track it as a possible future
+  DC-fabric RR baseline rather than dismiss it. Still gated on BGP-LS ingest
+  landing first; revisit when that substrate exists and the demand signal firms.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.
@@ -1340,6 +1355,13 @@ rustbgpd is an API-first BGP daemon. The following are explicitly out of scope:
   control plane. This is a BGP daemon. BGP-carried MPLS/VPN families
   (labeled-unicast, VPNv4/v6, EVPN MPLS encapsulation) are demand-shaped
   address-family breadth, not a commitment to become a full MPLS router.
+- **Lossless-fabric / RDMA transport tuning.** No RoCEv2 lossless-Ethernet
+  configuration (PFC, ECN, DCQCN) and no RDMA transport protocols (e.g. NVIDIA
+  Spectrum-X "Multipath Reliable Connection" / MRC) — these are NIC and
+  switch-ASIC dataplane concerns, not a routing daemon's job. rustbgpd's role in
+  an AI / RoCE fabric is the control plane it already provides: a BGP L3-ECMP
+  underlay (including IPv6 link-local / unnumbered peering, ADR-0069) plus the
+  EVPN/VXLAN overlay.
 - **CLI-first operation.** The gRPC API is the primary interface; the CLI and
   TUI are polished convenience wrappers, but gRPC is the contract.
 - **GoBGP proto compatibility.** Our protos are our own. A compat adapter can
