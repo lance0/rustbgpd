@@ -197,6 +197,18 @@ mod tests {
             .expect("RIB reply receiver is alive");
     }
 
+    async fn reply_to_core_probe(
+        peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        peers: Vec<PeerInfo>,
+        rib_rx: &mut mpsc::Receiver<RibUpdate>,
+        total_routes: usize,
+    ) {
+        tokio::join!(
+            reply_to_peer_manager(peer_rx, peers),
+            reply_to_rib(rib_rx, total_routes)
+        );
+    }
+
     #[test]
     fn display_uses_stable_operator_text() {
         assert_eq!(
@@ -236,10 +248,10 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
-        let snapshot = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-            reply_to_rib(&mut rib_rx, 17).await;
-        })
+        let snapshot = tokio::join!(
+            probe.snapshot(),
+            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 17)
+        )
         .0
         .expect("probe should succeed");
 
@@ -253,10 +265,10 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
-        let (result, ()) = tokio::join!(probe.check(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-            reply_to_rib(&mut rib_rx, 0).await;
-        });
+        let (result, ()) = tokio::join!(
+            probe.check(),
+            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 0)
+        );
 
         result.expect("check should succeed");
     }
