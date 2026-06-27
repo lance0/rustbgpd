@@ -487,6 +487,141 @@ mod tests {
         assert_eq!(verify_upstream(&path, &table), AspaValidation::Valid);
     }
 
+    fn nist_brio_common_demo_table() -> AspaTable {
+        // NIST-BRIO b7.1.2, commit 23ee402f (2025-08-08):
+        // brio-examples/demo-aspa-upstream/exp13.brio_rc.script and
+        // brio-examples/demo-aspa-downstream/exp1.brio_rc.script and
+        // brio-examples/demo-aspa-downstream/exp57.README.tpl.md.
+        make_table(vec![
+            (65000, vec![65020, 65030]),
+            (65010, vec![65040]),
+            (65020, vec![65050]),
+            (65030, vec![65050, 65060]),
+            (65060, Vec::new()),
+        ])
+    }
+
+    fn nist_brio_exp910_table() -> AspaTable {
+        // NIST-BRIO b7.1.2, commit 23ee402f (2025-08-08):
+        // brio-examples/demo-aspa-downstream/exp910.README.tpl.md.
+        make_table(vec![
+            (65000, vec![65020, 65030]),
+            (65010, vec![65040]),
+            (65020, vec![65050]),
+        ])
+    }
+
+    fn assert_nist_brio_case(
+        table: &AspaTable,
+        local_role: Option<BgpRole>,
+        neighbor_asn: u32,
+        as_path: &[u32],
+        expected: AspaValidation,
+    ) {
+        assert_eq!(
+            verify(
+                &make_path(as_path),
+                table,
+                context(local_role, neighbor_asn)
+            ),
+            expected,
+            "neighbor={neighbor_asn} role={local_role:?} path={as_path:?}"
+        );
+    }
+
+    #[test]
+    fn nist_brio_exp13_upstream_vectors() {
+        let table = nist_brio_common_demo_table();
+        let upstream = Some(BgpRole::Provider);
+
+        // BRIO exp13 bundles upstream examples #1, #2, and #3:
+        // F C A => Valid, D C A => Invalid, D F C A => Unknown.
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65050,
+            &[65050, 65020, 65000],
+            AspaValidation::Valid,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65030,
+            &[65030, 65020, 65000],
+            AspaValidation::Invalid,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65030,
+            &[65030, 65050, 65020, 65000],
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn nist_brio_downstream_vectors() {
+        let table = nist_brio_common_demo_table();
+        let downstream = Some(BgpRole::Customer);
+
+        // BRIO downstream exp1: E G F C A => Unknown.
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65060, 65050, 65020, 65000],
+            AspaValidation::Unknown,
+        );
+
+        // BRIO downstream exp57 examples #5, #6, and #7:
+        // C F D G => Unknown, D G E B => Valid, C D G E B => Invalid.
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65020,
+            &[65020, 65050, 65030, 65060],
+            AspaValidation::Unknown,
+        );
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65030,
+            &[65030, 65060, 65040, 65010],
+            AspaValidation::Valid,
+        );
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65020,
+            &[65020, 65030, 65060, 65040, 65010],
+            AspaValidation::Invalid,
+        );
+    }
+
+    #[test]
+    fn nist_brio_exp910_downstream_limit_vectors() {
+        let table = nist_brio_exp910_table();
+        let downstream = Some(BgpRole::Customer);
+
+        // BRIO exp910 documents forged-origin / forged-segment paths that
+        // remain ASPA-Valid. These pin the expected limitation rather than a
+        // stronger security claim.
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65000],
+            AspaValidation::Valid,
+        );
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65020, 65000],
+            AspaValidation::Valid,
+        );
+    }
+
     // ----------------------------------------------------------------
     // Bounds-checker equivalence spike (draft-ietf-sidrops-aspa-
     // verification-25 §5.3 / §5.4).

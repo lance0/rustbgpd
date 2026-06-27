@@ -180,9 +180,11 @@ has it, no broad performance sprints without profile evidence.
   verification now ships with the draft-v25 first-AS precondition, §6.2
   IPv4/IPv6-unicast family gate, best-path preference, and
   `match_aspa_validation` import/export policy. Direct policy-match unit coverage
-  now pins all ASPA verdicts plus combined RPKI+ASPA predicates. Remaining
-  hardening is external-vector breadth rather than feature scope: import
-  NIST-BRIO ASPA vectors when they are easy to automate.
+  now pins all ASPA verdicts plus combined RPKI+ASPA predicates. A compact
+  offline subset of the NIST-BRIO ASPA demo corpus (b7.1.2) is imported as
+  verifier unit tests for upstream/downstream Valid, Invalid, Unknown, and
+  ASPA-Valid attack-limit cases. Remaining ASPA work is demand-shaped policy
+  breadth, not feature scope.
 - **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
   intentionally bounded. Native RFC 9136 GW-IP and ESI overlay-index Type 5
   origination now ship, and the single-active ESI overlay-index receive path
