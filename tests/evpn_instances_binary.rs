@@ -74,7 +74,7 @@ fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
     } else {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
-        cmd.args(["run", "--quiet", "-p", "rbgp", "--bin", "rbgp", "--"])
+        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
             .arg(grpc_addr)
             .args(args)
