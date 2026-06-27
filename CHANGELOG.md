@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ASPA external-vector test coverage.** `rustbgpd-rpki` now imports a compact
+  offline subset of the NIST-BRIO ASPA demo corpus (b7.1.2) as verifier unit
+  tests, covering upstream Valid/Invalid/Unknown, downstream
+  Valid/Invalid/Unknown, and the documented forged-origin / forged-segment
+  limitations that remain ASPA-Valid.
+
 ## [0.42.0] — 2026-06-23
 
 ### Added

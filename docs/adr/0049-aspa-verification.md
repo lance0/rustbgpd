@@ -245,6 +245,8 @@ The original upstream-only scope is extended to the full draft-v25 verifier:
   downstream routes do not silently fall back to upstream verification when a
   fresh RTR table arrives.
 
-Remaining ASPA work is test hardening, not feature scope: import NIST-BRIO
-vectors when practical and keep expanding focused `match_aspa_validation`
-policy coverage.
+Remaining ASPA work is test hardening, not feature scope. A compact offline
+subset of the NIST-BRIO ASPA demo corpus (b7.1.2) now pins upstream and
+downstream Valid / Invalid / Unknown verifier outcomes, including the documented
+ASPA-Valid forged-origin / forged-segment limitations. Keep expanding focused
+`match_aspa_validation` policy coverage as demand warrants.
