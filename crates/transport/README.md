@@ -19,13 +19,13 @@ events.
 - **TCP MD5 signatures** (RFC 2385) and **GTSM** (RFC 5082) via raw
   socket options
 - **TCP-AO foundation** (RFC 5925) — internal Linux socket primitive plus
-  `GlobalService.GetGlobal` / `rustbgpctl global` capability status;
+  `GlobalService.GetGlobal` / `rbgp global` capability status;
   runtime config/session wiring is still deferred
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
 - **Import-decision explain** (ADR-0073) — a bounded per-session LRU
   cache of import-policy decisions (permit and deny) backing
-  `PolicyService.ExplainImportPolicy` / `rustbgpctl policy explain`;
+  `PolicyService.ExplainImportPolicy` / `rbgp policy explain`;
   diagnostic state only, resets on session reset / restart, gated by
   `[policy.explain].enabled`
 - **Private AS removal** — strip/replace private ASNs before eBGP export

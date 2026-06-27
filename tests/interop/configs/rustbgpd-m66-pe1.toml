@@ -6,7 +6,7 @@
 #
 # gRPC runs ADR-0064 `enforcement = "tier"` with two principals so
 # the driver can prove the drain RPC's operator_only ceiling with
-# rustbgpctl: the TCP listener authenticates the operator via bearer
+# rbgp: the TCP listener authenticates the operator via bearer
 # token; the UDS listener is the observer (filesystem-authenticated)
 # and must get PermissionDenied for the drain.
 #

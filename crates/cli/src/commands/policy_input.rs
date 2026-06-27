@@ -1,7 +1,7 @@
 //! JSON deserialization for policy statements.
 //!
 //! Operators feed policy / peer-group / neighbor-set definitions to
-//! `rustbgpctl ... set` via `--from-file <PATH>`. The file is JSON
+//! `rbgp ... set` via `--from-file <PATH>`. The file is JSON
 //! whose shape mirrors the corresponding proto message; we deserialize
 //! into local serde-friendly mirrors and convert into the proto types
 //! used on the wire. Keeping the conversion explicit (rather than

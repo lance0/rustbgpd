@@ -1,4 +1,4 @@
-//! `rustbgpctl policy ...` — wraps PolicyService gRPCs.
+//! `rbgp policy ...` — wraps PolicyService gRPCs.
 //!
 //! - `list` / `get NAME` / `set NAME --from-file FILE` / `delete NAME`
 //!   for named `[[policy_definitions]]` entries.

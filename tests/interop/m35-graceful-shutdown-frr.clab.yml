@@ -10,7 +10,7 @@
 #     `local_pref = 0`.
 #
 #   * Initiator leg (rustbgpd outbound advertise): the gRPC
-#     SetGracefulShutdown / `rustbgpctl gshut --peer 10.0.0.2` toggle
+#     SetGracefulShutdown / `rbgp gshut --peer 10.0.0.2` toggle
 #     attaches the GRACEFUL_SHUTDOWN community to outbound updates.
 #     FRR's `show ip bgp <prefix>` output for the rustbgpd-originated
 #     prefix must subsequently carry the community.

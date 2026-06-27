@@ -13,7 +13,7 @@
 ```bash
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
-cargo build --workspace          # builds rustbgpd + rustbgpctl
+cargo build --workspace          # builds rustbgpd + rbgp
 cargo test --workspace
 ```
 
@@ -127,7 +127,7 @@ crates/
   evpn-linux/            # Linux kernel dataplane for EVPN VTEP mode (#[cfg(target_os = "linux")]): rtnetlink reconciler, FDB / link / IP-VRF dumps, RTNLGRP_NEIGH classifier, RTNLGRP_IPV4_ROUTE / RTNLGRP_IPV6_ROUTE route observer (Gate 9 slice 6), L3 FIB programming (Gate 9 slice 6 PR B), nexthop_raw raw-netlink FDB-NHG primitive + group_state refcount + nh_id_alloc tag bits (ADR-0059 aliasing-ECMP)
   api/                   # gRPC server (tonic) — 11 services
   telemetry/             # Prometheus metrics + structured tracing
-  cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
+  cli/                   # rbgp — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
 docs/                    # Design doc, RFC notes, interop results, ADRs

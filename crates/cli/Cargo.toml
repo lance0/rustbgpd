@@ -1,11 +1,10 @@
 [package]
 publish = false
 name = "rustbgpctl"
-# Two binaries (rustbgpctl + the rbgp alias) ship from this package, so
-# `cargo run -p rustbgpctl` would otherwise be ambiguous. Pin the canonical
-# binary as the default-run target — integration tests shell out via
-# `cargo run -p rustbgpctl --`.
-default-run = "rustbgpctl"
+# The package keeps its historical Cargo name, but the shipped CLI binary is
+# `rbgp`.
+default-run = "rbgp"
+autobins = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,13 +16,8 @@ description = "CLI tool for rustbgpd — thin gRPC wrapper for daemon management
 readme = "README.md"
 
 [[bin]]
-name = "rustbgpctl"
-path = "src/main.rs"
-
-[[bin]]
 name = "rbgp"
-path = "src/bin/rbgp.rs"
-test = false
+path = "src/main.rs"
 
 [dependencies]
 tonic.workspace = true

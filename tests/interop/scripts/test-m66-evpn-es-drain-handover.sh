@@ -4,7 +4,7 @@
 #
 # The proof M65 couldn't be: M65 used GoBGP segment PEs because
 # rustbgpd had no deliberate origination-side withdrawal stimulus.
-# `rustbgpctl evpn es drain <esi>` is that stimulus now, so the two
+# `rbgp evpn es drain <esi>` is that stimulus now, so the two
 # single-active segment PEs AND the remote VTEP (receive side) are
 # all rustbgpd. The drain on pe1 must withdraw exactly its segment
 # origination state (Type 4 + EAD-per-ES + EAD-per-EVI + the member

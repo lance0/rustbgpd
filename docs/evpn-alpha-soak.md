@@ -41,7 +41,7 @@ none of them block the current release on their own.
   originator sees an observation from RIB-side origination failures.
 - [x] **`ListEvpnInstances` exposes `originated_local_macs_count`
   per instance.** Gives operators a fast "is the loop alive?" view
-  via `rustbgpctl evpn instances` without scraping logs. Human output
+  via `rbgp evpn instances` without scraping logs. Human output
   renders `originated-local-macs=N`; JSON and gRPC expose
   `originated_local_macs_count`.
 - [x] **24 h MAC-churn soak** of M37 — **PASS, 2026-05-19**. Run
@@ -116,7 +116,7 @@ none of them block the current release on their own.
   local Type 2 originations suppressed until timed recovery.
 - [x] **Duplicate-MAC loop-protection completion (#139).** Remote-route
   processing suppression, receive-side intent filtering, and the manual
-  clear API (`ClearDuplicateMacQuarantine` / `rustbgpctl evpn
+  clear API (`ClearDuplicateMacQuarantine` / `rbgp evpn
   clear-duplicate-mac`) all shipped. Explicit kernel drop / filter
   primitives remain an optional future enhancement, not a blocker.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
@@ -318,7 +318,7 @@ landing, tracked here for visibility)
   - `IpVrfTable` plumbed through `DataplaneIntent`; the reconcile
     actor calls `probe_ip_vrfs` each pass and logs `Ready` ↔
     `NotReady` transitions via tracing.
-  - `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
+  - `DataplaneReport.ip_vrf_status` rows + `rbgp evpn vrfs
     [NAME]` CLI + `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf`
     gRPC RPCs so operators read the verdict without scraping logs.
   - **Slice 6 PR A (#77)**: per-IP-VRF kernel-route observation +

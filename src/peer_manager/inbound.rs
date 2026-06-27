@@ -257,7 +257,7 @@ impl PeerManager {
             warn!(
                 %peer_ip,
                 hint = %format_args!(
-                    "to accept: rustbgpctl neighbor {peer_ip} add --asn <REMOTE_ASN>"
+                    "to accept: rbgp neighbor {peer_ip} add --asn <REMOTE_ASN>"
                 ),
                 "inbound connection from unknown peer, dropping"
             );

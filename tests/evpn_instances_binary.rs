@@ -42,7 +42,7 @@ impl Daemon {
     }
 
     fn shutdown(mut self, grpc_addr: &str) {
-        let _ = rustbgpctl(grpc_addr, &["shutdown", "--reason", "evpn binary test"]);
+        let _ = rbgp(grpc_addr, &["shutdown", "--reason", "evpn binary test"]);
         // The daemon has coordinated shutdown paths; this no-peer test should
         // finish well inside 5s even on a slow CI runner.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -67,27 +67,27 @@ impl Drop for Daemon {
     }
 }
 
-fn rustbgpctl(grpc_addr: &str, args: &[&str]) -> Output {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_rustbgpctl") {
+fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
         let mut cmd = Command::new(path);
         cmd.arg("--addr").arg(grpc_addr).args(args).output()
     } else {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
-        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--"])
+        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
             .arg(grpc_addr)
             .args(args)
             .output()
     }
-    .expect("failed to spawn rustbgpctl subprocess")
+    .expect("failed to spawn rbgp subprocess")
 }
 
 fn wait_for_cli_json(grpc_addr: &str, daemon: &mut Daemon) -> Output {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = None;
     while Instant::now() < deadline {
-        let output = rustbgpctl(grpc_addr, &["--json", "evpn", "instances"]);
+        let output = rbgp(grpc_addr, &["--json", "evpn", "instances"]);
         if output.status.success() {
             return output;
         }
@@ -95,9 +95,9 @@ fn wait_for_cli_json(grpc_addr: &str, daemon: &mut Daemon) -> Output {
         daemon.assert_still_running();
         thread::sleep(Duration::from_millis(100));
     }
-    let output = last.expect("rustbgpctl was never invoked");
+    let output = last.expect("rbgp was never invoked");
     panic!(
-        "rustbgpctl evpn instances did not succeed before timeout\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
+        "rbgp evpn instances did not succeed before timeout\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -151,7 +151,7 @@ fn optional_json_string<'a>(row: &'a serde_json::Value, key: &str) -> &'a str {
 }
 
 #[test]
-fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
+fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let config_path = write_config(temp.path());
     let grpc_sock = temp.path().join("runtime").join("grpc.sock");
@@ -199,7 +199,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
         "bridge br200 not found"
     );
 
-    let human_output = rustbgpctl(&grpc_addr, &["evpn", "instances"]);
+    let human_output = rbgp(&grpc_addr, &["evpn", "instances"]);
     assert!(
         human_output.status.success(),
         "human CLI failed\nstdout:\n{}\nstderr:\n{}",

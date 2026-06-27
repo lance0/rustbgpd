@@ -55,7 +55,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --workspace --profile ci && \
     mkdir -p /out && \
     cp target/ci/rustbgpd /out/ && \
-    cp target/ci/rustbgpctl /out/ && \
     cp target/ci/rbgp /out/ && \
     cp target/ci/evpn-tester /out/ && \
     cp target/ci/evpn-monitor /out/
@@ -68,7 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/rustbgpd /usr/local/bin/rustbgpd
-COPY --from=builder /out/rustbgpctl /usr/local/bin/rustbgpctl
 COPY --from=builder /out/rbgp /usr/local/bin/rbgp
 COPY --from=builder /out/evpn-tester /usr/local/bin/evpn-tester
 COPY --from=builder /out/evpn-monitor /usr/local/bin/evpn-monitor

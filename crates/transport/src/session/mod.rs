@@ -150,7 +150,7 @@ pub(crate) struct PeerSession {
     /// reconnect after flap) replays the toggle from `ManagedPeer`
     /// and the new session comes up with the correct state. The
     /// daemon-restart case is the only documented loss class
-    /// (`KNOWN_ISSUES.md`): operators re-issue `rustbgpctl gshut` after
+    /// (`KNOWN_ISSUES.md`): operators re-issue `rbgp gshut` after
     /// daemon restart if the maintenance window is still active.
     advertise_graceful_shutdown: bool,
     /// Channel to notify `PeerManager` of lossless collision-coordination events.

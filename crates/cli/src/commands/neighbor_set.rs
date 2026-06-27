@@ -1,4 +1,4 @@
-//! `rustbgpctl neighbor-set ...` — wraps PolicyService neighbor-set RPCs.
+//! `rbgp neighbor-set ...` — wraps PolicyService neighbor-set RPCs.
 //!
 //! Neighbor sets are the named (addresses, ASNs, peer-groups) tuple
 //! that policy `match_neighbor_set` resolves against. Backed by

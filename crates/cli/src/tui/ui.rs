@@ -428,7 +428,7 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  rustbgpctl top — Live TUI Dashboard",
+            "  rbgp top — Live TUI Dashboard",
             Style::default()
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),

@@ -1,16 +1,16 @@
 # Quick-start: rustbgpd + FRR peer
 #
 # Spins up rustbgpd with an FRR neighbor that advertises sample prefixes.
-# Useful for trying out rustbgpctl commands without real routers.
+# Useful for trying out rbgp commands without real routers.
 #
 # Usage:
 #   docker compose up -d
-#   docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
-#   docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+#   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
+#   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 #
 # From the host (gRPC exposed on localhost:50051):
-#   cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 neighbor
-#   cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 top
+#   cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
+#   cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
 
 services:
   rustbgpd:

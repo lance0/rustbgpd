@@ -11,7 +11,7 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-# Quick-start lab access: gRPC over TCP so `rustbgpctl` can reach the daemon
+# Quick-start lab access: gRPC over TCP so `rbgp` can reach the daemon
 # from the host via the published port. Like `rustbgpd --init-config lab`, this
 # throwaway lab uses legacy gRPC authorization for zero-setup access.
 # Production deployments should use tier enforcement + [security.grpc.roles]

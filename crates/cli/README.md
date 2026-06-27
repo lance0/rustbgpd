@@ -1,12 +1,10 @@
-# rustbgpd-cli (rbgp / rustbgpctl)
+# rustbgpd-cli (rbgp)
 
 Command-line interface for rustbgpd. Thin gRPC wrapper for daemon
 management with human-readable and JSON output modes.
 
-The CLI installs under two interchangeable names: `rbgp` (the short,
-preferred spelling used throughout the docs) and `rustbgpctl` (the
-original long form). Both binaries ship in every build and expose the
-identical command surface — use whichever you prefer.
+The CLI installs as `rbgp` and exposes the daemon's gRPC management surface with
+human-readable and JSON output modes.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 

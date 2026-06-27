@@ -31,7 +31,7 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
 const LAB: &str = r#"# rustbgpd "lab" profile — a minimal local setup for experimenting on
 # one machine. Edit the ASNs and addresses for your topology, then:
 #   rustbgpd config-lab.toml          # (after saving this output)
-#   rustbgpctl -s unix:///tmp/rustbgpd/grpc.sock neighbor
+#   rbgp -s unix:///tmp/rustbgpd/grpc.sock neighbor
 
 [global]
 asn = 65001
@@ -45,7 +45,7 @@ runtime_state_dir = "/tmp/rustbgpd"
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# Local control socket for rustbgpctl. The lab profile ships NO gRPC
+# Local control socket for rbgp. The lab profile ships NO gRPC
 # auth — do not use this posture outside a trusted local box.
 [global.telemetry.grpc_uds]
 path = "/tmp/rustbgpd/grpc.sock"

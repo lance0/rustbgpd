@@ -1925,7 +1925,7 @@ mod tests {
     fn parse_bfd_category_and_event_types() {
         // The API already filters BFD events; the CLI must accept the `bfd`
         // category and the bfd_* event types (and their aliases) so
-        // `rustbgpctl events watch --category bfd` works.
+        // `rbgp events watch --category bfd` works.
         assert_eq!(
             parse_event_category("bfd").unwrap(),
             EventCategory::Bfd as i32

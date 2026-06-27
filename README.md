@@ -36,7 +36,7 @@ diversity scripts remain local / manual gates. See
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`; compatible `rustbgpctl` spelling also ships) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
@@ -118,8 +118,7 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 cargo build --workspace --release
 
-# Binaries are at target/release/rustbgpd, target/release/rbgp,
-# and the compatible long-form target/release/rustbgpctl
+# Binaries are at target/release/rustbgpd and target/release/rbgp
 ```
 
 ### Docker

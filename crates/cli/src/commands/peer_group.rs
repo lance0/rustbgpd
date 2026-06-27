@@ -1,4 +1,4 @@
-//! `rustbgpctl peer-group ...` — wraps PeerGroupService gRPCs.
+//! `rbgp peer-group ...` — wraps PeerGroupService gRPCs.
 //!
 //! - `list` / `get NAME` / `set NAME --from-file FILE` / `delete NAME`
 //!   for named `[[peer_groups]]` entries.

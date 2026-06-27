@@ -1,4 +1,4 @@
-//! `rustbgpctl dynamic-neighbor ...` — wraps NeighborService dynamic-range RPCs.
+//! `rbgp dynamic-neighbor ...` — wraps NeighborService dynamic-range RPCs.
 //!
 //! Dynamic neighbor ranges accept inbound sessions from any peer whose source
 //! address falls in a configured prefix, binding them to a peer group. Backed

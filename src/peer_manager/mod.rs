@@ -144,7 +144,7 @@ struct ManagedPeer {
     /// `PeerSession` mirrors this value and gets re-seeded on every
     /// session spawn (collision-replace, dynamic peer re-establish,
     /// flap-and-reconnect). Without this lift, an operator who
-    /// runs `rustbgpctl gshut --peer X` and then experiences a peer
+    /// runs `rbgp gshut --peer X` and then experiences a peer
     /// flap would have the toggle silently lost — the new session
     /// would come up advertising untagged routes during the very
     /// maintenance window the toggle was supposed to cover.

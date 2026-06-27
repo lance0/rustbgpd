@@ -580,7 +580,7 @@ for the architectural record.
 8. **gRPC + CLI** — `ListEvpnRoutes` RPC on RibService with `route_type`
    / `peer` / `rd` filters; `AddEvpnRoute` / `DeleteEvpnRoute` on
    InjectionService for Type 2 (MAC/IP) and Type 3 (IMET) origination
-   with proto3-default-correct `disable_vxlan_encap`. `rustbgpctl evpn`
+   with proto3-default-correct `disable_vxlan_encap`. `rbgp evpn`
    list + `add-mac-ip` / `add-imet` / `delete-mac-ip` / `delete-imet`
    subcommands.
 9. **Five interop harnesses** — M29 capability sanity, M30 Type 2
@@ -618,7 +618,7 @@ for the architectural record.
 - **VTEP foundation (Gate 7a, v0.13.0) — landed.** Declarative
   domain in `crates/evpn` (`EvpnInstance`, `EvpnInstanceTable`,
   `RouteTarget`), `[[evpn_instances]]` TOML schema, read-only
-  `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`,
+  `EvpnService.ListEvpnInstances` + `rbgp evpn instances`,
   wire-side `RouteDistinguisher::from_str`. ADR-0052 codifies the
   boundary: domain-only, kernel-free; RR-only deployments
   unchanged.
@@ -767,7 +767,7 @@ runners can't sustain:
 | **M61** | ADR-0079 EVPN L3 adoption sweep kill-and-restart. FRR originates two Type 5 prefixes over the M48 symmetric-IRB topology; rustbgpd imports both into vrf1's kernel table (`proto bgp onlink`) plus the shared L3 neighbor / L3VXLAN FDB resolution rows, is SIGKILLed (netns + kernel rows survive), one prefix is withdrawn while the daemon is down, and the restart runs with `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS=5`. Proves the still-desired route + shared resolution rows stay marked continuously, the unclaimed route is reaped after the deferral, foreign `proto static` route / non-`extern_learn` neighbor / zebra-stamped `extern_learn` neighbor / stamp-less `extern_learn` + permanent neighbor (the ADR-0082 strict default refuses the pre-stamp legacy shape) rows survive, the re-claimed neighbor row carries the `NDA_PROTOCOL` ownership stamp (`proto bgp`), and the six `evpn_l3_*_adopted_total` / `_reaped_total` counters report the cycle. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m61-evpn-l3-adoption-sweep.sh`. |
 | **M62** | ADR-0079 blackhole discard adoption sweep kill-and-restart. FRR tags two host routes with BLACKHOLE (65535:666) over the M41 topology; rustbgpd installs both as kernel `RTN_BLACKHOLE` + `RTPROT_BGP` discards, is SIGKILLed (netns + kernel rows survive), one prefix is withdrawn while the daemon is down, and the restart runs with `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS=5`. Proves the still-desired discard stays present continuously (adopted + re-claimed, `ListBlackholeDiscards` reads `installed/adopted` → `owned`), the unclaimed row surfaces as `adopted_pending_reap` and is reaped only after the deferral, a foreign `proto static` blackhole row survives, and the `bgp_blackhole_discard_adopted_total` / `_reaped_total` counters report the cycle. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m62-blackhole-adoption-sweep.sh`. |
 | **M65** | ADR-0083 single-active failover blackout measurement. rustbgpd is the remote VTEP (receive side); two GoBGP-driven PEs share a single-active ES and a host behind the DUT pings the dual-homed CE at a 100 ms grain across an AC failure (active PE's CE leg down + EAD-per-ES withdrawn, MAC route retained — the RFC 7432 §8.2 mass-withdraw shape). Proves the slice-2 pre-install (one-member FDB NHG, standby NH pre-created but not a member), the slice-3 swap (same group id retargeted to the pre-created backup NH in one membership replace, the MAC row's nhid held continuously, withdrawn PE's NH GC'd, swap counter == 1, gauge == 1), the last-PE ordered teardown (rows flushed, group + NHs gone, teardown counter == 1, pings hard-dead), and foreign FDB rows + an untagged fdb nexthop untouched. Blackout measured informationally (~4.5 s locally, dominated by the dataplane supervisor's 5 s RIB-poll cadence; the swap itself is one `NLM_F_REPLACE`) with a hard < 30 s bound separating the poll-driven repair from the ≤60 s periodic-reconcile backstop. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m65-evpn-single-active-failover.sh`. |
-| **M66** | ADR-0084 Ethernet Segment drain service handover — rustbgpd on both sides (the proof M65 couldn't be: the runtime drain is the origination-side withdrawal stimulus M65 lacked). Two full-dataplane rustbgpd PEs share a single-active ES (RFC 9785 highest-preference DF) behind a rustbgpd VTEP/RR; a host behind the VTEP pings the dual-homed CE at a 100 ms grain. Proves the steady state (Type 4 + EAD-per-ES + EAD-per-EVI from both PEs, CE-MAC Type 2 from the DF only behind the ADR-0083 one-member NHG with the backup NH pre-created), the ADR-0064 operator_only ceiling on the drain RPC (observer principal → PermissionDenied, unknown ESI → NotFound, via rustbgpctl against tier-enforced bearer-token/UDS listeners), the drain itself (all four route classes withdrawn while the peer PE's survive, `changed=true` → repeat `changed=false` idempotence, df gauge → 0, pe2 promotes to DF), the service handover (pe2 learns the CE MAC through the flood path, originates its own Type 2, and the VTEP's CE-MAC FDB row re-resolves toward pe2), SIGHUP-while-drained non-resurrection (a live L2VNI-add reload demonstrably applies while the drained ES stays withdrawn — ADR-0084 decision 3), and the undrain (Type 4 + both EAD classes return immediately, pe1 re-wins DF revertively; after one CE maintenance-exit ARP broadcast — required by two pre-existing daemon gaps the proof surfaces and documents: no same-ESI local bias in the PE remote-MAC projection, and no local-delete observation for the in-place port usurpation it causes — the CE-MAC Type 2 and end-to-end service are asserted back). Blackout measured informationally with a generous < 30 s bound; the BUM-flood-only enforcement limit (non-DF/drained ACs do not block known unicast) typically keeps the observed gap near zero. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m66-evpn-es-drain-handover.sh`. |
+| **M66** | ADR-0084 Ethernet Segment drain service handover — rustbgpd on both sides (the proof M65 couldn't be: the runtime drain is the origination-side withdrawal stimulus M65 lacked). Two full-dataplane rustbgpd PEs share a single-active ES (RFC 9785 highest-preference DF) behind a rustbgpd VTEP/RR; a host behind the VTEP pings the dual-homed CE at a 100 ms grain. Proves the steady state (Type 4 + EAD-per-ES + EAD-per-EVI from both PEs, CE-MAC Type 2 from the DF only behind the ADR-0083 one-member NHG with the backup NH pre-created), the ADR-0064 operator_only ceiling on the drain RPC (observer principal → PermissionDenied, unknown ESI → NotFound, via rbgp against tier-enforced bearer-token/UDS listeners), the drain itself (all four route classes withdrawn while the peer PE's survive, `changed=true` → repeat `changed=false` idempotence, df gauge → 0, pe2 promotes to DF), the service handover (pe2 learns the CE MAC through the flood path, originates its own Type 2, and the VTEP's CE-MAC FDB row re-resolves toward pe2), SIGHUP-while-drained non-resurrection (a live L2VNI-add reload demonstrably applies while the drained ES stays withdrawn — ADR-0084 decision 3), and the undrain (Type 4 + both EAD classes return immediately, pe1 re-wins DF revertively; after one CE maintenance-exit ARP broadcast — required by two pre-existing daemon gaps the proof surfaces and documents: no same-ESI local bias in the PE remote-MAC projection, and no local-delete observation for the in-place port usurpation it causes — the CE-MAC Type 2 and end-to-end service are asserted back). Blackout measured informationally with a generous < 30 s bound; the BUM-flood-only enforcement limit (non-DF/drained ACs do not block known unicast) typically keeps the observed gap near zero. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m66-evpn-es-drain-handover.sh`. |
 | **M67** | ADR-0085 link-driven Ethernet Segment drain failover and held-off recovery — the M66 sibling with the production trigger: a real AC failure, not an RPC, drives the drain end-to-end (closing the origination-side withdrawal-stimulus arc). Same five-node M66 topology, but the rustbgpd PEs bind their CE-facing attachment circuit (`interface = "eth2"`, `recovery_delay_secs = 5`); the injection is `ip link set eth2 down` inside pe1 (the binding watches pe1's own ifindex carrier; the veth peer — the CE leg — drops too: cable-pull semantics). Proves the carrier monitor armed at steady state with all `evpn_es_drained{esi, reason}` gauges 0; on AC loss the `link` reason gauge → 1 with no operator action (operator gauge stays 0), df gauge → 0, all four route classes withdraw (RFC 7432 §8.2 shape) while pe2's survive, pe2 promotes to DF, the VTEP hands the CE MAC to exactly pe2, and service recovers (blackout informational, 100–300 ms locally — the AC is really dead, so this is the genuine failover — with a generous < 30 s bound); on carrier return the recovery hold-off keeps the gauge at 1 through up+3 s (strict-ish, 2 s margin on the 5 s window) before releasing (~5.5 s observed) and pe1 re-wins DF revertively; a down-up-down-up flap inside the hold-off stays drained past the FIRST up's would-be deadline (the re-arm cancelled it) and recovers only after the LAST up + hold-off; and the reasons compose (ADR-0085 decision 2): an operator drain plus a full link cycle stays withdrawn — link recovery never overrides a maintenance drain — until the operator undrain. Re-runnable: a prior cycle's shared-ESI co-advertisement (legitimate RFC 7432 aliasing once the CE has spoken on both legs) downgrades the two fresh-only steady-state pins to informational. Also asserts the single-active whole-port AC gate (RFC 7432 non-DF full-AC blocking, the ADR-0085 binding follow-on): the non-DF's bound AC port `state disabled` at steady state, `forwarding` on DF promotion, re-blocked after the revert. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m67-evpn-link-drain-failover.sh`. |
 | **M68** | ADR-0087 native GW-IP overlay-index Type 5 consume-side proof against FRR. rustbgpd originates a Type 5 for `203.0.113.0/24` from a static VRF route via Gateway Address `10.1.1.5`, with L2VNI 10 linked to L3VNI 100 / vrf1 on both PEs. FRR runs `enable-resolve-overlay-index`; the driver asserts FRR receives the Type 5 but keeps it out of vrf1 until rustbgpd originates the companion MAC/IP Type 2 for `10.1.1.5`, then imports the prefix into vrf1 via that gateway (BGP RIB and kernel route). Withdrawing the static route drops the Type 5 and imported route. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m68-evpn-type5-gwip-overlay-index-frr.sh`. |
 | **M69** | RFC 9785 highest-preference DF election, cross-vendor with FRR. rustbgpd advertises ES-DF preference 100 and FRR 200 (`evpn mh es-df-pref 200`); default RFC 7432 modulo service-carving would elect rustbgpd for VNI 200, so asserting rustbgpd NonDF + FRR DF proves the preference algorithm overrides carving on both sides. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m69-evpn-preference-df-frr.sh`. |
@@ -844,7 +844,7 @@ to the plain capability they delivered.
 
 ### CLI surface
 
-- **`rustbgpctl` policy / peer-group / neighbor-set commands** (#61) — three
+- **`rbgp` policy / peer-group / neighbor-set commands** (#61) — three
   subcommand trees wrap `PolicyService` (18 RPCs) and `PeerGroupService`
   (6 RPCs): read (`policy list/get`, `peer-group list/get`,
   `neighbor-set list/get`); write (`policy set/delete`, `peer-group set/delete`,
@@ -857,7 +857,7 @@ to the plain capability they delivered.
   on `rib --explain` (Add-Path send view) shipped alongside. Daemon-side
   `rustbgpd --diff` reports reload-applied policy / peer-group /
   effective-neighbor impact, restart-required startup-only surfaces, and
-  hot-applied global honor flags. A live `rustbgpctl policy diff
+  hot-applied global honor flags. A live `rbgp policy diff
   <candidate.toml>` against an API-exported runtime snapshot remains a larger
   config-snapshot design task if operators need it.
 
@@ -872,7 +872,7 @@ to the plain capability they delivered.
   chain — chain tail (not head) so the demotion wins last-writer accumulation
   against any operator policy that also sets `LOCAL_PREF`; iBGP exempt.
   Initiator behavior: gRPC `NeighborService.SetGracefulShutdown { address,
-  enabled }` (empty address = all peers) + `rustbgpctl gshut [--peer X]
+  enabled }` (empty address = all peers) + `rbgp gshut [--peer X]
   [--clear]`, stored on `ManagedPeer`, mirrored to the live session, replayed on
   session restart, and triggering `RibUpdate::RefreshPeerOutbound` so wire state
   updates immediately. M35 validates both legs plus the clear leg against FRR
@@ -899,7 +899,7 @@ to the plain capability they delivered.
   reconciler: installs daemon-owned `RTN_BLACKHOLE` routes for EBGP-learned
   BLACKHOLE best routes, defaults to host routes only (`/32` and `/128`),
   refuses to overwrite pre-existing kernel routes, cleans up on withdraw /
-  shutdown, and surfaces status through `rustbgpctl rib blackholes` + Prometheus
+  shutdown, and surfaces status through `rbgp rib blackholes` + Prometheus
   counters. M41 is CI-gated against FRR 10.3.1. Remaining BLACKHOLE work:
   per-peer / peer-group allow-lists, active-blackhole / rate limits, startup
   adoption or explicit stale-cleanup policy, audit trails, and an outbound
@@ -914,7 +914,7 @@ to the plain capability they delivered.
   tables. Pure intent/diff model plus a runtime actor; conservative ownership
   (`RTPROT_BGP` is not ownership proof, so pre-existing and externally-drifted
   rows are preserved and reported as `foreign_route_exists`); status via
-  `RibService.ListFibRoutes`, `rustbgpctl rib fib`, and Prometheus `bgp_fib_*`
+  `RibService.ListFibRoutes`, `rbgp rib fib`, and Prometheus `bgp_fib_*`
   counters; privileged netns harness plus the M42 FRR containerlab smoke.
   Follow-up hardening added per-peer / peer-group allow-lists, route-count caps,
   and exact-match crash-restart recovery through persisted owned-state under
@@ -945,7 +945,7 @@ to the plain capability they delivered.
   preservation, RFC 4456 reflection applied to EVPN routes, six typed
   extended-community accessors (BGP Encapsulation for VXLAN per RFC 8365/9012,
   MAC Mobility, ESI Label, ES-Import RT, Router MAC per RFC 9135, Default
-  Gateway). `ListEvpnRoutes` gRPC RPC + `rustbgpctl evpn` CLI. Includes review
+  Gateway). `ListEvpnRoutes` gRPC RPC + `rbgp evpn` CLI. Includes review
   correctness fixes: source-peer split horizon, same-peer attribute-change
   detection, full RFC 4456 tie-break chain, max-prefix counting EVPN keys +
   FlowSpec rules, EVPN withdrawals propagated through both AS_PATH and
@@ -1052,7 +1052,7 @@ to the plain capability they delivered.
   L3VXLAN dumps building an `IpVrfKernelSnapshot`; `Dataplane::probe_ip_vrfs`
   wires it through, the reconcile actor calls it every pass, and readiness
   transitions surface via `tracing` + `DataplaneReport.ip_vrf_status` +
-  `EvpnService.ListIpVrfs` / `GetIpVrf` + `rustbgpctl evpn vrfs`. The
+  `EvpnService.ListIpVrfs` / `GetIpVrf` + `rbgp evpn vrfs`. The
   daemon-side origination feed (#77) does a per-pass kernel-route dump per
   IP-VRF with a conservative classifier (filters routes from other daemons,
   non-forwardable types, and routes egressing the L3 VXLAN), a `watch`
@@ -1118,7 +1118,7 @@ to the plain capability they delivered.
   `UNIMPLEMENTED` stub with the cursor handler (single-category-cursor fast path
   + post-filter for repeated categories / `event_types` / `afi_safi` /
   `prefix_length`, leading `StreamLagEvent` when the requested cursor is older
-  than the retention floor); CLI `rustbgpctl events watch --from-event-id <u64>`;
+  than the retention floor); CLI `rbgp events watch --from-event-id <u64>`;
   `examples/event-bridge/` reference binary. Legacy `WatchEvents` /
   `WatchRoutes` / `List*Events` surfaces stay byte-identical. Notification events
   are durably persisted for the first time, closing ADR-0071's
@@ -1172,7 +1172,7 @@ to the plain capability they delivered.
   ADR-0052) — new `crates/evpn` exposes the runtime `EvpnInstance` /
   `EvpnInstanceTable` types; `[[evpn_instances]]` config block (VNI, RD, RTs,
   local VTEP IP, optional bridge, `advertise_svi_mac`); read-only
-  `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`; wire crate gains
+  `EvpnService.ListEvpnInstances` + `rbgp evpn instances`; wire crate gains
   `RouteDistinguisher::from_str`. Empty by default — RR-only deployments
   unchanged.
 

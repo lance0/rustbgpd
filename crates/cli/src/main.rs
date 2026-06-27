@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 mod commands;
 mod connection;
 mod error;
@@ -17,18 +19,11 @@ use crate::error::CliError;
 use crate::output::parse_family;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
-use std::ffi::OsStr;
 
-const LONG_BINARY_NAME: &str = "rustbgpctl";
-const SHORT_BINARY_NAME: &str = "rbgp";
+const BINARY_NAME: &str = "rbgp";
 
 #[derive(Parser)]
-#[command(
-    name = "rustbgpctl",
-    bin_name = "rustbgpctl",
-    about = "CLI for rustbgpd",
-    version
-)]
+#[command(name = "rbgp", bin_name = "rbgp", about = "CLI for rustbgpd", version)]
 struct Cli {
     /// gRPC server address or unix:///path/to/socket
     #[arg(
@@ -1089,23 +1084,7 @@ async fn main() {
 }
 
 fn invoked_binary_name() -> &'static str {
-    std::env::args_os()
-        .next()
-        .as_deref()
-        .map(binary_name_from_arg0)
-        .unwrap_or(LONG_BINARY_NAME)
-}
-
-fn binary_name_from_arg0(arg0: &OsStr) -> &'static str {
-    // `file_stem` (not `file_name`) so a platform extension like `rbgp.exe`
-    // still resolves to the short alias.
-    match std::path::Path::new(arg0)
-        .file_stem()
-        .and_then(OsStr::to_str)
-    {
-        Some(SHORT_BINARY_NAME) => SHORT_BINARY_NAME,
-        _ => LONG_BINARY_NAME,
-    }
+    BINARY_NAME
 }
 
 fn cli_command(binary_name: &'static str) -> clap::Command {
@@ -1928,32 +1907,8 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn test_binary_name_from_arg0() {
-        assert_eq!(
-            binary_name_from_arg0(OsStr::new("/usr/local/bin/rbgp")),
-            SHORT_BINARY_NAME
-        );
-        assert_eq!(
-            binary_name_from_arg0(OsStr::new("/usr/local/bin/rbgp.exe")),
-            SHORT_BINARY_NAME
-        );
-        assert_eq!(
-            binary_name_from_arg0(OsStr::new("/usr/local/bin/rustbgpctl")),
-            LONG_BINARY_NAME
-        );
-        assert_eq!(
-            binary_name_from_arg0(OsStr::new("rustbgpctl.exe")),
-            LONG_BINARY_NAME
-        );
-        assert_eq!(
-            binary_name_from_arg0(OsStr::new("unknown")),
-            LONG_BINARY_NAME
-        );
-    }
-
-    #[test]
-    fn test_rbgp_command_renders_short_usage() {
-        let mut command = cli_command(SHORT_BINARY_NAME);
+    fn test_rbgp_command_renders_rbgp_usage() {
+        let mut command = cli_command(BINARY_NAME);
         let help = command.render_long_help().to_string();
 
         assert!(help.contains("Usage: rbgp"));
@@ -1961,16 +1916,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rustbgpctl_command_keeps_long_usage() {
-        let mut command = cli_command(LONG_BINARY_NAME);
-        let help = command.render_long_help().to_string();
-
-        assert!(help.contains("Usage: rustbgpctl"));
-    }
-
-    #[test]
     fn test_rbgp_command_parses_same_surface() {
-        let matches = cli_command(SHORT_BINARY_NAME)
+        let matches = cli_command(BINARY_NAME)
             .try_get_matches_from(["rbgp", "global"])
             .unwrap();
         let cli = Cli::from_arg_matches(&matches).unwrap();
@@ -1981,7 +1928,7 @@ mod tests {
     #[test]
     fn test_rbgp_completion_uses_short_name() {
         let mut output = Vec::new();
-        generate_completions(Shell::Bash, SHORT_BINARY_NAME, &mut output);
+        generate_completions(Shell::Bash, BINARY_NAME, &mut output);
         let completion = String::from_utf8(output).unwrap();
 
         assert!(completion.contains("_rbgp()"));
@@ -1991,14 +1938,14 @@ mod tests {
 
     #[test]
     fn test_parse_global() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "global"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "global"]).unwrap();
         assert!(matches!(cli.command, Command::Global));
     }
 
     #[test]
     fn test_parse_config_apply_confirmed() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "config",
             "apply",
             "--from-file",
@@ -2029,7 +1976,7 @@ mod tests {
     #[test]
     fn test_parse_config_apply_confirm_timeout_requires_confirm_id() {
         let result = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "config",
             "apply",
             "--from-file",
@@ -2053,7 +2000,7 @@ mod tests {
 
     #[test]
     fn test_parse_config_confirm_abort_status() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "config", "confirm", "deploy-123"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "config", "confirm", "deploy-123"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Config {
@@ -2061,7 +2008,7 @@ mod tests {
             }
         ));
 
-        let cli = Cli::try_parse_from(["rustbgpctl", "config", "abort", "deploy-123"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "config", "abort", "deploy-123"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Config {
@@ -2069,7 +2016,7 @@ mod tests {
             }
         ));
 
-        let cli = Cli::try_parse_from(["rustbgpctl", "config", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "config", "status"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Config {
@@ -2080,13 +2027,13 @@ mod tests {
 
     #[test]
     fn test_parse_health() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "health"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "health"]).unwrap();
         assert!(matches!(cli.command, Command::Health));
     }
 
     #[test]
     fn test_parse_neighbor_list() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "neighbor"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "neighbor"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Neighbor {
@@ -2098,7 +2045,7 @@ mod tests {
 
     #[test]
     fn test_parse_neighbor_show() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "neighbor", "10.0.0.1"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.1"]).unwrap();
         if let Command::Neighbor { address, action } = cli.command {
             assert_eq!(address.unwrap(), "10.0.0.1");
             assert!(action.is_none());
@@ -2110,7 +2057,7 @@ mod tests {
     #[test]
     fn test_parse_neighbor_add() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "neighbor",
             "10.0.0.1",
             "add",
@@ -2143,7 +2090,7 @@ mod tests {
 
     #[test]
     fn test_parse_rib_best() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "rib"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "rib"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Rib {
@@ -2156,7 +2103,7 @@ mod tests {
 
     #[test]
     fn test_parse_rib_received() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "rib", "received", "10.0.0.1"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "rib", "received", "10.0.0.1"]).unwrap();
         if let Command::Rib {
             action: Some(RibAction::Received { address, .. }),
             ..
@@ -2171,7 +2118,7 @@ mod tests {
     #[test]
     fn rib_blackholes_rejects_route_filters() {
         let err = reject_rib_status_filters(
-            LONG_BINARY_NAME,
+            BINARY_NAME,
             "blackholes",
             RibStatusFilterArgs {
                 family: &Some("ipv4_unicast".to_string()),
@@ -2186,12 +2133,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("use `rustbgpctl rib blackholes`"),
+            err.to_string().contains("use `rbgp rib blackholes`"),
             "unexpected error: {err}"
         );
 
         let err = reject_rib_status_filters(
-            SHORT_BINARY_NAME,
+            BINARY_NAME,
             "blackholes",
             RibStatusFilterArgs {
                 family: &None,
@@ -2214,7 +2161,7 @@ mod tests {
     #[test]
     fn rib_fib_rejects_route_filters() {
         let err = reject_rib_status_filters(
-            LONG_BINARY_NAME,
+            BINARY_NAME,
             "fib",
             RibStatusFilterArgs {
                 family: &None,
@@ -2230,7 +2177,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("`rustbgpctl rib fib --prefix 203.0.113.0/24`"),
+                .contains("`rbgp rib fib --prefix 203.0.113.0/24`"),
             "unexpected error: {err}"
         );
     }
@@ -2238,7 +2185,7 @@ mod tests {
     #[test]
     fn test_parse_rib_fib_filters() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "rib",
             "fib",
             "--table",
@@ -2287,7 +2234,7 @@ mod tests {
     #[test]
     fn test_parse_rib_advertised_explain() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "rib",
             "--prefix",
             "203.0.113.0/24",
@@ -2314,7 +2261,7 @@ mod tests {
 
     #[test]
     fn test_parse_evpn_diagnose() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "diagnose"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "evpn", "diagnose"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Evpn {
@@ -2326,7 +2273,7 @@ mod tests {
 
     #[test]
     fn test_parse_evpn_nexthops() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "nexthops"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "evpn", "nexthops"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Evpn {
@@ -2338,7 +2285,7 @@ mod tests {
 
     #[test]
     fn test_parse_evpn_managed_netdevs() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "managed-netdevs"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "evpn", "managed-netdevs"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Evpn {
@@ -2351,7 +2298,7 @@ mod tests {
     #[test]
     fn test_parse_evpn_add_ip_prefix() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "add-ip-prefix",
             "--rd",
@@ -2396,7 +2343,7 @@ mod tests {
     #[test]
     fn test_parse_evpn_add_ip_prefix_without_router_mac_for_no_vxlan() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "add-ip-prefix",
             "--rd",
@@ -2434,7 +2381,7 @@ mod tests {
     #[test]
     fn test_parse_evpn_delete_ip_prefix() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "delete-ip-prefix",
             "--rd",
@@ -2458,7 +2405,7 @@ mod tests {
     #[test]
     fn test_parse_evpn_clear_duplicate_mac() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "clear-duplicate-mac",
             "--vni",
@@ -2482,7 +2429,7 @@ mod tests {
     #[test]
     fn test_parse_evpn_es_drain_and_undrain() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "es",
             "list",
@@ -2503,7 +2450,7 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "es",
             "drain",
@@ -2524,7 +2471,7 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "evpn",
             "es",
             "undrain",
@@ -2544,7 +2491,7 @@ mod tests {
 
     #[test]
     fn test_parse_evpn_runtime() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "runtime"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "evpn", "runtime"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Evpn {
@@ -2556,15 +2503,9 @@ mod tests {
 
     #[test]
     fn test_parse_rib_add() {
-        let cli = Cli::try_parse_from([
-            "rustbgpctl",
-            "rib",
-            "add",
-            "10.0.0.0/24",
-            "--nexthop",
-            "10.0.0.1",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rbgp", "rib", "add", "10.0.0.0/24", "--nexthop", "10.0.0.1"])
+                .unwrap();
         if let Command::Rib {
             action: Some(RibAction::Add {
                 prefix, nexthop, ..
@@ -2581,8 +2522,7 @@ mod tests {
 
     #[test]
     fn test_parse_shutdown() {
-        let cli =
-            Cli::try_parse_from(["rustbgpctl", "shutdown", "--reason", "maintenance"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "shutdown", "--reason", "maintenance"]).unwrap();
         if let Command::Shutdown { reason } = cli.command {
             assert_eq!(reason.unwrap(), "maintenance");
         } else {
@@ -2592,57 +2532,47 @@ mod tests {
 
     #[test]
     fn test_parse_json_flag() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "--json", "health"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "--json", "health"]).unwrap();
         assert!(cli.json);
     }
 
     #[test]
     fn test_parse_no_color_flag() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "--no-color", "health"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "--no-color", "health"]).unwrap();
         assert!(cli.no_color);
     }
 
     #[test]
     fn test_parse_addr_flag() {
-        let cli =
-            Cli::try_parse_from(["rustbgpctl", "--addr", "10.0.0.1:50051", "health"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "--addr", "10.0.0.1:50051", "health"]).unwrap();
         assert_eq!(cli.addr, "10.0.0.1:50051");
     }
 
     #[test]
     fn test_parse_unix_addr_flag() {
-        let cli = Cli::try_parse_from([
-            "rustbgpctl",
-            "--addr",
-            "unix:///run/rustbgpd/grpc.sock",
-            "health",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rbgp", "--addr", "unix:///run/rustbgpd/grpc.sock", "health"])
+                .unwrap();
         assert_eq!(cli.addr, "unix:///run/rustbgpd/grpc.sock");
     }
 
     #[test]
     fn test_parse_token_file_flag() {
-        let cli = Cli::try_parse_from([
-            "rustbgpctl",
-            "--token-file",
-            "/run/rustbgpd/token",
-            "health",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rbgp", "--token-file", "/run/rustbgpd/token", "health"]).unwrap();
         assert_eq!(cli.token_file.as_deref(), Some("/run/rustbgpd/token"));
     }
 
     #[test]
     fn test_parse_watch() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "watch"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "watch"]).unwrap();
         assert!(matches!(cli.command, Command::Watch { .. }));
     }
 
     #[test]
     fn test_parse_events() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "--prefix",
             "203.0.113.0/24",
@@ -2664,7 +2594,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--prefix",
@@ -2692,7 +2622,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch_category() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--category",
@@ -2717,7 +2647,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch_policy_category() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--category",
@@ -2742,7 +2672,7 @@ mod tests {
     #[test]
     fn test_parse_events_sessions() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "sessions",
             "--address",
@@ -2769,7 +2699,7 @@ mod tests {
     #[test]
     fn test_parse_events_policy() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "policy",
             "--address",
@@ -2796,7 +2726,7 @@ mod tests {
     #[test]
     fn test_parse_events_evpn() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "evpn",
             "--address",
@@ -2844,7 +2774,7 @@ mod tests {
         );
 
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "--address",
             "10.0.0.2",
@@ -2873,7 +2803,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch_dataplane_category() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--category",
@@ -2898,7 +2828,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch_evpn_category() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--category",
@@ -2928,7 +2858,7 @@ mod tests {
     #[test]
     fn test_parse_events_watch_comma_filters() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "events",
             "watch",
             "--category",
@@ -2995,7 +2925,7 @@ mod tests {
 
     #[test]
     fn test_parse_policy_list() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "policy", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "policy", "list"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Policy {
@@ -3007,14 +2937,14 @@ mod tests {
     #[test]
     fn test_parse_policy_set_requires_from_file() {
         // Missing --from-file flag should be a parse error.
-        let result = Cli::try_parse_from(["rustbgpctl", "policy", "set", "p1"]);
+        let result = Cli::try_parse_from(["rbgp", "policy", "set", "p1"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_policy_chain_set_import() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "policy",
             "chain",
             "set-import",
@@ -3040,8 +2970,7 @@ mod tests {
 
     #[test]
     fn test_parse_neighbor_set_get() {
-        let cli =
-            Cli::try_parse_from(["rustbgpctl", "neighbor-set", "get", "transit-peers"]).unwrap();
+        let cli = Cli::try_parse_from(["rbgp", "neighbor-set", "get", "transit-peers"]).unwrap();
         if let Command::NeighborSet {
             action: NeighborSetAction::Get { name },
         } = cli.command
@@ -3055,7 +2984,7 @@ mod tests {
     #[test]
     fn test_parse_peer_group_attach() {
         let cli = Cli::try_parse_from([
-            "rustbgpctl",
+            "rbgp",
             "peer-group",
             "attach",
             "10.0.0.2",

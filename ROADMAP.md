@@ -170,7 +170,7 @@ has it, no broad performance sprints without profile evidence.
   install, ECMP, per-class caps, `multipath_relax`, and Link Bandwidth
   weighting; the next pain points are lifecycle and scale, not base
   capability. **Done:** hot-swap `[[fib_tables]]` without a restart — SIGHUP
-  soft-reload and gRPC/`rustbgpctl fib-table` CRUD (`SetFibTable` /
+  soft-reload and gRPC/`rbgp fib-table` CRUD (`SetFibTable` /
   `DeleteFibTable` / `ListFibTables`), ack-gated with no runtime/config drift.
   Decide based on signal: over-cap detail APIs beyond the sampled
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
@@ -316,7 +316,7 @@ has it, no broad performance sprints without profile evidence.
   joins remote `(ESI, tag 0)` alias/eligible sets; (3)
   origination-side withdrawal stimulus — **complete end-to-end**:
   the manual half landed
-  (ADR-0084): `SetEthernetSegmentDrain` / `rustbgpctl evpn es drain`
+  (ADR-0084): `SetEthernetSegmentDrain` / `rbgp evpn es drain`
   withdraws the ES's Type 4/EAD routes + member VNIs' local Type 2
   state without replay, in-memory v1, and the M66 interop job proves
   the drain end-to-end as a service handover with rustbgpd on both
@@ -1214,7 +1214,7 @@ branch is between features.
   abort or timer expiry rolls back by applying the captured pre-commit runtime
   snapshot through the same transaction executor. Persisted runtime config
   mutators are fenced while a confirmed transaction is applying or pending.
-- [x] **`rustbgpctl` commit-confirmed workflow.**
+- [x] **`rbgp` commit-confirmed workflow.**
   The CLI can now run safe deploys end to end: `config apply --confirm-id
   --confirm-timeout`, `config status`, `config confirm`, and `config abort`
   expose the confirmed transaction lifecycle with text and JSON output.
@@ -1338,14 +1338,10 @@ branch is between features.
     tree). Reword to acknowledge the documented exception.
   - Optional periodic hygiene: trim the `thiserror` 1.x duplicate (1.0.69 + 2.0.18
     both resolved) at the next dependency refresh.
-- [ ] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI crate
-  ships two bins — `rustbgpctl` (`src/main.rs`) and `rbgp` (`src/bin/rbgp.rs`,
-  which `include!`s `main.rs`). Collapse to `rbgp` alone: drop the `rustbgpctl`
-  bin, make `rbgp` the real crate root (retiring the `include!` shim — which is
-  also what forces `#![deny(unsafe_code)]` onto the bin root rather than
-  `main.rs`), and sweep the long name out of docs/help/tests. Keep a deprecation
-  window if any tooling still calls `rustbgpctl`. Not urgent — `rbgp` is already
-  the documented primary name and both bins build the same code today.
+- [x] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI
+  crate now ships only the `rbgp` binary. The old `include!` alias/shim and
+  long-form binary are removed; supported docs, package artifacts, generated
+  completions, first-party scripts, and tests use `rbgp`.
 
 ---
 

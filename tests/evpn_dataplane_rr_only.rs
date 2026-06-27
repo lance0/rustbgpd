@@ -88,7 +88,7 @@ impl Daemon {
     }
 
     fn shutdown(mut self, grpc_addr: &str) {
-        let _ = rustbgpctl(
+        let _ = rbgp(
             grpc_addr,
             &["shutdown", "--reason", "rr-only invariant test"],
         );
@@ -114,20 +114,20 @@ impl Drop for Daemon {
     }
 }
 
-fn rustbgpctl(grpc_addr: &str, args: &[&str]) -> Output {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_rustbgpctl") {
+fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
         let mut cmd = Command::new(path);
         cmd.arg("--addr").arg(grpc_addr).args(args).output()
     } else {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
-        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--"])
+        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
             .arg(grpc_addr)
             .args(args)
             .output()
     }
-    .expect("failed to spawn rustbgpctl subprocess")
+    .expect("failed to spawn rbgp subprocess")
 }
 
 fn wait_for_health(grpc_addr: &str, daemon: &mut Daemon) {
@@ -138,7 +138,7 @@ fn wait_for_health(grpc_addr: &str, daemon: &mut Daemon) {
     // (returns an empty list when none).
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        let out = rustbgpctl(grpc_addr, &["--json", "evpn", "instances"]);
+        let out = rbgp(grpc_addr, &["--json", "evpn", "instances"]);
         if out.status.success() {
             return;
         }

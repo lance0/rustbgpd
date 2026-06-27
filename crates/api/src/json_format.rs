@@ -5,7 +5,7 @@
 //! avoid an extra build-graph dep). The CLI's existing
 //! `JsonRouteEvent` shape is route-only and pre-dates the envelope-
 //! level `event_id`. This module is the single hand-rolled formatter
-//! both `rustbgpctl watch --from-event-id` and the
+//! both `rbgp watch --from-event-id` and the
 //! `examples/event-bridge/` reference binary call into.
 //!
 //! Compact line shape (one event per line, newline-terminated):

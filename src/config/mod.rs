@@ -2321,7 +2321,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
 
 /// Text styling hooks for config-diff renderers.
 ///
-/// The default style is intentionally plain so API and `rustbgpctl`
+/// The default style is intentionally plain so API and `rbgp`
 /// clients never receive terminal escape codes. The daemon CLI can pass
 /// colored markers without duplicating the section logic.
 pub struct ConfigDiffTextStyle<'a> {

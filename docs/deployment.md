@@ -36,8 +36,7 @@ note.
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
 `rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon), `rbgp` (the preferred short CLI), and
-`rustbgpctl` (the compatible long-form CLI). The
+ships `rustbgpd` (the daemon) and `rbgp` (the CLI). The
 filename is the same on every release; `releases/latest/download/`
 always resolves to the current tag, so this snippet never needs a
 version bump.
@@ -50,7 +49,7 @@ TARBALL=rustbgpd-${SUFFIX}.tar.gz
 curl -fL -o "$TARBALL" \
   "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rbgp rustbgpctl /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
 ```
 
 To pin to a specific tag for reproducibility, swap `latest` for the
@@ -75,7 +74,7 @@ git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
 cargo build --workspace --release
 sudo install -m 0755 \
-  target/release/rustbgpd target/release/rbgp target/release/rbgp \
+  target/release/rustbgpd target/release/rbgp \
   /usr/local/bin/
 ```
 
@@ -462,8 +461,7 @@ configured with TLS / mTLS, the gNMI adapter (ADR-0070) exposes
 
 ### CLI introspection
 
-`rbgp` is the primary operator interface for read queries. The compatible
-`rustbgpctl` binary accepts the same commands.
+`rbgp` is the operator interface for read queries.
 
 ```sh
 rbgp neighbor                  # list all neighbors

@@ -84,8 +84,7 @@ When the daemon is already running, compare a candidate file against the live
 runtime snapshot instead of the on-disk file, then plan/apply a supported
 transaction with an optimistic runtime snapshot token:
 
-`rbgp` is the preferred short CLI spelling. `rustbgpctl` remains available
-as a compatible long-form binary with the same command surface.
+`rbgp` is the supported CLI spelling.
 
 ```bash
 rbgp config diff --from-file /tmp/new-config.toml

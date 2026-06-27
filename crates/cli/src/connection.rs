@@ -1,4 +1,4 @@
-//! gRPC connection handling for `rustbgpctl`.
+//! gRPC connection handling for `rbgp`.
 //!
 //! Supports both Unix domain socket (`unix:///path`) and TCP (`host:port` or
 //! `http://host:port`) endpoints, with optional bearer-token authentication

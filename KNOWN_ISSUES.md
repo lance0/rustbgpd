@@ -50,7 +50,7 @@ resolved.
   to reach the manager (closing the silent skipped-replay window).
   Operators can now alert on BMP loss without a log scraper.
 
-- **CLI gRPC integration tests added (fixed).** `rustbgpctl` now has
+- **CLI gRPC integration tests added (fixed).** `rbgp` now has
   mock-server integration tests covering health, global, neighbor add,
   and soft-reset command-to-RPC paths over both TCP+token and UDS.
 
@@ -124,7 +124,7 @@ resolved.
   rustbgpd doesn't support confederations yet.
 
 - **RFC 8326 initiator toggle does not persist across daemon restart.**
-  `rustbgpctl gshut --peer X` flips a runtime bool on `ManagedPeer`
+  `rbgp gshut --peer X` flips a runtime bool on `ManagedPeer`
   + the corresponding session, and triggers a RIB refresh so the
   community appears on the wire. The toggle survives session flaps
   and collision-replaces during the daemon's lifetime, but is lost

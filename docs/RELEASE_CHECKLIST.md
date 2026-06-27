@@ -117,7 +117,7 @@ release:
 
 Run these from a clean build (`cargo build --workspace --release`) before
 tagging. The `--workspace` flag is required to build both `rustbgpd` and
-`rustbgpctl`.
+`rbgp`.
 
 ### CLI smoke
 
@@ -132,11 +132,11 @@ sleep 2
 
 # Verify CLI commands parse and connect
 export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
-./target/release/rustbgpctl health
-./target/release/rustbgpctl global
-./target/release/rustbgpctl neighbor
-./target/release/rustbgpctl rib
-./target/release/rustbgpctl metrics
+./target/release/rbgp health
+./target/release/rbgp global
+./target/release/rbgp neighbor
+./target/release/rbgp rib
+./target/release/rbgp metrics
 
 kill $DAEMON_PID
 ```
@@ -161,7 +161,7 @@ Walk the exact README quickstart from a clean tree and confirm:
 
 - the minimal config validates with `--check`
 - the daemon creates the UDS socket under `/tmp/rustbgpd`
-- `rustbgpctl health`, `global`, and `neighbor` succeed with `RUSTBGPD_ADDR`
+- `rbgp health`, `global`, and `neighbor` succeed with `RUSTBGPD_ADDR`
 - no undocumented prerequisite or manual workaround is needed
 
 ### UDS default smoke
@@ -219,10 +219,10 @@ DAEMON_PID=$!
 sleep 2
 
 # Without token — should fail
-./target/release/rustbgpctl -s unix:///tmp/rustbgpd-auth/grpc.sock health 2>&1 | grep -i "error\|unauthenticated"
+./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock health 2>&1 | grep -i "error\|unauthenticated"
 
 # With token — should succeed
-./target/release/rustbgpctl -s unix:///tmp/rustbgpd-auth/grpc.sock --token-file /tmp/rustbgpd-token health
+./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock --token-file /tmp/rustbgpd-token health
 
 kill $DAEMON_PID
 rm -rf /tmp/rustbgpd-auth /tmp/rustbgpd-token /tmp/rustbgpd-auth-test.toml
@@ -235,7 +235,7 @@ confirm both audit surfaces move:
 
 ```bash
 # With the token-auth daemon above still running:
-./target/release/rustbgpctl -s unix:///tmp/rustbgpd-auth/grpc.sock \
+./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock \
   --token-file /tmp/rustbgpd-token health
 
 # Logs should include target="grpc_authz" with path, tier, result, authn,
@@ -401,7 +401,7 @@ containerlab destroy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.c
 
 If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**
 (`src/fib.rs`, `src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`,
-`rustbgpctl rib fib`, ECMP caps, `multipath_relax`, or weighted multipath), run
+`rbgp rib fib`, ECMP caps, `multipath_relax`, or weighted multipath), run
 the hosted `Kernel Dataplane` workflow for the relevant FIB suites: M42 for
 base configured-table install, M50 for ECMP, and M52 for multipath-relax. Manual
 reproduction:
@@ -425,7 +425,7 @@ containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
 ```
 
 If the release touches **ADR-0067 BFD** (`crates/bfd`, `src/bfd_runtime.rs`,
-`[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rustbgpctl bfd`, or BFD
+`[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rbgp bfd`, or BFD
 events / coupling), run the hosted `Kernel Dataplane` workflow for M51.
 Manual reproduction:
 
@@ -444,11 +444,11 @@ container is fine):
 # Inject a Type 2 route via gRPC, list it back, withdraw it
 RR_ADDR=$(docker inspect clab-m30-evpn-type2-frr-rustbgpd \
   --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'):50051
-./target/release/rustbgpctl -s "$RR_ADDR" evpn add-mac-ip \
+./target/release/rbgp -s "$RR_ADDR" evpn add-mac-ip \
   --rd 65000:100 --mac 02:00:00:aa:bb:cc \
   --label 100 --next-hop 10.0.0.1
-./target/release/rustbgpctl -s "$RR_ADDR" evpn --route-type 2
-./target/release/rustbgpctl -s "$RR_ADDR" evpn delete-mac-ip \
+./target/release/rbgp -s "$RR_ADDR" evpn --route-type 2
+./target/release/rbgp -s "$RR_ADDR" evpn delete-mac-ip \
   --rd 65000:100 --mac 02:00:00:aa:bb:cc
 ```
 
@@ -477,12 +477,12 @@ containerlab destroy -t tests/interop/m23-gobgp.clab.yml
 ```bash
 docker build -t rustbgpd:dev .
 
-# Verify both binaries are present
+# Verify shipped binaries are present
 docker run --rm --entrypoint sh rustbgpd:dev -c \
-  "ls /usr/local/bin/rustbgpd /usr/local/bin/rustbgpctl"
+  "ls /usr/local/bin/rustbgpd /usr/local/bin/rbgp"
 
-# Verify rustbgpctl parses subcommands
-docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
+# Verify rbgp parses subcommands
+docker run --rm --entrypoint rbgp rustbgpd:dev --help
 ```
 
 ## Release steps
