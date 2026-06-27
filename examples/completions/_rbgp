@@ -964,6 +964,18 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(managed-netdevs)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (vrfs)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1070,6 +1082,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (nexthops)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(managed-netdevs)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2355,6 +2371,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(managed-netdevs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (vrfs)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2948,6 +2968,7 @@ _rbgp__subcmd__evpn_commands() {
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -3064,6 +3085,7 @@ _rbgp__subcmd__evpn__subcmd__help_commands() {
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -3149,6 +3171,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help list commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__managed-netdevs_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__managed-netdevs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help managed-netdevs commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__nexthops_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__nexthops_commands() {
     local commands; commands=()
@@ -3173,6 +3200,11 @@ _rbgp__subcmd__evpn__subcmd__instances_commands() {
 _rbgp__subcmd__evpn__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__managed-netdevs_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__managed-netdevs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn managed-netdevs commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__nexthops_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__nexthops_commands() {
@@ -3464,6 +3496,7 @@ _rbgp__subcmd__help__subcmd__evpn_commands() {
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
     )
@@ -3542,6 +3575,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn list commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__managed-netdevs_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__managed-netdevs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn managed-netdevs commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__nexthops_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__nexthops_commands() {

@@ -1,4 +1,4 @@
-//! `rustbgpctl fib-table ...` — runtime `[[fib_tables]]` CRUD.
+//! `rbgp fib-table ...` — runtime `[[fib_tables]]` CRUD.
 //!
 //! Wraps RibService's `SetFibTable` / `DeleteFibTable` / `ListFibTables`.
 //! `set` is a create-or-replace upsert keyed on table name (the request carries

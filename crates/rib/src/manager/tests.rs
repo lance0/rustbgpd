@@ -1828,7 +1828,7 @@ async fn graceful_restart_clears_export_policy_stats() {
     // teardown reuses the outbound peer state slot on reconnect, so the
     // export policy aggregates must reset alongside the rest of the
     // per-peer state cleared in handle_peer_graceful_restart. Without
-    // this, `rustbgpctl neighbor show` shows import counters at 0
+    // this, `rbgp neighbor show` shows import counters at 0
     // (reset on SessionDown in transport/session/fsm.rs) but export
     // counters carrying forward — a directional asymmetry that
     // confuses operators.

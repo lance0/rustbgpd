@@ -70,7 +70,7 @@
 # gRPC authorization: the PEs run `enforcement = "tier"` with two
 # principals — an operator (bearer-token TCP listener) and an
 # observer (UDS listener) — so the driver can exercise the ADR-0084
-# operator drain for the reason-composition phase with rustbgpctl.
+# operator drain for the reason-composition phase with rbgp.
 # The VTEP keeps the M65/M66 legacy fixture shape.
 #
 # Usage:

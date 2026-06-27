@@ -133,7 +133,7 @@ prom_value() {
 }
 
 vtep_ctl() {
-    docker exec "$VTEP" rustbgpctl -s http://127.0.0.1:50051 "$@"
+    docker exec "$VTEP" rbgp -s http://127.0.0.1:50051 "$@"
 }
 
 vtep_routes() {
@@ -236,7 +236,7 @@ wait_vtep_established() {
 wait_pe_grpc() {
     local container=${1:?} label=${2:?}
     for i in $(seq 1 30); do
-        if docker exec "$container" rustbgpctl -s http://127.0.0.1:50051 \
+        if docker exec "$container" rbgp -s http://127.0.0.1:50051 \
             --token-file /etc/rustbgpd/grpc-operator.token global >/dev/null 2>&1; then
             log "$label gRPC ready after ${i}s"
             return 0

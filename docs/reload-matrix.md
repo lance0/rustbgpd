@@ -28,7 +28,7 @@ Several **live** fields take effect on the *next session establishment*,
 not mid-session. Examples: `md5_password`, `families`, `add_path`,
 `graceful_restart`. These are not restart-required (the daemon doesn't
 need to restart to pick them up) but they only become observable after
-the affected session is bounced — by the peer, by `rustbgpctl neighbor
+the affected session is bounced — by the peer, by `rbgp neighbor
 disable`/`enable`, or by any natural flap. The matrix calls this out per
 row.
 
@@ -141,7 +141,7 @@ Direct TOML edits are **reload-applied**: on SIGHUP the peer manager swaps the
 runtime config snapshot and rebuilds the live inbound-accept matcher, so adding,
 removing, or editing a `[[dynamic_neighbors]]` block changes which future
 inbound connections are accepted without bouncing existing sessions. Runtime
-gRPC CRUD — `rustbgpctl dynamic-neighbor {add,delete}`
+gRPC CRUD — `rbgp dynamic-neighbor {add,delete}`
 (`AddDynamicNeighbor` / `DeleteDynamicNeighbor`) — uses the same reload-applied
 matcher-update path: it updates the runtime config snapshot and inbound-accept
 matcher, then persists the accepted change back to the TOML when the daemon was

@@ -10,7 +10,7 @@
 #
 # gRPC runs ADR-0064 `enforcement = "tier"` with two principals (M66
 # shape) so the driver can compose the ADR-0084 operator drain with
-# the link reason via rustbgpctl: the TCP listener authenticates the
+# the link reason via rbgp: the TCP listener authenticates the
 # operator via bearer token; the UDS listener is the observer.
 #
 # This file is bind-mounted as a read-only TEMPLATE; the start script

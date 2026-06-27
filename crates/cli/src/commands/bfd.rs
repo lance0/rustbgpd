@@ -1,4 +1,4 @@
-//! `rustbgpctl bfd` — single-hop BFD session inspection (ADR-0067).
+//! `rbgp bfd` — single-hop BFD session inspection (ADR-0067).
 
 use crate::connection::Connection;
 use crate::error::CliError;

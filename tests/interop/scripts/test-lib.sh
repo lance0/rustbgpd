@@ -185,27 +185,27 @@ wait_frr_established() {
 # segment PEs, a CE, and a remote host. Keep the helpers here low-level and
 # transparent; phase-specific assertions stay in the individual M scripts.
 
-# rustbgpctl as the OPERATOR principal against a PE's bearer-token TCP
+# rbgp as the OPERATOR principal against a PE's bearer-token TCP
 # listener. $1 = container, rest = CLI args.
 pe_ctl() {
     local pe=${1:?}
     local token_file="${OPERATOR_TOKEN_FILE:-/etc/rustbgpd/grpc-operator.token}"
     shift
-    docker exec "$pe" rustbgpctl -s http://127.0.0.1:50051 \
+    docker exec "$pe" rbgp -s http://127.0.0.1:50051 \
         --token-file "$token_file" "$@"
 }
 
-# rustbgpctl as the OBSERVER principal against a PE's UDS listener.
+# rbgp as the OBSERVER principal against a PE's UDS listener.
 pe_ctl_observer() {
     local pe=${1:?}
     local observer_sock="${OBSERVER_SOCK:-unix:///var/lib/rustbgpd/grpc-observer.sock}"
     shift
-    docker exec "$pe" rustbgpctl -s "$observer_sock" "$@"
+    docker exec "$pe" rbgp -s "$observer_sock" "$@"
 }
 
-# rustbgpctl against the VTEP/RR (legacy enforcement, plaintext TCP).
+# rbgp against the VTEP/RR (legacy enforcement, plaintext TCP).
 vtep_ctl() {
-    docker exec "$VTEP" rustbgpctl -s http://127.0.0.1:50051 "$@"
+    docker exec "$VTEP" rbgp -s http://127.0.0.1:50051 "$@"
 }
 
 # JSON array of the VTEP's EVPN routes of one type from one peer.
@@ -443,7 +443,7 @@ ce_recovery_broadcast() {
     docker exec "$CE" ping -c 1 -W 1 "$target" >/dev/null 2>&1 || true
 }
 
-# Wait until a PE's gRPC surface answers an operator rustbgpctl call.
+# Wait until a PE's gRPC surface answers an operator rbgp call.
 wait_pe_grpc() {
     local pe=${1:?}
     local label=${2:?}

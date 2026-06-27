@@ -752,7 +752,7 @@ impl PeerManager {
     /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** — forces re-emission
     ///    of routes already in `AdjRibOut` so the wire form updates
     ///    immediately. Without this, an operator running
-    ///    `rustbgpctl gshut` against an Established session with active
+    ///    `rbgp gshut` against an Established session with active
     ///    routes would see no change until something else triggered a
     ///    re-advertise.
     ///

@@ -45,7 +45,7 @@ pub enum EventHistoryError {
 
     /// EHM has been driven into pass-through mode (allocator anchor
     /// unrecoverable) and refuses to issue new event_ids. Operator
-    /// resolves explicitly via `rustbgpctl event-history reset-allocator`
+    /// resolves explicitly via `rbgp event-history reset-allocator`
     /// (P1 follow-up). See ADR-0072 "Allocator recovery ladder."
     #[error("event outbox in pass-through mode; allocator anchor unrecoverable")]
     PassThrough,

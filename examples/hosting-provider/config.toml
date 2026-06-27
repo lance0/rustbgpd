@@ -55,8 +55,8 @@ operator = "operator"
 # families = ["ipv4_unicast", "ipv6_unicast"]
 #
 # Inspect runtime status with:
-#   rustbgpctl rib fib
-#   rustbgpctl -j rib fib
+#   rbgp rib fib
+#   rbgp -j rib fib
 
 # RPKI validation — don't announce prefixes we can't prove we hold
 [rpki]

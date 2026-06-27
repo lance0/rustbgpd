@@ -79,7 +79,7 @@ impl PeerManager {
             }
         }
         // Replay preserved RFC 8326 toggles onto the freshly added peers. This
-        // goes through the same path as the operator's `rustbgpctl gshut` so
+        // goes through the same path as the operator's `rbgp gshut` so
         // the live session bool, ManagedPeer desired state, and RIB refresh all
         // advance in lockstep. Disabled state was already applied during
         // add_peer_with_admin_state above, so a disabled changed peer never

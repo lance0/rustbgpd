@@ -183,7 +183,7 @@ fi
 # 3. Initiator leg — INJECT FIRST so the route is steady-state in
 #    AdjRibOut, THEN toggle and verify the community appears on the
 #    wire WITHOUT a delete+re-add. This is the actual maintenance-
-#    window behaviour: an operator running `rustbgpctl gshut` against
+#    window behaviour: an operator running `rbgp gshut` against
 #    a peer with active routes expects them to re-emit with the
 #    community attached. It exercises the runtime force-emit path
 #    (RibUpdate::RefreshPeerOutbound bypassing AdjRibOut equality

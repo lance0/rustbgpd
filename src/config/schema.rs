@@ -868,7 +868,7 @@ pub struct PolicyConfig {
 }
 
 /// Tuning for the per-session import-decision cache that backs
-/// `rustbgpctl policy explain` / `PolicyService.ExplainImportPolicy`
+/// `rbgp policy explain` / `PolicyService.ExplainImportPolicy`
 /// (ADR-0073).
 ///
 /// This is **diagnostic retention**, not policy evaluation behaviour:

@@ -20,8 +20,8 @@ docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 
 # From the host (gRPC is forwarded to localhost:50051)
-cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
-cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
+cargo run -p rbgp --bin rbgp -- -s http://127.0.0.1:50051 neighbor
+cargo run -p rbgp --bin rbgp -- -s http://127.0.0.1:50051 top
 ```
 
 ## Stop

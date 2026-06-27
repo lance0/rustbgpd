@@ -176,7 +176,7 @@ IPv4/IPv6 `Prefix` routes.
 [^bfd]: Single-hop **asynchronous** BFD ships (RFC 5880/5881, ADR-0067): an
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
     discard-on-receive if ≠ 255), config via `[[bfd_profiles]]` +
-    `[neighbors.bfd]`, observable through `GetBfdSessions` / `rustbgpctl bfd` /
+    `[neighbors.bfd]`, observable through `GetBfdSessions` / `rbgp bfd` /
     events + Prometheus. RFC 5882 BGP coupling ships in both **strict** (withhold
     BGP until BFD Up) and **non-strict** (tear BGP down on BFD-down before the
     hold timer) modes; the non-strict path is cross-checked against FRR `bfdd` by

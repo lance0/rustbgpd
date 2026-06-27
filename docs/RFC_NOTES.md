@@ -670,7 +670,7 @@ implemented per ADR-0040.
   (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC
   addresses and host IPs, and assembles an `EvpnRibRoute` with
   `RouteOrigin::Local` that flows through the same reflection
-  pipeline as iBGP-learned routes. `rustbgpctl evpn add-mac-ip /
+  pipeline as iBGP-learned routes. `rbgp evpn add-mac-ip /
   add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
   the operator-facing surface. Type 5 IP-Prefix injection is
   deferred pending use-case signal. Native Type 1/4 multi-homing
@@ -836,7 +836,7 @@ implemented per ADR-0040.
   `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast for
   sub-second tenant `ip addr del` withdraw. `DataplaneReport.ip_vrf_status`
   + `DataplaneReport.ip_vrf_installed_routes` propagate the
-  verdict to subscribers; `rustbgpctl evpn vrfs [NAME]` +
+  verdict to subscribers; `rbgp evpn vrfs [NAME]` +
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC
   surfaces let operators read it without scraping logs.
   **M39 hosted kernel-dataplane CI** validates the
@@ -899,7 +899,7 @@ implemented per ADR-0040.
   the transactional `L3OwnedState` model with four-phase apply
   ordering, Router MAC conflict detection, sub-second withdraw
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
-  `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
+  `rbgp evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
   M39 hosted smoke against FRR 10.3.1.
 - **Shipped after Gate 9:** receive-side overlay-index recursion,
   auto-derived Route Targets per RFC 8365 §5.1.2.1, native GW-IP +

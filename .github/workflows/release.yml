@@ -45,7 +45,7 @@ jobs:
 
       - name: Package binaries
         run: |
-          # Pack both binaries into a single per-arch tarball with a
+          # Pack the daemon and CLI into a single per-arch tarball with a
           # version-less filename. This is what powers the static
           # `https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-<arch>.tar.gz`
           # URL pattern in docs/deployment.md — operators never have to
@@ -56,9 +56,8 @@ jobs:
           SUFFIX=${{ matrix.suffix }}
           mkdir -p dist staging
           cp target/${{ matrix.target }}/release/rustbgpd staging/
-          cp target/${{ matrix.target }}/release/rustbgpctl staging/
           cp target/${{ matrix.target }}/release/rbgp staging/
-          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rustbgpctl rbgp
+          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 

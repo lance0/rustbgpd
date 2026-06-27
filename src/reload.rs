@@ -1187,7 +1187,7 @@ pub(crate) async fn reload_config(
                 // Instead: return `None` so the daemon's in-memory
                 // config stays at `current` and log clearly that live
                 // state may differ. Operators investigate via
-                // `rustbgpctl neighbor list`, fix the failing TOML,
+                // `rbgp neighbor list`, fix the failing TOML,
                 // and reload again. The retry-succeeded-operations
                 // concern is bounded by the underlying ops being
                 // mostly idempotent (`delete_peer` of a missing peer
@@ -1208,7 +1208,7 @@ pub(crate) async fn reload_config(
                     failures = reconcile.failures.len(),
                     "config reload halted at neighbor reconcile — live peer-manager state \
                      may differ from the in-memory config snapshot. Inspect live state via \
-                     `rustbgpctl neighbor list` and re-edit the failing TOML before \
+                     `rbgp neighbor list` and re-edit the failing TOML before \
                      reloading again. Earlier reload steps (policy / peer-group / chain \
                      edits) DID land at the manager and remain in effect."
                 );
@@ -1219,7 +1219,7 @@ pub(crate) async fn reload_config(
                     error = %e,
                     "config reload halted: peer manager dropped reconcile reply — live \
                      state may differ from the in-memory config snapshot. Inspect via \
-                     `rustbgpctl neighbor list` before reloading again. Earlier reload \
+                     `rbgp neighbor list` before reloading again. Earlier reload \
                      steps (policy / peer-group / chain edits) DID land at the manager \
                      and remain in effect."
                 );
@@ -4073,7 +4073,7 @@ peer_group = "secure"
         // state is ambiguous (delete-then-readd ordering, independent
         // adds/removes), so guessing a snapshot would let the next
         // reload diff against a config that doesn't match reality.
-        // Operators investigate live state via `rustbgpctl neighbor
+        // Operators investigate live state via `rbgp neighbor
         // list`. Earlier reload steps (the SetPolicy here) DID land
         // at the manager and remain in effect — assert via the mock's
         // command log, since the in-memory config doesn't advance for

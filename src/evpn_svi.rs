@@ -47,7 +47,7 @@
 //! The daemon's `OriginatedLocalMacCounts` is shared across the
 //! local-MAC originator and this task. SVI MACs participate in the
 //! same VNI counter via `record_inject` / `record_withdraw` so
-//! `rustbgpctl evpn instances` reports the full picture.
+//! `rbgp evpn instances` reports the full picture.
 //!
 //! ## RR-only / inert path
 //!

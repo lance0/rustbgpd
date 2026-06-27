@@ -48,7 +48,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   import + L3 FIB programming through a transactional
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast for
   sub-second withdraw, `ListIpVrfs`/`GetIpVrf` gRPC +
-  `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
+  `rbgp evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the hosted M40 smoke.
   ADR-0087/0090 close the near-term overlay-index ladder through native
@@ -323,7 +323,7 @@ Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
 Controller injection supports Type 2 (MAC/IP), Type 3 (IMET), and Type 5
 (IP Prefix, RFC 9136 — shipped v0.25.0 via `AddEvpnRoute`/`DeleteEvpnRoute`
-+ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Type 5 injection accepts the
++ `rbgp evpn add-ip-prefix`, M45 smoke). Type 5 injection accepts the
 default interface-less gateway-zero shape and a controller-supplied
 overlay-index Gateway Address with ESI still zero. Native Type 1/4
 multi-homing origination ships through `[[ethernet_segments]]`, but
@@ -338,7 +338,7 @@ Delivered:
 | `RouteOrigin::Local` path for EVPN (mirrors FlowSpec) | `crates/api/src/injection_service.rs` |
 | Proto: `AddEvpnRoute` / `DeleteEvpnRoute` RPCs | `proto/rustbgpd.proto` |
 | `InjectionService` methods + RD / MAC / IP validation | `crates/api/src/injection_service.rs` |
-| `rustbgpctl evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
+| `rbgp evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
 | Unit + integration tests | `crates/rib/src/manager/tests.rs`, `crates/api/src/injection_service.rs` |
 
 End-to-end flow:
@@ -389,7 +389,7 @@ later phases consume:
 | `RouteDistinguisher::from_str` | `crates/wire/src/evpn.rs` | landed (slice) |
 | `[[evpn_instances]]` schema + parse + validation | `src/config/schema.rs` + `src/config/mod.rs` | landed (slice) |
 | `EvpnService.ListEvpnInstances` (read-only gRPC) | `crates/api/src/evpn_service.rs` | landed (slice) |
-| `rustbgpctl evpn instances` CLI | `crates/cli/src/commands/evpn.rs` | landed (slice) |
+| `rbgp evpn instances` CLI | `crates/cli/src/commands/evpn.rs` | landed (slice) |
 | Example TOML + ADR | `examples/evpn-vtep-leaf/`, `docs/adr/0052-...` | landed (slice) |
 
 #### Gate 7b — Kernel reconciliation + origination
@@ -408,12 +408,12 @@ not a tactical feature. Only worth it if there's a specific use case
 
 | Task | File / location | Status |
 |------|----------------|--------|
-| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
+| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rbgp evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
 | Runtime mutation surface for the EVPN model (ADR-0063) — coordinator core + commit gate, with `EvpnService.ApplyEvpnRuntime` and SIGHUP reload wired to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only/no-op behavior, and ordered convergence + rollback. ADR-0063 deliberately rejects a direct `ArcSwap` / `RwLock` table swap. **See the "ADR-0063 runtime convergence contract" subsection below the table for the full shape-by-shape breakdown.** | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_runtime_converger.rs`, `src/reload.rs`, `src/evpn_imet.rs`, `src/evpn_originator/`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI add/delete/redefine + IP-VRF add/delete/redefine + ES add/delete/redefine + additive build-up + atomic tenant teardown + `ip_vrf` relink + L2VNI-only add/delete/redefine compositions, including intrinsic IP-VRF link metadata for added/deleted VNIs, landed for RPC and SIGHUP (M47/M48 teardown + M49 preference-DF smokes); L3VNI/device/table IP-VRF identity redefine (restart-required by design) + ES/IP-VRF row mixed edits remain tracked in [#268](https://github.com/lance0/rustbgpd/issues/268) |
 
 **ADR-0063 runtime convergence contract.** The foundation exposes the
-committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`
+committed generation through `GetEvpnRuntime` / `rbgp evpn runtime`
 and rejects a direct `ArcSwap` / `RwLock` table swap. A daemon actor
 converger commits these shapes **live** through `ApplyEvpnRuntime` and SIGHUP
 file-driven reload:
@@ -486,7 +486,7 @@ times out mid-apply loses only the response — the mutation still runs to
 completion (commit or rollback) and the coordinator generation and SIGHUP
 reload baseline advance truthfully. A caller that lost its response should
 treat the apply as at-least-once and read `GetEvpnRuntime` /
-`rustbgpctl evpn runtime` for the authoritative outcome. Coordinated
+`rbgp evpn runtime` for the authoritative outcome. Coordinated
 shutdown takes the same apply lock before EVPN teardown, so an in-flight
 apply finishes before the withdraw-all sweep and a late apply cannot
 re-originate routes after it.
@@ -833,7 +833,7 @@ Shipped pieces (v0.18.0):
   `DataplaneIntent`; reconcile actor calls `probe_ip_vrfs` each
   pass and logs `Ready` ↔ `NotReady` transitions via tracing.
   `DataplaneReport.ip_vrf_status` rows propagate the same verdict
-  to subscribers, and `rustbgpctl evpn vrfs [NAME]` plus the new
+  to subscribers, and `rbgp evpn vrfs [NAME]` plus the new
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC surfaces
   let operators read the readiness state without scraping logs.
 

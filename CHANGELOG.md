@@ -17,6 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Valid/Invalid/Unknown, and the documented forged-origin / forged-segment
   limitations that remain ASPA-Valid.
 
+### Removed
+
+- **`rustbgpctl` CLI binary.** `rbgp` is now the only shipped CLI binary from
+  the `rustbgpctl` Cargo package. The old long-form binary and `include!`
+  alias/shim are removed; Docker images, release tarballs, generated
+  completions, first-party scripts, and supported docs now use `rbgp`.
+
 ## [0.42.0] — 2026-06-23
 
 ### Added
