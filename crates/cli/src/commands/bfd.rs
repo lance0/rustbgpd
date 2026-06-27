@@ -79,3 +79,126 @@ fn print_sessions(sessions: &[BfdSession], json: bool) -> Result<(), CliError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::spawn_mock_server;
+    use tonic::Code;
+
+    fn session(peer: &str, state: BfdSessionState, diagnostic: &str, strict: bool) -> BfdSession {
+        BfdSession {
+            peer_address: peer.to_string(),
+            state: state as i32,
+            diagnostic: diagnostic.to_string(),
+            strict,
+        }
+    }
+
+    fn server_session(
+        peer: &str,
+        state: BfdSessionState,
+        diagnostic: &str,
+        strict: bool,
+    ) -> rustbgpd_api::proto::BfdSession {
+        rustbgpd_api::proto::BfdSession {
+            peer_address: peer.to_string(),
+            state: state as i32,
+            diagnostic: diagnostic.to_string(),
+            strict,
+        }
+    }
+
+    #[test]
+    fn bfd_session_json_shape_is_stable() {
+        let value = serde_json::to_value(to_json(&session(
+            "192.0.2.1",
+            BfdSessionState::AdminDown,
+            "administratively_down",
+            true,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "peer_address": "192.0.2.1",
+                "state": "admin-down",
+                "diagnostic": "administratively_down",
+                "strict": true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sends_empty_filter_and_renders_sessions() {
+        let server = spawn_mock_server(None).await;
+        *server.state.bfd_sessions.lock().await = vec![server_session(
+            "192.0.2.1",
+            BfdSessionState::Up,
+            "none",
+            false,
+        )];
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        list(connection, true).await.unwrap();
+
+        assert_eq!(server.state.bfd_calls.load(Ordering::SeqCst), 1);
+        let request = server
+            .state
+            .last_bfd_request
+            .lock()
+            .await
+            .clone()
+            .expect("BFD request captured");
+        assert!(request.peer_address.is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_sends_peer_filter() {
+        let server = spawn_mock_server(None).await;
+        *server.state.bfd_sessions.lock().await = vec![
+            server_session("192.0.2.1", BfdSessionState::Up, "none", false),
+            server_session(
+                "192.0.2.2",
+                BfdSessionState::Down,
+                "control_detection_time_expired",
+                true,
+            ),
+        ];
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        show(connection, "192.0.2.2", true).await.unwrap();
+
+        assert_eq!(server.state.bfd_calls.load(Ordering::SeqCst), 1);
+        let request = server
+            .state
+            .last_bfd_request
+            .lock()
+            .await
+            .clone()
+            .expect("BFD request captured");
+        assert_eq!(request.peer_address, "192.0.2.2");
+    }
+
+    #[tokio::test]
+    async fn list_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.bfd_error.lock().await =
+            Some((Code::PermissionDenied, "bfd denied".to_string()));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = list(connection, true)
+            .await
+            .expect_err("RPC error should map to CliError");
+
+        assert!(
+            matches!(err, CliError::Rpc(ref message) if message.contains("bfd denied")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.bfd_calls.load(Ordering::SeqCst), 1);
+    }
+}

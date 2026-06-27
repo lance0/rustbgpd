@@ -12,6 +12,7 @@ use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
 
 use rustbgpd_api::proto as server_proto;
+use rustbgpd_api::proto::bfd_service_server::BfdServiceServer;
 use rustbgpd_api::proto::config_service_server::ConfigServiceServer;
 use rustbgpd_api::proto::control_service_server::ControlServiceServer;
 use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
@@ -23,6 +24,7 @@ use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 
 #[derive(Default)]
 pub(crate) struct MockState {
+    pub(crate) bfd_calls: AtomicUsize,
     pub(crate) health_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
@@ -34,6 +36,9 @@ pub(crate) struct MockState {
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
+    pub(crate) bfd_error: Mutex<Option<(Code, String)>>,
+    pub(crate) bfd_sessions: Mutex<Vec<server_proto::BfdSession>>,
+    pub(crate) last_bfd_request: Mutex<Option<server_proto::GetBfdSessionsRequest>>,
     pub(crate) last_config_diff: Mutex<Option<String>>,
     pub(crate) last_config_plan: Mutex<Option<server_proto::PlanConfigTransactionRequest>>,
     pub(crate) last_config_apply: Mutex<Option<server_proto::ApplyConfigTransactionRequest>>,
@@ -139,6 +144,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
     let control = MockControlService {
         state: Arc::clone(&state),
     };
+    let bfd = MockBfdService {
+        state: Arc::clone(&state),
+    };
     let neighbor = MockNeighborService {
         state: Arc::clone(&state),
     };
@@ -167,6 +175,7 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
                 control,
                 interceptor.clone(),
             ))
+            .add_service(BfdServiceServer::with_interceptor(bfd, interceptor.clone()))
             .add_service(NeighborServiceServer::with_interceptor(
                 neighbor,
                 interceptor.clone(),
@@ -221,6 +230,9 @@ pub(crate) async fn spawn_mock_uds_server(
     let control = MockControlService {
         state: Arc::clone(&state),
     };
+    let bfd = MockBfdService {
+        state: Arc::clone(&state),
+    };
     let neighbor = MockNeighborService {
         state: Arc::clone(&state),
     };
@@ -249,6 +261,7 @@ pub(crate) async fn spawn_mock_uds_server(
                 control,
                 interceptor.clone(),
             ))
+            .add_service(BfdServiceServer::with_interceptor(bfd, interceptor.clone()))
             .add_service(NeighborServiceServer::with_interceptor(
                 neighbor,
                 interceptor.clone(),
@@ -458,6 +471,32 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
 
 struct MockControlService {
     state: Arc<MockState>,
+}
+
+struct MockBfdService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::bfd_service_server::BfdService for MockBfdService {
+    async fn get_bfd_sessions(
+        &self,
+        request: Request<server_proto::GetBfdSessionsRequest>,
+    ) -> Result<Response<server_proto::GetBfdSessionsResponse>, Status> {
+        self.state.bfd_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.last_bfd_request.lock().await = Some(request.clone());
+        if let Some((code, message)) = self.state.bfd_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        let mut sessions = self.state.bfd_sessions.lock().await.clone();
+        if !request.peer_address.is_empty() {
+            sessions.retain(|session| session.peer_address == request.peer_address);
+        }
+        Ok(Response::new(server_proto::GetBfdSessionsResponse {
+            sessions,
+        }))
+    }
 }
 
 #[tonic::async_trait]
