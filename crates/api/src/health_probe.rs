@@ -157,3 +157,202 @@ impl fmt::Display for CoreReadinessError {
 }
 
 impl std::error::Error for CoreReadinessError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe_with_closed_peer_manager() -> CoreReadinessProbe {
+        let (peer_tx, peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        drop(peer_rx);
+        CoreReadinessProbe::new(peer_tx, rib_tx)
+    }
+
+    fn probe_with_closed_rib() -> (CoreReadinessProbe, mpsc::Receiver<PeerManagerCommand>) {
+        let (peer_tx, peer_rx) = mpsc::channel(1);
+        let (rib_tx, rib_rx) = mpsc::channel(1);
+        drop(rib_rx);
+        (CoreReadinessProbe::new(peer_tx, rib_tx), peer_rx)
+    }
+
+    async fn reply_to_peer_manager(
+        peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        peers: Vec<PeerInfo>,
+    ) {
+        let command = peer_rx.recv().await.expect("peer manager command");
+        let PeerManagerCommand::ListPeers { reply } = command else {
+            panic!("expected ListPeers command");
+        };
+        reply.send(peers).expect("peer reply receiver is alive");
+    }
+
+    async fn reply_to_rib(rib_rx: &mut mpsc::Receiver<RibUpdate>, total_routes: usize) {
+        let command = rib_rx.recv().await.expect("RIB command");
+        let RibUpdate::QueryLocRibCount { reply } = command else {
+            panic!("expected QueryLocRibCount command");
+        };
+        reply
+            .send(total_routes)
+            .expect("RIB reply receiver is alive");
+    }
+
+    #[test]
+    fn display_uses_stable_operator_text() {
+        assert_eq!(
+            CoreReadinessError::PeerManagerUnavailable.to_string(),
+            "peer manager unavailable"
+        );
+        assert_eq!(
+            CoreReadinessError::PeerManagerTimedOut.to_string(),
+            "peer manager probe timed out (200ms deadline)"
+        );
+        assert_eq!(
+            CoreReadinessError::PeerManagerDroppedReply.to_string(),
+            "peer manager dropped reply"
+        );
+        assert_eq!(
+            CoreReadinessError::RibUnavailable.to_string(),
+            "RIB manager unavailable"
+        );
+        assert_eq!(
+            CoreReadinessError::RibTimedOut.to_string(),
+            "RIB manager probe timed out (200ms deadline)"
+        );
+        assert_eq!(
+            CoreReadinessError::RibDroppedReply.to_string(),
+            "RIB manager dropped reply"
+        );
+    }
+
+    #[test]
+    fn core_readiness_deadline_is_200ms() {
+        assert_eq!(CORE_READINESS_DEADLINE, Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_core_actor_data_when_both_respond() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let snapshot = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_rib(&mut rib_rx, 17).await;
+        })
+        .0
+        .expect("probe should succeed");
+
+        assert!(snapshot.peers.is_empty());
+        assert_eq!(snapshot.total_routes, 17);
+    }
+
+    #[tokio::test]
+    async fn check_succeeds_when_snapshot_succeeds() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let (result, ()) = tokio::join!(probe.check(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_rib(&mut rib_rx, 0).await;
+        });
+
+        result.expect("check should succeed");
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_peer_manager_sender_is_closed() {
+        let err = probe_with_closed_peer_manager()
+            .snapshot()
+            .await
+            .expect_err("closed peer manager channel should fail");
+
+        assert_eq!(err, CoreReadinessError::PeerManagerUnavailable);
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_rib_sender_is_closed() {
+        let (probe, mut peer_rx) = probe_with_closed_rib();
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+        });
+
+        assert_eq!(
+            result.expect_err("closed RIB channel should fail"),
+            CoreReadinessError::RibUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_peer_manager_drops_reply() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            let command = peer_rx.recv().await.expect("peer manager command");
+            let PeerManagerCommand::ListPeers { reply } = command else {
+                panic!("expected ListPeers command");
+            };
+            drop(reply);
+        });
+
+        assert_eq!(
+            result.expect_err("dropped peer reply should fail"),
+            CoreReadinessError::PeerManagerDroppedReply
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_rib_drops_reply() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            let command = rib_rx.recv().await.expect("RIB command");
+            let RibUpdate::QueryLocRibCount { reply } = command else {
+                panic!("expected QueryLocRibCount command");
+            };
+            drop(reply);
+        });
+
+        assert_eq!(
+            result.expect_err("dropped RIB reply should fail"),
+            CoreReadinessError::RibDroppedReply
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_peer_manager_times_out() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let err = probe
+            .snapshot()
+            .await
+            .expect_err("unresponsive peer manager should time out");
+
+        assert_eq!(err, CoreReadinessError::PeerManagerTimedOut);
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_when_rib_times_out() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+        });
+
+        assert_eq!(
+            result.expect_err("unresponsive RIB should time out"),
+            CoreReadinessError::RibTimedOut
+        );
+    }
+}
