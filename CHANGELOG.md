@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-06-27
+
 ### Added
 
 - **ASPA external-vector test coverage.** `rustbgpd-rpki` now imports a compact
