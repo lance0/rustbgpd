@@ -722,7 +722,7 @@ impl RibManager {
         }
     }
 
-    fn process_evpn_withdraw_chunk(
+    pub(super) fn process_evpn_withdraw_chunk(
         &mut self,
         peer: IpAddr,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
@@ -752,6 +752,11 @@ impl RibManager {
                     }
                 }
             }
+            // Reclaim attribute sets stranded by these withdrawals (and by any
+            // earlier same-key re-advertise still referenced only here). Under
+            // MAC Mobility every move mints a fresh interned set, so the intern
+            // table leaks without this sweep. Mirrors the unicast withdraw chunk.
+            rib.gc_intern_table();
             rib.evpn_len()
         };
         self.metrics
@@ -763,7 +768,7 @@ impl RibManager {
         }
     }
 
-    fn process_evpn_announce_chunk(
+    pub(super) fn process_evpn_announce_chunk(
         &mut self,
         peer: IpAddr,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
@@ -795,6 +800,10 @@ impl RibManager {
                     removed_stale_count += 1;
                 }
             }
+            // Re-advertising a key with a new attribute set (MAC Mobility seq
+            // churn) replaces the route and strands its previous interned set;
+            // reclaim it here so steady-state re-advertise churn stays bounded.
+            rib.gc_intern_table();
             rib.evpn_len()
         };
         self.metrics
@@ -1026,6 +1035,9 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert_evpn(route);
+        // Local re-origination replaces the injected route's attribute set on
+        // every MAC Mobility move; reclaim the stranded interned set.
+        rib.gc_intern_table();
         debug!(?key, "injected local EVPN route");
         let mut evpn_affected = HashSet::new();
         evpn_affected.insert(key);
@@ -1044,6 +1056,7 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw_evpn(&key) {
             debug!(?key, "withdrawn injected EVPN route");
+            rib.gc_intern_table();
             let mut evpn_affected = HashSet::new();
             evpn_affected.insert(key);
             self.recompute_and_distribute_evpn(&evpn_affected);

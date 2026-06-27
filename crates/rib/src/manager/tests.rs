@@ -14112,3 +14112,111 @@ async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
     manager.handle_update(RibUpdate::PeerDeleted { peer });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
 }
+
+#[test]
+fn evpn_withdraw_gcs_attr_intern_under_mac_mobility() {
+    // Regression: RFC 7432 §7.7 MAC Mobility re-advertises the SAME EVPN route
+    // key with a fresh attribute set on every move (the sequence number carried
+    // in the MAC Mobility extended community increments each time). `insert_evpn`
+    // interns each distinct attribute set, so the EVPN withdraw paths MUST GC the
+    // intern table — otherwise every move permanently orphans one interned set
+    // and the table grows unbounded under sustained mobility (observed as a
+    // ~258 MB/h RSS leak on every node, RR included, in the M67 link-drain soak).
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    // Churn well past the bounded event-history ring so an unbounded intern
+    // table is unmistakable: pre-fix this grows one orphaned interned set per
+    // move (→ `moves` sets); post-fix the withdraw GC reclaims every set not
+    // still referenced by the ring, so it plateaus at/below the ring capacity.
+    let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY).unwrap() + 2000;
+    for seq in 0..moves {
+        // Same key, distinct attribute set per "move" — `Med(seq)` stands in
+        // for the incrementing MAC Mobility sequence so each set interns anew.
+        let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        let key = route.key();
+        manager.process_evpn_announce_chunk(peer, vec![route]);
+        manager.process_evpn_withdraw_chunk(peer, vec![key]);
+    }
+
+    let intern = manager.ribs[&peer].intern_len();
+    assert!(
+        intern <= EVPN_ROUTE_EVENT_HISTORY_CAPACITY,
+        "EVPN attribute intern table grew unbounded under MAC-mobility churn: \
+         {intern} interned sets after {moves} moves (must stay bounded by the \
+         {EVPN_ROUTE_EVENT_HISTORY_CAPACITY}-entry event-history ring)"
+    );
+    assert_eq!(
+        manager.ribs[&peer].evpn_len(),
+        0,
+        "every churned route was withdrawn from the Adj-RIB-In"
+    );
+}
+
+#[test]
+fn evpn_announce_replace_reclaims_attr_intern() {
+    // The dominant M67 leak path: MAC Mobility re-advertises the SAME key with
+    // a fresh attribute set on every move *without* an intervening withdraw
+    // (the route is replaced in place, e.g. by originator re-injection). The
+    // announce path must reclaim the stranded interned set or steady-state
+    // re-advertise churn leaks unbounded.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY).unwrap() + 2000;
+    for seq in 0..moves {
+        let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        manager.process_evpn_announce_chunk(peer, vec![route]);
+    }
+
+    let intern = manager.ribs[&peer].intern_len();
+    // Bounded by the event-history ring plus the single live route and the
+    // in-flight event (~ring + 2); pre-fix this grew to `moves` (6096).
+    let bound = EVPN_ROUTE_EVENT_HISTORY_CAPACITY + 16;
+    assert!(
+        intern <= bound,
+        "EVPN re-advertise (replace, no withdraw) churn leaked the intern table: \
+         {intern} interned sets after {moves} replaces (must stay bounded near the \
+         {EVPN_ROUTE_EVENT_HISTORY_CAPACITY}-entry event-history ring, <= {bound})"
+    );
+    assert_eq!(
+        manager.ribs[&peer].evpn_len(),
+        1,
+        "the same key collapses to a single live route"
+    );
+}
+
+#[test]
+fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
+    // Companion to the above for the locally-injected origination path
+    // (`RibUpdate::WithdrawEvpn` -> `handle_withdraw_evpn`): re-originating a
+    // MAC route on every mobility move churns a fresh interned set in the
+    // LOCAL_PEER Adj-RIB-In, which must be GC'd on withdraw.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+
+    for seq in 0..64u32 {
+        let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        let key = route.key();
+        manager
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER))
+            .insert_evpn(route);
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        manager.handle_withdraw_evpn(key, reply_tx);
+    }
+
+    let intern = manager.ribs[&LOCAL_PEER].intern_len();
+    assert!(
+        intern <= 1,
+        "injected EVPN re-origination leaked the intern table: {intern} sets (expected <= 1)"
+    );
+}
