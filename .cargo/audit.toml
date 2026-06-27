@@ -18,7 +18,7 @@ ignore = [
     # RUSTSEC-2026-0097 — rand 0.8.5 + 0.9.2 soundness warning with a
     # custom logger using `rand::rng()`. Transitive via
     # phf_generator → phf_macros → phf → termwiz → ratatui-termwiz
-    # (the `rustbgpctl top` command). We do not install a custom rand
+    # (the `rbgp top` command). We do not install a custom rand
     # logger anywhere in the workspace, so the unsoundness isn't
     # reachable. Pending a ratatui-termwiz bump that pulls a fixed
     # rand. Tracked in ROADMAP.md under "Resolve open cargo audit
