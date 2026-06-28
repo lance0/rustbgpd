@@ -93,6 +93,11 @@ impl RibManager {
                     evpn_affected.insert(key);
                 }
             }
+            // GR entry can prune entire non-preserved families while keeping
+            // the peer Adj-RIB-In shell alive for preserved families. Reclaim
+            // attribute sets stranded by those removals now rather than
+            // waiting for an unrelated future withdraw on this peer.
+            rib.gc_intern_table();
         }
 
         if let Some(rib) = self.ribs.get(&peer) {

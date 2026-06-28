@@ -14220,3 +14220,48 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
         "injected EVPN re-origination leaked the intern table: {intern} sets (expected <= 1)"
     );
 }
+
+#[test]
+fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
+    // A GR-down that preserves some families keeps the peer Adj-RIB-In shell
+    // alive. If EVPN is not preserved, that GR entry prunes EVPN routes through
+    // a direct removal path; the associated interned attribute sets must be
+    // reclaimed immediately rather than leaking until a future unrelated
+    // withdraw happens to run GC for this peer.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let rib = manager
+        .ribs
+        .entry(peer)
+        .or_insert_with(|| AdjRibIn::new(peer));
+
+    for seq in 0..64u32 {
+        let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100 + seq);
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        rib.insert_evpn(route);
+    }
+    assert_eq!(manager.ribs[&peer].intern_len(), 64);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+
+    let rib = manager
+        .ribs
+        .get(&peer)
+        .expect("GR-preserved peer shell should stay alive");
+    assert_eq!(rib.evpn_len(), 0, "EVPN was not GR-preserved");
+    assert_eq!(
+        rib.intern_len(),
+        0,
+        "GR family pruning must reclaim EVPN attribute intern entries"
+    );
+}
