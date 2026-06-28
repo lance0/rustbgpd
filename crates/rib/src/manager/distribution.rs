@@ -603,7 +603,11 @@ impl RibManager {
         }
     }
 
-    fn process_announce_chunk(&mut self, peer: IpAddr, announced: Vec<crate::route::Route>) {
+    pub(super) fn process_announce_chunk(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::Route>,
+    ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
@@ -619,6 +623,7 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
 
+            let mut any_replaced = false;
             for mut route in announced {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
@@ -630,7 +635,7 @@ impl RibManager {
                 affected.insert(route.prefix);
                 let prefix = route.prefix;
                 let path_id = route.path_id;
-                rib.insert(route);
+                any_replaced |= rib.insert(route);
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
@@ -638,6 +643,15 @@ impl RibManager {
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
+            }
+            // Reclaim any interned attribute set stranded by an in-place
+            // replacement (same prefix re-advertised with changed attributes,
+            // no intervening withdraw). Skipped when nothing was replaced: the
+            // initial-load flood is all first-time inserts, so this stays off
+            // the bulk hot path and fires only on steady-state re-advertise
+            // churn — the unicast analogue of the EVPN MAC-mobility leak.
+            if any_replaced {
+                rib.gc_intern_table();
             }
 
             debug!(%peer, routes = rib.len(), "rib updated");
@@ -946,6 +960,9 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert(route);
+        // Re-originating a local route on every change strands the prior
+        // interned attribute set; reclaim it (mirrors `handle_inject_evpn`).
+        rib.gc_intern_table();
         debug!(%prefix, "injected local route");
         self.metrics
             .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
@@ -969,6 +986,9 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
+            // Reclaim the interned attribute set the withdrawn route held
+            // (mirrors `handle_withdraw_evpn`).
+            rib.gc_intern_table();
             debug!(%prefix, "withdrawn injected route");
             self.metrics
                 .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
