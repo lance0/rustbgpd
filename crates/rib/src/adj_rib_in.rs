@@ -448,6 +448,12 @@ impl AdjRibIn {
     // clear_llgr_stale_evpn below.
 
     /// Insert or replace an EVPN route, keyed by its RFC 7432 identity.
+    ///
+    /// Re-advertising the same key with a new attribute set (notably RFC 7432
+    /// §7.7 MAC Mobility, which increments a sequence number on every move)
+    /// strands the previous interned set. Callers must run [`Self::gc_intern_table`]
+    /// after a batch of inserts/withdraws to reclaim it — see the EVPN
+    /// announce/withdraw/inject paths in the RIB manager.
     pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) {
         // Intern attributes so identical attribute sets share one Arc.
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
