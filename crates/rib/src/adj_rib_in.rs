@@ -108,7 +108,14 @@ impl AdjRibIn {
     /// The route's attributes are interned: if an identical attribute set
     /// already exists from a previous route, the existing `Arc` is reused
     /// instead of keeping a separate allocation.
-    pub fn insert(&mut self, mut route: Route) {
+    ///
+    /// Returns `true` if an existing route at the same `(prefix, path_id)` was
+    /// replaced. A replacement may strand the previous route's interned
+    /// attribute set, so a caller processing a batch should run
+    /// [`Self::gc_intern_table`] once afterwards when any insert returned
+    /// `true` (see the unicast announce path in the RIB manager). A first-time
+    /// insert orphans nothing, so the initial-load flood skips the GC.
+    pub fn insert(&mut self, mut route: Route) -> bool {
         let key = (route.prefix, route.path_id);
         let ids = self.prefix_index.entry_or_default(route.prefix);
         if !ids.contains(&route.path_id) {
@@ -123,7 +130,7 @@ impl AdjRibIn {
             self.attr_intern.insert(route.attributes.clone());
         }
 
-        self.routes.insert(key, route);
+        self.routes.insert(key, route).is_some()
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
@@ -455,17 +462,27 @@ impl AdjRibIn {
     /// after a batch of inserts/withdraws to reclaim it — see the EVPN
     /// announce/withdraw/inject paths in the RIB manager.
     pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) {
+        let key = route.key();
+        // Re-advertising a key drops any record that *we* locally injected
+        // LLGR_STALE on the prior version of it — exactly as unicast `insert`
+        // and FlowSpec `insert_flowspec` clear their stale tags. Without this,
+        // a later EoR (`clear_llgr_stale_evpn`) would treat this fresh route as
+        // locally tagged and strip a peer-originated LLGR_STALE off it.
+        self.evpn_llgr_stale_local_tags.remove(&key);
         // Intern attributes so identical attribute sets share one Arc.
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
             route.attributes = existing.clone();
         } else {
             self.attr_intern.insert(route.attributes.clone());
         }
-        self.evpn_routes.insert(route.key(), route);
+        self.evpn_routes.insert(key, route);
     }
 
     /// Withdraw an EVPN route. Returns `true` if it existed.
     pub fn withdraw_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        // Mirror unicast `withdraw` / FlowSpec `withdraw_flowspec`: a withdrawn
+        // key can no longer carry a locally-injected LLGR_STALE tag.
+        self.evpn_llgr_stale_local_tags.remove(key);
         self.evpn_routes.remove(key).is_some()
     }
 
@@ -1394,6 +1411,67 @@ mod tests {
         assert!(!route.is_stale);
         // Peer-originated LLGR_STALE community preserved.
         assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn insert_evpn_clears_llgr_stale_local_tag_on_readvertise() {
+        // Regression: promotion injects LLGR_STALE locally and records the key
+        // in evpn_llgr_stale_local_tags. If the peer RE-ADVERTISES the same key
+        // during LLGR recovery, insert_evpn must drop that tag — otherwise the
+        // subsequent EoR (clear_llgr_stale_evpn) strips a peer-originated
+        // LLGR_STALE off the fresh route, mistaking it for our local injection.
+        // (Unicast `insert` and FlowSpec `insert_flowspec` already clear their
+        // stale tags on the same path.)
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert!(
+            rib.evpn_llgr_stale_local_tags.contains(&key),
+            "promotion should record the local LLGR_STALE injection"
+        );
+
+        // Peer re-advertises the same key, itself carrying LLGR_STALE.
+        let readvertised = insert_evpn_imet(
+            &mut rib,
+            Ipv4Addr::new(10, 0, 0, 1),
+            100,
+            vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+        );
+        assert_eq!(readvertised, key);
+        assert!(
+            !rib.evpn_llgr_stale_local_tags.contains(&key),
+            "re-advertise must clear the stale local tag"
+        );
+
+        // EoR: the peer-originated LLGR_STALE must survive.
+        rib.clear_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert!(
+            rib.evpn_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE),
+            "peer-originated LLGR_STALE was wrongly stripped from the re-advertised route"
+        );
+    }
+
+    #[test]
+    fn withdraw_evpn_clears_llgr_stale_local_tag() {
+        // A withdrawn key can no longer carry a locally-injected LLGR_STALE
+        // tag; leaving it set would mistag a later re-insert at the same key.
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert!(rib.evpn_llgr_stale_local_tags.contains(&key));
+
+        assert!(rib.withdraw_evpn(&key));
+        assert!(
+            !rib.evpn_llgr_stale_local_tags.contains(&key),
+            "withdraw must clear the stale local tag"
+        );
     }
 
     #[test]

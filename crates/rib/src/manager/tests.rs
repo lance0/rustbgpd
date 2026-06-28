@@ -14222,6 +14222,42 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
 }
 
 #[test]
+fn unicast_announce_replace_reclaims_attr_intern() {
+    // Unicast analogue of `evpn_announce_replace_reclaims_attr_intern`: a peer
+    // re-advertises the SAME prefix with a fresh attribute set on every update
+    // (e.g. MED / AS-path oscillation) and never withdraws it. Each distinct
+    // set interns, so the announce path must reclaim the set stranded by the
+    // in-place replacement — otherwise steady-state re-advertise churn leaks
+    // unbounded. The GC fires only when a replacement occurred, so the
+    // all-new-keys initial-load flood pays nothing.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let moves = 5000u32;
+    for seq in 0..moves {
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        manager.process_announce_chunk(peer, vec![route]);
+    }
+
+    let intern = manager.ribs[&peer].intern_len();
+    assert!(
+        intern <= 2,
+        "unicast re-advertise (replace, no withdraw) churn leaked the intern table: \
+         {intern} interned sets after {moves} replaces (must collapse to the single \
+         live route's set)"
+    );
+    assert_eq!(
+        manager.ribs[&peer].len(),
+        1,
+        "the same prefix collapses to one live route"
+    );
+}
+
+#[test]
 fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     // A GR-down that preserves some families keeps the peer Adj-RIB-In shell
     // alive. If EVPN is not preserved, that GR entry prunes EVPN routes through

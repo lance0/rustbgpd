@@ -9,6 +9,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **EVPN attribute intern table leaked under MAC mobility.** The EVPN
+  Adj-RIB-In attribute intern table was never garbage-collected on EVPN
+  mutation paths, so under sustained MAC mobility (RFC 7432 §7.7, where each
+  move re-advertises with a fresh attribute set) it grew unbounded — linear
+  RSS growth on every node, including a pure route reflector. The intern table
+  is now reclaimed on all EVPN mutation paths (announce/withdraw chunks, route
+  injection, and injected-route withdrawal) and after the graceful-restart
+  family prune. An M67 link-drain churn soak confirms the per-node RSS slope
+  drops from ~279 MB/h to ~0.2 MB/h.
+- **EVPN re-advertised routes could lose a peer-originated `LLGR_STALE`
+  community.** `insert_evpn` / `withdraw_evpn` did not clear the
+  locally-injected-`LLGR_STALE` bookkeeping tag the way unicast and FlowSpec
+  already do, so if a key promoted to LLGR-stale was re-advertised (or
+  withdrawn and re-learned) during a long-lived graceful restart, the
+  end-of-RIB sweep could strip an `LLGR_STALE` community the peer had set
+  itself. The tag is now cleared on EVPN re-advertise and withdraw.
+- **Unicast attribute intern table could grow under re-advertisement churn.**
+  The unicast announce and local inject/withdraw paths did not garbage-collect
+  the attribute intern table after a route was replaced in place (same prefix,
+  changed attributes, no intervening withdraw) — the same class of unbounded
+  growth fixed for EVPN above. The intern table is now reclaimed on those
+  paths; the announce path collects only when a replacement actually occurred,
+  keeping the initial-load flood off the collection cost.
+
 ## [0.43.0] — 2026-06-27
 
 ### Added
