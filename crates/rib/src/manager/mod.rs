@@ -1600,6 +1600,18 @@ impl RibManager {
             rib.gc_intern_table();
         }
 
+        self.recompute_bgpls_keys(affected);
+    }
+
+    /// Recompute the Loc-RIB BGP-LS selection for each affected key across the
+    /// current set of peer Adj-RIB-Ins.
+    ///
+    /// Shared by the receive path and the peer-teardown cleanup so a departed
+    /// peer's routes fall back to the next-best remaining candidate (or are
+    /// removed when no peer still advertises the key), mirroring the
+    /// unicast/FlowSpec/EVPN recompute pattern. BGP-LS is receive/API-only for
+    /// this tranche, so there is no outbound distribution step.
+    fn recompute_bgpls_keys(&mut self, affected: HashSet<crate::route::BgpLsRouteKey>) {
         for key in affected {
             let candidates: Vec<_> = self
                 .ribs

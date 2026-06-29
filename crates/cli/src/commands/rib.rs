@@ -131,7 +131,9 @@ fn parse_bgpls_family(family: Option<&str>) -> Result<i32, CliError> {
             Ok(value)
         }
         Some(_) | None => Err(CliError::Argument(format!(
-            "unsupported BGP-LS family {family:?}; expected linkstate or linkstate_vpn"
+            "unsupported BGP-LS family {family:?}; expected linkstate \
+             (aliases: bgpls, bgp-ls, bgp_ls) or linkstate_vpn \
+             (aliases: bgpls-vpn, bgp-ls-vpn, bgp_ls_vpn)"
         ))),
     }
 }

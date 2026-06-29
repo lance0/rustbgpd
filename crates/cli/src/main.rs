@@ -639,7 +639,8 @@ enum RibAction {
     /// Show BGP-LS routes learned from peers (RFC 9552)
     #[command(name = "bgpls", visible_alias = "bgp-ls")]
     BgpLs {
-        /// BGP-LS family filter: linkstate or linkstate_vpn
+        /// BGP-LS family filter: linkstate (aliases bgpls, bgp-ls) or
+        /// linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)
         #[arg(short = 'a', long)]
         family: Option<String>,
         /// Peer IP address filter

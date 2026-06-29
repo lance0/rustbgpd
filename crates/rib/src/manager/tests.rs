@@ -433,6 +433,91 @@ async fn bgpls_routes_received_recompute_and_withdraw() {
     handle.await.unwrap();
 }
 
+/// A peer going down must drop its BGP-LS routes from the Loc-RIB the same way
+/// unicast/FlowSpec/EVPN do — otherwise the entries strand until process
+/// restart and `QueryBgpLsRoutes`/`ListBgpLsRoutes` keep reporting a dead
+/// peer's routes as live. Two peers advertise the same key so we can assert the
+/// Loc-RIB *falls back* to the surviving peer on the first teardown, then
+/// *empties* on the second.
+#[tokio::test]
+async fn bgpls_peer_down_clears_or_falls_back_loc_rib() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 2);
+    let best_peer = IpAddr::V4(best_advertiser);
+    let alternate_peer = IpAddr::V4(alternate_advertiser);
+
+    // Same opaque key (same NLRI payload suffix), different LOCAL_PREF so the
+    // tie-break has a defined winner: peer A (200) beats peer B (100).
+    let route_a = make_bgpls_route(best_advertiser, 9, 200);
+    let route_b = make_bgpls_route(alternate_advertiser, 9, 100);
+    let key: BgpLsRouteKey = route_a.key();
+    assert_eq!(route_b.key(), key);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: best_peer,
+        announced: vec![route_a],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: alternate_peer,
+        announced: vec![route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_before = query_bgpls_routes(&tx).await;
+    assert_eq!(best_before.len(), 1);
+    assert_eq!(
+        best_before[0].peer, best_peer,
+        "higher LOCAL_PREF peer should win before teardown"
+    );
+
+    // Tear down the winner — the Loc-RIB must fall back to the surviving peer.
+    tx.send(RibUpdate::PeerDown {
+        peer: best_peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    let after_winner_down = query_bgpls_routes(&tx).await;
+    assert_eq!(
+        after_winner_down.len(),
+        1,
+        "Loc-RIB must fall back to the surviving peer, not strand the dead peer's route"
+    );
+    assert_eq!(
+        after_winner_down[0].peer, alternate_peer,
+        "surviving peer's route should be selected after the winner goes down"
+    );
+
+    // Tear down the last advertiser — the key must leave the Loc-RIB entirely.
+    tx.send(RibUpdate::PeerDown {
+        peer: alternate_peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    let after_last_down = query_bgpls_routes(&tx).await;
+    assert!(
+        after_last_down.is_empty(),
+        "Loc-RIB must be empty once no peer advertises the BGP-LS key"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn closed_query_channel_does_not_block_primary_channel() {
     let (tx, rx) = mpsc::channel(64);
