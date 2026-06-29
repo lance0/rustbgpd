@@ -56,7 +56,11 @@ an inbound Route Refresh handler that installs it.
    family) removes the previously installed list of that type (reset to
    permit-all) rather than tearing the session down — the wire codec surfaces
    such a group as `OrfEntries::Malformed` and the transport emits a REMOVE-ALL.
-   Genuine BGP-framing truncation remains a `DecodeError`.
+   A negotiated ORF message with an unknown `When-to-refresh` value is treated
+   the same way at the RIB boundary: the installed list for that family/type is
+   reset and a safe outbound resync runs, instead of installing the peer's
+   entries with defer-like timing. Genuine BGP-framing truncation remains a
+   `DecodeError`.
 8. **ORF is an additional filter, applied before export policy, tracked
    separately.** In the distribution hot path the ORF check sits after the
    sendable-family check and before export-policy evaluation. An ORF-denied

@@ -5214,15 +5214,23 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
 
 // ── Inbound ORF ROUTE-REFRESH handling (RFC 5291/5292) ──────────────────
 
-fn orf_rr(orf_type: OrfType, entries: OrfEntries) -> RouteRefreshMessage {
+fn orf_rr_with_when(
+    when_to_refresh: WhenToRefresh,
+    orf_type: OrfType,
+    entries: OrfEntries,
+) -> RouteRefreshMessage {
     RouteRefreshMessage::new_with_orf(
         Afi::Ipv4,
         Safi::Unicast,
         OrfPayload {
-            when_to_refresh: WhenToRefresh::Immediate,
+            when_to_refresh,
             groups: vec![OrfEntryGroup { orf_type, entries }],
         },
     )
+}
+
+fn orf_rr(orf_type: OrfType, entries: OrfEntries) -> RouteRefreshMessage {
+    orf_rr_with_when(WhenToRefresh::Immediate, orf_type, entries)
 }
 
 fn one_permit_entry() -> OrfEntries {
@@ -5260,6 +5268,33 @@ async fn inbound_orf_emits_peer_orf_update_when_negotiated() {
         } => {
             assert_eq!((afi, safi), (Afi::Ipv4, Safi::Unicast));
             assert_eq!(when, WhenToRefresh::Immediate);
+            assert_eq!(entries.len(), 1);
+        }
+        _ => panic!("expected RibUpdate::PeerOrfUpdate"),
+    }
+}
+
+#[tokio::test]
+async fn inbound_orf_preserves_defer_when_negotiated() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(neg);
+
+    let rr = orf_rr_with_when(
+        WhenToRefresh::Defer,
+        OrfType::AddressPrefix,
+        one_permit_entry(),
+    );
+    let handled = session
+        .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
+        .await;
+    assert!(handled, "negotiated ORF must be forwarded to the RIB");
+
+    let msg = rib_rx.try_recv().expect("PeerOrfUpdate should be emitted");
+    match msg {
+        RibUpdate::PeerOrfUpdate { when, entries, .. } => {
+            assert_eq!(when, WhenToRefresh::Defer);
             assert_eq!(entries.len(), 1);
         }
         _ => panic!("expected RibUpdate::PeerOrfUpdate"),

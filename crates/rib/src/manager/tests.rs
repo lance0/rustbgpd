@@ -13205,6 +13205,24 @@ async fn collect_announced(
     prefixes
 }
 
+/// Drain outbound updates until `prefix` has been announced.
+async fn collect_until_announced(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>, prefix: Prefix) {
+    let deadline = Duration::from_secs(5);
+    let result = tokio::time::timeout(deadline, async {
+        loop {
+            let u = out_rx.recv().await.expect("outbound channel open");
+            if u.announce.iter().any(|route| route.prefix == prefix) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "expected {prefix:?} to be announced within {deadline:?}"
+    );
+}
+
 /// Set up a manager with two routes (10/8, 192.168/16) in the Loc-RIB and a
 /// gated ORF-receive target peer; returns the tx, the target peer, and the
 /// target's outbound receiver after draining the (route-less) initial `EoR`.
@@ -13496,6 +13514,61 @@ async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
         withdrawn.contains(&denied),
         "plain refresh after deferred ORF must withdraw the denied prefix"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn orf_unknown_when_resets_filter_and_sweeps() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // First install a restrictive ORF that permits only 10/8, proving the
+    // 192.168/16 route is currently suppressed.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    )
+    .await;
+    let announced = collect_announced(&mut out_rx, 1).await;
+    assert_eq!(
+        announced,
+        vec![Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "192.168/16 must be suppressed before the malformed ORF control update"
+    );
+
+    // RFC 5291 only defines IMMEDIATE and DEFER. An unknown timing value must
+    // not silently install the peer's entries as deferred state; reset the
+    // negotiated ORF list and force a safe resync.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Unknown(0x7f),
+        vec![orf_deny(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    collect_until_announced(
+        &mut out_rx,
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16)),
+    )
+    .await;
 
     drop(tx);
     handle.await.unwrap();

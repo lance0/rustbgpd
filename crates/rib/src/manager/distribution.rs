@@ -8,7 +8,10 @@ use rustbgpd_policy::{
 };
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{
+    AddressPrefixOrf, Afi, FlowSpecRule, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype, Safi,
+    WhenToRefresh,
+};
 use tracing::{debug, info, warn};
 
 use super::helpers::{
@@ -407,9 +410,34 @@ impl RibManager {
             .or_default()
             .entry(family)
             .or_default();
-        let reset = filter.apply(entries).is_err();
+        let unknown_when = matches!(when, WhenToRefresh::Unknown(_));
+        let reset = match when {
+            WhenToRefresh::Unknown(value) => {
+                // RFC 5291 only defines IMMEDIATE and DEFER. Treat an unknown
+                // value like a malformed negotiated ORF control field: clear the
+                // installed list and force a safe resync instead of silently
+                // installing peer state with defer-like behavior.
+                let remove_all = AddressPrefixOrf {
+                    action: OrfAction::RemoveAll,
+                    match_: OrfMatch::Permit,
+                    sequence: 0,
+                    min_len: 0,
+                    max_len: 0,
+                    prefix: None,
+                };
+                let _ = filter.apply(&[remove_all]);
+                warn!(
+                    %peer,
+                    ?family,
+                    when_to_refresh = value,
+                    "unknown ORF When-to-refresh — installed ORF list for this type reset"
+                );
+                true
+            }
+            _ => filter.apply(entries).is_err(),
+        };
         let now_empty = filter.is_empty();
-        if reset {
+        if reset && !unknown_when {
             warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
         }
         // An emptied filter (REMOVE-ALL or a reset) means permit-all again —
@@ -417,7 +445,7 @@ impl RibManager {
         if now_empty && let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
             by_family.remove(&family);
         }
-        if reset || when == rustbgpd_wire::WhenToRefresh::Immediate {
+        if reset || when == WhenToRefresh::Immediate {
             // If this peer's EoR for the family was withheld at `PeerUp`
             // (GR restarter + §6 gate, see `send_initial_table`), the forced
             // resync below is the gated flood: move the family into
