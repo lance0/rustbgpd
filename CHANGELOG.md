@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.44.0] — 2026-06-29
+
 ### Fixed
 
 - **EVPN attribute intern table leaked under MAC mobility.** The EVPN
