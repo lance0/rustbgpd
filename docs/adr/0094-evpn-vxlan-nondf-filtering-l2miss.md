@@ -1,11 +1,15 @@
 # ADR-0094: EVPN VXLAN all-active BUM filtering via kernel `l2_miss` (revisits ADR-0065)
 
-**Status:** Accepted — **spike PASSED (2026-06-29, 6/6)**: the `l2_miss` egress
-filter works on a standard bridged VXLAN softswitch, overturning
-[ADR-0065](0065-evpn-localbias-split-horizon.md)'s ASIC-only deferral. A2 moves
-from "ASIC/offload-only" back to an achievable softswitch feature (kernel ≥ 6.5,
-iproute2 ≥ 6.3). Production wiring + the multi-PE composition (assertion (i))
-follow. See "Spike result".
+**Status:** **Accepted as a negative feasibility result — implementation rejected
+for A2** (assertion-(i) 2-PE spike, 2026-06-29). The `l2_miss` egress filter works
+on a standard bridged VXLAN softswitch (single-PE spike 6/6) and is a refinement of
+the existing A1 **non-DF filtering**, but the 2-PE composition spike proved it does
+**NOT** close
+[ADR-0065](0065-evpn-localbias-split-horizon.md)'s **A2 local-bias** (the DF-side
+ES-peer loop survives, blocked by the same overlay-source-stripping wall ADR-0065
+hit). **A2 stays ASIC-deferred per ADR-0065.** Production wiring is **not pursued**
+on this basis — the gain over A1 is marginal and the headline gap is not closed.
+See "Spike result" and "Assertion (i) result".
 **Date:** 2026-06-29
 
 ## Context
@@ -182,25 +186,49 @@ bridged VXLAN does what ADR-0065's `enc_src_ip` design could not:
   reaches the CE. The production composition is therefore: install on **non-DF**
   PEs; the **DF** delivers external BUM.
 
-### What the spike did NOT resolve — assertion (i)
+## Assertion (i) result — the 2-PE composition spike
 
-The harness models one PE with the CE on it; it proves the mechanism and the
-source-blindness but cannot measure the **DF-side ES-peer duplicate** (an ES-peer
-PE locally floods to the *shared* CE while the DF re-delivers the overlay copy).
-That needs a 2-PE-shared-CE topology, or resolves in the production design. Open
-item for the wiring phase: confirm whether DF election alone closes it, or a
-narrow source-conditioned drop for the (small, DF-election-known) ES-peer-VTEP
-set on the DF is required.
+Ran `crates/evpn-linux/tests/scripts/netns-l2miss-sph-2pe-spike.sh` (2026-06-29,
+kernel 6.17 / iproute2 6.15): a CE dual-homed to two local PEs sharing the ESI; a
+broadcast injected on PE1's CE port; measured whether it loops back to the *same*
+CE via PE2.
+
+- **T1 (peer PE unfiltered = DF): the loop EXISTS** — the CE's own broadcast
+  returns via PE2 (`ce2h` rx delta 29).
+- **T2 (peer PE filtered = non-DF): the loop is STOPPED** (delta 1).
+
+**The decisive finding:** the loop is stopped *only when the re-delivering PE is
+the non-DF*. DF election picks the DF independently of which uplink the CE used,
+so when the ingress is the non-DF and the **DF** is the peer, the DF re-delivers
+the ES-peer-sourced overlay BUM **unfiltered** — the loop survives. The source-blind
+`l2_miss` filter cannot fix this on the DF (installing it there would also drop the
+*external* BUM the DF must deliver), and distinguishing ES-peer-sourced from
+external requires the **overlay source IP** — the exact field a standard bridged
+VXLAN strips, per ADR-0065.
+
+So `l2_miss` solves the **non-DF filtering** problem (RFC: only the DF forwards
+external BUM toward the segment) — which is a *refinement* of the already-shipped
+A1 flood-flag suppression — but it does **not** solve ADR-0065's **A2 local-bias**
+(an egress PE, DF included, must drop BUM whose overlay source is an ES-peer). The
+two are different correctness properties; the feasibility framing conflated them.
 
 ### Decision outcome
 
-A2 **moves from "ASIC/offload-only" (ADR-0065) back to an achievable softswitch
-feature** on kernel ≥ 6.5 / iproute2 ≥ 6.3, via the `l2_miss` egress filter
-composed with the existing DF election. rustbgpd would ship working
-pure-softswitch EVPN-MH BUM filtering, which FRR-on-Linux does not (#15400). Next:
-the production-wiring plan + the (i) composition spike, gated behind
-`apply_sph_filters` (default off → observe → default-on after a protected smoke +
-soak), with the kernel ≥ 6.5 floor documented.
+**A2 (VXLAN local-bias split-horizon) stays deferred as ASIC/offload-dependent per
+ADR-0065** — the 2-PE spike confirms the softswitch cannot do the source-conditioned
+ES-peer drop without the stripped overlay source. The `l2_miss` mechanism is real
+and works, but it only refines A1's non-DF filtering (overlay-sourced-only,
+preserving local + known-unicast) — a marginal gain that does not close the headline
+gap. **The production wiring (the `qdisc_raw` tc-flower primitive, the SPH op/flag,
+the test ladder) is therefore NOT pursued**: ~1800 lines of new raw-netlink for a
+marginal refinement that leaves A2 open is not warranted. all-active EVPN remains
+"complete except the documented A2 local-bias ASIC limitation" — i.e. where ADR-0065
+already left it. This is the gate working as intended: the cost of learning it was
+two netns spikes, not a sprint.
+
+Revisit only if (a) a kernel mechanism emerges that exposes the overlay source to a
+softswitch filter on a standard bridged VXLAN (none today), or (b) the marginal A1→
+`l2_miss` precision becomes worth the raw-netlink cost on its own merits.
 
 ## Consequences
 
