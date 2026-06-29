@@ -19,13 +19,14 @@ use std::sync::Arc;
 //   3. A peer able to mount this already has strictly higher-impact vectors
 //      (route hijack / leak / churn flood) that dominate the threat model.
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
+// `BgpLsRouteKey` joins the same class once ADR-0077 receive wiring lands.
 // Aliased to the std names so the storage type declarations read unchanged.
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
-use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+use crate::route::{BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -57,6 +58,8 @@ pub struct AdjRibIn {
     flowspec_llgr_stale_local_tags: HashSet<(FlowSpecRule, u32)>,
     /// EVPN routes keyed by RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    /// BGP-LS routes keyed by opaque RFC 9552 route identity.
+    bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
     /// during promotion from GR-stale → LLGR-stale. Used to distinguish
     /// locally-injected communities (which we strip on clear) from
@@ -89,6 +92,7 @@ impl AdjRibIn {
             flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
             flowspec_llgr_stale_local_tags: HashSet::default(),
             evpn_routes: HashMap::default(),
+            bgpls_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             attr_intern: HashSet::with_capacity_and_hasher(
                 route_capacity.clamp(16, 64),
@@ -144,15 +148,16 @@ impl AdjRibIn {
         removed
     }
 
-    /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN —
-    /// plus all secondary indices, stale tags, and the attribute intern
-    /// table. Used when the per-peer Adj-RIB-In needs to be wiped without
-    /// also dropping the [`AdjRibIn`] struct itself.
+    /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
+    /// and BGP-LS — plus all secondary indices, stale tags, and the attribute
+    /// intern table. Used when the per-peer Adj-RIB-In needs to be wiped
+    /// without also dropping the [`AdjRibIn`] struct itself.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_index.clear();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
+        self.bgpls_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
         self.evpn_llgr_stale_local_tags.clear();
@@ -646,6 +651,44 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_evpn_community(&clear_local_llgr);
     }
 
+    // --- BGP-LS methods (ADR-0077 substrate, not yet peer-reachable) ---
+
+    /// Insert or replace a BGP-LS route, keyed by opaque RFC 9552 identity.
+    ///
+    /// This is dormant storage only. OPEN negotiation and MP-BGP dispatch do not
+    /// expose BGP-LS yet.
+    pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) {
+        let key = route.key();
+        if let Some(existing) = self.attr_intern.get(&route.attributes) {
+            route.attributes = existing.clone();
+        } else {
+            self.attr_intern.insert(route.attributes.clone());
+        }
+        self.bgpls_routes.insert(key, route);
+    }
+
+    /// Withdraw a BGP-LS route. Returns `true` if it existed.
+    pub fn withdraw_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
+        self.bgpls_routes.remove(key).is_some()
+    }
+
+    /// Look up a BGP-LS route by opaque key.
+    #[must_use]
+    pub fn get_bgpls(&self, key: &BgpLsRouteKey) -> Option<&BgpLsRibRoute> {
+        self.bgpls_routes.get(key)
+    }
+
+    /// Iterate over all BGP-LS routes in this Adj-RIB-In.
+    pub fn iter_bgpls(&self) -> impl Iterator<Item = &BgpLsRibRoute> {
+        self.bgpls_routes.values()
+    }
+
+    /// Return the number of BGP-LS routes stored.
+    #[must_use]
+    pub fn bgpls_len(&self) -> usize {
+        self.bgpls_routes.len()
+    }
+
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
     pub fn iter_flowspec_rule(&self, rule: &FlowSpecRule) -> impl Iterator<Item = &FlowSpecRoute> {
         let target = rule.clone();
@@ -891,11 +934,67 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_wire::{Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, PathAttribute, Safi};
+    use rustbgpd_wire::{
+        Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Safi,
+    };
 
     use super::*;
 
+    use crate::route::BgpLsFamily;
     use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
+
+    fn bgpls_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {
+        let bytes = [0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_suffix];
+        rustbgpd_wire::bgpls::decode_bgpls_nlri(&bytes)
+            .expect("fixture BGP-LS NLRI decodes")
+            .pop()
+            .expect("fixture contains one NLRI")
+    }
+
+    fn bgpls_vpn_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {
+        let bytes = [
+            0xfd,
+            0xe8,
+            0,
+            11, // 8-byte RD + 3-byte opaque payload
+            0,
+            0,
+            0xfd,
+            0xe8,
+            0,
+            0,
+            0,
+            42,
+            0xaa,
+            0xbb,
+            payload_suffix,
+        ];
+        rustbgpd_wire::bgpls::decode_bgpls_vpn_nlri(&bytes)
+            .expect("fixture BGP-LS VPN NLRI decodes")
+            .pop()
+            .expect("fixture contains one NLRI")
+    }
+
+    fn make_bgpls_route(
+        family: BgpLsFamily,
+        nlri: rustbgpd_wire::bgpls::BgpLsNlri,
+        peer_oct: u8,
+    ) -> BgpLsRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        BgpLsRibRoute {
+            family,
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
 
     #[test]
     fn insert_and_get() {
@@ -944,6 +1043,77 @@ mod tests {
         assert_eq!(rib.len(), 2);
 
         rib.clear();
+        assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn bgpls_insert_replace_withdraw_preserves_opaque_key() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = bgpls_nlri(1);
+        let key = BgpLsRouteKey {
+            family: BgpLsFamily::LinkState,
+            nlri: nlri.key(),
+            path_id: 0,
+        };
+
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1));
+        assert_eq!(rib.bgpls_len(), 1);
+        assert_eq!(rib.iter_bgpls().count(), 1);
+        assert_eq!(
+            rib.get_bgpls(&key).unwrap().nlri.payload.as_ref(),
+            &[0xaa, 0xbb, 1]
+        );
+
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri, 2));
+        assert_eq!(rib.bgpls_len(), 1, "same opaque key should replace");
+        assert_eq!(
+            rib.get_bgpls(&key).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.withdraw_bgpls(&key));
+        assert_eq!(rib.bgpls_len(), 0);
+        assert!(!rib.withdraw_bgpls(&key));
+    }
+
+    #[test]
+    fn bgpls_base_and_vpn_keys_are_distinct() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let base = bgpls_nlri(7);
+        let vpn = bgpls_vpn_nlri(7);
+        let base_key = BgpLsRouteKey {
+            family: BgpLsFamily::LinkState,
+            nlri: base.key(),
+            path_id: 0,
+        };
+        let vpn_key = BgpLsRouteKey {
+            family: BgpLsFamily::LinkStateVpn,
+            nlri: vpn.key(),
+            path_id: 0,
+        };
+
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, base, 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkStateVpn, vpn, 2));
+
+        assert_eq!(rib.bgpls_len(), 2);
+        assert_ne!(base_key, vpn_key);
+        assert!(rib.get_bgpls(&base_key).is_some());
+        assert!(rib.get_bgpls(&vpn_key).is_some());
+    }
+
+    #[test]
+    fn bgpls_clear_removes_routes_and_keeps_unicast_index_isolated() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(9), 1));
+
+        assert_eq!(rib.bgpls_len(), 1);
+        assert_eq!(rib.len(), 0, "BGP-LS storage must not touch unicast count");
+
+        rib.clear();
+        assert_eq!(rib.bgpls_len(), 0);
         assert!(rib.is_empty());
     }
 

@@ -8,7 +8,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
-use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+use crate::route::{BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -26,6 +26,8 @@ pub struct AdjRibOut {
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
+    bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
 }
 
 impl AdjRibOut {
@@ -47,6 +49,7 @@ impl AdjRibOut {
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
+            bgpls_routes: HashMap::default(),
         }
     }
 
@@ -113,13 +116,14 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
-    /// Remove every advertised route — unicast, `FlowSpec`, EVPN — and
-    /// the secondary prefix index.
+    /// Remove every advertised route — unicast, `FlowSpec`, EVPN, and BGP-LS —
+    /// and the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
+        self.bgpls_routes.clear();
     }
 
     /// Return the number of advertised routes.
@@ -221,15 +225,47 @@ impl AdjRibOut {
     pub fn evpn_len(&self) -> usize {
         self.evpn_routes.len()
     }
+
+    // --- BGP-LS methods (ADR-0077 substrate, not yet peer-reachable) ---
+
+    /// Insert or replace an advertised BGP-LS route.
+    pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {
+        self.bgpls_routes.insert(route.key(), route);
+    }
+
+    /// Remove an advertised BGP-LS route by opaque key. Returns `true` if it existed.
+    pub fn remove_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
+        self.bgpls_routes.remove(key).is_some()
+    }
+
+    /// Look up an advertised BGP-LS route by opaque key.
+    #[must_use]
+    pub fn get_bgpls(&self, key: &BgpLsRouteKey) -> Option<&BgpLsRibRoute> {
+        self.bgpls_routes.get(key)
+    }
+
+    /// Iterate over all advertised BGP-LS routes.
+    pub fn iter_bgpls(&self) -> impl Iterator<Item = &BgpLsRibRoute> {
+        self.bgpls_routes.values()
+    }
+
+    /// Return the number of advertised BGP-LS routes.
+    #[must_use]
+    pub fn bgpls_len(&self) -> usize {
+        self.bgpls_routes.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    use rustbgpd_wire::{Ipv4Prefix, Prefix};
+    use rustbgpd_wire::{Ipv4Prefix, Origin, PathAttribute, Prefix};
 
+    use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
 
     fn prefix_a() -> Prefix {
@@ -238,6 +274,35 @@ mod tests {
 
     fn prefix_b() -> Prefix {
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24))
+    }
+
+    fn bgpls_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {
+        let bytes = [0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_suffix];
+        rustbgpd_wire::bgpls::decode_bgpls_nlri(&bytes)
+            .expect("fixture BGP-LS NLRI decodes")
+            .pop()
+            .expect("fixture contains one NLRI")
+    }
+
+    fn make_bgpls_route(
+        family: BgpLsFamily,
+        nlri: rustbgpd_wire::bgpls::BgpLsNlri,
+        peer_oct: u8,
+    ) -> BgpLsRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        BgpLsRibRoute {
+            family,
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
     }
 
     #[test]
@@ -309,11 +374,41 @@ mod tests {
         let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
         rib.insert(make_route(prefix_a(), 0));
         rib.insert(make_route(prefix_b(), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(13), 1));
 
         rib.clear();
         assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
         assert!(rib.path_ids_for_prefix(&prefix_b()).is_empty());
         assert!(rib.is_empty());
+        assert_eq!(rib.bgpls_len(), 0);
+    }
+
+    #[test]
+    fn bgpls_insert_remove_isolated_from_unicast_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let nlri = bgpls_nlri(14);
+        let key = BgpLsRouteKey {
+            family: BgpLsFamily::LinkState,
+            nlri: nlri.key(),
+            path_id: 0,
+        };
+
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1));
+        assert_eq!(rib.bgpls_len(), 1);
+        assert_eq!(rib.iter_bgpls().count(), 1);
+        assert_eq!(rib.len(), 0);
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri, 2));
+        assert_eq!(rib.bgpls_len(), 1, "same opaque key should replace");
+        assert_eq!(
+            rib.get_bgpls(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.remove_bgpls(&key));
+        assert_eq!(rib.bgpls_len(), 0);
+        assert!(!rib.remove_bgpls(&key));
     }
 
     #[test]
