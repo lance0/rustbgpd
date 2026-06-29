@@ -1,7 +1,11 @@
 # ADR-0065: EVPN VXLAN local-bias split-horizon (spike-gated)
 
-**Status:** Accepted — spike disproved the softswitch mechanism; A2 deferred as
-ASIC/offload-dependent (documented limitation). See "Spike result".
+**Status:** Accepted — spike disproved the `enc_src_ip` softswitch mechanism; A2
+deferred as ASIC/offload-dependent (documented limitation). See "Spike result".
+**Revisited by [ADR-0094](0094-evpn-vxlan-nondf-filtering-l2miss.md)** — the
+kernel `l2_miss` primitive (mainline 6.5, added for EVPN non-DF filtering)
+postdates this spike and reopens the softswitch path on a mechanism not tested
+here.
 **Date:** 2026-05-22
 
 ## Context
