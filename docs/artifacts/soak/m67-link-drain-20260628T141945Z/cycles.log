@@ -1,0 +1,1921 @@
+[2026-06-28T14:19:47Z] cycle=1 start
+[2026-06-28T14:20:01Z] cycle=1 done blackout_ms=100 release_ms=5338 failures=0
+[2026-06-28T14:21:18Z] cycle=2 start
+[2026-06-28T14:21:37Z] cycle=2 done blackout_ms=300 release_ms=5344 failures=0
+[2026-06-28T14:22:48Z] cycle=3 start
+[2026-06-28T14:23:06Z] cycle=3 done blackout_ms=300 release_ms=5355 failures=0
+[2026-06-28T14:24:18Z] cycle=4 start
+[2026-06-28T14:24:35Z] cycle=4 done blackout_ms=300 release_ms=5351 failures=0
+[2026-06-28T14:25:48Z] cycle=5 start
+[2026-06-28T14:26:06Z] cycle=5 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T14:27:18Z] cycle=6 start
+[2026-06-28T14:27:37Z] cycle=6 done blackout_ms=300 release_ms=5352 failures=0
+[2026-06-28T14:28:48Z] cycle=7 start
+[2026-06-28T14:29:06Z] cycle=7 done blackout_ms=300 release_ms=5355 failures=0
+[2026-06-28T14:30:18Z] cycle=8 start
+[2026-06-28T14:30:36Z] cycle=8 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T14:31:48Z] cycle=9 start
+[2026-06-28T14:32:06Z] cycle=9 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T14:33:18Z] cycle=10 start
+[2026-06-28T14:33:35Z] cycle=10 done blackout_ms=300 release_ms=5354 failures=0
+[2026-06-28T14:34:48Z] cycle=11 start
+[2026-06-28T14:35:05Z] cycle=11 done blackout_ms=300 release_ms=5339 failures=0
+[2026-06-28T14:36:18Z] cycle=12 start
+[2026-06-28T14:36:37Z] cycle=12 done blackout_ms=300 release_ms=5361 failures=0
+[2026-06-28T14:37:48Z] cycle=13 start
+[2026-06-28T14:38:06Z] cycle=13 done blackout_ms=200 release_ms=5332 failures=0
+[2026-06-28T14:39:18Z] cycle=14 start
+[2026-06-28T14:39:35Z] cycle=14 done blackout_ms=300 release_ms=5352 failures=0
+[2026-06-28T14:40:48Z] cycle=15 start
+[2026-06-28T14:41:07Z] cycle=15 done blackout_ms=300 release_ms=5365 failures=0
+[2026-06-28T14:42:18Z] cycle=16 start
+[2026-06-28T14:42:36Z] cycle=16 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T14:43:48Z] cycle=17 start
+[2026-06-28T14:44:06Z] cycle=17 done blackout_ms=300 release_ms=5379 failures=0
+[2026-06-28T14:45:18Z] cycle=18 start
+[2026-06-28T14:45:36Z] cycle=18 done blackout_ms=300 release_ms=5360 failures=0
+[2026-06-28T14:46:48Z] cycle=19 start
+[2026-06-28T14:47:06Z] cycle=19 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T14:48:18Z] cycle=20 start
+[2026-06-28T14:48:36Z] cycle=20 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T14:49:48Z] cycle=21 start
+[2026-06-28T14:50:05Z] cycle=21 done blackout_ms=300 release_ms=5356 failures=0
+[2026-06-28T14:51:18Z] cycle=22 start
+[2026-06-28T14:51:35Z] cycle=22 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-28T14:52:48Z] cycle=23 start
+[2026-06-28T14:53:05Z] cycle=23 done blackout_ms=300 release_ms=5344 failures=0
+[2026-06-28T14:54:18Z] cycle=24 start
+[2026-06-28T14:54:37Z] cycle=24 done blackout_ms=300 release_ms=5355 failures=0
+[2026-06-28T14:55:48Z] cycle=25 start
+[2026-06-28T14:56:06Z] cycle=25 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T14:57:18Z] cycle=26 start
+[2026-06-28T14:57:37Z] cycle=26 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T14:58:48Z] cycle=27 start
+[2026-06-28T14:59:05Z] cycle=27 done blackout_ms=300 release_ms=5350 failures=0
+[2026-06-28T15:00:18Z] cycle=28 start
+[2026-06-28T15:00:35Z] cycle=28 done blackout_ms=300 release_ms=5380 failures=0
+[2026-06-28T15:01:48Z] cycle=29 start
+[2026-06-28T15:02:07Z] cycle=29 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T15:03:18Z] cycle=30 start
+[2026-06-28T15:03:36Z] cycle=30 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T15:04:48Z] cycle=31 start
+[2026-06-28T15:05:05Z] cycle=31 done blackout_ms=300 release_ms=5404 failures=0
+[2026-06-28T15:06:18Z] cycle=32 start
+[2026-06-28T15:06:36Z] cycle=32 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T15:07:48Z] cycle=33 start
+[2026-06-28T15:08:05Z] cycle=33 done blackout_ms=300 release_ms=5345 failures=0
+[2026-06-28T15:09:18Z] cycle=34 start
+[2026-06-28T15:09:37Z] cycle=34 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T15:10:48Z] cycle=35 start
+[2026-06-28T15:11:06Z] cycle=35 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-28T15:12:18Z] cycle=36 start
+[2026-06-28T15:12:36Z] cycle=36 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T15:13:48Z] cycle=37 start
+[2026-06-28T15:14:05Z] cycle=37 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-28T15:15:18Z] cycle=38 start
+[2026-06-28T15:15:36Z] cycle=38 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T15:16:48Z] cycle=39 start
+[2026-06-28T15:17:06Z] cycle=39 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T15:18:18Z] cycle=40 start
+[2026-06-28T15:18:35Z] cycle=40 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-28T15:19:48Z] cycle=41 start
+[2026-06-28T15:20:06Z] cycle=41 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-28T15:21:18Z] cycle=42 start
+[2026-06-28T15:21:36Z] cycle=42 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-28T15:22:49Z] cycle=43 start
+[2026-06-28T15:23:05Z] cycle=43 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-28T15:24:19Z] cycle=44 start
+[2026-06-28T15:24:36Z] cycle=44 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-28T15:25:49Z] cycle=45 start
+[2026-06-28T15:26:05Z] cycle=45 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T15:27:19Z] cycle=46 start
+[2026-06-28T15:27:35Z] cycle=46 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T15:28:49Z] cycle=47 start
+[2026-06-28T15:29:07Z] cycle=47 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T15:30:19Z] cycle=48 start
+[2026-06-28T15:30:36Z] cycle=48 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T15:31:49Z] cycle=49 start
+[2026-06-28T15:32:05Z] cycle=49 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T15:33:19Z] cycle=50 start
+[2026-06-28T15:33:35Z] cycle=50 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T15:34:49Z] cycle=51 start
+[2026-06-28T15:35:06Z] cycle=51 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T15:36:19Z] cycle=52 start
+[2026-06-28T15:36:35Z] cycle=52 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T15:37:49Z] cycle=53 start
+[2026-06-28T15:38:05Z] cycle=53 done blackout_ms=200 release_ms=5410 failures=0
+[2026-06-28T15:39:19Z] cycle=54 start
+[2026-06-28T15:39:36Z] cycle=54 done blackout_ms=300 release_ms=5371 failures=0
+[2026-06-28T15:40:49Z] cycle=55 start
+[2026-06-28T15:41:06Z] cycle=55 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T15:42:19Z] cycle=56 start
+[2026-06-28T15:42:35Z] cycle=56 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T15:43:49Z] cycle=57 start
+[2026-06-28T15:44:06Z] cycle=57 done blackout_ms=300 release_ms=5356 failures=0
+[2026-06-28T15:45:19Z] cycle=58 start
+[2026-06-28T15:45:37Z] cycle=58 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T15:46:49Z] cycle=59 start
+[2026-06-28T15:47:07Z] cycle=59 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-28T15:48:19Z] cycle=60 start
+[2026-06-28T15:48:36Z] cycle=60 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T15:49:49Z] cycle=61 start
+[2026-06-28T15:50:05Z] cycle=61 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T15:51:19Z] cycle=62 start
+[2026-06-28T15:51:37Z] cycle=62 done blackout_ms=200 release_ms=5335 failures=0
+[2026-06-28T15:52:49Z] cycle=63 start
+[2026-06-28T15:53:07Z] cycle=63 done blackout_ms=300 release_ms=5339 failures=0
+[2026-06-28T15:54:19Z] cycle=64 start
+[2026-06-28T15:54:36Z] cycle=64 done blackout_ms=300 release_ms=5355 failures=0
+[2026-06-28T15:55:49Z] cycle=65 start
+[2026-06-28T15:56:07Z] cycle=65 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T15:57:19Z] cycle=66 start
+[2026-06-28T15:57:35Z] cycle=66 done blackout_ms=300 release_ms=5358 failures=0
+[2026-06-28T15:58:49Z] cycle=67 start
+[2026-06-28T15:59:06Z] cycle=67 done blackout_ms=300 release_ms=5348 failures=0
+[2026-06-28T16:00:19Z] cycle=68 start
+[2026-06-28T16:00:36Z] cycle=68 done blackout_ms=300 release_ms=5352 failures=0
+[2026-06-28T16:01:49Z] cycle=69 start
+[2026-06-28T16:02:06Z] cycle=69 done blackout_ms=300 release_ms=5366 failures=0
+[2026-06-28T16:03:19Z] cycle=70 start
+[2026-06-28T16:03:36Z] cycle=70 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T16:04:49Z] cycle=71 start
+[2026-06-28T16:05:06Z] cycle=71 done blackout_ms=300 release_ms=5396 failures=0
+[2026-06-28T16:06:19Z] cycle=72 start
+[2026-06-28T16:06:35Z] cycle=72 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T16:07:49Z] cycle=73 start
+[2026-06-28T16:08:06Z] cycle=73 done blackout_ms=300 release_ms=5358 failures=0
+[2026-06-28T16:09:19Z] cycle=74 start
+[2026-06-28T16:09:36Z] cycle=74 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T16:10:49Z] cycle=75 start
+[2026-06-28T16:11:06Z] cycle=75 done blackout_ms=300 release_ms=5337 failures=0
+[2026-06-28T16:12:19Z] cycle=76 start
+[2026-06-28T16:12:36Z] cycle=76 done blackout_ms=300 release_ms=5361 failures=0
+[2026-06-28T16:13:49Z] cycle=77 start
+[2026-06-28T16:14:07Z] cycle=77 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T16:15:19Z] cycle=78 start
+[2026-06-28T16:15:36Z] cycle=78 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-28T16:16:49Z] cycle=79 start
+[2026-06-28T16:17:06Z] cycle=79 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T16:18:19Z] cycle=80 start
+[2026-06-28T16:18:36Z] cycle=80 done blackout_ms=300 release_ms=5361 failures=0
+[2026-06-28T16:19:49Z] cycle=81 start
+[2026-06-28T16:20:05Z] cycle=81 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T16:21:19Z] cycle=82 start
+[2026-06-28T16:21:36Z] cycle=82 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T16:22:49Z] cycle=83 start
+[2026-06-28T16:23:05Z] cycle=83 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-28T16:24:19Z] cycle=84 start
+[2026-06-28T16:24:35Z] cycle=84 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T16:25:49Z] cycle=85 start
+[2026-06-28T16:26:07Z] cycle=85 done blackout_ms=300 release_ms=5349 failures=0
+[2026-06-28T16:27:19Z] cycle=86 start
+[2026-06-28T16:27:36Z] cycle=86 done blackout_ms=300 release_ms=5347 failures=0
+[2026-06-28T16:28:50Z] cycle=87 start
+[2026-06-28T16:29:05Z] cycle=87 done blackout_ms=300 release_ms=5359 failures=0
+[2026-06-28T16:30:20Z] cycle=88 start
+[2026-06-28T16:30:36Z] cycle=88 done blackout_ms=300 release_ms=5353 failures=0
+[2026-06-28T16:31:50Z] cycle=89 start
+[2026-06-28T16:32:06Z] cycle=89 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T16:33:20Z] cycle=90 start
+[2026-06-28T16:33:35Z] cycle=90 done blackout_ms=300 release_ms=5367 failures=0
+[2026-06-28T16:34:50Z] cycle=91 start
+[2026-06-28T16:35:06Z] cycle=91 done blackout_ms=300 release_ms=5375 failures=0
+[2026-06-28T16:36:20Z] cycle=92 start
+[2026-06-28T16:36:36Z] cycle=92 done blackout_ms=300 release_ms=5367 failures=0
+[2026-06-28T16:37:50Z] cycle=93 start
+[2026-06-28T16:38:06Z] cycle=93 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T16:39:20Z] cycle=94 start
+[2026-06-28T16:39:36Z] cycle=94 done blackout_ms=300 release_ms=5358 failures=0
+[2026-06-28T16:40:50Z] cycle=95 start
+[2026-06-28T16:41:06Z] cycle=95 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T16:42:20Z] cycle=96 start
+[2026-06-28T16:42:37Z] cycle=96 done blackout_ms=300 release_ms=5350 failures=0
+[2026-06-28T16:43:50Z] cycle=97 start
+[2026-06-28T16:44:07Z] cycle=97 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T16:45:20Z] cycle=98 start
+[2026-06-28T16:45:36Z] cycle=98 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-28T16:46:50Z] cycle=99 start
+[2026-06-28T16:47:06Z] cycle=99 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T16:48:20Z] cycle=100 start
+[2026-06-28T16:48:36Z] cycle=100 done blackout_ms=300 release_ms=5362 failures=0
+[2026-06-28T16:49:50Z] cycle=101 start
+[2026-06-28T16:50:05Z] cycle=101 done blackout_ms=300 release_ms=5370 failures=0
+[2026-06-28T16:51:20Z] cycle=102 start
+[2026-06-28T16:51:37Z] cycle=102 done blackout_ms=300 release_ms=5351 failures=0
+[2026-06-28T16:52:50Z] cycle=103 start
+[2026-06-28T16:53:05Z] cycle=103 done blackout_ms=200 release_ms=5386 failures=0
+[2026-06-28T16:54:20Z] cycle=104 start
+[2026-06-28T16:54:36Z] cycle=104 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T16:55:50Z] cycle=105 start
+[2026-06-28T16:56:05Z] cycle=105 done blackout_ms=300 release_ms=5350 failures=0
+[2026-06-28T16:57:20Z] cycle=106 start
+[2026-06-28T16:57:37Z] cycle=106 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T16:58:50Z] cycle=107 start
+[2026-06-28T16:59:05Z] cycle=107 done blackout_ms=300 release_ms=5354 failures=0
+[2026-06-28T17:00:20Z] cycle=108 start
+[2026-06-28T17:00:36Z] cycle=108 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T17:01:51Z] cycle=109 start
+[2026-06-28T17:02:05Z] cycle=109 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T17:03:21Z] cycle=110 start
+[2026-06-28T17:03:35Z] cycle=110 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T17:04:51Z] cycle=111 start
+[2026-06-28T17:05:11Z] cycle=111 done blackout_ms=300 release_ms=5383 failures=0
+[2026-06-28T17:06:21Z] cycle=112 start
+[2026-06-28T17:06:40Z] cycle=112 done blackout_ms=300 release_ms=5357 failures=0
+[2026-06-28T17:07:51Z] cycle=113 start
+[2026-06-28T17:08:06Z] cycle=113 done blackout_ms=300 release_ms=5357 failures=0
+[2026-06-28T17:09:21Z] cycle=114 start
+[2026-06-28T17:09:36Z] cycle=114 done blackout_ms=300 release_ms=5369 failures=0
+[2026-06-28T17:10:51Z] cycle=115 start
+[2026-06-28T17:11:11Z] cycle=115 done blackout_ms=300 release_ms=5363 failures=0
+[2026-06-28T17:12:21Z] cycle=116 start
+[2026-06-28T17:12:40Z] cycle=116 done blackout_ms=300 release_ms=5351 failures=0
+[2026-06-28T17:13:51Z] cycle=117 start
+[2026-06-28T17:14:06Z] cycle=117 done blackout_ms=300 release_ms=5351 failures=0
+[2026-06-28T17:15:21Z] cycle=118 start
+[2026-06-28T17:15:41Z] cycle=118 done blackout_ms=300 release_ms=5358 failures=0
+[2026-06-28T17:16:51Z] cycle=119 start
+[2026-06-28T17:17:10Z] cycle=119 done blackout_ms=300 release_ms=5375 failures=0
+[2026-06-28T17:18:21Z] cycle=120 start
+[2026-06-28T17:18:40Z] cycle=120 done blackout_ms=300 release_ms=5367 failures=0
+[2026-06-28T17:19:51Z] cycle=121 start
+[2026-06-28T17:20:06Z] cycle=121 done blackout_ms=300 release_ms=5366 failures=0
+[2026-06-28T17:21:21Z] cycle=122 start
+[2026-06-28T17:21:41Z] cycle=122 done blackout_ms=300 release_ms=5370 failures=0
+[2026-06-28T17:22:51Z] cycle=123 start
+[2026-06-28T17:23:10Z] cycle=123 done blackout_ms=300 release_ms=5363 failures=0
+[2026-06-28T17:24:21Z] cycle=124 start
+[2026-06-28T17:24:36Z] cycle=124 done blackout_ms=300 release_ms=5365 failures=0
+[2026-06-28T17:25:51Z] cycle=125 start
+[2026-06-28T17:26:05Z] cycle=125 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-28T17:27:21Z] cycle=126 start
+[2026-06-28T17:27:40Z] cycle=126 done blackout_ms=300 release_ms=5367 failures=0
+[2026-06-28T17:28:51Z] cycle=127 start
+[2026-06-28T17:29:05Z] cycle=127 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T17:30:21Z] cycle=128 start
+[2026-06-28T17:30:40Z] cycle=128 done blackout_ms=300 release_ms=5368 failures=0
+[2026-06-28T17:31:51Z] cycle=129 start
+[2026-06-28T17:32:05Z] cycle=129 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T17:33:21Z] cycle=130 start
+[2026-06-28T17:33:35Z] cycle=130 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T17:34:51Z] cycle=131 start
+[2026-06-28T17:35:05Z] cycle=131 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-28T17:36:21Z] cycle=132 start
+[2026-06-28T17:36:35Z] cycle=132 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T17:37:51Z] cycle=133 start
+[2026-06-28T17:38:05Z] cycle=133 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T17:39:21Z] cycle=134 start
+[2026-06-28T17:39:35Z] cycle=134 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T17:40:51Z] cycle=135 start
+[2026-06-28T17:41:05Z] cycle=135 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T17:42:21Z] cycle=136 start
+[2026-06-28T17:42:36Z] cycle=136 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T17:43:51Z] cycle=137 start
+[2026-06-28T17:44:11Z] cycle=137 done blackout_ms=300 release_ms=5348 failures=0
+[2026-06-28T17:45:21Z] cycle=138 start
+[2026-06-28T17:45:35Z] cycle=138 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-28T17:46:51Z] cycle=139 start
+[2026-06-28T17:47:05Z] cycle=139 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-28T17:48:21Z] cycle=140 start
+[2026-06-28T17:48:35Z] cycle=140 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T17:49:51Z] cycle=141 start
+[2026-06-28T17:50:06Z] cycle=141 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T17:51:21Z] cycle=142 start
+[2026-06-28T17:51:35Z] cycle=142 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T17:52:51Z] cycle=143 start
+[2026-06-28T17:53:05Z] cycle=143 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-28T17:54:21Z] cycle=144 start
+[2026-06-28T17:54:35Z] cycle=144 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T17:55:51Z] cycle=145 start
+[2026-06-28T17:56:05Z] cycle=145 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T17:57:21Z] cycle=146 start
+[2026-06-28T17:57:35Z] cycle=146 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T17:58:51Z] cycle=147 start
+[2026-06-28T17:59:06Z] cycle=147 done blackout_ms=300 release_ms=5368 failures=0
+[2026-06-28T18:00:21Z] cycle=148 start
+[2026-06-28T18:00:41Z] cycle=148 done blackout_ms=300 release_ms=5375 failures=0
+[2026-06-28T18:01:51Z] cycle=149 start
+[2026-06-28T18:02:11Z] cycle=149 done blackout_ms=300 release_ms=5358 failures=0
+[2026-06-28T18:03:21Z] cycle=150 start
+[2026-06-28T18:03:35Z] cycle=150 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T18:04:51Z] cycle=151 start
+[2026-06-28T18:05:05Z] cycle=151 done blackout_ms=200 release_ms=5412 failures=0
+[2026-06-28T18:06:22Z] cycle=152 start
+[2026-06-28T18:06:36Z] cycle=152 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T18:07:52Z] cycle=153 start
+[2026-06-28T18:08:11Z] cycle=153 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T18:09:22Z] cycle=154 start
+[2026-06-28T18:09:40Z] cycle=154 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T18:10:52Z] cycle=155 start
+[2026-06-28T18:11:06Z] cycle=155 done blackout_ms=100 release_ms=5346 failures=0
+[2026-06-28T18:12:22Z] cycle=156 start
+[2026-06-28T18:12:41Z] cycle=156 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T18:13:52Z] cycle=157 start
+[2026-06-28T18:14:11Z] cycle=157 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T18:15:22Z] cycle=158 start
+[2026-06-28T18:15:40Z] cycle=158 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T18:16:52Z] cycle=159 start
+[2026-06-28T18:17:06Z] cycle=159 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T18:18:22Z] cycle=160 start
+[2026-06-28T18:18:40Z] cycle=160 done blackout_ms=300 release_ms=5342 failures=0
+[2026-06-28T18:19:52Z] cycle=161 start
+[2026-06-28T18:20:11Z] cycle=161 done blackout_ms=200 release_ms=5385 failures=0
+[2026-06-28T18:21:22Z] cycle=162 start
+[2026-06-28T18:21:40Z] cycle=162 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-28T18:22:52Z] cycle=163 start
+[2026-06-28T18:23:06Z] cycle=163 done blackout_ms=100 release_ms=5364 failures=0
+[2026-06-28T18:24:22Z] cycle=164 start
+[2026-06-28T18:24:41Z] cycle=164 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T18:25:52Z] cycle=165 start
+[2026-06-28T18:26:11Z] cycle=165 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T18:27:22Z] cycle=166 start
+[2026-06-28T18:27:42Z] cycle=166 done blackout_ms=0 release_ms=5361 failures=0
+[2026-06-28T18:28:52Z] cycle=167 start
+[2026-06-28T18:29:06Z] cycle=167 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-28T18:30:22Z] cycle=168 start
+[2026-06-28T18:30:41Z] cycle=168 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-28T18:31:52Z] cycle=169 start
+[2026-06-28T18:32:10Z] cycle=169 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-28T18:33:22Z] cycle=170 start
+[2026-06-28T18:33:36Z] cycle=170 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T18:34:52Z] cycle=171 start
+[2026-06-28T18:35:11Z] cycle=171 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T18:36:22Z] cycle=172 start
+[2026-06-28T18:36:40Z] cycle=172 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T18:37:52Z] cycle=173 start
+[2026-06-28T18:38:10Z] cycle=173 done blackout_ms=100 release_ms=5350 failures=0
+[2026-06-28T18:39:22Z] cycle=174 start
+[2026-06-28T18:39:36Z] cycle=174 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-28T18:40:52Z] cycle=175 start
+[2026-06-28T18:41:11Z] cycle=175 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-28T18:42:22Z] cycle=176 start
+[2026-06-28T18:42:40Z] cycle=176 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T18:43:52Z] cycle=177 start
+[2026-06-28T18:44:06Z] cycle=177 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T18:45:22Z] cycle=178 start
+[2026-06-28T18:45:40Z] cycle=178 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T18:46:52Z] cycle=179 start
+[2026-06-28T18:47:06Z] cycle=179 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T18:48:22Z] cycle=180 start
+[2026-06-28T18:48:41Z] cycle=180 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T18:49:52Z] cycle=181 start
+[2026-06-28T18:50:10Z] cycle=181 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-28T18:51:22Z] cycle=182 start
+[2026-06-28T18:51:40Z] cycle=182 done blackout_ms=100 release_ms=5360 failures=0
+[2026-06-28T18:52:52Z] cycle=183 start
+[2026-06-28T18:53:06Z] cycle=183 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T18:54:22Z] cycle=184 start
+[2026-06-28T18:54:41Z] cycle=184 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T18:55:52Z] cycle=185 start
+[2026-06-28T18:56:10Z] cycle=185 done blackout_ms=200 release_ms=5337 failures=0
+[2026-06-28T18:57:22Z] cycle=186 start
+[2026-06-28T18:57:36Z] cycle=186 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T18:58:52Z] cycle=187 start
+[2026-06-28T18:59:11Z] cycle=187 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T19:00:22Z] cycle=188 start
+[2026-06-28T19:00:41Z] cycle=188 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T19:01:52Z] cycle=189 start
+[2026-06-28T19:02:10Z] cycle=189 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T19:03:22Z] cycle=190 start
+[2026-06-28T19:03:41Z] cycle=190 done blackout_ms=300 release_ms=5372 failures=0
+[2026-06-28T19:04:52Z] cycle=191 start
+[2026-06-28T19:05:10Z] cycle=191 done blackout_ms=100 release_ms=5381 failures=0
+[2026-06-28T19:06:22Z] cycle=192 start
+[2026-06-28T19:06:36Z] cycle=192 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T19:07:52Z] cycle=193 start
+[2026-06-28T19:08:11Z] cycle=193 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T19:09:22Z] cycle=194 start
+[2026-06-28T19:09:41Z] cycle=194 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T19:10:52Z] cycle=195 start
+[2026-06-28T19:11:10Z] cycle=195 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T19:12:22Z] cycle=196 start
+[2026-06-28T19:12:36Z] cycle=196 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T19:13:52Z] cycle=197 start
+[2026-06-28T19:14:11Z] cycle=197 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-28T19:15:22Z] cycle=198 start
+[2026-06-28T19:15:40Z] cycle=198 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T19:16:52Z] cycle=199 start
+[2026-06-28T19:17:10Z] cycle=199 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-28T19:18:22Z] cycle=200 start
+[2026-06-28T19:18:36Z] cycle=200 done blackout_ms=200 release_ms=5424 failures=0
+[2026-06-28T19:19:52Z] cycle=201 start
+[2026-06-28T19:20:11Z] cycle=201 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T19:21:22Z] cycle=202 start
+[2026-06-28T19:21:36Z] cycle=202 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T19:22:52Z] cycle=203 start
+[2026-06-28T19:23:11Z] cycle=203 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T19:24:22Z] cycle=204 start
+[2026-06-28T19:24:40Z] cycle=204 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T19:25:52Z] cycle=205 start
+[2026-06-28T19:26:10Z] cycle=205 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T19:27:22Z] cycle=206 start
+[2026-06-28T19:27:36Z] cycle=206 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T19:28:52Z] cycle=207 start
+[2026-06-28T19:29:11Z] cycle=207 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-28T19:30:22Z] cycle=208 start
+[2026-06-28T19:30:40Z] cycle=208 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-28T19:31:52Z] cycle=209 start
+[2026-06-28T19:32:06Z] cycle=209 done blackout_ms=100 release_ms=5354 failures=0
+[2026-06-28T19:33:22Z] cycle=210 start
+[2026-06-28T19:33:36Z] cycle=210 done blackout_ms=200 release_ms=5385 failures=0
+[2026-06-28T19:34:52Z] cycle=211 start
+[2026-06-28T19:35:11Z] cycle=211 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T19:36:22Z] cycle=212 start
+[2026-06-28T19:36:40Z] cycle=212 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T19:37:52Z] cycle=213 start
+[2026-06-28T19:38:06Z] cycle=213 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T19:39:22Z] cycle=214 start
+[2026-06-28T19:39:41Z] cycle=214 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T19:40:52Z] cycle=215 start
+[2026-06-28T19:41:11Z] cycle=215 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T19:42:22Z] cycle=216 start
+[2026-06-28T19:42:41Z] cycle=216 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T19:43:52Z] cycle=217 start
+[2026-06-28T19:44:10Z] cycle=217 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T19:45:22Z] cycle=218 start
+[2026-06-28T19:45:40Z] cycle=218 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T19:46:52Z] cycle=219 start
+[2026-06-28T19:47:06Z] cycle=219 done blackout_ms=100 release_ms=5353 failures=0
+[2026-06-28T19:48:22Z] cycle=220 start
+[2026-06-28T19:48:36Z] cycle=220 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T19:49:52Z] cycle=221 start
+[2026-06-28T19:50:11Z] cycle=221 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-28T19:51:22Z] cycle=222 start
+[2026-06-28T19:51:40Z] cycle=222 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T19:52:52Z] cycle=223 start
+[2026-06-28T19:53:06Z] cycle=223 done blackout_ms=100 release_ms=5342 failures=0
+[2026-06-28T19:54:22Z] cycle=224 start
+[2026-06-28T19:54:36Z] cycle=224 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T19:55:52Z] cycle=225 start
+[2026-06-28T19:56:11Z] cycle=225 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T19:57:22Z] cycle=226 start
+[2026-06-28T19:57:40Z] cycle=226 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T19:58:52Z] cycle=227 start
+[2026-06-28T19:59:06Z] cycle=227 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T20:00:22Z] cycle=228 start
+[2026-06-28T20:00:41Z] cycle=228 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T20:01:52Z] cycle=229 start
+[2026-06-28T20:02:10Z] cycle=229 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T20:03:22Z] cycle=230 start
+[2026-06-28T20:03:36Z] cycle=230 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T20:04:52Z] cycle=231 start
+[2026-06-28T20:05:06Z] cycle=231 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-28T20:06:22Z] cycle=232 start
+[2026-06-28T20:06:36Z] cycle=232 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T20:07:52Z] cycle=233 start
+[2026-06-28T20:08:11Z] cycle=233 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T20:09:22Z] cycle=234 start
+[2026-06-28T20:09:40Z] cycle=234 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T20:10:52Z] cycle=235 start
+[2026-06-28T20:11:10Z] cycle=235 done blackout_ms=0 release_ms=5362 failures=0
+[2026-06-28T20:12:22Z] cycle=236 start
+[2026-06-28T20:12:36Z] cycle=236 done blackout_ms=200 release_ms=5401 failures=0
+[2026-06-28T20:13:52Z] cycle=237 start
+[2026-06-28T20:14:11Z] cycle=237 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T20:15:22Z] cycle=238 start
+[2026-06-28T20:15:40Z] cycle=238 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T20:16:52Z] cycle=239 start
+[2026-06-28T20:17:06Z] cycle=239 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T20:18:22Z] cycle=240 start
+[2026-06-28T20:18:41Z] cycle=240 done blackout_ms=200 release_ms=5337 failures=0
+[2026-06-28T20:19:52Z] cycle=241 start
+[2026-06-28T20:20:10Z] cycle=241 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T20:21:22Z] cycle=242 start
+[2026-06-28T20:21:36Z] cycle=242 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T20:22:52Z] cycle=243 start
+[2026-06-28T20:23:11Z] cycle=243 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T20:24:22Z] cycle=244 start
+[2026-06-28T20:24:40Z] cycle=244 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T20:25:52Z] cycle=245 start
+[2026-06-28T20:26:06Z] cycle=245 done blackout_ms=100 release_ms=5354 failures=0
+[2026-06-28T20:27:22Z] cycle=246 start
+[2026-06-28T20:27:36Z] cycle=246 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T20:28:52Z] cycle=247 start
+[2026-06-28T20:29:10Z] cycle=247 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-28T20:30:22Z] cycle=248 start
+[2026-06-28T20:30:36Z] cycle=248 done blackout_ms=100 release_ms=5361 failures=0
+[2026-06-28T20:31:52Z] cycle=249 start
+[2026-06-28T20:32:06Z] cycle=249 done blackout_ms=200 release_ms=5337 failures=0
+[2026-06-28T20:33:22Z] cycle=250 start
+[2026-06-28T20:33:42Z] cycle=250 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T20:34:52Z] cycle=251 start
+[2026-06-28T20:35:06Z] cycle=251 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T20:36:22Z] cycle=252 start
+[2026-06-28T20:36:40Z] cycle=252 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T20:37:52Z] cycle=253 start
+[2026-06-28T20:38:06Z] cycle=253 done blackout_ms=100 release_ms=5366 failures=0
+[2026-06-28T20:39:22Z] cycle=254 start
+[2026-06-28T20:39:41Z] cycle=254 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-28T20:40:52Z] cycle=255 start
+[2026-06-28T20:41:10Z] cycle=255 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T20:42:22Z] cycle=256 start
+[2026-06-28T20:42:36Z] cycle=256 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T20:43:52Z] cycle=257 start
+[2026-06-28T20:44:11Z] cycle=257 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T20:45:22Z] cycle=258 start
+[2026-06-28T20:45:36Z] cycle=258 done blackout_ms=100 release_ms=5351 failures=0
+[2026-06-28T20:46:52Z] cycle=259 start
+[2026-06-28T20:47:06Z] cycle=259 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T20:48:22Z] cycle=260 start
+[2026-06-28T20:48:40Z] cycle=260 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T20:49:52Z] cycle=261 start
+[2026-06-28T20:50:06Z] cycle=261 done blackout_ms=200 release_ms=5405 failures=0
+[2026-06-28T20:51:22Z] cycle=262 start
+[2026-06-28T20:51:36Z] cycle=262 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T20:52:52Z] cycle=263 start
+[2026-06-28T20:53:10Z] cycle=263 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T20:54:22Z] cycle=264 start
+[2026-06-28T20:54:36Z] cycle=264 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T20:55:53Z] cycle=265 start
+[2026-06-28T20:56:11Z] cycle=265 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-28T20:57:23Z] cycle=266 start
+[2026-06-28T20:57:41Z] cycle=266 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T20:58:53Z] cycle=267 start
+[2026-06-28T20:59:11Z] cycle=267 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-28T21:00:23Z] cycle=268 start
+[2026-06-28T21:00:41Z] cycle=268 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T21:01:53Z] cycle=269 start
+[2026-06-28T21:02:12Z] cycle=269 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-28T21:03:23Z] cycle=270 start
+[2026-06-28T21:03:42Z] cycle=270 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T21:04:53Z] cycle=271 start
+[2026-06-28T21:05:12Z] cycle=271 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T21:06:23Z] cycle=272 start
+[2026-06-28T21:06:41Z] cycle=272 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T21:07:53Z] cycle=273 start
+[2026-06-28T21:08:11Z] cycle=273 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T21:09:23Z] cycle=274 start
+[2026-06-28T21:09:40Z] cycle=274 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T21:10:53Z] cycle=275 start
+[2026-06-28T21:11:11Z] cycle=275 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T21:12:23Z] cycle=276 start
+[2026-06-28T21:12:41Z] cycle=276 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T21:13:53Z] cycle=277 start
+[2026-06-28T21:14:11Z] cycle=277 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T21:15:23Z] cycle=278 start
+[2026-06-28T21:15:40Z] cycle=278 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T21:16:53Z] cycle=279 start
+[2026-06-28T21:17:11Z] cycle=279 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T21:18:23Z] cycle=280 start
+[2026-06-28T21:18:41Z] cycle=280 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T21:19:53Z] cycle=281 start
+[2026-06-28T21:20:11Z] cycle=281 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T21:21:24Z] cycle=282 start
+[2026-06-28T21:21:40Z] cycle=282 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T21:22:54Z] cycle=283 start
+[2026-06-28T21:23:10Z] cycle=283 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-28T21:24:24Z] cycle=284 start
+[2026-06-28T21:24:42Z] cycle=284 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-28T21:25:55Z] cycle=285 start
+[2026-06-28T21:26:11Z] cycle=285 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T21:27:25Z] cycle=286 start
+[2026-06-28T21:27:41Z] cycle=286 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T21:28:55Z] cycle=287 start
+[2026-06-28T21:29:11Z] cycle=287 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-28T21:30:25Z] cycle=288 start
+[2026-06-28T21:30:40Z] cycle=288 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T21:31:55Z] cycle=289 start
+[2026-06-28T21:32:11Z] cycle=289 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-28T21:33:25Z] cycle=290 start
+[2026-06-28T21:33:41Z] cycle=290 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-28T21:34:55Z] cycle=291 start
+[2026-06-28T21:35:11Z] cycle=291 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T21:36:25Z] cycle=292 start
+[2026-06-28T21:36:41Z] cycle=292 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T21:37:55Z] cycle=293 start
+[2026-06-28T21:38:11Z] cycle=293 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-28T21:39:25Z] cycle=294 start
+[2026-06-28T21:39:41Z] cycle=294 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T21:40:55Z] cycle=295 start
+[2026-06-28T21:41:12Z] cycle=295 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T21:42:25Z] cycle=296 start
+[2026-06-28T21:42:41Z] cycle=296 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T21:43:55Z] cycle=297 start
+[2026-06-28T21:44:12Z] cycle=297 done blackout_ms=200 release_ms=5404 failures=0
+[2026-06-28T21:45:25Z] cycle=298 start
+[2026-06-28T21:45:42Z] cycle=298 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T21:46:55Z] cycle=299 start
+[2026-06-28T21:47:11Z] cycle=299 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T21:48:25Z] cycle=300 start
+[2026-06-28T21:48:41Z] cycle=300 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T21:49:55Z] cycle=301 start
+[2026-06-28T21:50:12Z] cycle=301 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T21:51:25Z] cycle=302 start
+[2026-06-28T21:51:41Z] cycle=302 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T21:52:55Z] cycle=303 start
+[2026-06-28T21:53:11Z] cycle=303 done blackout_ms=200 release_ms=5377 failures=0
+[2026-06-28T21:54:25Z] cycle=304 start
+[2026-06-28T21:54:41Z] cycle=304 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T21:55:55Z] cycle=305 start
+[2026-06-28T21:56:11Z] cycle=305 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T21:57:25Z] cycle=306 start
+[2026-06-28T21:57:41Z] cycle=306 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T21:58:55Z] cycle=307 start
+[2026-06-28T21:59:11Z] cycle=307 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T22:00:26Z] cycle=308 start
+[2026-06-28T22:00:40Z] cycle=308 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T22:01:55Z] cycle=309 start
+[2026-06-28T22:02:11Z] cycle=309 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T22:03:25Z] cycle=310 start
+[2026-06-28T22:03:41Z] cycle=310 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T22:04:55Z] cycle=311 start
+[2026-06-28T22:05:10Z] cycle=311 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T22:06:25Z] cycle=312 start
+[2026-06-28T22:06:41Z] cycle=312 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-28T22:07:55Z] cycle=313 start
+[2026-06-28T22:08:11Z] cycle=313 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-28T22:09:25Z] cycle=314 start
+[2026-06-28T22:09:41Z] cycle=314 done blackout_ms=200 release_ms=5391 failures=0
+[2026-06-28T22:10:55Z] cycle=315 start
+[2026-06-28T22:11:11Z] cycle=315 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-28T22:12:25Z] cycle=316 start
+[2026-06-28T22:12:41Z] cycle=316 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T22:13:55Z] cycle=317 start
+[2026-06-28T22:14:11Z] cycle=317 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T22:15:25Z] cycle=318 start
+[2026-06-28T22:15:41Z] cycle=318 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-28T22:16:55Z] cycle=319 start
+[2026-06-28T22:17:11Z] cycle=319 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T22:18:25Z] cycle=320 start
+[2026-06-28T22:18:41Z] cycle=320 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-28T22:19:55Z] cycle=321 start
+[2026-06-28T22:20:12Z] cycle=321 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-28T22:21:25Z] cycle=322 start
+[2026-06-28T22:21:41Z] cycle=322 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T22:22:55Z] cycle=323 start
+[2026-06-28T22:23:11Z] cycle=323 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-28T22:24:25Z] cycle=324 start
+[2026-06-28T22:24:40Z] cycle=324 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-28T22:25:55Z] cycle=325 start
+[2026-06-28T22:26:11Z] cycle=325 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T22:27:25Z] cycle=326 start
+[2026-06-28T22:27:41Z] cycle=326 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T22:28:55Z] cycle=327 start
+[2026-06-28T22:29:10Z] cycle=327 done blackout_ms=200 release_ms=5325 failures=0
+[2026-06-28T22:30:25Z] cycle=328 start
+[2026-06-28T22:30:41Z] cycle=328 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T22:31:55Z] cycle=329 start
+[2026-06-28T22:32:11Z] cycle=329 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T22:33:25Z] cycle=330 start
+[2026-06-28T22:33:40Z] cycle=330 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-28T22:34:55Z] cycle=331 start
+[2026-06-28T22:35:11Z] cycle=331 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T22:36:25Z] cycle=332 start
+[2026-06-28T22:36:41Z] cycle=332 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T22:37:55Z] cycle=333 start
+[2026-06-28T22:38:12Z] cycle=333 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-28T22:39:25Z] cycle=334 start
+[2026-06-28T22:39:41Z] cycle=334 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-28T22:40:55Z] cycle=335 start
+[2026-06-28T22:41:11Z] cycle=335 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T22:42:25Z] cycle=336 start
+[2026-06-28T22:42:42Z] cycle=336 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T22:43:55Z] cycle=337 start
+[2026-06-28T22:44:11Z] cycle=337 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T22:45:25Z] cycle=338 start
+[2026-06-28T22:45:41Z] cycle=338 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T22:46:55Z] cycle=339 start
+[2026-06-28T22:47:10Z] cycle=339 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T22:48:25Z] cycle=340 start
+[2026-06-28T22:48:41Z] cycle=340 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-28T22:49:55Z] cycle=341 start
+[2026-06-28T22:50:11Z] cycle=341 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-28T22:51:25Z] cycle=342 start
+[2026-06-28T22:51:42Z] cycle=342 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-28T22:52:55Z] cycle=343 start
+[2026-06-28T22:53:11Z] cycle=343 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-28T22:54:25Z] cycle=344 start
+[2026-06-28T22:54:41Z] cycle=344 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-28T22:55:55Z] cycle=345 start
+[2026-06-28T22:56:12Z] cycle=345 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-28T22:57:25Z] cycle=346 start
+[2026-06-28T22:57:41Z] cycle=346 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-28T22:58:55Z] cycle=347 start
+[2026-06-28T22:59:11Z] cycle=347 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-28T23:00:25Z] cycle=348 start
+[2026-06-28T23:00:42Z] cycle=348 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-28T23:01:55Z] cycle=349 start
+[2026-06-28T23:02:11Z] cycle=349 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-28T23:03:25Z] cycle=350 start
+[2026-06-28T23:03:41Z] cycle=350 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T23:04:55Z] cycle=351 start
+[2026-06-28T23:05:10Z] cycle=351 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T23:06:25Z] cycle=352 start
+[2026-06-28T23:06:41Z] cycle=352 done blackout_ms=200 release_ms=5330 failures=0
+[2026-06-28T23:07:55Z] cycle=353 start
+[2026-06-28T23:08:11Z] cycle=353 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-28T23:09:25Z] cycle=354 start
+[2026-06-28T23:09:42Z] cycle=354 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-28T23:10:55Z] cycle=355 start
+[2026-06-28T23:11:11Z] cycle=355 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-28T23:12:25Z] cycle=356 start
+[2026-06-28T23:12:41Z] cycle=356 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-28T23:13:55Z] cycle=357 start
+[2026-06-28T23:14:12Z] cycle=357 done blackout_ms=200 release_ms=5403 failures=0
+[2026-06-28T23:15:25Z] cycle=358 start
+[2026-06-28T23:15:43Z] cycle=358 done blackout_ms=200 release_ms=5394 failures=0
+[2026-06-28T23:16:55Z] cycle=359 start
+[2026-06-28T23:17:10Z] cycle=359 done blackout_ms=200 release_ms=5433 failures=0
+[2026-06-28T23:18:25Z] cycle=360 start
+[2026-06-28T23:18:41Z] cycle=360 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-28T23:19:56Z] cycle=361 start
+[2026-06-28T23:20:10Z] cycle=361 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-28T23:21:26Z] cycle=362 start
+[2026-06-28T23:21:42Z] cycle=362 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-28T23:22:56Z] cycle=363 start
+[2026-06-28T23:23:10Z] cycle=363 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-28T23:24:26Z] cycle=364 start
+[2026-06-28T23:24:40Z] cycle=364 done blackout_ms=200 release_ms=5398 failures=0
+[2026-06-28T23:25:56Z] cycle=365 start
+[2026-06-28T23:26:11Z] cycle=365 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-28T23:27:26Z] cycle=366 start
+[2026-06-28T23:27:41Z] cycle=366 done blackout_ms=200 release_ms=5401 failures=0
+[2026-06-28T23:28:56Z] cycle=367 start
+[2026-06-28T23:29:11Z] cycle=367 done blackout_ms=200 release_ms=5427 failures=0
+[2026-06-28T23:30:26Z] cycle=368 start
+[2026-06-28T23:30:41Z] cycle=368 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-28T23:31:57Z] cycle=369 start
+[2026-06-28T23:32:11Z] cycle=369 done blackout_ms=200 release_ms=5407 failures=0
+[2026-06-28T23:33:27Z] cycle=370 start
+[2026-06-28T23:33:46Z] cycle=370 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-28T23:34:57Z] cycle=371 start
+[2026-06-28T23:35:11Z] cycle=371 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-28T23:36:27Z] cycle=372 start
+[2026-06-28T23:36:41Z] cycle=372 done blackout_ms=200 release_ms=5414 failures=0
+[2026-06-28T23:37:57Z] cycle=373 start
+[2026-06-28T23:38:11Z] cycle=373 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-28T23:39:27Z] cycle=374 start
+[2026-06-28T23:39:41Z] cycle=374 done blackout_ms=200 release_ms=5404 failures=0
+[2026-06-28T23:40:57Z] cycle=375 start
+[2026-06-28T23:41:11Z] cycle=375 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-28T23:42:27Z] cycle=376 start
+[2026-06-28T23:42:45Z] cycle=376 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T23:43:57Z] cycle=377 start
+[2026-06-28T23:44:11Z] cycle=377 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T23:45:27Z] cycle=378 start
+[2026-06-28T23:45:46Z] cycle=378 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-28T23:46:57Z] cycle=379 start
+[2026-06-28T23:47:11Z] cycle=379 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-28T23:48:27Z] cycle=380 start
+[2026-06-28T23:48:46Z] cycle=380 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-28T23:49:57Z] cycle=381 start
+[2026-06-28T23:50:15Z] cycle=381 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-28T23:51:27Z] cycle=382 start
+[2026-06-28T23:51:41Z] cycle=382 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-28T23:52:57Z] cycle=383 start
+[2026-06-28T23:53:16Z] cycle=383 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-28T23:54:27Z] cycle=384 start
+[2026-06-28T23:54:41Z] cycle=384 done blackout_ms=100 release_ms=5332 failures=0
+[2026-06-28T23:55:57Z] cycle=385 start
+[2026-06-28T23:56:16Z] cycle=385 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-28T23:57:27Z] cycle=386 start
+[2026-06-28T23:57:46Z] cycle=386 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-28T23:58:57Z] cycle=387 start
+[2026-06-28T23:59:11Z] cycle=387 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T00:00:27Z] cycle=388 start
+[2026-06-29T00:00:46Z] cycle=388 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T00:01:57Z] cycle=389 start
+[2026-06-29T00:02:15Z] cycle=389 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T00:03:27Z] cycle=390 start
+[2026-06-29T00:03:45Z] cycle=390 done blackout_ms=200 release_ms=5382 failures=0
+[2026-06-29T00:04:57Z] cycle=391 start
+[2026-06-29T00:05:16Z] cycle=391 done blackout_ms=200 release_ms=5398 failures=0
+[2026-06-29T00:06:27Z] cycle=392 start
+[2026-06-29T00:06:45Z] cycle=392 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T00:07:57Z] cycle=393 start
+[2026-06-29T00:08:11Z] cycle=393 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T00:09:27Z] cycle=394 start
+[2026-06-29T00:09:45Z] cycle=394 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T00:10:57Z] cycle=395 start
+[2026-06-29T00:11:11Z] cycle=395 done blackout_ms=100 release_ms=5336 failures=0
+[2026-06-29T00:12:27Z] cycle=396 start
+[2026-06-29T00:12:46Z] cycle=396 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T00:13:57Z] cycle=397 start
+[2026-06-29T00:14:15Z] cycle=397 done blackout_ms=100 release_ms=5353 failures=0
+[2026-06-29T00:15:27Z] cycle=398 start
+[2026-06-29T00:15:41Z] cycle=398 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T00:16:57Z] cycle=399 start
+[2026-06-29T00:17:16Z] cycle=399 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T00:18:27Z] cycle=400 start
+[2026-06-29T00:18:45Z] cycle=400 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T00:19:57Z] cycle=401 start
+[2026-06-29T00:20:17Z] cycle=401 done blackout_ms=100 release_ms=5344 failures=0
+[2026-06-29T00:21:27Z] cycle=402 start
+[2026-06-29T00:21:41Z] cycle=402 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T00:22:57Z] cycle=403 start
+[2026-06-29T00:23:16Z] cycle=403 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T00:24:27Z] cycle=404 start
+[2026-06-29T00:24:45Z] cycle=404 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T00:25:57Z] cycle=405 start
+[2026-06-29T00:26:11Z] cycle=405 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T00:27:27Z] cycle=406 start
+[2026-06-29T00:27:46Z] cycle=406 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T00:28:57Z] cycle=407 start
+[2026-06-29T00:29:11Z] cycle=407 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T00:30:27Z] cycle=408 start
+[2026-06-29T00:30:41Z] cycle=408 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T00:31:57Z] cycle=409 start
+[2026-06-29T00:32:15Z] cycle=409 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T00:33:27Z] cycle=410 start
+[2026-06-29T00:33:41Z] cycle=410 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-29T00:34:57Z] cycle=411 start
+[2026-06-29T00:35:16Z] cycle=411 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T00:36:27Z] cycle=412 start
+[2026-06-29T00:36:41Z] cycle=412 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T00:37:57Z] cycle=413 start
+[2026-06-29T00:38:11Z] cycle=413 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T00:39:27Z] cycle=414 start
+[2026-06-29T00:39:45Z] cycle=414 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T00:40:57Z] cycle=415 start
+[2026-06-29T00:41:11Z] cycle=415 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T00:42:27Z] cycle=416 start
+[2026-06-29T00:42:46Z] cycle=416 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T00:43:57Z] cycle=417 start
+[2026-06-29T00:44:15Z] cycle=417 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T00:45:27Z] cycle=418 start
+[2026-06-29T00:45:41Z] cycle=418 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T00:46:57Z] cycle=419 start
+[2026-06-29T00:47:16Z] cycle=419 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T00:48:27Z] cycle=420 start
+[2026-06-29T00:48:45Z] cycle=420 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T00:49:57Z] cycle=421 start
+[2026-06-29T00:50:11Z] cycle=421 done blackout_ms=100 release_ms=5347 failures=0
+[2026-06-29T00:51:27Z] cycle=422 start
+[2026-06-29T00:51:46Z] cycle=422 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T00:52:57Z] cycle=423 start
+[2026-06-29T00:53:15Z] cycle=423 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T00:54:27Z] cycle=424 start
+[2026-06-29T00:54:41Z] cycle=424 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T00:55:57Z] cycle=425 start
+[2026-06-29T00:56:16Z] cycle=425 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T00:57:27Z] cycle=426 start
+[2026-06-29T00:57:41Z] cycle=426 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T00:58:57Z] cycle=427 start
+[2026-06-29T00:59:16Z] cycle=427 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T01:00:27Z] cycle=428 start
+[2026-06-29T01:00:46Z] cycle=428 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T01:01:57Z] cycle=429 start
+[2026-06-29T01:02:15Z] cycle=429 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T01:03:27Z] cycle=430 start
+[2026-06-29T01:03:41Z] cycle=430 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T01:04:57Z] cycle=431 start
+[2026-06-29T01:05:16Z] cycle=431 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-29T01:06:27Z] cycle=432 start
+[2026-06-29T01:06:45Z] cycle=432 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T01:07:57Z] cycle=433 start
+[2026-06-29T01:08:11Z] cycle=433 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T01:09:27Z] cycle=434 start
+[2026-06-29T01:09:46Z] cycle=434 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T01:10:57Z] cycle=435 start
+[2026-06-29T01:11:16Z] cycle=435 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T01:12:27Z] cycle=436 start
+[2026-06-29T01:12:41Z] cycle=436 done blackout_ms=100 release_ms=5363 failures=0
+[2026-06-29T01:13:57Z] cycle=437 start
+[2026-06-29T01:14:16Z] cycle=437 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T01:15:27Z] cycle=438 start
+[2026-06-29T01:15:46Z] cycle=438 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T01:16:57Z] cycle=439 start
+[2026-06-29T01:17:11Z] cycle=439 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T01:18:27Z] cycle=440 start
+[2026-06-29T01:18:46Z] cycle=440 done blackout_ms=300 release_ms=5366 failures=0
+[2026-06-29T01:19:57Z] cycle=441 start
+[2026-06-29T01:20:16Z] cycle=441 done blackout_ms=200 release_ms=5281 failures=0
+[2026-06-29T01:21:27Z] cycle=442 start
+[2026-06-29T01:21:46Z] cycle=442 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T01:22:57Z] cycle=443 start
+[2026-06-29T01:23:16Z] cycle=443 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T01:24:27Z] cycle=444 start
+[2026-06-29T01:24:46Z] cycle=444 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T01:25:57Z] cycle=445 start
+[2026-06-29T01:26:15Z] cycle=445 done blackout_ms=100 release_ms=5361 failures=0
+[2026-06-29T01:27:27Z] cycle=446 start
+[2026-06-29T01:27:41Z] cycle=446 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T01:28:57Z] cycle=447 start
+[2026-06-29T01:29:16Z] cycle=447 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T01:30:27Z] cycle=448 start
+[2026-06-29T01:30:45Z] cycle=448 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T01:31:57Z] cycle=449 start
+[2026-06-29T01:32:11Z] cycle=449 done blackout_ms=100 release_ms=5349 failures=0
+[2026-06-29T01:33:27Z] cycle=450 start
+[2026-06-29T01:33:46Z] cycle=450 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T01:34:57Z] cycle=451 start
+[2026-06-29T01:35:16Z] cycle=451 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T01:36:27Z] cycle=452 start
+[2026-06-29T01:36:45Z] cycle=452 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T01:37:57Z] cycle=453 start
+[2026-06-29T01:38:11Z] cycle=453 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-29T01:39:27Z] cycle=454 start
+[2026-06-29T01:39:45Z] cycle=454 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T01:40:57Z] cycle=455 start
+[2026-06-29T01:41:11Z] cycle=455 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T01:42:27Z] cycle=456 start
+[2026-06-29T01:42:46Z] cycle=456 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T01:43:57Z] cycle=457 start
+[2026-06-29T01:44:11Z] cycle=457 done blackout_ms=100 release_ms=5353 failures=0
+[2026-06-29T01:45:27Z] cycle=458 start
+[2026-06-29T01:45:46Z] cycle=458 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T01:46:57Z] cycle=459 start
+[2026-06-29T01:47:15Z] cycle=459 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T01:48:27Z] cycle=460 start
+[2026-06-29T01:48:41Z] cycle=460 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T01:49:57Z] cycle=461 start
+[2026-06-29T01:50:11Z] cycle=461 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T01:51:27Z] cycle=462 start
+[2026-06-29T01:51:45Z] cycle=462 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T01:52:57Z] cycle=463 start
+[2026-06-29T01:53:11Z] cycle=463 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T01:54:27Z] cycle=464 start
+[2026-06-29T01:54:41Z] cycle=464 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T01:55:57Z] cycle=465 start
+[2026-06-29T01:56:16Z] cycle=465 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T01:57:27Z] cycle=466 start
+[2026-06-29T01:57:45Z] cycle=466 done blackout_ms=100 release_ms=5346 failures=0
+[2026-06-29T01:58:57Z] cycle=467 start
+[2026-06-29T01:59:11Z] cycle=467 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T02:00:27Z] cycle=468 start
+[2026-06-29T02:00:45Z] cycle=468 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T02:01:57Z] cycle=469 start
+[2026-06-29T02:02:11Z] cycle=469 done blackout_ms=100 release_ms=5352 failures=0
+[2026-06-29T02:03:27Z] cycle=470 start
+[2026-06-29T02:03:41Z] cycle=470 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T02:04:57Z] cycle=471 start
+[2026-06-29T02:05:16Z] cycle=471 done blackout_ms=200 release_ms=5401 failures=0
+[2026-06-29T02:06:27Z] cycle=472 start
+[2026-06-29T02:06:46Z] cycle=472 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T02:07:57Z] cycle=473 start
+[2026-06-29T02:08:15Z] cycle=473 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T02:09:27Z] cycle=474 start
+[2026-06-29T02:09:41Z] cycle=474 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T02:10:57Z] cycle=475 start
+[2026-06-29T02:11:15Z] cycle=475 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T02:12:27Z] cycle=476 start
+[2026-06-29T02:12:41Z] cycle=476 done blackout_ms=100 release_ms=5348 failures=0
+[2026-06-29T02:13:57Z] cycle=477 start
+[2026-06-29T02:14:16Z] cycle=477 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T02:15:27Z] cycle=478 start
+[2026-06-29T02:15:46Z] cycle=478 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T02:16:57Z] cycle=479 start
+[2026-06-29T02:17:17Z] cycle=479 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T02:18:27Z] cycle=480 start
+[2026-06-29T02:18:41Z] cycle=480 done blackout_ms=200 release_ms=5386 failures=0
+[2026-06-29T02:19:57Z] cycle=481 start
+[2026-06-29T02:20:16Z] cycle=481 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T02:21:27Z] cycle=482 start
+[2026-06-29T02:21:46Z] cycle=482 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T02:22:57Z] cycle=483 start
+[2026-06-29T02:23:15Z] cycle=483 done blackout_ms=100 release_ms=5363 failures=0
+[2026-06-29T02:24:27Z] cycle=484 start
+[2026-06-29T02:24:41Z] cycle=484 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T02:25:57Z] cycle=485 start
+[2026-06-29T02:26:16Z] cycle=485 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T02:27:27Z] cycle=486 start
+[2026-06-29T02:27:46Z] cycle=486 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T02:28:57Z] cycle=487 start
+[2026-06-29T02:29:11Z] cycle=487 done blackout_ms=100 release_ms=5354 failures=0
+[2026-06-29T02:30:27Z] cycle=488 start
+[2026-06-29T02:30:46Z] cycle=488 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T02:31:57Z] cycle=489 start
+[2026-06-29T02:32:16Z] cycle=489 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T02:33:27Z] cycle=490 start
+[2026-06-29T02:33:45Z] cycle=490 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T02:34:57Z] cycle=491 start
+[2026-06-29T02:35:11Z] cycle=491 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T02:36:27Z] cycle=492 start
+[2026-06-29T02:36:46Z] cycle=492 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T02:37:57Z] cycle=493 start
+[2026-06-29T02:38:16Z] cycle=493 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T02:39:27Z] cycle=494 start
+[2026-06-29T02:39:45Z] cycle=494 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-29T02:40:57Z] cycle=495 start
+[2026-06-29T02:41:11Z] cycle=495 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T02:42:27Z] cycle=496 start
+[2026-06-29T02:42:46Z] cycle=496 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T02:43:57Z] cycle=497 start
+[2026-06-29T02:44:15Z] cycle=497 done blackout_ms=0 release_ms=5361 failures=0
+[2026-06-29T02:45:27Z] cycle=498 start
+[2026-06-29T02:45:41Z] cycle=498 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T02:46:57Z] cycle=499 start
+[2026-06-29T02:47:16Z] cycle=499 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T02:48:27Z] cycle=500 start
+[2026-06-29T02:48:46Z] cycle=500 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T02:49:57Z] cycle=501 start
+[2026-06-29T02:50:11Z] cycle=501 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T02:51:27Z] cycle=502 start
+[2026-06-29T02:51:41Z] cycle=502 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T02:52:57Z] cycle=503 start
+[2026-06-29T02:53:11Z] cycle=503 done blackout_ms=100 release_ms=5358 failures=0
+[2026-06-29T02:54:27Z] cycle=504 start
+[2026-06-29T02:54:46Z] cycle=504 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T02:55:57Z] cycle=505 start
+[2026-06-29T02:56:16Z] cycle=505 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T02:57:27Z] cycle=506 start
+[2026-06-29T02:57:45Z] cycle=506 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T02:58:57Z] cycle=507 start
+[2026-06-29T02:59:11Z] cycle=507 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T03:00:27Z] cycle=508 start
+[2026-06-29T03:00:46Z] cycle=508 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T03:01:57Z] cycle=509 start
+[2026-06-29T03:02:15Z] cycle=509 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T03:03:27Z] cycle=510 start
+[2026-06-29T03:03:41Z] cycle=510 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T03:04:57Z] cycle=511 start
+[2026-06-29T03:05:11Z] cycle=511 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T03:06:27Z] cycle=512 start
+[2026-06-29T03:06:45Z] cycle=512 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T03:07:57Z] cycle=513 start
+[2026-06-29T03:08:11Z] cycle=513 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T03:09:27Z] cycle=514 start
+[2026-06-29T03:09:46Z] cycle=514 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T03:10:57Z] cycle=515 start
+[2026-06-29T03:11:15Z] cycle=515 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T03:12:27Z] cycle=516 start
+[2026-06-29T03:12:41Z] cycle=516 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T03:13:57Z] cycle=517 start
+[2026-06-29T03:14:15Z] cycle=517 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T03:15:27Z] cycle=518 start
+[2026-06-29T03:15:41Z] cycle=518 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T03:16:57Z] cycle=519 start
+[2026-06-29T03:17:16Z] cycle=519 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T03:18:27Z] cycle=520 start
+[2026-06-29T03:18:45Z] cycle=520 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T03:19:57Z] cycle=521 start
+[2026-06-29T03:20:17Z] cycle=521 done blackout_ms=200 release_ms=5422 failures=0
+[2026-06-29T03:21:27Z] cycle=522 start
+[2026-06-29T03:21:41Z] cycle=522 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-29T03:22:57Z] cycle=523 start
+[2026-06-29T03:23:11Z] cycle=523 done blackout_ms=200 release_ms=5422 failures=0
+[2026-06-29T03:24:27Z] cycle=524 start
+[2026-06-29T03:24:41Z] cycle=524 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T03:25:57Z] cycle=525 start
+[2026-06-29T03:26:15Z] cycle=525 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T03:27:27Z] cycle=526 start
+[2026-06-29T03:27:41Z] cycle=526 done blackout_ms=100 release_ms=5361 failures=0
+[2026-06-29T03:28:57Z] cycle=527 start
+[2026-06-29T03:29:16Z] cycle=527 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T03:30:27Z] cycle=528 start
+[2026-06-29T03:30:46Z] cycle=528 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T03:31:57Z] cycle=529 start
+[2026-06-29T03:32:15Z] cycle=529 done blackout_ms=100 release_ms=5342 failures=0
+[2026-06-29T03:33:27Z] cycle=530 start
+[2026-06-29T03:33:41Z] cycle=530 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T03:34:57Z] cycle=531 start
+[2026-06-29T03:35:15Z] cycle=531 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T03:36:27Z] cycle=532 start
+[2026-06-29T03:36:41Z] cycle=532 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T03:37:57Z] cycle=533 start
+[2026-06-29T03:38:16Z] cycle=533 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T03:39:27Z] cycle=534 start
+[2026-06-29T03:39:47Z] cycle=534 done blackout_ms=0 release_ms=5350 failures=0
+[2026-06-29T03:40:57Z] cycle=535 start
+[2026-06-29T03:41:11Z] cycle=535 done blackout_ms=200 release_ms=5336 failures=0
+[2026-06-29T03:42:27Z] cycle=536 start
+[2026-06-29T03:42:46Z] cycle=536 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T03:43:57Z] cycle=537 start
+[2026-06-29T03:44:15Z] cycle=537 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-29T03:45:27Z] cycle=538 start
+[2026-06-29T03:45:41Z] cycle=538 done blackout_ms=100 release_ms=5340 failures=0
+[2026-06-29T03:46:57Z] cycle=539 start
+[2026-06-29T03:47:15Z] cycle=539 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T03:48:27Z] cycle=540 start
+[2026-06-29T03:48:41Z] cycle=540 done blackout_ms=100 release_ms=5345 failures=0
+[2026-06-29T03:49:57Z] cycle=541 start
+[2026-06-29T03:50:16Z] cycle=541 done blackout_ms=200 release_ms=5389 failures=0
+[2026-06-29T03:51:27Z] cycle=542 start
+[2026-06-29T03:51:47Z] cycle=542 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T03:52:57Z] cycle=543 start
+[2026-06-29T03:53:15Z] cycle=543 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-29T03:54:27Z] cycle=544 start
+[2026-06-29T03:54:41Z] cycle=544 done blackout_ms=100 release_ms=5353 failures=0
+[2026-06-29T03:55:57Z] cycle=545 start
+[2026-06-29T03:56:16Z] cycle=545 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T03:57:27Z] cycle=546 start
+[2026-06-29T03:57:45Z] cycle=546 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T03:58:57Z] cycle=547 start
+[2026-06-29T03:59:11Z] cycle=547 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T04:00:27Z] cycle=548 start
+[2026-06-29T04:00:45Z] cycle=548 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T04:01:57Z] cycle=549 start
+[2026-06-29T04:02:15Z] cycle=549 done blackout_ms=100 release_ms=5333 failures=0
+[2026-06-29T04:03:27Z] cycle=550 start
+[2026-06-29T04:03:41Z] cycle=550 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T04:04:57Z] cycle=551 start
+[2026-06-29T04:05:11Z] cycle=551 done blackout_ms=200 release_ms=5394 failures=0
+[2026-06-29T04:06:27Z] cycle=552 start
+[2026-06-29T04:06:46Z] cycle=552 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T04:07:57Z] cycle=553 start
+[2026-06-29T04:08:15Z] cycle=553 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T04:09:27Z] cycle=554 start
+[2026-06-29T04:09:41Z] cycle=554 done blackout_ms=100 release_ms=5348 failures=0
+[2026-06-29T04:10:57Z] cycle=555 start
+[2026-06-29T04:11:16Z] cycle=555 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T04:12:27Z] cycle=556 start
+[2026-06-29T04:12:45Z] cycle=556 done blackout_ms=100 release_ms=5335 failures=0
+[2026-06-29T04:13:57Z] cycle=557 start
+[2026-06-29T04:14:11Z] cycle=557 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T04:15:27Z] cycle=558 start
+[2026-06-29T04:15:46Z] cycle=558 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T04:16:57Z] cycle=559 start
+[2026-06-29T04:17:15Z] cycle=559 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T04:18:27Z] cycle=560 start
+[2026-06-29T04:18:41Z] cycle=560 done blackout_ms=100 release_ms=5360 failures=0
+[2026-06-29T04:19:57Z] cycle=561 start
+[2026-06-29T04:20:11Z] cycle=561 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T04:21:27Z] cycle=562 start
+[2026-06-29T04:21:45Z] cycle=562 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T04:22:57Z] cycle=563 start
+[2026-06-29T04:23:15Z] cycle=563 done blackout_ms=100 release_ms=5367 failures=0
+[2026-06-29T04:24:27Z] cycle=564 start
+[2026-06-29T04:24:41Z] cycle=564 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T04:25:58Z] cycle=565 start
+[2026-06-29T04:26:16Z] cycle=565 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T04:27:28Z] cycle=566 start
+[2026-06-29T04:27:47Z] cycle=566 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T04:28:58Z] cycle=567 start
+[2026-06-29T04:29:17Z] cycle=567 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T04:30:28Z] cycle=568 start
+[2026-06-29T04:30:46Z] cycle=568 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T04:31:58Z] cycle=569 start
+[2026-06-29T04:32:16Z] cycle=569 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T04:33:28Z] cycle=570 start
+[2026-06-29T04:33:46Z] cycle=570 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T04:34:58Z] cycle=571 start
+[2026-06-29T04:35:15Z] cycle=571 done blackout_ms=200 release_ms=5389 failures=0
+[2026-06-29T04:36:28Z] cycle=572 start
+[2026-06-29T04:36:46Z] cycle=572 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T04:37:58Z] cycle=573 start
+[2026-06-29T04:38:16Z] cycle=573 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T04:39:28Z] cycle=574 start
+[2026-06-29T04:39:47Z] cycle=574 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T04:40:58Z] cycle=575 start
+[2026-06-29T04:41:16Z] cycle=575 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T04:42:28Z] cycle=576 start
+[2026-06-29T04:42:46Z] cycle=576 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T04:43:58Z] cycle=577 start
+[2026-06-29T04:44:16Z] cycle=577 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T04:45:28Z] cycle=578 start
+[2026-06-29T04:45:47Z] cycle=578 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T04:46:58Z] cycle=579 start
+[2026-06-29T04:47:16Z] cycle=579 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T04:48:28Z] cycle=580 start
+[2026-06-29T04:48:46Z] cycle=580 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T04:49:58Z] cycle=581 start
+[2026-06-29T04:50:15Z] cycle=581 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T04:51:28Z] cycle=582 start
+[2026-06-29T04:51:45Z] cycle=582 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T04:52:58Z] cycle=583 start
+[2026-06-29T04:53:15Z] cycle=583 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T04:54:28Z] cycle=584 start
+[2026-06-29T04:54:46Z] cycle=584 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T04:55:58Z] cycle=585 start
+[2026-06-29T04:56:16Z] cycle=585 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T04:57:28Z] cycle=586 start
+[2026-06-29T04:57:46Z] cycle=586 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T04:58:58Z] cycle=587 start
+[2026-06-29T04:59:16Z] cycle=587 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T05:00:28Z] cycle=588 start
+[2026-06-29T05:00:46Z] cycle=588 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T05:01:58Z] cycle=589 start
+[2026-06-29T05:02:16Z] cycle=589 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T05:03:28Z] cycle=590 start
+[2026-06-29T05:03:45Z] cycle=590 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T05:04:58Z] cycle=591 start
+[2026-06-29T05:05:17Z] cycle=591 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-29T05:06:28Z] cycle=592 start
+[2026-06-29T05:06:46Z] cycle=592 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T05:07:58Z] cycle=593 start
+[2026-06-29T05:08:16Z] cycle=593 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T05:09:28Z] cycle=594 start
+[2026-06-29T05:09:46Z] cycle=594 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T05:10:59Z] cycle=595 start
+[2026-06-29T05:11:15Z] cycle=595 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T05:12:28Z] cycle=596 start
+[2026-06-29T05:12:46Z] cycle=596 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T05:13:58Z] cycle=597 start
+[2026-06-29T05:14:16Z] cycle=597 done blackout_ms=200 release_ms=5335 failures=0
+[2026-06-29T05:15:28Z] cycle=598 start
+[2026-06-29T05:15:45Z] cycle=598 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T05:16:58Z] cycle=599 start
+[2026-06-29T05:17:16Z] cycle=599 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T05:18:28Z] cycle=600 start
+[2026-06-29T05:18:46Z] cycle=600 done blackout_ms=200 release_ms=5377 failures=0
+[2026-06-29T05:19:58Z] cycle=601 start
+[2026-06-29T05:20:16Z] cycle=601 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-29T05:21:28Z] cycle=602 start
+[2026-06-29T05:21:45Z] cycle=602 done blackout_ms=200 release_ms=5396 failures=0
+[2026-06-29T05:22:58Z] cycle=603 start
+[2026-06-29T05:23:16Z] cycle=603 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T05:24:28Z] cycle=604 start
+[2026-06-29T05:24:46Z] cycle=604 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T05:25:58Z] cycle=605 start
+[2026-06-29T05:26:16Z] cycle=605 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T05:27:28Z] cycle=606 start
+[2026-06-29T05:27:45Z] cycle=606 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T05:28:58Z] cycle=607 start
+[2026-06-29T05:29:16Z] cycle=607 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T05:30:28Z] cycle=608 start
+[2026-06-29T05:30:46Z] cycle=608 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T05:31:58Z] cycle=609 start
+[2026-06-29T05:32:16Z] cycle=609 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T05:33:28Z] cycle=610 start
+[2026-06-29T05:33:47Z] cycle=610 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T05:34:58Z] cycle=611 start
+[2026-06-29T05:35:16Z] cycle=611 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T05:36:28Z] cycle=612 start
+[2026-06-29T05:36:46Z] cycle=612 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T05:37:58Z] cycle=613 start
+[2026-06-29T05:38:15Z] cycle=613 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T05:39:28Z] cycle=614 start
+[2026-06-29T05:39:45Z] cycle=614 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T05:40:58Z] cycle=615 start
+[2026-06-29T05:41:17Z] cycle=615 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T05:42:28Z] cycle=616 start
+[2026-06-29T05:42:46Z] cycle=616 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T05:43:58Z] cycle=617 start
+[2026-06-29T05:44:16Z] cycle=617 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T05:45:28Z] cycle=618 start
+[2026-06-29T05:45:46Z] cycle=618 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T05:46:58Z] cycle=619 start
+[2026-06-29T05:47:16Z] cycle=619 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T05:48:28Z] cycle=620 start
+[2026-06-29T05:48:45Z] cycle=620 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T05:49:58Z] cycle=621 start
+[2026-06-29T05:50:16Z] cycle=621 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T05:51:28Z] cycle=622 start
+[2026-06-29T05:51:46Z] cycle=622 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T05:52:58Z] cycle=623 start
+[2026-06-29T05:53:16Z] cycle=623 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T05:54:28Z] cycle=624 start
+[2026-06-29T05:54:46Z] cycle=624 done blackout_ms=200 release_ms=5405 failures=0
+[2026-06-29T05:55:58Z] cycle=625 start
+[2026-06-29T05:56:16Z] cycle=625 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T05:57:28Z] cycle=626 start
+[2026-06-29T05:57:46Z] cycle=626 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T05:58:58Z] cycle=627 start
+[2026-06-29T05:59:15Z] cycle=627 done blackout_ms=200 release_ms=5390 failures=0
+[2026-06-29T06:00:28Z] cycle=628 start
+[2026-06-29T06:00:46Z] cycle=628 done blackout_ms=200 release_ms=5415 failures=0
+[2026-06-29T06:01:58Z] cycle=629 start
+[2026-06-29T06:02:16Z] cycle=629 done blackout_ms=200 release_ms=5400 failures=0
+[2026-06-29T06:03:28Z] cycle=630 start
+[2026-06-29T06:03:47Z] cycle=630 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-29T06:04:58Z] cycle=631 start
+[2026-06-29T06:05:17Z] cycle=631 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T06:06:28Z] cycle=632 start
+[2026-06-29T06:06:46Z] cycle=632 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T06:07:58Z] cycle=633 start
+[2026-06-29T06:08:16Z] cycle=633 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T06:09:28Z] cycle=634 start
+[2026-06-29T06:09:46Z] cycle=634 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T06:10:58Z] cycle=635 start
+[2026-06-29T06:11:17Z] cycle=635 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T06:12:28Z] cycle=636 start
+[2026-06-29T06:12:47Z] cycle=636 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-29T06:13:58Z] cycle=637 start
+[2026-06-29T06:14:16Z] cycle=637 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T06:15:28Z] cycle=638 start
+[2026-06-29T06:15:47Z] cycle=638 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T06:16:58Z] cycle=639 start
+[2026-06-29T06:17:15Z] cycle=639 done blackout_ms=200 release_ms=5431 failures=0
+[2026-06-29T06:18:29Z] cycle=640 start
+[2026-06-29T06:18:47Z] cycle=640 done blackout_ms=200 release_ms=5448 failures=0
+[2026-06-29T06:19:59Z] cycle=641 start
+[2026-06-29T06:20:17Z] cycle=641 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T06:21:29Z] cycle=642 start
+[2026-06-29T06:21:46Z] cycle=642 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T06:22:59Z] cycle=643 start
+[2026-06-29T06:23:15Z] cycle=643 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T06:24:29Z] cycle=644 start
+[2026-06-29T06:24:47Z] cycle=644 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T06:25:59Z] cycle=645 start
+[2026-06-29T06:26:16Z] cycle=645 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T06:27:29Z] cycle=646 start
+[2026-06-29T06:27:47Z] cycle=646 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T06:28:59Z] cycle=647 start
+[2026-06-29T06:29:15Z] cycle=647 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T06:30:29Z] cycle=648 start
+[2026-06-29T06:30:47Z] cycle=648 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T06:31:59Z] cycle=649 start
+[2026-06-29T06:32:15Z] cycle=649 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T06:33:29Z] cycle=650 start
+[2026-06-29T06:33:47Z] cycle=650 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T06:34:59Z] cycle=651 start
+[2026-06-29T06:35:15Z] cycle=651 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T06:36:29Z] cycle=652 start
+[2026-06-29T06:36:45Z] cycle=652 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T06:37:59Z] cycle=653 start
+[2026-06-29T06:38:15Z] cycle=653 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T06:39:29Z] cycle=654 start
+[2026-06-29T06:39:45Z] cycle=654 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T06:40:59Z] cycle=655 start
+[2026-06-29T06:41:15Z] cycle=655 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T06:42:29Z] cycle=656 start
+[2026-06-29T06:42:46Z] cycle=656 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T06:43:59Z] cycle=657 start
+[2026-06-29T06:44:17Z] cycle=657 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T06:45:29Z] cycle=658 start
+[2026-06-29T06:45:45Z] cycle=658 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T06:46:59Z] cycle=659 start
+[2026-06-29T06:47:16Z] cycle=659 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T06:48:29Z] cycle=660 start
+[2026-06-29T06:48:45Z] cycle=660 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T06:49:59Z] cycle=661 start
+[2026-06-29T06:50:17Z] cycle=661 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T06:51:29Z] cycle=662 start
+[2026-06-29T06:51:46Z] cycle=662 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T06:52:59Z] cycle=663 start
+[2026-06-29T06:53:15Z] cycle=663 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T06:54:29Z] cycle=664 start
+[2026-06-29T06:54:47Z] cycle=664 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T06:55:59Z] cycle=665 start
+[2026-06-29T06:56:16Z] cycle=665 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T06:57:29Z] cycle=666 start
+[2026-06-29T06:57:46Z] cycle=666 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T06:58:59Z] cycle=667 start
+[2026-06-29T06:59:16Z] cycle=667 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T07:00:29Z] cycle=668 start
+[2026-06-29T07:00:45Z] cycle=668 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T07:01:59Z] cycle=669 start
+[2026-06-29T07:02:17Z] cycle=669 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T07:03:29Z] cycle=670 start
+[2026-06-29T07:03:47Z] cycle=670 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T07:04:59Z] cycle=671 start
+[2026-06-29T07:05:15Z] cycle=671 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-29T07:06:29Z] cycle=672 start
+[2026-06-29T07:06:45Z] cycle=672 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T07:08:00Z] cycle=673 start
+[2026-06-29T07:08:16Z] cycle=673 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T07:09:29Z] cycle=674 start
+[2026-06-29T07:09:45Z] cycle=674 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T07:10:59Z] cycle=675 start
+[2026-06-29T07:11:15Z] cycle=675 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T07:12:29Z] cycle=676 start
+[2026-06-29T07:12:47Z] cycle=676 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T07:13:59Z] cycle=677 start
+[2026-06-29T07:14:17Z] cycle=677 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T07:15:29Z] cycle=678 start
+[2026-06-29T07:15:46Z] cycle=678 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T07:16:59Z] cycle=679 start
+[2026-06-29T07:17:15Z] cycle=679 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T07:18:29Z] cycle=680 start
+[2026-06-29T07:18:45Z] cycle=680 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T07:19:59Z] cycle=681 start
+[2026-06-29T07:20:17Z] cycle=681 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T07:21:29Z] cycle=682 start
+[2026-06-29T07:21:46Z] cycle=682 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T07:22:59Z] cycle=683 start
+[2026-06-29T07:23:15Z] cycle=683 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T07:24:29Z] cycle=684 start
+[2026-06-29T07:24:47Z] cycle=684 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T07:26:00Z] cycle=685 start
+[2026-06-29T07:26:16Z] cycle=685 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T07:27:30Z] cycle=686 start
+[2026-06-29T07:27:46Z] cycle=686 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T07:29:00Z] cycle=687 start
+[2026-06-29T07:29:16Z] cycle=687 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T07:30:30Z] cycle=688 start
+[2026-06-29T07:30:46Z] cycle=688 done blackout_ms=200 release_ms=5388 failures=0
+[2026-06-29T07:32:00Z] cycle=689 start
+[2026-06-29T07:32:16Z] cycle=689 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T07:33:30Z] cycle=690 start
+[2026-06-29T07:33:45Z] cycle=690 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-29T07:35:00Z] cycle=691 start
+[2026-06-29T07:35:16Z] cycle=691 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T07:36:30Z] cycle=692 start
+[2026-06-29T07:36:46Z] cycle=692 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T07:38:00Z] cycle=693 start
+[2026-06-29T07:38:16Z] cycle=693 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T07:39:30Z] cycle=694 start
+[2026-06-29T07:39:46Z] cycle=694 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T07:41:00Z] cycle=695 start
+[2026-06-29T07:41:15Z] cycle=695 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T07:42:30Z] cycle=696 start
+[2026-06-29T07:42:47Z] cycle=696 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-29T07:44:00Z] cycle=697 start
+[2026-06-29T07:44:16Z] cycle=697 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T07:45:30Z] cycle=698 start
+[2026-06-29T07:45:46Z] cycle=698 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T07:47:00Z] cycle=699 start
+[2026-06-29T07:47:16Z] cycle=699 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T07:48:30Z] cycle=700 start
+[2026-06-29T07:48:45Z] cycle=700 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T07:50:00Z] cycle=701 start
+[2026-06-29T07:50:16Z] cycle=701 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T07:51:30Z] cycle=702 start
+[2026-06-29T07:51:46Z] cycle=702 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T07:53:00Z] cycle=703 start
+[2026-06-29T07:53:16Z] cycle=703 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T07:54:30Z] cycle=704 start
+[2026-06-29T07:54:46Z] cycle=704 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T07:56:00Z] cycle=705 start
+[2026-06-29T07:56:15Z] cycle=705 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T07:57:30Z] cycle=706 start
+[2026-06-29T07:57:47Z] cycle=706 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T07:59:00Z] cycle=707 start
+[2026-06-29T07:59:16Z] cycle=707 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T08:00:30Z] cycle=708 start
+[2026-06-29T08:00:46Z] cycle=708 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T08:02:00Z] cycle=709 start
+[2026-06-29T08:02:16Z] cycle=709 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T08:03:30Z] cycle=710 start
+[2026-06-29T08:03:46Z] cycle=710 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T08:05:00Z] cycle=711 start
+[2026-06-29T08:05:16Z] cycle=711 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T08:06:30Z] cycle=712 start
+[2026-06-29T08:06:45Z] cycle=712 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T08:08:00Z] cycle=713 start
+[2026-06-29T08:08:16Z] cycle=713 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T08:09:30Z] cycle=714 start
+[2026-06-29T08:09:46Z] cycle=714 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T08:11:00Z] cycle=715 start
+[2026-06-29T08:11:17Z] cycle=715 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T08:12:30Z] cycle=716 start
+[2026-06-29T08:12:46Z] cycle=716 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T08:14:00Z] cycle=717 start
+[2026-06-29T08:14:16Z] cycle=717 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T08:15:30Z] cycle=718 start
+[2026-06-29T08:15:47Z] cycle=718 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T08:17:00Z] cycle=719 start
+[2026-06-29T08:17:17Z] cycle=719 done blackout_ms=200 release_ms=5397 failures=0
+[2026-06-29T08:18:30Z] cycle=720 start
+[2026-06-29T08:18:46Z] cycle=720 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T08:20:00Z] cycle=721 start
+[2026-06-29T08:20:16Z] cycle=721 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T08:21:30Z] cycle=722 start
+[2026-06-29T08:21:47Z] cycle=722 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T08:23:00Z] cycle=723 start
+[2026-06-29T08:23:16Z] cycle=723 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T08:24:30Z] cycle=724 start
+[2026-06-29T08:24:46Z] cycle=724 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T08:26:00Z] cycle=725 start
+[2026-06-29T08:26:16Z] cycle=725 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T08:27:30Z] cycle=726 start
+[2026-06-29T08:27:47Z] cycle=726 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T08:29:00Z] cycle=727 start
+[2026-06-29T08:29:16Z] cycle=727 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T08:30:30Z] cycle=728 start
+[2026-06-29T08:30:46Z] cycle=728 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T08:32:00Z] cycle=729 start
+[2026-06-29T08:32:16Z] cycle=729 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T08:33:30Z] cycle=730 start
+[2026-06-29T08:33:46Z] cycle=730 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T08:35:00Z] cycle=731 start
+[2026-06-29T08:35:16Z] cycle=731 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T08:36:30Z] cycle=732 start
+[2026-06-29T08:36:46Z] cycle=732 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T08:38:00Z] cycle=733 start
+[2026-06-29T08:38:16Z] cycle=733 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T08:39:30Z] cycle=734 start
+[2026-06-29T08:39:47Z] cycle=734 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T08:41:00Z] cycle=735 start
+[2026-06-29T08:41:16Z] cycle=735 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T08:42:30Z] cycle=736 start
+[2026-06-29T08:42:46Z] cycle=736 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T08:44:00Z] cycle=737 start
+[2026-06-29T08:44:16Z] cycle=737 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T08:45:30Z] cycle=738 start
+[2026-06-29T08:45:46Z] cycle=738 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T08:47:00Z] cycle=739 start
+[2026-06-29T08:47:16Z] cycle=739 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T08:48:30Z] cycle=740 start
+[2026-06-29T08:48:46Z] cycle=740 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-29T08:50:00Z] cycle=741 start
+[2026-06-29T08:50:16Z] cycle=741 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-29T08:51:30Z] cycle=742 start
+[2026-06-29T08:51:47Z] cycle=742 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T08:53:00Z] cycle=743 start
+[2026-06-29T08:53:17Z] cycle=743 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T08:54:30Z] cycle=744 start
+[2026-06-29T08:54:46Z] cycle=744 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T08:56:00Z] cycle=745 start
+[2026-06-29T08:56:16Z] cycle=745 done blackout_ms=200 release_ms=5408 failures=0
+[2026-06-29T08:57:30Z] cycle=746 start
+[2026-06-29T08:57:46Z] cycle=746 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T08:59:00Z] cycle=747 start
+[2026-06-29T08:59:16Z] cycle=747 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T09:00:30Z] cycle=748 start
+[2026-06-29T09:00:45Z] cycle=748 done blackout_ms=200 release_ms=5385 failures=0
+[2026-06-29T09:02:00Z] cycle=749 start
+[2026-06-29T09:02:17Z] cycle=749 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T09:03:30Z] cycle=750 start
+[2026-06-29T09:03:47Z] cycle=750 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T09:05:00Z] cycle=751 start
+[2026-06-29T09:05:17Z] cycle=751 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T09:06:30Z] cycle=752 start
+[2026-06-29T09:06:45Z] cycle=752 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T09:08:00Z] cycle=753 start
+[2026-06-29T09:08:15Z] cycle=753 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T09:09:30Z] cycle=754 start
+[2026-06-29T09:09:46Z] cycle=754 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T09:11:00Z] cycle=755 start
+[2026-06-29T09:11:16Z] cycle=755 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T09:12:30Z] cycle=756 start
+[2026-06-29T09:12:46Z] cycle=756 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T09:14:00Z] cycle=757 start
+[2026-06-29T09:14:16Z] cycle=757 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T09:15:30Z] cycle=758 start
+[2026-06-29T09:15:46Z] cycle=758 done blackout_ms=200 release_ms=5376 failures=0
+[2026-06-29T09:17:00Z] cycle=759 start
+[2026-06-29T09:17:16Z] cycle=759 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T09:18:30Z] cycle=760 start
+[2026-06-29T09:18:47Z] cycle=760 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T09:20:00Z] cycle=761 start
+[2026-06-29T09:20:16Z] cycle=761 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T09:21:30Z] cycle=762 start
+[2026-06-29T09:21:46Z] cycle=762 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T09:23:00Z] cycle=763 start
+[2026-06-29T09:23:17Z] cycle=763 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T09:24:30Z] cycle=764 start
+[2026-06-29T09:24:46Z] cycle=764 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T09:26:00Z] cycle=765 start
+[2026-06-29T09:26:16Z] cycle=765 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T09:27:31Z] cycle=766 start
+[2026-06-29T09:27:45Z] cycle=766 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T09:29:01Z] cycle=767 start
+[2026-06-29T09:29:15Z] cycle=767 done blackout_ms=200 release_ms=5377 failures=0
+[2026-06-29T09:30:31Z] cycle=768 start
+[2026-06-29T09:30:45Z] cycle=768 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T09:32:01Z] cycle=769 start
+[2026-06-29T09:32:17Z] cycle=769 done blackout_ms=200 release_ms=5361 failures=0
+[2026-06-29T09:33:31Z] cycle=770 start
+[2026-06-29T09:33:47Z] cycle=770 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T09:35:01Z] cycle=771 start
+[2026-06-29T09:35:15Z] cycle=771 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-29T09:36:31Z] cycle=772 start
+[2026-06-29T09:36:45Z] cycle=772 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T09:38:01Z] cycle=773 start
+[2026-06-29T09:38:15Z] cycle=773 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T09:39:31Z] cycle=774 start
+[2026-06-29T09:39:47Z] cycle=774 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T09:41:01Z] cycle=775 start
+[2026-06-29T09:41:15Z] cycle=775 done blackout_ms=200 release_ms=5342 failures=0
+[2026-06-29T09:42:31Z] cycle=776 start
+[2026-06-29T09:42:45Z] cycle=776 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T09:44:01Z] cycle=777 start
+[2026-06-29T09:44:16Z] cycle=777 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T09:45:31Z] cycle=778 start
+[2026-06-29T09:45:45Z] cycle=778 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T09:47:01Z] cycle=779 start
+[2026-06-29T09:47:17Z] cycle=779 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T09:48:31Z] cycle=780 start
+[2026-06-29T09:48:46Z] cycle=780 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T09:50:01Z] cycle=781 start
+[2026-06-29T09:50:16Z] cycle=781 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T09:51:31Z] cycle=782 start
+[2026-06-29T09:51:45Z] cycle=782 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T09:53:01Z] cycle=783 start
+[2026-06-29T09:53:15Z] cycle=783 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T09:54:31Z] cycle=784 start
+[2026-06-29T09:54:47Z] cycle=784 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T09:56:01Z] cycle=785 start
+[2026-06-29T09:56:15Z] cycle=785 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T09:57:31Z] cycle=786 start
+[2026-06-29T09:57:47Z] cycle=786 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T09:59:01Z] cycle=787 start
+[2026-06-29T09:59:17Z] cycle=787 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-29T10:00:31Z] cycle=788 start
+[2026-06-29T10:00:46Z] cycle=788 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T10:02:01Z] cycle=789 start
+[2026-06-29T10:02:15Z] cycle=789 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T10:03:31Z] cycle=790 start
+[2026-06-29T10:03:47Z] cycle=790 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T10:05:01Z] cycle=791 start
+[2026-06-29T10:05:15Z] cycle=791 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T10:06:31Z] cycle=792 start
+[2026-06-29T10:06:47Z] cycle=792 done blackout_ms=200 release_ms=5334 failures=0
+[2026-06-29T10:08:01Z] cycle=793 start
+[2026-06-29T10:08:15Z] cycle=793 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T10:09:31Z] cycle=794 start
+[2026-06-29T10:09:46Z] cycle=794 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T10:11:01Z] cycle=795 start
+[2026-06-29T10:11:17Z] cycle=795 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T10:12:31Z] cycle=796 start
+[2026-06-29T10:12:45Z] cycle=796 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-29T10:14:01Z] cycle=797 start
+[2026-06-29T10:14:15Z] cycle=797 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-29T10:15:32Z] cycle=798 start
+[2026-06-29T10:15:46Z] cycle=798 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T10:17:02Z] cycle=799 start
+[2026-06-29T10:17:21Z] cycle=799 done blackout_ms=200 release_ms=5347 failures=0
+[2026-06-29T10:18:32Z] cycle=800 start
+[2026-06-29T10:18:50Z] cycle=800 done blackout_ms=200 release_ms=5339 failures=0
+[2026-06-29T10:20:02Z] cycle=801 start
+[2026-06-29T10:20:16Z] cycle=801 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T10:21:32Z] cycle=802 start
+[2026-06-29T10:21:51Z] cycle=802 done blackout_ms=200 release_ms=5337 failures=0
+[2026-06-29T10:23:02Z] cycle=803 start
+[2026-06-29T10:23:20Z] cycle=803 done blackout_ms=200 release_ms=5337 failures=0
+[2026-06-29T10:24:32Z] cycle=804 start
+[2026-06-29T10:24:46Z] cycle=804 done blackout_ms=100 release_ms=5363 failures=0
+[2026-06-29T10:26:02Z] cycle=805 start
+[2026-06-29T10:26:16Z] cycle=805 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T10:27:32Z] cycle=806 start
+[2026-06-29T10:27:51Z] cycle=806 done blackout_ms=200 release_ms=5397 failures=0
+[2026-06-29T10:29:02Z] cycle=807 start
+[2026-06-29T10:29:20Z] cycle=807 done blackout_ms=100 release_ms=5348 failures=0
+[2026-06-29T10:30:32Z] cycle=808 start
+[2026-06-29T10:30:46Z] cycle=808 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T10:32:02Z] cycle=809 start
+[2026-06-29T10:32:21Z] cycle=809 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T10:33:32Z] cycle=810 start
+[2026-06-29T10:33:46Z] cycle=810 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T10:35:02Z] cycle=811 start
+[2026-06-29T10:35:21Z] cycle=811 done blackout_ms=200 release_ms=5351 failures=0
+[2026-06-29T10:36:32Z] cycle=812 start
+[2026-06-29T10:36:50Z] cycle=812 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T10:38:02Z] cycle=813 start
+[2026-06-29T10:38:20Z] cycle=813 done blackout_ms=100 release_ms=5370 failures=0
+[2026-06-29T10:39:33Z] cycle=814 start
+[2026-06-29T10:39:51Z] cycle=814 done blackout_ms=200 release_ms=5341 failures=0
+[2026-06-29T10:41:03Z] cycle=815 start
+[2026-06-29T10:41:21Z] cycle=815 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T10:42:33Z] cycle=816 start
+[2026-06-29T10:42:52Z] cycle=816 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-29T10:44:03Z] cycle=817 start
+[2026-06-29T10:44:21Z] cycle=817 done blackout_ms=200 release_ms=5338 failures=0
+[2026-06-29T10:45:33Z] cycle=818 start
+[2026-06-29T10:45:51Z] cycle=818 done blackout_ms=200 release_ms=5334 failures=0
+[2026-06-29T10:47:03Z] cycle=819 start
+[2026-06-29T10:47:20Z] cycle=819 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T10:48:33Z] cycle=820 start
+[2026-06-29T10:48:51Z] cycle=820 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T10:50:03Z] cycle=821 start
+[2026-06-29T10:50:21Z] cycle=821 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T10:51:33Z] cycle=822 start
+[2026-06-29T10:51:52Z] cycle=822 done blackout_ms=200 release_ms=5345 failures=0
+[2026-06-29T10:53:03Z] cycle=823 start
+[2026-06-29T10:53:21Z] cycle=823 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T10:54:33Z] cycle=824 start
+[2026-06-29T10:54:51Z] cycle=824 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T10:56:03Z] cycle=825 start
+[2026-06-29T10:56:21Z] cycle=825 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T10:57:33Z] cycle=826 start
+[2026-06-29T10:57:51Z] cycle=826 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T10:59:03Z] cycle=827 start
+[2026-06-29T10:59:22Z] cycle=827 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-29T11:00:33Z] cycle=828 start
+[2026-06-29T11:00:51Z] cycle=828 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T11:02:03Z] cycle=829 start
+[2026-06-29T11:02:21Z] cycle=829 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T11:03:33Z] cycle=830 start
+[2026-06-29T11:03:51Z] cycle=830 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T11:05:03Z] cycle=831 start
+[2026-06-29T11:05:21Z] cycle=831 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T11:06:33Z] cycle=832 start
+[2026-06-29T11:06:51Z] cycle=832 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T11:08:03Z] cycle=833 start
+[2026-06-29T11:08:22Z] cycle=833 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T11:09:33Z] cycle=834 start
+[2026-06-29T11:09:52Z] cycle=834 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T11:11:03Z] cycle=835 start
+[2026-06-29T11:11:21Z] cycle=835 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T11:12:33Z] cycle=836 start
+[2026-06-29T11:12:51Z] cycle=836 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T11:14:03Z] cycle=837 start
+[2026-06-29T11:14:21Z] cycle=837 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T11:15:33Z] cycle=838 start
+[2026-06-29T11:15:52Z] cycle=838 done blackout_ms=200 release_ms=5333 failures=0
+[2026-06-29T11:17:03Z] cycle=839 start
+[2026-06-29T11:17:21Z] cycle=839 done blackout_ms=200 release_ms=5336 failures=0
+[2026-06-29T11:18:33Z] cycle=840 start
+[2026-06-29T11:18:51Z] cycle=840 done blackout_ms=200 release_ms=5430 failures=0
+[2026-06-29T11:20:03Z] cycle=841 start
+[2026-06-29T11:20:21Z] cycle=841 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-29T11:21:33Z] cycle=842 start
+[2026-06-29T11:21:51Z] cycle=842 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-29T11:23:03Z] cycle=843 start
+[2026-06-29T11:23:21Z] cycle=843 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-29T11:24:33Z] cycle=844 start
+[2026-06-29T11:24:51Z] cycle=844 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-29T11:26:03Z] cycle=845 start
+[2026-06-29T11:26:21Z] cycle=845 done blackout_ms=200 release_ms=5393 failures=0
+[2026-06-29T11:27:33Z] cycle=846 start
+[2026-06-29T11:27:50Z] cycle=846 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T11:29:03Z] cycle=847 start
+[2026-06-29T11:29:22Z] cycle=847 done blackout_ms=200 release_ms=5390 failures=0
+[2026-06-29T11:30:33Z] cycle=848 start
+[2026-06-29T11:30:50Z] cycle=848 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-29T11:32:03Z] cycle=849 start
+[2026-06-29T11:32:21Z] cycle=849 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-29T11:33:33Z] cycle=850 start
+[2026-06-29T11:33:51Z] cycle=850 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-29T11:35:03Z] cycle=851 start
+[2026-06-29T11:35:21Z] cycle=851 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T11:36:33Z] cycle=852 start
+[2026-06-29T11:36:51Z] cycle=852 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T11:38:03Z] cycle=853 start
+[2026-06-29T11:38:21Z] cycle=853 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-29T11:39:33Z] cycle=854 start
+[2026-06-29T11:39:51Z] cycle=854 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T11:41:03Z] cycle=855 start
+[2026-06-29T11:41:21Z] cycle=855 done blackout_ms=200 release_ms=5394 failures=0
+[2026-06-29T11:42:33Z] cycle=856 start
+[2026-06-29T11:42:51Z] cycle=856 done blackout_ms=200 release_ms=5385 failures=0
+[2026-06-29T11:44:03Z] cycle=857 start
+[2026-06-29T11:44:22Z] cycle=857 done blackout_ms=200 release_ms=5398 failures=0
+[2026-06-29T11:45:33Z] cycle=858 start
+[2026-06-29T11:45:52Z] cycle=858 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-29T11:47:03Z] cycle=859 start
+[2026-06-29T11:47:22Z] cycle=859 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T11:48:33Z] cycle=860 start
+[2026-06-29T11:48:52Z] cycle=860 done blackout_ms=200 release_ms=5390 failures=0
+[2026-06-29T11:50:03Z] cycle=861 start
+[2026-06-29T11:50:21Z] cycle=861 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T11:51:33Z] cycle=862 start
+[2026-06-29T11:51:51Z] cycle=862 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-29T11:53:03Z] cycle=863 start
+[2026-06-29T11:53:21Z] cycle=863 done blackout_ms=200 release_ms=5382 failures=0
+[2026-06-29T11:54:33Z] cycle=864 start
+[2026-06-29T11:54:51Z] cycle=864 done blackout_ms=200 release_ms=5382 failures=0
+[2026-06-29T11:56:03Z] cycle=865 start
+[2026-06-29T11:56:21Z] cycle=865 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T11:57:33Z] cycle=866 start
+[2026-06-29T11:57:51Z] cycle=866 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T11:59:03Z] cycle=867 start
+[2026-06-29T11:59:21Z] cycle=867 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T12:00:33Z] cycle=868 start
+[2026-06-29T12:00:51Z] cycle=868 done blackout_ms=200 release_ms=5392 failures=0
+[2026-06-29T12:02:03Z] cycle=869 start
+[2026-06-29T12:02:20Z] cycle=869 done blackout_ms=200 release_ms=5385 failures=0
+[2026-06-29T12:03:33Z] cycle=870 start
+[2026-06-29T12:03:52Z] cycle=870 done blackout_ms=200 release_ms=5370 failures=0
+[2026-06-29T12:05:03Z] cycle=871 start
+[2026-06-29T12:05:21Z] cycle=871 done blackout_ms=200 release_ms=5396 failures=0
+[2026-06-29T12:06:33Z] cycle=872 start
+[2026-06-29T12:06:51Z] cycle=872 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T12:08:03Z] cycle=873 start
+[2026-06-29T12:08:21Z] cycle=873 done blackout_ms=200 release_ms=5427 failures=0
+[2026-06-29T12:09:33Z] cycle=874 start
+[2026-06-29T12:09:51Z] cycle=874 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T12:11:03Z] cycle=875 start
+[2026-06-29T12:11:21Z] cycle=875 done blackout_ms=200 release_ms=5386 failures=0
+[2026-06-29T12:12:33Z] cycle=876 start
+[2026-06-29T12:12:51Z] cycle=876 done blackout_ms=200 release_ms=5367 failures=0
+[2026-06-29T12:14:03Z] cycle=877 start
+[2026-06-29T12:14:21Z] cycle=877 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T12:15:34Z] cycle=878 start
+[2026-06-29T12:15:52Z] cycle=878 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T12:17:04Z] cycle=879 start
+[2026-06-29T12:17:22Z] cycle=879 done blackout_ms=200 release_ms=5388 failures=0
+[2026-06-29T12:18:35Z] cycle=880 start
+[2026-06-29T12:18:51Z] cycle=880 done blackout_ms=200 release_ms=5402 failures=0
+[2026-06-29T12:20:05Z] cycle=881 start
+[2026-06-29T12:20:21Z] cycle=881 done blackout_ms=200 release_ms=5382 failures=0
+[2026-06-29T12:21:35Z] cycle=882 start
+[2026-06-29T12:21:51Z] cycle=882 done blackout_ms=200 release_ms=5392 failures=0
+[2026-06-29T12:23:05Z] cycle=883 start
+[2026-06-29T12:23:21Z] cycle=883 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T12:24:35Z] cycle=884 start
+[2026-06-29T12:24:51Z] cycle=884 done blackout_ms=200 release_ms=5396 failures=0
+[2026-06-29T12:26:05Z] cycle=885 start
+[2026-06-29T12:26:22Z] cycle=885 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-29T12:27:35Z] cycle=886 start
+[2026-06-29T12:27:50Z] cycle=886 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T12:29:05Z] cycle=887 start
+[2026-06-29T12:29:22Z] cycle=887 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T12:30:35Z] cycle=888 start
+[2026-06-29T12:30:50Z] cycle=888 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-29T12:32:05Z] cycle=889 start
+[2026-06-29T12:32:22Z] cycle=889 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T12:33:35Z] cycle=890 start
+[2026-06-29T12:33:50Z] cycle=890 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-29T12:35:05Z] cycle=891 start
+[2026-06-29T12:35:22Z] cycle=891 done blackout_ms=200 release_ms=5373 failures=0
+[2026-06-29T12:36:36Z] cycle=892 start
+[2026-06-29T12:36:52Z] cycle=892 done blackout_ms=200 release_ms=5380 failures=0
+[2026-06-29T12:38:06Z] cycle=893 start
+[2026-06-29T12:38:20Z] cycle=893 done blackout_ms=200 release_ms=5378 failures=0
+[2026-06-29T12:39:36Z] cycle=894 start
+[2026-06-29T12:39:52Z] cycle=894 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T12:41:06Z] cycle=895 start
+[2026-06-29T12:41:20Z] cycle=895 done blackout_ms=200 release_ms=5399 failures=0
+[2026-06-29T12:42:36Z] cycle=896 start
+[2026-06-29T12:42:50Z] cycle=896 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T12:44:06Z] cycle=897 start
+[2026-06-29T12:44:20Z] cycle=897 done blackout_ms=200 release_ms=5403 failures=0
+[2026-06-29T12:45:36Z] cycle=898 start
+[2026-06-29T12:45:50Z] cycle=898 done blackout_ms=200 release_ms=5384 failures=0
+[2026-06-29T12:47:06Z] cycle=899 start
+[2026-06-29T12:47:22Z] cycle=899 done blackout_ms=200 release_ms=5397 failures=0
+[2026-06-29T12:48:36Z] cycle=900 start
+[2026-06-29T12:48:50Z] cycle=900 done blackout_ms=200 release_ms=5404 failures=0
+[2026-06-29T12:50:06Z] cycle=901 start
+[2026-06-29T12:50:22Z] cycle=901 done blackout_ms=200 release_ms=5383 failures=0
+[2026-06-29T12:51:36Z] cycle=902 start
+[2026-06-29T12:51:52Z] cycle=902 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T12:53:06Z] cycle=903 start
+[2026-06-29T12:53:22Z] cycle=903 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T12:54:36Z] cycle=904 start
+[2026-06-29T12:54:52Z] cycle=904 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-29T12:56:06Z] cycle=905 start
+[2026-06-29T12:56:22Z] cycle=905 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T12:57:36Z] cycle=906 start
+[2026-06-29T12:57:50Z] cycle=906 done blackout_ms=200 release_ms=5381 failures=0
+[2026-06-29T12:59:06Z] cycle=907 start
+[2026-06-29T12:59:22Z] cycle=907 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T13:00:36Z] cycle=908 start
+[2026-06-29T13:00:52Z] cycle=908 done blackout_ms=200 release_ms=5372 failures=0
+[2026-06-29T13:02:06Z] cycle=909 start
+[2026-06-29T13:02:20Z] cycle=909 done blackout_ms=200 release_ms=5362 failures=0
+[2026-06-29T13:03:36Z] cycle=910 start
+[2026-06-29T13:03:52Z] cycle=910 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T13:05:06Z] cycle=911 start
+[2026-06-29T13:05:22Z] cycle=911 done blackout_ms=200 release_ms=5397 failures=0
+[2026-06-29T13:06:36Z] cycle=912 start
+[2026-06-29T13:06:52Z] cycle=912 done blackout_ms=200 release_ms=5375 failures=0
+[2026-06-29T13:08:06Z] cycle=913 start
+[2026-06-29T13:08:20Z] cycle=913 done blackout_ms=200 release_ms=5369 failures=0
+[2026-06-29T13:09:36Z] cycle=914 start
+[2026-06-29T13:09:51Z] cycle=914 done blackout_ms=200 release_ms=5374 failures=0
+[2026-06-29T13:11:06Z] cycle=915 start
+[2026-06-29T13:11:20Z] cycle=915 done blackout_ms=200 release_ms=5355 failures=0
+[2026-06-29T13:12:36Z] cycle=916 start
+[2026-06-29T13:12:52Z] cycle=916 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T13:14:06Z] cycle=917 start
+[2026-06-29T13:14:22Z] cycle=917 done blackout_ms=200 release_ms=5387 failures=0
+[2026-06-29T13:15:36Z] cycle=918 start
+[2026-06-29T13:15:51Z] cycle=918 done blackout_ms=200 release_ms=5382 failures=0
+[2026-06-29T13:17:06Z] cycle=919 start
+[2026-06-29T13:17:20Z] cycle=919 done blackout_ms=200 release_ms=5379 failures=0
+[2026-06-29T13:18:36Z] cycle=920 start
+[2026-06-29T13:18:50Z] cycle=920 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T13:20:06Z] cycle=921 start
+[2026-06-29T13:20:22Z] cycle=921 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T13:21:36Z] cycle=922 start
+[2026-06-29T13:21:50Z] cycle=922 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T13:23:06Z] cycle=923 start
+[2026-06-29T13:23:20Z] cycle=923 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T13:24:36Z] cycle=924 start
+[2026-06-29T13:24:51Z] cycle=924 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T13:26:06Z] cycle=925 start
+[2026-06-29T13:26:20Z] cycle=925 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T13:27:36Z] cycle=926 start
+[2026-06-29T13:27:50Z] cycle=926 done blackout_ms=200 release_ms=5353 failures=0
+[2026-06-29T13:29:06Z] cycle=927 start
+[2026-06-29T13:29:22Z] cycle=927 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T13:30:36Z] cycle=928 start
+[2026-06-29T13:30:52Z] cycle=928 done blackout_ms=200 release_ms=5364 failures=0
+[2026-06-29T13:32:06Z] cycle=929 start
+[2026-06-29T13:32:20Z] cycle=929 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T13:33:36Z] cycle=930 start
+[2026-06-29T13:33:50Z] cycle=930 done blackout_ms=200 release_ms=5356 failures=0
+[2026-06-29T13:35:07Z] cycle=931 start
+[2026-06-29T13:35:21Z] cycle=931 done blackout_ms=200 release_ms=5352 failures=0
+[2026-06-29T13:36:37Z] cycle=932 start
+[2026-06-29T13:36:51Z] cycle=932 done blackout_ms=200 release_ms=5340 failures=0
+[2026-06-29T13:38:07Z] cycle=933 start
+[2026-06-29T13:38:26Z] cycle=933 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T13:39:37Z] cycle=934 start
+[2026-06-29T13:39:56Z] cycle=934 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T13:41:07Z] cycle=935 start
+[2026-06-29T13:41:25Z] cycle=935 done blackout_ms=200 release_ms=5371 failures=0
+[2026-06-29T13:42:37Z] cycle=936 start
+[2026-06-29T13:42:51Z] cycle=936 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T13:44:07Z] cycle=937 start
+[2026-06-29T13:44:26Z] cycle=937 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T13:45:37Z] cycle=938 start
+[2026-06-29T13:45:56Z] cycle=938 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T13:47:07Z] cycle=939 start
+[2026-06-29T13:47:25Z] cycle=939 done blackout_ms=200 release_ms=5348 failures=0
+[2026-06-29T13:48:37Z] cycle=940 start
+[2026-06-29T13:48:51Z] cycle=940 done blackout_ms=200 release_ms=5363 failures=0
+[2026-06-29T13:50:07Z] cycle=941 start
+[2026-06-29T13:50:26Z] cycle=941 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T13:51:37Z] cycle=942 start
+[2026-06-29T13:51:56Z] cycle=942 done blackout_ms=200 release_ms=5354 failures=0
+[2026-06-29T13:53:07Z] cycle=943 start
+[2026-06-29T13:53:25Z] cycle=943 done blackout_ms=200 release_ms=5368 failures=0
+[2026-06-29T13:54:37Z] cycle=944 start
+[2026-06-29T13:54:51Z] cycle=944 done blackout_ms=100 release_ms=5377 failures=0
+[2026-06-29T13:56:07Z] cycle=945 start
+[2026-06-29T13:56:21Z] cycle=945 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T13:57:37Z] cycle=946 start
+[2026-06-29T13:57:56Z] cycle=946 done blackout_ms=200 release_ms=5366 failures=0
+[2026-06-29T13:59:07Z] cycle=947 start
+[2026-06-29T13:59:26Z] cycle=947 done blackout_ms=200 release_ms=5335 failures=0
+[2026-06-29T14:00:37Z] cycle=948 start
+[2026-06-29T14:00:55Z] cycle=948 done blackout_ms=200 release_ms=5360 failures=0
+[2026-06-29T14:02:07Z] cycle=949 start
+[2026-06-29T14:02:25Z] cycle=949 done blackout_ms=100 release_ms=5361 failures=0
+[2026-06-29T14:03:37Z] cycle=950 start
+[2026-06-29T14:03:51Z] cycle=950 done blackout_ms=200 release_ms=5365 failures=0
+[2026-06-29T14:05:07Z] cycle=951 start
+[2026-06-29T14:05:21Z] cycle=951 done blackout_ms=200 release_ms=5411 failures=0
+[2026-06-29T14:06:37Z] cycle=952 start
+[2026-06-29T14:06:51Z] cycle=952 done blackout_ms=200 release_ms=5343 failures=0
+[2026-06-29T14:08:07Z] cycle=953 start
+[2026-06-29T14:08:26Z] cycle=953 done blackout_ms=200 release_ms=5346 failures=0
+[2026-06-29T14:09:37Z] cycle=954 start
+[2026-06-29T14:09:56Z] cycle=954 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T14:11:07Z] cycle=955 start
+[2026-06-29T14:11:25Z] cycle=955 done blackout_ms=200 release_ms=5350 failures=0
+[2026-06-29T14:12:37Z] cycle=956 start
+[2026-06-29T14:12:51Z] cycle=956 done blackout_ms=200 release_ms=5357 failures=0
+[2026-06-29T14:14:07Z] cycle=957 start
+[2026-06-29T14:14:26Z] cycle=957 done blackout_ms=200 release_ms=5359 failures=0
+[2026-06-29T14:15:37Z] cycle=958 start
+[2026-06-29T14:15:55Z] cycle=958 done blackout_ms=200 release_ms=5349 failures=0
+[2026-06-29T14:17:07Z] cycle=959 start
+[2026-06-29T14:17:25Z] cycle=959 done blackout_ms=200 release_ms=5358 failures=0
+[2026-06-29T14:18:37Z] cycle=960 start
+[2026-06-29T14:18:51Z] cycle=960 done blackout_ms=200 release_ms=5344 failures=0
+[2026-06-29T14:19:47Z] cycle=960 failure=1: analyzer verdict failed

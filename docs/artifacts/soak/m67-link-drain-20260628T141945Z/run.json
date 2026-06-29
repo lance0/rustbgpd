@@ -1,0 +1,14 @@
+{
+  "run_id": "20260628T141945Z",
+  "git_head": "e9ad34790ab1e091917268c63fa1552717225917",
+  "soak_seconds": 86400,
+  "sample_interval_sec": 30,
+  "cycle_interval_sec": 90,
+  "recovery_delay_sec": 5,
+  "blackout_bound_ms": 30000,
+  "release_bound_ms": 30000,
+  "topology": "<repo>/tests/soak/m67-link-drain-soak.clab.yml",
+  "vtep_container": "clab-m67-link-drain-soak-vtep",
+  "pe1_container": "clab-m67-link-drain-soak-pe1",
+  "pe2_container": "clab-m67-link-drain-soak-pe2"
+}
