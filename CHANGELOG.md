@@ -9,6 +9,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0063 EVPN runtime convergence — additive ES member expansion.**
+  `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff` now treat an
+  additive candidate that adds L2VNIs and expands an existing Ethernet
+  Segment's `member_vnis` with exactly those newly added VNIs as a live
+  hot-apply shape. The converger reuses the additive build-up rollback ladder:
+  newly added VNIs originate IMET, candidate L2/IP-VRF/ES snapshots are
+  republished to the dataplane, Type 2 originator, SVI, segment, and Type 5
+  actors, and any failed publish restores committed snapshots and withdraws
+  speculative IMET. ES field changes, member removals, existing-member
+  additions, arbitrary relinks, and IP-VRF identity edits still fail closed.
+
 ### Fixed
 
 - **Invalid ORF `When-to-refresh` values no longer install hidden deferred

@@ -8,14 +8,16 @@ unchanged L3VNI/device/table identity, single Ethernet Segment
 add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
 ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
 and/or a linked IP-VRF in one pass), additive multi-domain build-up (pure
-add-only L2VNI/IP-VRF/ES candidates), `ip_vrf` relink (an L2VNI re-homed to
-a different IP-VRF), and L2VNI-only mixed compositions (one-or-more L2VNI
+add-only L2VNI/IP-VRF/ES candidates, plus existing-ES `member_vnis` expansion
+when every new member VNI is added by the same candidate), `ip_vrf` relink (an
+L2VNI re-homed to a different IP-VRF), and L2VNI-only mixed compositions (one-or-more L2VNI
 add/delete/redefine change classes, with any IP-VRF link metadata changes
 limited to added/deleted VNIs and no ES-member deletes or IP-VRF/ES row-shape
 changes) commit live via
 `EvpnService.ApplyEvpnRuntime` and SIGHUP file-driven reload; ES add/redefine
-can bind member VNIs added by a prior live L2VNI add when the segment actor
-already exists. Two shapes remain non-live, by design: **L3VNI/device/table
+can bind member VNIs added by a prior live L2VNI add, or an additive candidate
+can add a L2VNI and expand an existing ES membership in one pass when the
+segment actor already exists. Two shapes remain non-live, by design: **L3VNI/device/table
 IP-VRF identity changes** are restart-required (kernel VRF lifecycle —
 `router_mac` is still live-redefinable), and **broader ES/IP-VRF mixed edits**
 fail closed with a "split the request" error
@@ -256,13 +258,16 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   back by republishing the committed IP-VRF / L2VNI tables, withdrawing
   speculative IMET, restoring deleted IMET, and restoring the committed Type 3
   keys for redefined VNIs if any step fails.
-- `ip_vrf` relink now commits live (dataplane-only, see above). The two shapes
-  that remain non-live are by design: **L3VNI/device/table IP-VRF identity
-  changes** stay restart-required (a kernel VRF lifecycle operation — a runtime
-  drain/recreate would risk a dual-state window; `router_mac` is still
-  live-redefinable), and **broader ES/IP-VRF mixed edits**
-  fail closed with an operator-actionable "split the request or apply the
-  L2VNI-only change separately" error, pending a generalized
+- `ip_vrf` relink now commits live (dataplane-only, see above). Additive
+  build-up also permits an existing ES row to expand `member_vnis` only when
+  every new member VNI is added by the same candidate; ES member removal, ES
+  non-member field changes, and existing-VNI membership expansion still fail
+  closed. The two shape families that remain non-live are by design:
+  **L3VNI/device/table IP-VRF identity changes** stay restart-required (a kernel
+  VRF lifecycle operation — a runtime drain/recreate would risk a dual-state
+  window; `router_mac` is still live-redefinable), and **broader ES/IP-VRF mixed
+  edits** fail closed with an operator-actionable "split the request or apply
+  the L2VNI-only change separately" error, pending a generalized
   converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #268.
@@ -273,8 +278,9 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
 - No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
   L3VNI/device/table IP-VRF identity changes, ES/IP-VRF row mixed edits beyond
-  the supported L2VNI-only composer, and runtime applies on daemons without the
-  required EVPN actors remain fail-closed.
+  additive ES member expansion and the supported L2VNI-only composer, and
+  runtime applies on daemons without the required EVPN actors remain
+  fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.
 - No change to EVPN dataplane defaults such as `apply_bum_enforcement` or

@@ -5752,6 +5752,110 @@ local_vtep_ip = "10.0.0.100"
 }
 
 #[test]
+fn evpn_instance_add_existing_es_member_expansion_marks_reload_applied() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100, 200]
+originator_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_instances_changed);
+    assert!(diff.ethernet_segments_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["evpn_runtime_change_class"], "reload_applied");
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
+}
+
+#[test]
+fn evpn_instance_add_existing_es_field_change_stays_restart_required() {
+    let old = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let new = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100, 200]
+originator_ip = "10.0.0.101"
+"#,
+    ))
+    .unwrap();
+
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_instances_changed);
+    assert!(diff.ethernet_segments_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::RestartRequired
+    );
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
 fn evpn_instance_swap_with_ip_vrf_link_marks_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"

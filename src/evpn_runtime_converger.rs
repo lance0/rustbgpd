@@ -5,7 +5,7 @@
 //! shape detectors and validators, the rollback ladder, and the gRPC apply
 //! entry point. Extracted from `src/main.rs`; see ADR-0063.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -674,7 +674,8 @@ impl EvpnRuntimeActorConverger {
         let l2_changed = !plan.evpn_instances.added.is_empty();
         let ip_vrf_rows_changed = !plan.ip_vrfs.added.is_empty();
         let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
-        let es_changed = !plan.ethernet_segments.added.is_empty();
+        let es_changed = !plan.ethernet_segments.added.is_empty()
+            || !plan.ethernet_segments.redefined.is_empty();
 
         let dataplane = if l2_changed || ip_vrf_metadata_changed || ip_vrf_rows_changed {
             Some(self.require_l2vni_dataplane("additive build-up")?)
@@ -2573,21 +2574,20 @@ fn validate_no_unexpected_relink(
     Ok(())
 }
 
-/// True when the plan is a pure add-only build-up that the single-row add paths
-/// cannot express: multiple domains change together, or one domain adds more
-/// than one row. Single-row adds keep routing through their narrower legacy
-/// validators.
+/// True when the plan is an additive build-up that the single-row add paths
+/// cannot express: multiple domains change together, one domain adds more than
+/// one row, or an existing ES expands membership only for newly added L2VNIs.
+/// Single-row adds keep routing through their narrower legacy validators.
 fn is_additive_build_up_plan(plan: &rustbgpd_evpn::EvpnRuntimePlan) -> bool {
-    let no_deletes_or_redefines = plan.evpn_instances.deleted.is_empty()
+    let no_deletes_or_non_es_redefines = plan.evpn_instances.deleted.is_empty()
         && plan.evpn_instances.redefined.is_empty()
         && plan.ip_vrfs.deleted.is_empty()
         && plan.ip_vrfs.redefined.is_empty()
-        && plan.ethernet_segments.deleted.is_empty()
-        && plan.ethernet_segments.redefined.is_empty();
+        && plan.ethernet_segments.deleted.is_empty();
     let has_add = !plan.evpn_instances.added.is_empty()
         || !plan.ip_vrfs.added.is_empty()
         || !plan.ethernet_segments.added.is_empty();
-    if !(no_deletes_or_redefines && has_add) {
+    if !(no_deletes_or_non_es_redefines && has_add) {
         return false;
     }
     let resource_types_added = [
@@ -2602,6 +2602,7 @@ fn is_additive_build_up_plan(plan: &rustbgpd_evpn::EvpnRuntimePlan) -> bool {
         || plan.evpn_instances.added.len() > 1
         || plan.ip_vrfs.added.len() > 1
         || plan.ethernet_segments.added.len() > 1
+        || !plan.ethernet_segments.redefined.is_empty()
 }
 
 fn validate_additive_build_up(
@@ -2611,7 +2612,7 @@ fn validate_additive_build_up(
 ) -> Result<Vec<rustbgpd_evpn::EvpnInstance>, DaemonEvpnRuntimeConvergeError> {
     if !is_additive_build_up_plan(plan) {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime additive build-up requires pure add-only changes across multiple rows or EVPN runtime domains",
+            "ApplyEvpnRuntime additive build-up requires add-only changes across multiple rows or EVPN runtime domains, with only existing-ES member expansion allowed as a redefine",
         ));
     }
     validate_no_unexpected_relink(current, candidate, plan)?;
@@ -2675,7 +2676,76 @@ fn validate_additive_build_up(
         )?;
     }
 
+    let added_l2vnis = added_instances
+        .iter()
+        .map(|instance| instance.id)
+        .collect::<BTreeSet<_>>();
+    for esi in &plan.ethernet_segments.redefined {
+        validate_additive_existing_es_member_expansion(current, candidate, *esi, &added_l2vnis)?;
+    }
+
     Ok(added_instances)
+}
+
+fn validate_additive_existing_es_member_expansion(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    added_l2vnis: &BTreeSet<rustbgpd_evpn::EvpnInstanceId>,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    let Some(current_segment) = current
+        .ethernet_segments()
+        .iter()
+        .find(|segment| segment.esi == esi)
+    else {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "planned Ethernet Segment {esi} is not committed"
+        )));
+    };
+    let Some(candidate_segment) = candidate
+        .ethernet_segments()
+        .iter()
+        .find(|segment| segment.esi == esi)
+    else {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "candidate is missing planned Ethernet Segment {esi}"
+        )));
+    };
+
+    if candidate_segment.member_vnis.len() <= current_segment.member_vnis.len()
+        || !candidate_segment
+            .member_vnis
+            .is_superset(&current_segment.member_vnis)
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "additive build-up may only expand Ethernet Segment {esi} member_vnis"
+        )));
+    }
+    let added_members = candidate_segment
+        .member_vnis
+        .difference(&current_segment.member_vnis)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if added_members.is_empty() || !added_members.iter().all(|vni| added_l2vnis.contains(vni)) {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "additive build-up may only add newly planned L2VNIs to Ethernet Segment {esi}"
+        )));
+    }
+    validate_ethernet_segment_member_vnis_present(
+        esi,
+        &candidate_segment.member_vnis,
+        candidate.instances(),
+    )?;
+
+    let mut probe = current_segment.clone();
+    probe.member_vnis.clone_from(&candidate_segment.member_vnis);
+    if &probe != candidate_segment {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "additive build-up may not change Ethernet Segment {esi} fields other than member_vnis"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Build the failure returned from an additive build-up step. Escalates when
@@ -3654,6 +3724,47 @@ local_vtep_ip = "10.0.0.1"
 vni = 200
 rd = "65000:200"
 route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100, 200]
+originator_ip = "10.0.0.1"
+"#
+    }
+
+    // Adds VNI 300 while trying to expand the existing ES with committed VNI
+    // 200 instead. The additive ES-expansion validator must reject this: every
+    // newly added ES member must be an L2VNI added in the same request.
+    fn three_l2vni_redefined_es_existing_member_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
 local_vtep_ip = "10.0.0.1"
 
 [[ethernet_segments]]
@@ -6915,6 +7026,142 @@ table_id = 6000
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
+        reason = "full dataplane-handle + segment-actor wiring per the sibling converger proofs"
+    )]
+    async fn runtime_actor_converger_additive_existing_es_member_expansion_publishes_models() {
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert!(is_additive_build_up_plan(&plan));
+        let current_instances = Arc::new(current.instances().clone());
+        let added_vni = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let added_rd = candidate.instances().get(added_vni).unwrap().rd;
+        let expanded_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(128);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws);
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (same_esi_bias_tx, _bias_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::SameEsiBiasTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            same_esi_bias_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (local_tx, local_rx) = mpsc::channel(8);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        assert!(evpn_instances_rx.borrow().get(added_vni).is_some());
+        wait_for_recorded_evpn_key_matching(
+            &injects,
+            "additive ES member expansion should originate IMET for the added L2VNI",
+            |key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { rd, .. } if *rd == added_rd),
+        )
+        .await;
+        wait_for_recorded_evpn_key_matching(
+            &injects,
+            "additive ES member expansion should publish EAD-per-EVI for the added member",
+            |key| {
+                matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::EadPerEvi {
+                        esi,
+                        rd,
+                        ..
+                    } if *esi == expanded_esi && *rd == added_rd
+                )
+            },
+        )
+        .await;
+
+        let local_mac = rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xee]);
+        local_tx
+            .send(rustbgpd_evpn::LocalMacObservation::Learned {
+                vni: added_vni,
+                mac: local_mac,
+                ifindex: 20,
+            })
+            .await
+            .unwrap();
+        wait_for_recorded_evpn_key_matching(
+            &injects,
+            "Type 2 originator should accept local MACs on the newly ES-membered L2VNI",
+            |key| {
+                matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::MacIp {
+                        rd,
+                        mac,
+                        ..
+                    } if *rd == added_rd && *mac == local_mac
+                )
+            },
+        )
+        .await;
+
+        segment_handle.shutdown().await;
+        originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
         reason = "actor convergence regression sets up dataplane, IMET, and Type 2 controls end to end"
     )]
     async fn runtime_actor_converger_l2vni_delete_drains_imet_and_actor_models() {
@@ -8342,6 +8589,69 @@ table_id = 6000
     }
 
     #[test]
+    fn validate_additive_build_up_accepts_existing_es_member_expansion() {
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(is_additive_build_up_plan(&plan));
+        assert_eq!(plan.evpn_instances.added, vec![200]);
+        assert_eq!(plan.ethernet_segments.redefined.len(), 1);
+        let added = validate_additive_build_up(&current, &candidate, &plan).unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0].id,
+            rustbgpd_evpn::EvpnInstanceId::new(200).unwrap()
+        );
+    }
+
+    #[test]
+    fn validate_additive_build_up_rejects_existing_es_member_expansion_field_change() {
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let valid = runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let mut bad_segment = valid.ethernet_segments()[0].clone();
+        bad_segment.originator_ip = "10.0.0.2".parse().unwrap();
+        let bad_candidate = rustbgpd_evpn::EvpnRuntimeCandidate::new(
+            valid.instances().clone(),
+            rustbgpd_evpn::IpVrfTable::new(),
+            vec![bad_segment],
+        );
+        let plan = current.plan_candidate(&bad_candidate);
+
+        assert!(is_additive_build_up_plan(&plan));
+        let error = validate_additive_build_up(&current, &bad_candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("fields other than member_vnis"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_additive_build_up_rejects_existing_vni_es_member_expansion() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let bad_candidate = runtime_candidate_from_toml(
+            three_l2vni_redefined_es_existing_member_runtime_candidate_toml(),
+        );
+        let plan = current.plan_candidate(&bad_candidate);
+
+        assert!(is_additive_build_up_plan(&plan));
+        assert_eq!(plan.evpn_instances.added, vec![300]);
+        assert_eq!(plan.ethernet_segments.redefined.len(), 1);
+        let error = validate_additive_build_up(&current, &bad_candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("newly planned L2VNIs"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
     fn validate_additive_build_up_rejects_add_with_redefine() {
         let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
         let candidate = runtime_candidate_from_toml(
@@ -8357,7 +8667,8 @@ table_id = 6000
             panic!("expected unsupported error, got {error:?}");
         };
         assert!(
-            message.contains("pure add-only"),
+            message.contains("add-only changes")
+                && message.contains("only existing-ES member expansion allowed as a redefine"),
             "unexpected error message: {message}"
         );
     }
