@@ -44,8 +44,8 @@ pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{
-    EvpnRibRoute, FibInstallCandidate, FibInstallNextHop, FlowSpecRoute, NextHopScope, Route,
-    RouteOrigin,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
+    FibInstallNextHop, FlowSpecRoute, NextHopScope, Route, RouteOrigin,
 };
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,

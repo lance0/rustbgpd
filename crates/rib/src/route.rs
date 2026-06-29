@@ -5,6 +5,7 @@ use std::time::Instant;
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
     FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+    bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
 /// Interface scope required to resolve an IPv6 link-local next-hop.
@@ -26,6 +27,42 @@ pub enum RouteOrigin {
     Ibgp,
     /// Locally originated (gRPC injection).
     Local,
+}
+
+/// BGP-LS route family carried by ADR-0077 substrate.
+///
+/// This is deliberately independent from wire-level `Afi`/`Safi` enums while
+/// BGP-LS remains unreachable from OPEN negotiation and MP-BGP dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BgpLsFamily {
+    /// AFI 16388 / SAFI 71 — base BGP-LS.
+    LinkState,
+    /// AFI 16388 / SAFI 72 — BGP-LS VPN with an 8-octet Route Distinguisher.
+    LinkStateVpn,
+}
+
+impl BgpLsFamily {
+    /// Whether this family requires the NLRI to carry an 8-octet Route Distinguisher.
+    #[must_use]
+    pub fn requires_route_distinguisher(self) -> bool {
+        matches!(self, Self::LinkStateVpn)
+    }
+}
+
+/// Opaque BGP-LS route identity for the RIB substrate.
+///
+/// The key preserves the complete NLRI identity bytes from the wire codec, so
+/// unknown NLRI types and descriptor TLVs remain distinguishable without display
+/// parsing. `path_id` is reserved for a future Add-Path-enabled BGP-LS slice and
+/// is always zero until negotiation grows that capability.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BgpLsRouteKey {
+    /// Base BGP-LS or BGP-LS VPN.
+    pub family: BgpLsFamily,
+    /// Opaque RFC 9552 NLRI identity.
+    pub nlri: BgpLsNlriKey,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
 }
 
 /// A single route stored in the Adj-RIB-In.
@@ -281,6 +318,54 @@ pub struct FlowSpecRoute {
     pub is_llgr_stale: bool,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
     pub path_id: u32,
+}
+
+/// A single BGP-LS route stored by the inert ADR-0077 RIB substrate.
+///
+/// This type is intentionally not reachable from peer UPDATE dispatch yet. It
+/// exists so the future negotiated BGP-LS slice has a family-honest route key
+/// and storage model instead of reusing unicast [`Prefix`].
+#[derive(Debug, Clone)]
+pub struct BgpLsRibRoute {
+    /// Base BGP-LS or BGP-LS VPN.
+    pub family: BgpLsFamily,
+    /// Full opaque NLRI, preserving unknown NLRI types and TLVs.
+    pub nlri: BgpLsNlri,
+    /// BGP-LS next-hop from `MP_REACH_NLRI`.
+    pub next_hop: IpAddr,
+    /// The peer that advertised this route.
+    pub peer: IpAddr,
+    /// BGP path attributes.
+    pub attributes: Arc<Vec<PathAttribute>>,
+    /// When this route was received (monotonic clock).
+    pub received_at: Instant,
+    /// How this route was learned (eBGP, iBGP, or local).
+    pub origin_type: RouteOrigin,
+    /// BGP router-id of the advertising peer.
+    pub peer_router_id: Ipv4Addr,
+    /// Whether this route is stale due to graceful restart.
+    pub is_stale: bool,
+    /// Whether this route is in LLGR stale phase (RFC 9494).
+    pub is_llgr_stale: bool,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl BgpLsRibRoute {
+    /// Identity key suitable for BGP-LS Adj-RIB-In, Loc-RIB, and Adj-RIB-Out maps.
+    #[must_use]
+    pub fn key(&self) -> BgpLsRouteKey {
+        debug_assert_eq!(
+            self.family.requires_route_distinguisher(),
+            self.nlri.route_distinguisher.is_some(),
+            "BGP-LS family and NLRI Route Distinguisher disagree"
+        );
+        BgpLsRouteKey {
+            family: self.family,
+            nlri: self.nlri.key(),
+            path_id: self.path_id,
+        }
+    }
 }
 
 impl FlowSpecRoute {
@@ -588,5 +673,64 @@ impl EvpnRibRoute {
     #[must_use]
     pub fn route_type(&self) -> u8 {
         self.route.route_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use rustbgpd_wire::{
+        PathAttribute,
+        bgpls::{BgpLsNlri, decode_bgpls_nlri, decode_bgpls_vpn_nlri},
+    };
+
+    use super::*;
+
+    fn bgpls_route(family: BgpLsFamily, nlri: BgpLsNlri) -> BgpLsRibRoute {
+        BgpLsRibRoute {
+            family,
+            nlri,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    fn base_bgpls_nlri() -> BgpLsNlri {
+        decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, 0xcc])
+            .expect("fixture BGP-LS NLRI decodes")
+            .pop()
+            .expect("fixture contains one NLRI")
+    }
+
+    fn vpn_bgpls_nlri() -> BgpLsNlri {
+        decode_bgpls_vpn_nlri(&[
+            0xfd, 0xe8, 0, 11, // 8-byte RD + 3-byte opaque payload
+            0, 0, 0xfd, 0xe8, 0, 0, 0, 1, 0xaa, 0xbb, 0xcc,
+        ])
+        .expect("fixture BGP-LS VPN NLRI decodes")
+        .pop()
+        .expect("fixture contains one NLRI")
+    }
+
+    #[test]
+    #[should_panic(expected = "BGP-LS family and NLRI Route Distinguisher disagree")]
+    fn bgpls_key_rejects_base_family_with_vpn_nlri_in_debug_builds() {
+        let _ = bgpls_route(BgpLsFamily::LinkState, vpn_bgpls_nlri()).key();
+    }
+
+    #[test]
+    #[should_panic(expected = "BGP-LS family and NLRI Route Distinguisher disagree")]
+    fn bgpls_key_rejects_vpn_family_without_rd_in_debug_builds() {
+        let _ = bgpls_route(BgpLsFamily::LinkStateVpn, base_bgpls_nlri()).key();
     }
 }
