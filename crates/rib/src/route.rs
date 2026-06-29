@@ -41,6 +41,14 @@ pub enum BgpLsFamily {
     LinkStateVpn,
 }
 
+impl BgpLsFamily {
+    /// Whether this family requires the NLRI to carry an 8-octet Route Distinguisher.
+    #[must_use]
+    pub fn requires_route_distinguisher(self) -> bool {
+        matches!(self, Self::LinkStateVpn)
+    }
+}
+
 /// Opaque BGP-LS route identity for the RIB substrate.
 ///
 /// The key preserves the complete NLRI identity bytes from the wire codec, so
@@ -347,6 +355,11 @@ impl BgpLsRibRoute {
     /// Identity key suitable for BGP-LS Adj-RIB-In, Loc-RIB, and Adj-RIB-Out maps.
     #[must_use]
     pub fn key(&self) -> BgpLsRouteKey {
+        debug_assert_eq!(
+            self.family.requires_route_distinguisher(),
+            self.nlri.route_distinguisher.is_some(),
+            "BGP-LS family and NLRI Route Distinguisher disagree"
+        );
         BgpLsRouteKey {
             family: self.family,
             nlri: self.nlri.key(),
@@ -660,5 +673,64 @@ impl EvpnRibRoute {
     #[must_use]
     pub fn route_type(&self) -> u8 {
         self.route.route_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use rustbgpd_wire::{
+        PathAttribute,
+        bgpls::{BgpLsNlri, decode_bgpls_nlri, decode_bgpls_vpn_nlri},
+    };
+
+    use super::*;
+
+    fn bgpls_route(family: BgpLsFamily, nlri: BgpLsNlri) -> BgpLsRibRoute {
+        BgpLsRibRoute {
+            family,
+            nlri,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    fn base_bgpls_nlri() -> BgpLsNlri {
+        decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, 0xcc])
+            .expect("fixture BGP-LS NLRI decodes")
+            .pop()
+            .expect("fixture contains one NLRI")
+    }
+
+    fn vpn_bgpls_nlri() -> BgpLsNlri {
+        decode_bgpls_vpn_nlri(&[
+            0xfd, 0xe8, 0, 11, // 8-byte RD + 3-byte opaque payload
+            0, 0, 0xfd, 0xe8, 0, 0, 0, 1, 0xaa, 0xbb, 0xcc,
+        ])
+        .expect("fixture BGP-LS VPN NLRI decodes")
+        .pop()
+        .expect("fixture contains one NLRI")
+    }
+
+    #[test]
+    #[should_panic(expected = "BGP-LS family and NLRI Route Distinguisher disagree")]
+    fn bgpls_key_rejects_base_family_with_vpn_nlri_in_debug_builds() {
+        let _ = bgpls_route(BgpLsFamily::LinkState, vpn_bgpls_nlri()).key();
+    }
+
+    #[test]
+    #[should_panic(expected = "BGP-LS family and NLRI Route Distinguisher disagree")]
+    fn bgpls_key_rejects_vpn_family_without_rd_in_debug_builds() {
+        let _ = bgpls_route(BgpLsFamily::LinkStateVpn, base_bgpls_nlri()).key();
     }
 }

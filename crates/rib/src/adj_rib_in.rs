@@ -657,14 +657,19 @@ impl AdjRibIn {
     ///
     /// This is dormant storage only. OPEN negotiation and MP-BGP dispatch do not
     /// expose BGP-LS yet.
-    pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) {
+    ///
+    /// Returns `true` if an existing route at the same opaque key was replaced.
+    /// A replacement may strand the previous route's interned attribute set, so
+    /// future BGP-LS batch callers should mirror the unicast announce path and
+    /// run [`Self::gc_intern_table`] once when any insert returned `true`.
+    pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) -> bool {
         let key = route.key();
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
             route.attributes = existing.clone();
         } else {
             self.attr_intern.insert(route.attributes.clone());
         }
-        self.bgpls_routes.insert(key, route);
+        self.bgpls_routes.insert(key, route).is_some()
     }
 
     /// Withdraw a BGP-LS route. Returns `true` if it existed.
@@ -1057,7 +1062,7 @@ mod tests {
             path_id: 0,
         };
 
-        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1));
+        assert!(!rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1)));
         assert_eq!(rib.bgpls_len(), 1);
         assert_eq!(rib.iter_bgpls().count(), 1);
         assert_eq!(
@@ -1065,7 +1070,7 @@ mod tests {
             &[0xaa, 0xbb, 1]
         );
 
-        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri, 2));
+        assert!(rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri, 2)));
         assert_eq!(rib.bgpls_len(), 1, "same opaque key should replace");
         assert_eq!(
             rib.get_bgpls(&key).unwrap().next_hop,
@@ -1101,6 +1106,29 @@ mod tests {
         assert_ne!(base_key, vpn_key);
         assert!(rib.get_bgpls(&base_key).is_some());
         assert!(rib.get_bgpls(&vpn_key).is_some());
+    }
+
+    #[test]
+    fn bgpls_insert_reports_replacement_for_intern_gc() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = bgpls_nlri(8);
+
+        assert!(!rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1)));
+        assert_eq!(rib.intern_len(), 1);
+
+        let mut replacement = make_bgpls_route(BgpLsFamily::LinkState, nlri, 2);
+        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+
+        assert!(rib.insert_bgpls(replacement));
+        assert_eq!(
+            rib.intern_len(),
+            2,
+            "replacement strands the previous interned attribute set before GC"
+        );
+
+        rib.gc_intern_table();
+        assert_eq!(rib.intern_len(), 1);
     }
 
     #[test]
