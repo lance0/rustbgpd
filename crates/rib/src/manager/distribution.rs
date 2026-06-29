@@ -163,12 +163,15 @@ impl RibManager {
                         Afi::Ipv4 => "ipv4",
                         Afi::Ipv6 => "ipv6",
                         Afi::L2Vpn => "l2vpn",
+                        Afi::BgpLs => "bgpls",
                     },
                     match family.1 {
                         Safi::Unicast => "unicast",
                         Safi::FlowSpec => "flowspec",
                         Safi::Multicast => "multicast",
                         Safi::Evpn => "evpn",
+                        Safi::BgpLs => "bgpls",
+                        Safi::BgpLsVpn => "bgpls_vpn",
                     }
                 ),
             });

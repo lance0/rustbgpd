@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Prefix};
+use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Origin, PathAttribute, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
@@ -21,7 +21,7 @@ pub struct LocRib {
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
-    /// BGP-LS Loc-RIB substrate: best route per opaque RFC 9552 identity.
+    /// BGP-LS Loc-RIB: best route per opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
 }
 
@@ -241,7 +241,39 @@ impl LocRib {
         self.evpn_routes.remove(key).is_some()
     }
 
-    // --- BGP-LS methods (ADR-0077 substrate, not yet peer-reachable) ---
+    // --- BGP-LS methods (RFC 9552) ---
+
+    /// Recompute the selected BGP-LS route for a key from the given candidates.
+    ///
+    /// Uses the same family-agnostic BGP preference chain as `FlowSpec`: stale
+    /// rank, `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
+    /// originator ID, then peer address. The opaque BGP-LS NLRI identity remains
+    /// the map key and is not parsed for selection.
+    pub fn recompute_bgpls<'a>(
+        &mut self,
+        key: BgpLsRouteKey,
+        candidates: impl Iterator<Item = &'a BgpLsRibRoute>,
+    ) -> bool {
+        let best = candidates.min_by(|a, b| bgpls_tiebreak(a, b)).cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self.bgpls_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.path_id != new_best.path_id
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.attributes != new_best.attributes
+                });
+                if changed {
+                    self.bgpls_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.bgpls_routes.remove(&key).is_some(),
+        }
+    }
 
     /// Insert or replace the selected BGP-LS route for a key.
     pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {
@@ -456,6 +488,120 @@ fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
 
     // 6. Lowest peer address (final tiebreaker)
     cmp_ipaddr(&a.peer, &b.peer)
+}
+
+fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
+    let cmp = bgpls_stale_rank(a).cmp(&bgpls_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = bgpls_local_pref(b).cmp(&bgpls_local_pref(a));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let a_len = bgpls_as_path(a).map_or(0, AsPath::len);
+    let b_len = bgpls_as_path(b).map_or(0, AsPath::len);
+    let cmp = a_len.cmp(&b_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = bgpls_origin(a).cmp(&bgpls_origin(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = bgpls_med(a).cmp(&bgpls_med(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = bgpls_cluster_list_len(a).cmp(&bgpls_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    if let (Some(a_oid), Some(b_oid)) = (bgpls_originator_id(a), bgpls_originator_id(b)) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    cmp_ipaddr(&a.peer, &b.peer)
+}
+
+fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
+fn bgpls_local_pref(route: &BgpLsRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(100)
+}
+
+fn bgpls_as_path(route: &BgpLsRibRoute) -> Option<&AsPath> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::AsPath(path) => Some(path),
+        _ => None,
+    })
+}
+
+fn bgpls_origin(route: &BgpLsRibRoute) -> Origin {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Origin(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(Origin::Incomplete)
+}
+
+fn bgpls_med(route: &BgpLsRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn bgpls_cluster_list_len(route: &BgpLsRibRoute) -> usize {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::ClusterList(ids) => Some(ids.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn bgpls_originator_id(route: &BgpLsRibRoute) -> Option<std::net::Ipv4Addr> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::OriginatorId(id) => Some(*id),
+        _ => None,
+    })
 }
 
 /// Compare two `IpAddr` values, treating V4 < V6.

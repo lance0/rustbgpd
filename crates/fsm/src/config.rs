@@ -8,6 +8,18 @@ use rustbgpd_wire::{
     GracefulRestartFamily, LlgrFamily, OrfCapEntry, OrfCapType, OrfSendReceive, OrfType, Safi,
 };
 
+/// Whether the RIB currently has GR/LLGR stale-retention handling for a family.
+///
+/// BGP-LS receive/API support stores opaque routes, but does not yet implement
+/// the GR/LLGR stale lifecycle for that typed RIB. Keep it out of restart
+/// preservation until that behavior is added.
+pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> bool {
+    matches!(
+        (afi, safi),
+        (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::FlowSpec) | (Afi::L2Vpn, Safi::Evpn)
+    )
+}
+
 /// Configuration for a single BGP peer session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -72,16 +84,21 @@ impl PeerConfig {
     #[must_use]
     pub fn local_capabilities(&self) -> Vec<Capability> {
         let families = self.effective_families();
+        let restart_families: Vec<_> = families
+            .iter()
+            .copied()
+            .filter(|family| graceful_restart_preserves_family(*family))
+            .collect();
         let mut caps = Vec::new();
         for &(afi, safi) in &families {
             caps.push(Capability::MultiProtocol { afi, safi });
         }
-        if self.graceful_restart {
+        if self.graceful_restart && !restart_families.is_empty() {
             caps.push(Capability::GracefulRestart {
                 restart_state: false,
                 notification: true,
                 restart_time: self.gr_restart_time,
-                families: families
+                families: restart_families
                     .iter()
                     .map(|&(afi, safi)| GracefulRestartFamily {
                         afi,
@@ -92,9 +109,9 @@ impl PeerConfig {
             });
         }
         // LLGR requires GR — only advertise when both are enabled (RFC 9494 §3).
-        if self.graceful_restart && self.llgr_stale_time > 0 {
+        if self.graceful_restart && self.llgr_stale_time > 0 && !restart_families.is_empty() {
             caps.push(Capability::LongLivedGracefulRestart(
-                families
+                restart_families
                     .iter()
                     .map(|&(afi, safi)| LlgrFamily {
                         afi,
@@ -356,6 +373,55 @@ mod tests {
             !caps
                 .iter()
                 .any(|c| matches!(c, Capability::GracefulRestart { .. }))
+        );
+    }
+
+    #[test]
+    fn restart_capabilities_omit_bgpls_families() {
+        let mut cfg = test_config();
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::BgpLs, Safi::BgpLs),
+            (Afi::BgpLs, Safi::BgpLsVpn),
+        ];
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        let caps = cfg.local_capabilities();
+
+        let mp_families: Vec<_> = caps
+            .iter()
+            .filter_map(|cap| match cap {
+                Capability::MultiProtocol { afi, safi } => Some((*afi, *safi)),
+                _ => None,
+            })
+            .collect();
+        assert!(mp_families.contains(&(Afi::BgpLs, Safi::BgpLs)));
+        assert!(mp_families.contains(&(Afi::BgpLs, Safi::BgpLsVpn)));
+
+        let gr_families = caps
+            .iter()
+            .find_map(|cap| match cap {
+                Capability::GracefulRestart { families, .. } => Some(families),
+                _ => None,
+            })
+            .expect("GR capability advertised for unicast");
+        assert_eq!(gr_families.len(), 1);
+        assert_eq!(
+            (gr_families[0].afi, gr_families[0].safi),
+            (Afi::Ipv4, Safi::Unicast)
+        );
+
+        let llgr_families = caps
+            .iter()
+            .find_map(|cap| match cap {
+                Capability::LongLivedGracefulRestart(families) => Some(families),
+                _ => None,
+            })
+            .expect("LLGR capability advertised for unicast");
+        assert_eq!(llgr_families.len(), 1);
+        assert_eq!(
+            (llgr_families[0].afi, llgr_families[0].safi),
+            (Afi::Ipv4, Safi::Unicast)
         );
     }
 

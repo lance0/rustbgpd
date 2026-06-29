@@ -7,13 +7,15 @@ use rustbgpd_wire::{
     AddressPrefixOrf, Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId,
     EvpnImet, EvpnMacIp, EvpnRoute, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, MacAddress,
     MplsLabel, OrfAction, OrfMatch, Origin, PathAttribute, Prefix, RouteDistinguisher,
-    RpkiValidation, Safi, WhenToRefresh,
+    RpkiValidation, Safi, WhenToRefresh, bgpls::decode_bgpls_nlri,
 };
 use tokio::sync::oneshot;
 
 use super::*;
 use crate::event::RouteEventType;
-use crate::route::{EvpnRibRoute, FlowSpecRoute, NextHopScope, Route};
+use crate::route::{
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope, Route,
+};
 use crate::test_support::{make_flowspec_route, make_route, make_route_with_lp, make_v6_route};
 
 fn evpn_sendable() -> Vec<(Afi, Safi)> {
@@ -37,6 +39,29 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
         peer_router_id: peer,
         is_stale: false,
         is_llgr_stale: false,
+    }
+}
+
+fn make_bgpls_route(peer: Ipv4Addr, payload_suffix: u8, local_pref: u32) -> BgpLsRibRoute {
+    let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 4, 0xde, 0xad, 0xbe, payload_suffix])
+        .expect("fixture BGP-LS NLRI decodes")
+        .pop()
+        .expect("fixture contains one BGP-LS NLRI");
+    BgpLsRibRoute {
+        family: BgpLsFamily::LinkState,
+        nlri,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
     }
 }
 
@@ -131,6 +156,14 @@ async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Ve
 async fn query_evpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<EvpnRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
+async fn query_bgpls_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<BgpLsRibRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryBgpLsRoutes { reply: reply_tx })
         .await
         .unwrap();
     reply_rx.await.unwrap()
@@ -325,6 +358,76 @@ async fn routes_received_and_queried() {
     let routes = reply_rx.await.unwrap();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].prefix, Prefix::V4(prefix));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bgpls_routes_received_recompute_and_withdraw() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let first_advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let better_advertiser = Ipv4Addr::new(10, 0, 0, 2);
+    let first_peer = IpAddr::V4(first_advertiser);
+    let better_peer = IpAddr::V4(better_advertiser);
+    let route_a = make_bgpls_route(first_advertiser, 7, 100);
+    let route_b = make_bgpls_route(better_advertiser, 7, 200);
+    let key: BgpLsRouteKey = route_a.key();
+    assert_eq!(route_b.key(), key);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: first_peer,
+        announced: vec![route_a],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_after_first = query_bgpls_routes(&tx).await;
+    assert_eq!(best_after_first.len(), 1);
+    assert_eq!(best_after_first[0].peer, first_peer);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: better_peer,
+        announced: vec![route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_after_second = query_bgpls_routes(&tx).await;
+    assert_eq!(best_after_second.len(), 1);
+    assert_eq!(best_after_second[0].peer, better_peer);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: better_peer,
+        announced: vec![],
+        withdrawn: vec![key.clone()],
+    })
+    .await
+    .unwrap();
+
+    let best_after_withdraw_b = query_bgpls_routes(&tx).await;
+    assert_eq!(best_after_withdraw_b.len(), 1);
+    assert_eq!(best_after_withdraw_b[0].peer, first_peer);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: first_peer,
+        announced: vec![],
+        withdrawn: vec![key],
+    })
+    .await
+    .unwrap();
+
+    let best_after_withdraw_a = query_bgpls_routes(&tx).await;
+    assert!(best_after_withdraw_a.is_empty());
 
     drop(tx);
     handle.await.unwrap();

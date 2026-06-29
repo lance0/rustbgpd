@@ -11,7 +11,7 @@ use rustbgpd_wire::{
 };
 
 use crate::action::NegotiatedSession;
-use crate::config::PeerConfig;
+use crate::config::{PeerConfig, graceful_restart_preserves_family};
 
 /// Validate a received OPEN message against our configuration and negotiate
 /// session parameters.
@@ -117,7 +117,7 @@ pub fn validate_open(
 
     // Extract Graceful Restart capability from peer
     let (
-        peer_gr_capable,
+        mut peer_gr_capable,
         peer_restart_state,
         peer_notification,
         peer_restart_time,
@@ -141,6 +141,14 @@ pub fn validate_open(
             _ => None,
         })
         .unwrap_or_default();
+    let peer_gr_families: Vec<_> = peer_gr_families
+        .into_iter()
+        .filter(|family| {
+            let key = (family.afi, family.safi);
+            negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
+        })
+        .collect();
+    peer_gr_capable = peer_gr_capable && !peer_gr_families.is_empty();
 
     // Extract Long-Lived Graceful Restart capability (RFC 9494).
     // LLGR requires GR — if the peer didn't advertise GR, LLGR is ignored.
@@ -155,6 +163,14 @@ pub fn validate_open(
     } else {
         (false, Vec::new())
     };
+    let peer_llgr_families: Vec<_> = peer_llgr_families
+        .into_iter()
+        .filter(|family| {
+            let key = (family.afi, family.safi);
+            negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
+        })
+        .collect();
+    let peer_llgr_capable = peer_llgr_capable && !peer_llgr_families.is_empty();
 
     let peer_route_refresh = open
         .capabilities
@@ -462,7 +478,7 @@ pub fn negotiate_extended_nexthop(
 mod tests {
     use std::net::Ipv4Addr;
 
-    use rustbgpd_wire::{Afi, Safi};
+    use rustbgpd_wire::{Afi, GracefulRestartFamily, LlgrFamily, Safi};
 
     use super::*;
 
@@ -860,8 +876,6 @@ mod tests {
 
     #[test]
     fn graceful_restart_extracted_from_peer_open() {
-        use rustbgpd_wire::GracefulRestartFamily;
-
         let mut cfg = test_config();
         cfg.graceful_restart = true;
         let mut open = peer_open();
@@ -882,6 +896,69 @@ mod tests {
         assert_eq!(neg.peer_restart_time, 120);
         assert_eq!(neg.peer_gr_families.len(), 1);
         assert!(neg.peer_gr_families[0].forwarding_preserved);
+    }
+
+    #[test]
+    fn graceful_restart_filters_bgpls_from_peer_open() {
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::BgpLs, Safi::BgpLs)];
+
+        let mut open = peer_open();
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+        });
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 120,
+            families: vec![
+                GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true,
+                },
+                GracefulRestartFamily {
+                    afi: Afi::BgpLs,
+                    safi: Safi::BgpLs,
+                    forwarding_preserved: true,
+                },
+            ],
+        });
+        open.capabilities
+            .push(Capability::LongLivedGracefulRestart(vec![
+                LlgrFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true,
+                    stale_time: 3600,
+                },
+                LlgrFamily {
+                    afi: Afi::BgpLs,
+                    safi: Safi::BgpLs,
+                    forwarding_preserved: true,
+                    stale_time: 3600,
+                },
+            ]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.peer_gr_capable);
+        assert_eq!(neg.peer_gr_families.len(), 1);
+        assert_eq!(
+            (neg.peer_gr_families[0].afi, neg.peer_gr_families[0].safi),
+            (Afi::Ipv4, Safi::Unicast)
+        );
+        assert!(neg.peer_llgr_capable);
+        assert_eq!(neg.peer_llgr_families.len(), 1);
+        assert_eq!(
+            (
+                neg.peer_llgr_families[0].afi,
+                neg.peer_llgr_families[0].safi
+            ),
+            (Afi::Ipv4, Safi::Unicast)
+        );
     }
 
     #[test]

@@ -146,22 +146,26 @@ has it, no broad performance sprints without profile evidence.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
-- **MPLS / VPN / BGP-LS address-family ADR** *(done — implementation remains
-  deferred).* ADR-0077 draws the address-family-expansion boundaries while the
+- **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive/API slice in
+  progress).* ADR-0077 draws the address-family-expansion boundaries while the
   substrate is still small: a control-plane AFI/SAFI route-key model for
   VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
   Constraints (RFC 4684), and BGP-LS (RFC 9552, which obsoletes RFC 7752), with
-  BGP-LS *export* and route-reflector-only VPN/MPLS families as the on-identity
-  entry points (controller-feed / RR, not a forwarding plane). **Explicit
-  non-goal, stated up front: rustbgpd does not install MPLS labels in the
-  dataplane** — these are BGP-carried families, not a step toward a full MPLS
-  router (see Non-goals). The ADR also preserves the ORF Address-Prefix guard:
-  only IPv4/IPv6 unicast entries are parsed today, and future VPN/MPLS-family
-  ORF support must be family-specific. Implementation stays demand-shaped (see
-  *Out-of-niche address families* under Maybe). Follow-up substrate work must
-  either remain unreachable from peers/operators or ship a complete typed family
-  slice; constant-only negotiation or config-only "support" is explicitly out
-  of scope.
+  BGP-LS *receive/API export* and route-reflector-only VPN/MPLS families as the
+  on-identity entry points (controller-feed / RR, not a forwarding plane).
+  **Done:** the BGP-LS wire/RIB/API tranche accepts `linkstate` /
+  `linkstate_vpn`, decodes BGP-LS and BGP-LS VPN MP_REACH/MP_UNREACH, stores
+  learned topology objects in typed Adj-RIB-In / Loc-RIB tables, and exposes
+  opaque NLRI/TLV bytes through `RibService.ListBgpLsRoutes` and
+  `rbgp rib bgpls`. Reflection/export remains the next ADR-0077 slice.
+  **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
+  in the dataplane** — these are BGP-carried families, not a step toward a full
+  MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix
+  guard: only IPv4/IPv6 unicast entries are parsed today, and future
+  VPN/MPLS-family ORF support must be family-specific. Follow-up substrate work
+  must either remain unreachable from peers/operators or ship a complete typed
+  family slice; constant-only negotiation or config-only "support" is
+  explicitly out of scope.
 
 ### Later
 
@@ -868,17 +872,17 @@ has it, no broad performance sprints without profile evidence.
   client's best path from the *client's* topological vantage point instead of the
   RR's own — an on-identity RR feature. Heavily gated, though: RFC 9107 §3.1
   admits only an IGP or BGP-LS as the topology source for the per-client SPF, and
-  rustbgpd runs no IGP (and won't). So ORR is at least two substrate projects
-  deep — BGP-LS **ingestion** (ADR-0077 currently scopes only BGP-LS *export*)
-  plus an in-daemon link-state DB + SPF engine — and then a per-client best-path
-  dimension (with Add-Path to distribute the multiple bests), touching the
+  rustbgpd runs no IGP (and won't). So ORR remains more than the BGP-LS
+  receive/API slice: it needs BGP-LS reflection/export, an in-daemon link-state
+  DB + SPF engine, and then a per-client best-path dimension (with Add-Path to
+  distribute the multiple bests), touching the
   single-best-path RIB core. No open-source peer ships it (FRR's request has sat
   open since 2018; BIRD / GoBGP / OpenBGPd lack it; only Cisco / Juniper / Nokia
   do). Not yet an open-source parity gap — but it is drawing renewed attention in
   the SONiC / DC-NOS ecosystem rustbgpd competes in (where the NOS's FRR can
   already source the IGP topology ORR needs), so track it as a possible future
-  DC-fabric RR baseline rather than dismiss it. Still gated on BGP-LS ingest
-  landing first; revisit when that substrate exists and the demand signal firms.
+  DC-fabric RR baseline rather than dismiss it. Revisit when BGP-LS reflection
+  and semantic LSDB/SPF substrate are plausible and the demand signal firms.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.
@@ -899,8 +903,8 @@ has it, no broad performance sprints without profile evidence.
   but it is entirely service-provider / traffic-engineering / full-router scope —
   outside rustbgpd's fabric / route-server / automation niche. Demand-shaped:
   pursuing them is a deliberate strategic pivot, not parity-chasing. (Of these,
-  BGP-LS *export* is the closest fit to the API-first / controller story if a
-  controller-integration headline ever materializes.) When adding VPN/MPLS-family
+  BGP-LS receive/API export is the closest fit to the API-first / controller
+  story if a controller-integration headline ever materializes.) When adding VPN/MPLS-family
   support, extend the ORF Address-Prefix decoder deliberately: it currently
   parses only IPv4/IPv6 unicast and preserves L2VPN / unknown SAFIs as raw ORF
   groups to avoid silently applying plain-IP prefix semantics to future families.

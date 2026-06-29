@@ -495,6 +495,7 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![evpn_route],
+            bgpls_announced: vec![],
         }),
     ];
 
@@ -1367,6 +1368,7 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -1401,6 +1403,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -1906,6 +1909,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         }],
         flowspec_announced: vec![],
         evpn_announced: vec![],
+        bgpls_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2051,6 +2055,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2129,6 +2134,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2171,6 +2177,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -3418,6 +3425,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         }],
         flowspec_announced: vec![],
         evpn_announced: vec![],
+        bgpls_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -4074,6 +4082,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }),
     ];
     // Build with Add-Path enabled and MP encoding
@@ -4892,6 +4901,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],
+            bgpls_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -4899,6 +4909,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![withdrawn_route],
+            bgpls_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -5001,6 +5012,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: routes,
+                bgpls_announced: vec![],
             }),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
@@ -5107,6 +5119,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],
+            bgpls_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -5114,6 +5127,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![withdrawn_route],
+            bgpls_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);

@@ -598,6 +598,14 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
 - `"ipv4_flowspec"` — IPv4 FlowSpec (AFI 1, SAFI 133, RFC 8955)
 - `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
+- `"linkstate"` — BGP-LS (AFI 16388, SAFI 71, RFC 9552). This v1
+  tranche is receive/API-only: learned BGP-LS routes are stored in the
+  RIB and exposed through `RibService.ListBgpLsRoutes` / `rbgp rib bgpls`,
+  but rustbgpd does not originate local BGP-LS objects or reflect BGP-LS
+  routes outbound yet. GR/LLGR stale preservation is not negotiated for
+  BGP-LS until the reflection/export tranche owns the full lifecycle.
+- `"linkstate_vpn"` — BGP-LS VPN (AFI 16388, SAFI 72, RFC 9552), with
+  the same receive/API-only scope as `linkstate`.
 - `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Two
   deployment modes share the family:
   - **RR mode (Phase 1):** the daemon reflects all five RFC 7432
@@ -2712,7 +2720,7 @@ starting:
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
-| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, or `"ipv6_flowspec"` | `unsupported address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, or `"linkstate_vpn"` | `unsupported address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |

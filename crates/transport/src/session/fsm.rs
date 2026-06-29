@@ -368,6 +368,12 @@ impl PeerSession {
                     if unnumbered_ipv4_without_enhe {
                         sendable_families.retain(|family| *family != (Afi::Ipv4, Safi::Unicast));
                     }
+                    // PR2 enables BGP-LS receive/API export only. Keep the
+                    // negotiated families on the session for inbound UPDATEs
+                    // but do not register BGP-LS as outbound-sendable until
+                    // the reflection tranche wires Adj-RIB-Out and refresh
+                    // response support.
+                    sendable_families.retain(|family| !matches!(family.0, Afi::BgpLs));
 
                     // If Extended Messages was negotiated, increase the
                     // framing buffer limit from 4096 to 65535 (RFC 8654).

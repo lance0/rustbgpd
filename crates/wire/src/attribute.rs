@@ -189,6 +189,8 @@ pub struct MpReachNlri {
     pub flowspec_announced: Vec<crate::flowspec::FlowSpecRule>,
     /// EVPN NLRI routes (RFC 7432). Populated only when `safi == Evpn`.
     pub evpn_announced: Vec<crate::evpn::EvpnRoute>,
+    /// BGP-LS NLRI objects (RFC 9552). Populated only for SAFI 71/72.
+    pub bgpls_announced: Vec<crate::bgpls::BgpLsNlri>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
@@ -207,6 +209,8 @@ pub struct MpUnreachNlri {
     pub flowspec_withdrawn: Vec<crate::flowspec::FlowSpecRule>,
     /// EVPN NLRI routes withdrawn (RFC 7432). Populated only when `safi == Evpn`.
     pub evpn_withdrawn: Vec<crate::evpn::EvpnRoute>,
+    /// BGP-LS NLRI objects withdrawn (RFC 9552). Populated only for SAFI 71/72.
+    pub bgpls_withdrawn: Vec<crate::bgpls::BgpLsNlri>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +218,7 @@ enum MpNlriFamily {
     Unicast,
     FlowSpec,
     Evpn,
+    BgpLs,
 }
 
 fn classify_mp_nlri_family(
@@ -225,9 +230,11 @@ fn classify_mp_nlri_family(
         (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => Ok(MpNlriFamily::Unicast),
         (Afi::Ipv4 | Afi::Ipv6, Safi::FlowSpec) => Ok(MpNlriFamily::FlowSpec),
         (Afi::L2Vpn, Safi::Evpn) => Ok(MpNlriFamily::Evpn),
-        (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::Multicast)
+        (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn) => Ok(MpNlriFamily::BgpLs),
+        (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::Multicast | Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
-        | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec) => {
+        | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec)
+        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec) => {
             Err(unsupported_mp_nlri_family(attribute, afi, safi))
         }
     }
@@ -237,7 +244,7 @@ fn unsupported_mp_nlri_family(attribute: &'static str, afi: Afi, safi: Safi) -> 
     DecodeError::MalformedField {
         message_type: "UPDATE",
         detail: format!(
-            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, and L2VPN EVPN",
+            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN EVPN, and BGP-LS/BGP-LS VPN",
             afi as u16, safi as u8
         ),
     }
@@ -1104,6 +1111,11 @@ fn decode_mp_reach_nlri(
             }
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         }
+        MpNlriFamily::BgpLs => {
+            let (nh, ll) = decode_bgpls_mp_next_hop(safi, nh_bytes, nh_len)?;
+            link_local_next_hop = ll;
+            nh
+        }
         MpNlriFamily::Unicast | MpNlriFamily::Evpn => match afi {
             Afi::Ipv4 => match nh_len {
                 4 => IpAddr::V4(Ipv4Addr::new(
@@ -1170,6 +1182,7 @@ fn decode_mp_reach_nlri(
                     });
                 }
             },
+            Afi::BgpLs => return Err(unsupported_mp_nlri_family("MP_REACH_NLRI", afi, safi)),
         },
     };
 
@@ -1188,6 +1201,7 @@ fn decode_mp_reach_nlri(
             announced: vec![],
             flowspec_announced: flowspec_rules,
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         }));
     }
 
@@ -1202,6 +1216,31 @@ fn decode_mp_reach_nlri(
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: routes,
+            bgpls_announced: vec![],
+        }));
+    }
+
+    if family == MpNlriFamily::BgpLs {
+        if add_path_families.contains(&(afi, safi)) {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "MP_REACH_NLRI BGP-LS Add-Path is not supported".to_string(),
+            });
+        }
+        let routes = if safi == Safi::BgpLsVpn {
+            crate::bgpls::decode_bgpls_vpn_nlri(nlri_bytes)?
+        } else {
+            crate::bgpls::decode_bgpls_nlri(nlri_bytes)?
+        };
+        return Ok(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            link_local_next_hop,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: routes,
         }));
     }
 
@@ -1229,7 +1268,9 @@ fn decode_mp_reach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(nlri_bytes)?,
-        (Afi::L2Vpn, _) => return Err(unsupported_mp_nlri_family("MP_REACH_NLRI", afi, safi)),
+        (Afi::L2Vpn | Afi::BgpLs, _) => {
+            return Err(unsupported_mp_nlri_family("MP_REACH_NLRI", afi, safi));
+        }
     };
 
     Ok(PathAttribute::MpReachNlri(MpReachNlri {
@@ -1240,6 +1281,7 @@ fn decode_mp_reach_nlri(
         announced,
         flowspec_announced: vec![],
         evpn_announced: vec![],
+        bgpls_announced: vec![],
     }))
 }
 
@@ -1282,6 +1324,7 @@ fn decode_mp_unreach_nlri(
             withdrawn: vec![],
             flowspec_withdrawn: flowspec_rules,
             evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
         }));
     }
 
@@ -1294,6 +1337,29 @@ fn decode_mp_unreach_nlri(
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
             evpn_withdrawn: routes,
+            bgpls_withdrawn: vec![],
+        }));
+    }
+
+    if family == MpNlriFamily::BgpLs {
+        if add_path_families.contains(&(afi, safi)) {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "MP_UNREACH_NLRI BGP-LS Add-Path is not supported".to_string(),
+            });
+        }
+        let routes = if safi == Safi::BgpLsVpn {
+            crate::bgpls::decode_bgpls_vpn_nlri(withdrawn_bytes)?
+        } else {
+            crate::bgpls::decode_bgpls_nlri(withdrawn_bytes)?
+        };
+        return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: routes,
         }));
     }
 
@@ -1321,7 +1387,9 @@ fn decode_mp_unreach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(withdrawn_bytes)?,
-        (Afi::L2Vpn, _) => return Err(unsupported_mp_nlri_family("MP_UNREACH_NLRI", afi, safi)),
+        (Afi::L2Vpn | Afi::BgpLs, _) => {
+            return Err(unsupported_mp_nlri_family("MP_UNREACH_NLRI", afi, safi));
+        }
     };
 
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -1330,6 +1398,7 @@ fn decode_mp_unreach_nlri(
         withdrawn,
         flowspec_withdrawn: vec![],
         evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
     }))
 }
 
@@ -1442,6 +1511,94 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::ONLY_TO_CUSTOMER => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
         _ => None,
     }
+}
+
+fn decode_bgpls_mp_next_hop(
+    safi: Safi,
+    nh_bytes: &[u8],
+    nh_len: usize,
+) -> Result<(IpAddr, Option<Ipv6Addr>), DecodeError> {
+    let (ip_len, ip_bytes) = if safi == Safi::BgpLsVpn {
+        if nh_len != 12 && nh_len != 24 && nh_len != 40 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_REACH_NLRI BGP-LS VPN next-hop length {nh_len} (expected 12, 24, or 40)"
+                ),
+            });
+        }
+        if nh_bytes[..crate::bgpls::BGP_LS_ROUTE_DISTINGUISHER_LEN]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "MP_REACH_NLRI BGP-LS VPN next-hop RD must be all zero".to_string(),
+            });
+        }
+        (
+            nh_len - crate::bgpls::BGP_LS_ROUTE_DISTINGUISHER_LEN,
+            &nh_bytes[crate::bgpls::BGP_LS_ROUTE_DISTINGUISHER_LEN..],
+        )
+    } else {
+        if nh_len != 4 && nh_len != 16 && nh_len != 32 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_REACH_NLRI BGP-LS next-hop length {nh_len} (expected 4, 16, or 32)"
+                ),
+            });
+        }
+        (nh_len, nh_bytes)
+    };
+
+    let mut link_local_next_hop = None;
+    let next_hop = match ip_len {
+        4 => IpAddr::V4(Ipv4Addr::new(
+            ip_bytes[0],
+            ip_bytes[1],
+            ip_bytes[2],
+            ip_bytes[3],
+        )),
+        16 | 32 => {
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(&ip_bytes[..16]);
+            if ip_len == 32 {
+                let mut ll = [0_u8; 16];
+                ll.copy_from_slice(&ip_bytes[16..32]);
+                link_local_next_hop = Some(Ipv6Addr::from(ll));
+            }
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+        _ => unreachable!("BGP-LS next-hop length validated above"),
+    };
+    Ok((next_hop, link_local_next_hop))
+}
+
+fn encode_bgpls_mp_next_hop(mp: &MpReachNlri, buf: &mut Vec<u8>) {
+    let mut next_hop = Vec::new();
+    if mp.safi == Safi::BgpLsVpn {
+        next_hop.extend_from_slice(&[0_u8; crate::bgpls::BGP_LS_ROUTE_DISTINGUISHER_LEN]);
+    }
+    match (mp.next_hop, mp.link_local_next_hop) {
+        (IpAddr::V4(addr), _) => next_hop.extend_from_slice(&addr.octets()),
+        (IpAddr::V6(addr), Some(ll)) => {
+            debug_assert!(
+                (ll.segments()[0] & 0xffc0) == 0xfe80,
+                "MP_REACH BGP-LS NH-Len=32 second segment must be link-local (fe80::/10), got {ll}"
+            );
+            next_hop.extend_from_slice(&addr.octets());
+            next_hop.extend_from_slice(&ll.octets());
+        }
+        (IpAddr::V6(addr), None) => next_hop.extend_from_slice(&addr.octets()),
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "BGP-LS next-hop encoding is bounded to 4/16/32 bytes plus optional 8-byte RD"
+    )]
+    let nh_len = next_hop.len() as u8;
+    buf.push(nh_len);
+    buf.extend_from_slice(&next_hop);
 }
 
 /// Encode path attributes to wire bytes.
@@ -1625,6 +1782,14 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
         return;
     }
 
+    if mp.afi == Afi::BgpLs && matches!(mp.safi, Safi::BgpLs | Safi::BgpLsVpn) {
+        encode_bgpls_mp_next_hop(mp, buf);
+        buf.push(0); // Reserved
+        crate::bgpls::encode_bgpls_nlri(&mp.bgpls_announced, buf)
+            .expect("BGP-LS NLRI length validated before MP_REACH encoding");
+        return;
+    }
+
     match (mp.next_hop, mp.link_local_next_hop) {
         (IpAddr::V4(addr), _) => {
             buf.push(4); // NH-Len
@@ -1689,6 +1854,12 @@ fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>, add_path: bool)
         return;
     }
 
+    if mp.afi == Afi::BgpLs && matches!(mp.safi, Safi::BgpLs | Safi::BgpLsVpn) {
+        crate::bgpls::encode_bgpls_nlri(&mp.bgpls_withdrawn, buf)
+            .expect("BGP-LS NLRI length validated before MP_UNREACH encoding");
+        return;
+    }
+
     if add_path {
         crate::nlri::encode_ipv6_nlri_addpath(&mp.withdrawn, buf);
     } else {
@@ -1749,6 +1920,7 @@ mod tests {
                 ethernet_tag: EthernetTagId(100),
                 originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
             })],
+            bgpls_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(mp);
 
@@ -1794,6 +1966,7 @@ mod tests {
                 ethernet_tag: EthernetTagId(100),
                 originator_ip: IpAddr::V6(vtep_v6),
             })],
+            bgpls_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(mp.clone());
 
@@ -1895,6 +2068,7 @@ mod tests {
                 esi: EthernetSegmentIdentifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
                 originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             })],
+            bgpls_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(mp);
         let mut buf = Vec::new();
@@ -1902,6 +2076,143 @@ mod tests {
         let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
         assert_eq!(decoded.len(), 1);
         assert_eq!(attr, decoded[0]);
+    }
+
+    fn bgpls_test_payload() -> bytes::Bytes {
+        bytes::Bytes::from_static(&[
+            2, // IS-IS Level 2 protocol-id.
+            0, 0, 0, 0, 0, 0, 0, 42, // Identifier.
+            0, 1, 0, 1, 0xaa, // One descriptor TLV.
+        ])
+    }
+
+    fn bgpls_node(route_distinguisher: Option<[u8; 8]>) -> crate::bgpls::BgpLsNlri {
+        crate::bgpls::BgpLsNlri::try_new(
+            crate::bgpls::BgpLsNlriType::Node,
+            route_distinguisher,
+            bgpls_test_payload(),
+        )
+        .expect("test BGP-LS NLRI encodes")
+    }
+
+    #[test]
+    fn mp_reach_bgpls_attribute_roundtrip() {
+        let route = bgpls_node(None);
+        let mp = MpReachNlri {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![route.clone()],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode BGP-LS MP_REACH");
+        assert_eq!(decoded, vec![PathAttribute::MpReachNlri(mp)]);
+
+        let PathAttribute::MpReachNlri(decoded_mp) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(decoded_mp.bgpls_announced, vec![route]);
+        assert!(decoded_mp.announced.is_empty());
+        assert!(decoded_mp.flowspec_announced.is_empty());
+        assert!(decoded_mp.evpn_announced.is_empty());
+    }
+
+    #[test]
+    fn mp_unreach_bgpls_vpn_attribute_roundtrip() {
+        let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 42];
+        let route = bgpls_node(Some(rd));
+        let mp = MpUnreachNlri {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLsVpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![route.clone()],
+        };
+        let attr = PathAttribute::MpUnreachNlri(mp.clone());
+
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded =
+            decode_path_attributes(&buf, true, &[]).expect("decode BGP-LS VPN MP_UNREACH");
+        assert_eq!(decoded, vec![PathAttribute::MpUnreachNlri(mp)]);
+
+        let PathAttribute::MpUnreachNlri(decoded_mp) = &decoded[0] else {
+            panic!("not MP_UNREACH after decode");
+        };
+        assert_eq!(decoded_mp.bgpls_withdrawn, vec![route]);
+        assert!(decoded_mp.withdrawn.is_empty());
+        assert!(decoded_mp.flowspec_withdrawn.is_empty());
+        assert!(decoded_mp.evpn_withdrawn.is_empty());
+    }
+
+    #[test]
+    fn mp_reach_bgpls_addpath_rejected() {
+        let route = bgpls_node(None);
+        let attr = PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![route],
+        });
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true, false);
+
+        let err = decode_path_attributes(&buf, true, &[(Afi::BgpLs, Safi::BgpLs)])
+            .expect_err("BGP-LS Add-Path must fail closed");
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("BGP-LS Add-Path is not supported"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_reach_bgpls_vpn_rejects_nonzero_next_hop_rd() {
+        let route = bgpls_node(Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 42]));
+        let mut nlri = Vec::new();
+        crate::bgpls::encode_bgpls_nlri(&[route], &mut nlri).expect("encode BGP-LS VPN NLRI");
+
+        let mut value = Vec::new();
+        value.extend_from_slice(&(Afi::BgpLs as u16).to_be_bytes());
+        value.push(Safi::BgpLsVpn as u8);
+        value.push(12);
+        value.extend_from_slice(&[0, 0, 0xfd, 0xe8, 0, 0, 0, 42]);
+        value.extend_from_slice(&[192, 0, 2, 1]);
+        value.push(0);
+        value.extend_from_slice(&nlri);
+
+        let value_len =
+            u8::try_from(value.len()).expect("fixture MP_REACH value length fits in one octet");
+        let mut attr = vec![attr_flags::OPTIONAL, 14, value_len];
+        attr.extend_from_slice(&value);
+
+        let err = decode_path_attributes(&attr, true, &[])
+            .expect_err("BGP-LS VPN next-hop RD must be all zero");
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("next-hop RD must be all zero"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got: {other:?}"),
+        }
     }
 
     // ---- EVPN extended community typed accessors (RFC 7432 / 8365 / 9135) ---
@@ -2748,6 +3059,7 @@ mod tests {
             ],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2772,6 +3084,7 @@ mod tests {
             )))],
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
@@ -2798,6 +3111,7 @@ mod tests {
             )))],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2823,6 +3137,7 @@ mod tests {
             )))],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2844,6 +3159,7 @@ mod tests {
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         });
         assert_eq!(attr.type_code(), 14);
         // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
@@ -2860,6 +3176,7 @@ mod tests {
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
         });
         assert_eq!(attr.type_code(), 15);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
@@ -2877,6 +3194,7 @@ mod tests {
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -3054,6 +3372,7 @@ mod tests {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -3099,6 +3418,7 @@ mod tests {
             }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
+            bgpls_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(mp.clone());
         let mut buf = Vec::new();

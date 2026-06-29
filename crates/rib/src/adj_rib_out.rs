@@ -226,7 +226,7 @@ impl AdjRibOut {
         self.evpn_routes.len()
     }
 
-    // --- BGP-LS methods (ADR-0077 substrate, not yet peer-reachable) ---
+    // --- BGP-LS methods (ADR-0077 outbound reflection substrate) ---
 
     /// Insert or replace an advertised BGP-LS route.
     pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {

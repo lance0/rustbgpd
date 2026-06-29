@@ -3,7 +3,7 @@
 BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
 NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
 MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
-VPNv4/VPNv6 labeled NLRI substrate, BGP-LS/BGP-LS-VPN codec substrate,
+VPNv4/VPNv6 labeled NLRI substrate, BGP-LS/BGP-LS-VPN codec support,
 Add-Path, Extended Messages, Outbound Route Filtering (RFC 5291/5292), BGP
 Roles + Only-to-Customer (RFC 9234), and more.
 
@@ -56,7 +56,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
-| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV substrate with opaque preservation of unknown NLRI types and TLVs. No daemon BGP-LS family negotiation or topology API by itself |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche; outbound reflection and local topology production remain outside the wire crate |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
 
@@ -130,8 +130,9 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
 - **`vpn` module** — VPNv4/VPNv6 labeled NLRI substrate, including label-stack
   validation, Route Distinguisher, and IPv4/IPv6 prefix payloads
-- **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV substrate, preserving
-  unknown object types and TLVs for future family support
+- **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV codec, preserving
+  unknown object types and TLVs for the daemon's receive/API surface and
+  future reflection support
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)

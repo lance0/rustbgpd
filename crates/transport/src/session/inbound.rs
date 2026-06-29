@@ -3,10 +3,10 @@ use std::time::SystemTime;
 
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::{
-    Afi, AsPath, BgpRole, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
-    FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage,
-    PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info,
-    is_ipv6_link_local, resolve_import_nexthop, warn,
+    Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
+    EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope,
+    NotificationCode, NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route,
+    Safi, cease_subcode, debug, info, is_ipv6_link_local, resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
@@ -75,6 +75,14 @@ fn otc_state(attrs: &[PathAttribute]) -> OtcState {
         }
     }
     found
+}
+
+fn bgpls_family_from_safi(safi: Safi) -> Option<BgpLsFamily> {
+    match safi {
+        Safi::BgpLs => Some(BgpLsFamily::LinkState),
+        Safi::BgpLsVpn => Some(BgpLsFamily::LinkStateVpn),
+        _ => None,
+    }
 }
 
 /// Build the `(otc_value, as_path_string)` pair attached to an
@@ -503,6 +511,7 @@ impl PeerSession {
                 && mp.withdrawn.is_empty()
                 && mp.flowspec_withdrawn.is_empty()
                 && mp.evpn_withdrawn.is_empty()
+                && mp.bgpls_withdrawn.is_empty()
             {
                 info!(
                     peer = %self.peer_label,
@@ -634,7 +643,9 @@ impl PeerSession {
                     .attributes
                     .iter()
                     .filter_map(|a| match a {
-                        PathAttribute::MpReachNlri(mp) => Some(mp.announced.len()),
+                        PathAttribute::MpReachNlri(mp) => {
+                            Some(mp.announced.len() + mp.bgpls_announced.len())
+                        }
                         _ => None,
                     })
                     .sum::<usize>();
@@ -648,8 +659,8 @@ impl PeerSession {
                 .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
 
             // Still process withdrawals (body + MP_UNREACH with negotiated-family check).
-            // Covers unicast, FlowSpec, AND EVPN — the AS_PATH-loop branch must
-            // not silently drop withdrawals for any family, or stale EVPN state
+            // Covers unicast, FlowSpec, EVPN, and BGP-LS — the AS_PATH-loop branch must
+            // not silently drop withdrawals for any family, or stale non-unicast state
             // accumulates downstream until the next session reset / refresh.
             let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
                 .withdrawn
@@ -658,6 +669,7 @@ impl PeerSession {
                 .collect();
             let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+            let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -665,6 +677,15 @@ impl PeerSession {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                         loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                         loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
+                        if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
+                            loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
+                                BgpLsRouteKey {
+                                    family: bgpls_family,
+                                    nlri: nlri.key(),
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
                 }
             }
@@ -676,6 +697,9 @@ impl PeerSession {
             }
             for key in &loop_evpn_withdrawn {
                 self.known_evpn.remove(key);
+            }
+            for key in &loop_bgpls_withdrawn {
+                self.known_bgpls.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -690,6 +714,19 @@ impl PeerSession {
                         flowspec_withdrawn: loop_fs_withdrawn,
                         evpn_announced: vec![],
                         evpn_withdrawn: loop_evpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_bgpls_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_bgpls_withdrawn,
                     })
                     .await
                     .is_err()
@@ -730,7 +767,7 @@ impl PeerSession {
             self.metrics.record_rr_loop_detected(&self.peer_label);
 
             // Still process withdrawals (same pattern as AS_PATH loop).
-            // Covers unicast, FlowSpec, AND EVPN — the reflected-loop
+            // Covers unicast, FlowSpec, EVPN, and BGP-LS — the reflected-loop
             // detection must not silently drop withdrawals for any family,
             // or stale state accumulates downstream.
             let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
@@ -740,6 +777,7 @@ impl PeerSession {
                 .collect();
             let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+            let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -747,6 +785,15 @@ impl PeerSession {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                         loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                         loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
+                        if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
+                            loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
+                                BgpLsRouteKey {
+                                    family: bgpls_family,
+                                    nlri: nlri.key(),
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
                 }
             }
@@ -758,6 +805,9 @@ impl PeerSession {
             }
             for key in &loop_evpn_withdrawn {
                 self.known_evpn.remove(key);
+            }
+            for key in &loop_bgpls_withdrawn {
+                self.known_bgpls.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -772,6 +822,19 @@ impl PeerSession {
                         flowspec_withdrawn: loop_fs_withdrawn,
                         evpn_announced: vec![],
                         evpn_withdrawn: loop_evpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_bgpls_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_bgpls_withdrawn,
                     })
                     .await
                     .is_err()
@@ -1008,6 +1071,8 @@ impl PeerSession {
         let mut flowspec_withdrawn: Vec<FlowSpecRule> = Vec::new();
         let mut evpn_announced: Vec<EvpnRibRoute> = Vec::new();
         let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+        let mut bgpls_announced: Vec<BgpLsRibRoute> = Vec::new();
+        let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
 
         for attr in &parsed.attributes {
             match attr {
@@ -1179,6 +1244,68 @@ impl PeerSession {
                         continue;
                     }
 
+                    if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
+                        // BGP-LS announced routes — opaque topology objects,
+                        // not unicast prefixes. Prefix policy predicates see a
+                        // placeholder; AS_PATH/community/RT predicates still
+                        // operate on the real path attributes.
+                        let placeholder_prefix =
+                            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+                        for nlri in &mp.bgpls_announced {
+                            let ctx = RouteContext {
+                                prefix: placeholder_prefix,
+                                next_hop: Some(mp.next_hop),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: mp_aspa_state,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                evpn_route_type: None,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
+                            };
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let (attrs, _) =
+                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                bgpls_announced.push(BgpLsRibRoute {
+                                    family: bgpls_family,
+                                    nlri: nlri.clone(),
+                                    next_hop: mp.next_hop,
+                                    peer: self.peer_ip,
+                                    attributes: attrs,
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    is_llgr_stale: false,
+                                    path_id: 0,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
                     if otc_drop_unicast_announcements {
                         continue;
                     }
@@ -1298,6 +1425,15 @@ impl PeerSession {
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                     flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
+                    if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
+                        bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
+                            BgpLsRouteKey {
+                                family: bgpls_family,
+                                nlri: nlri.key(),
+                                path_id: 0,
+                            }
+                        }));
+                    }
                 }
                 _ => {}
             }
@@ -1349,6 +1485,12 @@ impl PeerSession {
         for route in &evpn_announced {
             self.known_evpn.insert(route.key());
         }
+        for key in &bgpls_withdrawn {
+            self.known_bgpls.remove(key);
+        }
+        for route in &bgpls_announced {
+            self.known_bgpls.insert(route.key());
+        }
         self.import_policy_routes_permitted = self
             .import_policy_routes_permitted
             .saturating_add(import_policy_routes_permitted);
@@ -1392,6 +1534,20 @@ impl PeerSession {
                     flowspec_withdrawn,
                     evpn_announced,
                     evpn_withdrawn,
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+
+        if (!bgpls_announced.is_empty() || !bgpls_withdrawn.is_empty())
+            && self
+                .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: bgpls_announced,
+                    withdrawn: bgpls_withdrawn,
                 })
                 .await
                 .is_err()

@@ -1887,6 +1887,17 @@ fn duplicate_families_deduplicated() {
     assert_eq!(peers[0].0.peer.families.len(), 2);
 }
 
+#[test]
+fn bgpls_families_parse_to_linkstate_afi_safis() {
+    let toml = gr_toml(r#"families = ["linkstate", "linkstate_vpn"]"#);
+    let config = parse(&toml).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.peer.families,
+        vec![(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)]
+    );
+}
+
 // --- Community match config tests ---
 
 fn community_toml(policy_entries: &str) -> String {

@@ -773,6 +773,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
+| `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
 | `ListFibTables` | List the configured `[[fib_tables]]` and whether the FIB reconciler is running (`sensitive_read`) |
@@ -801,6 +802,7 @@ through one RPC shape.
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
 | EVPN L2/L3 dataplane readiness and managed-netdev ownership status | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
+| BGP-LS topology objects | `ListBgpLsRoutes` / `rbgp rib bgpls` | Snapshot | Current Loc-RIB only; raw BGP-LS NLRI/TLV bytes preserved |
 | ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rbgp bfd` | Snapshot | Current BFD actor snapshot |
 | Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rbgp events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
@@ -875,7 +877,9 @@ Route-listing RPCs and route-event streams (`ListReceivedRoutes`,
 unicast families). Route watch events include the address family of each route
 change. FlowSpec routes use `ListFlowSpecRoutes` with
 `IPV4_FLOWSPEC` (3), `IPV6_FLOWSPEC` (4), or unspecified (0). EVPN routes
-use `ListEvpnRoutes` and its EVPN-specific filters.
+use `ListEvpnRoutes` and its EVPN-specific filters. BGP-LS routes use
+`ListBgpLsRoutes` with `ADDRESS_FAMILY_BGP_LS` (6),
+`ADDRESS_FAMILY_BGP_LS_VPN` (7), or unspecified (0).
 
 ### Pagination
 
@@ -883,8 +887,8 @@ The unicast route-listing RPCs `ListReceivedRoutes`, `ListBestRoutes`, and
 `ListAdvertisedRoutes` support pagination via `page_size` and `page_token`.
 `ListFibRoutes` also supports optional pagination; unlike the route-listing
 RPCs, `page_size = 0` preserves the legacy behavior and returns the full
-filtered FIB status snapshot. `ListBlackholeDiscards` and `ListFlowSpecRoutes`
-do not support pagination.
+filtered FIB status snapshot. `ListBlackholeDiscards`, `ListFlowSpecRoutes`,
+and `ListBgpLsRoutes` do not support pagination.
 
 ```bash
 # First page (2 routes)
@@ -1008,6 +1012,26 @@ peer IP address (e.g. `"10.0.0.2"`); `rd_filter` is an optional **exact**
 match against the route distinguisher in display form (e.g. `"65000:100"`,
 `"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2). Empty
 strings disable each filter.
+
+### List BGP-LS routes
+
+```bash
+# All BGP-LS and BGP-LS VPN routes in Loc-RIB
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRoutes
+
+# BGP-LS only, from one peer, for Node NLRI
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"afi_safi": "ADDRESS_FAMILY_BGP_LS", "peer_filter": "10.0.0.2", "nlri_type_filter": 1}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRoutes
+```
+
+`ListBgpLsRoutes` is the ADR-0077 receive/API surface. It preserves BGP-LS
+routes as opaque RFC 9552 objects: raw Route Distinguisher bytes for BGP-LS
+VPN, raw NLRI descriptor/payload bytes, and raw BGP-LS Attribute (type 29)
+bytes when present. The daemon does not synthesize BGP-LS from a local LSDB,
+compute paths from BGP-LS data, or reflect BGP-LS routes outbound in this
+tranche. It also does not negotiate GR/LLGR stale preservation for BGP-LS yet.
 
 ### List BLACKHOLE discard status
 

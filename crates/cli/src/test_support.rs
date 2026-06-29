@@ -48,6 +48,7 @@ pub(crate) struct MockState {
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
+    pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -1014,6 +1015,33 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             routes: vec![],
             next_page_token: String::new(),
             total_count: 0,
+        }))
+    }
+
+    async fn list_bgp_ls_routes(
+        &self,
+        request: Request<server_proto::ListBgpLsRequest>,
+    ) -> Result<Response<server_proto::ListBgpLsResponse>, Status> {
+        *self.state.last_list_bgpls.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListBgpLsResponse {
+            routes: vec![server_proto::BgpLsRouteEntry {
+                afi_safi: server_proto::AddressFamily::BgpLs as i32,
+                family: "bgp_ls".to_string(),
+                nlri_type: 1,
+                nlri_type_name: "node".to_string(),
+                route_distinguisher: vec![],
+                payload: vec![0x01, 0x02, 0x03],
+                descriptor: vec![0x04, 0x05],
+                next_hop: "192.0.2.1".to_string(),
+                peer_address: "198.51.100.1".to_string(),
+                as_path: vec![64512],
+                communities: vec![],
+                extended_communities: vec![],
+                stale: false,
+                llgr_stale: false,
+                path_id: 0,
+                bgp_ls_attribute: vec![0xaa, 0xbb],
+            }],
         }))
     }
 
