@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Invalid ORF `When-to-refresh` values no longer install hidden deferred
+  filters.** RFC 5291 defines only `IMMEDIATE` and `DEFER`; a negotiated
+  Address-Prefix ORF update carrying any other value now resets the installed
+  ORF list for that family/type and forces a safe outbound resync instead of
+  treating the unknown value as defer-like state.
+
 ## [0.44.0] — 2026-06-29
 
 ### Fixed
