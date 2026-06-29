@@ -344,9 +344,11 @@ has it, no broad performance sprints without profile evidence.
   for broader ES/IP-VRF-linked candidates (pure additive build-up,
   standalone/IP-VRF-linked L2VNI swaps, and L2VNI-only
   add/delete/redefine compositions, including L2VNI-only batch redefines,
-  now commit live; ES-member deletes are live only through delete-only tenant
-  teardown, pure `ip_vrf` relinks commit live, and relinks mixed with row edits
-  plus broader IP-VRF/ES row edits in the same request still fail closed today).
+  now commit live; additive L2VNI adds may also expand an existing ES
+  `member_vnis` set when every new member VNI is added in that same request;
+  ES-member deletes are live only through delete-only tenant teardown, pure
+  `ip_vrf` relinks commit live, and relinks mixed with row edits plus broader
+  IP-VRF/ES row edits in the same request still fail closed today).
   **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required

@@ -2769,16 +2769,15 @@ fn evpn_runtime_is_ip_vrf_relink_plan(plan: &EvpnRuntimePlan) -> bool {
 }
 
 fn evpn_runtime_is_additive_build_up_plan(plan: &EvpnRuntimePlan) -> bool {
-    let no_deletes_or_redefines = plan.evpn_instances.deleted.is_empty()
+    let no_deletes_or_non_es_redefines = plan.evpn_instances.deleted.is_empty()
         && plan.evpn_instances.redefined.is_empty()
         && plan.ip_vrfs.deleted.is_empty()
         && plan.ip_vrfs.redefined.is_empty()
-        && plan.ethernet_segments.deleted.is_empty()
-        && plan.ethernet_segments.redefined.is_empty();
+        && plan.ethernet_segments.deleted.is_empty();
     let has_add = !plan.evpn_instances.added.is_empty()
         || !plan.ip_vrfs.added.is_empty()
         || !plan.ethernet_segments.added.is_empty();
-    if !(no_deletes_or_redefines && has_add) {
+    if !(no_deletes_or_non_es_redefines && has_add) {
         return false;
     }
     let resource_types_added = [
@@ -2793,6 +2792,7 @@ fn evpn_runtime_is_additive_build_up_plan(plan: &EvpnRuntimePlan) -> bool {
         || plan.evpn_instances.added.len() > 1
         || plan.ip_vrfs.added.len() > 1
         || plan.ethernet_segments.added.len() > 1
+        || !plan.ethernet_segments.redefined.is_empty()
 }
 
 fn evpn_runtime_validate_additive_build_up_shape(
@@ -2803,6 +2803,9 @@ fn evpn_runtime_validate_additive_build_up_shape(
     if !evpn_runtime_no_unexpected_relink(current, candidate, plan) {
         return false;
     }
+    let Some(added_l2vnis) = evpn_runtime_added_l2vnis(plan) else {
+        return false;
+    };
     plan.evpn_instances.added.iter().all(|&raw_vni| {
         EvpnInstanceId::new(raw_vni).is_ok_and(|vni| {
             current.instances().get(vni).is_none() && candidate.instances().get(vni).is_some()
@@ -2825,7 +2828,66 @@ fn evpn_runtime_validate_additive_build_up_shape(
                             .iter()
                             .all(|&vni| candidate.instances().get(vni).is_some())
                 })
+    }) && plan.ethernet_segments.redefined.iter().all(|esi| {
+        evpn_runtime_es_member_expansion_is_additive(current, candidate, *esi, &added_l2vnis)
     })
+}
+
+fn evpn_runtime_added_l2vnis(plan: &EvpnRuntimePlan) -> Option<BTreeSet<EvpnInstanceId>> {
+    plan.evpn_instances
+        .added
+        .iter()
+        .map(|raw| EvpnInstanceId::new(*raw))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .ok()
+}
+
+fn evpn_runtime_es_member_expansion_is_additive(
+    current: &EvpnRuntimeModel,
+    candidate: &EvpnRuntimeCandidate,
+    esi: EthernetSegmentIdentifier,
+    added_l2vnis: &BTreeSet<EvpnInstanceId>,
+) -> bool {
+    let Some(current_segment) = current
+        .ethernet_segments()
+        .iter()
+        .find(|segment| segment.esi == esi)
+    else {
+        return false;
+    };
+    let Some(candidate_segment) = candidate
+        .ethernet_segments()
+        .iter()
+        .find(|segment| segment.esi == esi)
+    else {
+        return false;
+    };
+
+    if candidate_segment.member_vnis.len() <= current_segment.member_vnis.len()
+        || !candidate_segment
+            .member_vnis
+            .is_superset(&current_segment.member_vnis)
+    {
+        return false;
+    }
+    let added_members: BTreeSet<_> = candidate_segment
+        .member_vnis
+        .difference(&current_segment.member_vnis)
+        .copied()
+        .collect();
+    if added_members.is_empty()
+        || !added_members.iter().all(|vni| added_l2vnis.contains(vni))
+        || !candidate_segment
+            .member_vnis
+            .iter()
+            .all(|&vni| candidate.instances().get(vni).is_some())
+    {
+        return false;
+    }
+
+    let mut probe = current_segment.clone();
+    probe.member_vnis.clone_from(&candidate_segment.member_vnis);
+    &probe == candidate_segment
 }
 
 fn evpn_runtime_is_l2vni_mixed_plan(plan: &EvpnRuntimePlan) -> bool {
