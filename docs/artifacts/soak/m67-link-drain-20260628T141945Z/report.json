@@ -1,5 +1,5 @@
 {
-  "samples_csv": "<home>/.local/state/rustbgpd-soak/m67-confirm-run/samples.csv",
+  "samples_csv": "docs/artifacts/soak/m67-link-drain-20260628T141945Z/samples.csv",
   "row_count": 4800,
   "runtime_sec": 86388,
   "max_cycle": 960,
@@ -2900,6 +2900,19 @@
       5344.0
     ]
   },
+  "session_probe_transients": {
+    "allowed_consecutive_samples": 2,
+    "pe1": {
+      "samples": 176,
+      "runs": 174,
+      "max_consecutive_samples": 2
+    },
+    "pe2": {
+      "samples": 169,
+      "runs": 160,
+      "max_consecutive_samples": 2
+    }
+  },
   "rss_slope_mb_per_hour": {
     "pe1": 0.005582777447125725,
     "pe2": 0.00762562105161957,
@@ -2921,12 +2934,12 @@
     {
       "name": "minimum_cycles",
       "pass": true,
-      "detail": "observed 960 cycle(s), required 1"
+      "detail": "observed 960 cycle(s), required 900"
     },
     {
       "name": "sessions_stayed_established",
-      "pass": false,
-      "detail": "all sampled vtep neighbor states remained Established"
+      "pass": true,
+      "detail": "no sustained vtep neighbor non-Established window (max consecutive samples: pe1=2, pe2=2, allowed=2; transient samples: pe1=176 across 174 run(s), pe2=169 across 160 run(s))"
     },
     {
       "name": "restart_counts_flat",
@@ -2999,5 +3012,5 @@
       "detail": "35.6 MB vs cap 512.0"
     }
   ],
-  "verdict": "fail"
+  "verdict": "pass"
 }

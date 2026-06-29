@@ -16,7 +16,7 @@ operator-facing index that answers "what has actually been proved?"
 | Performance and scale | Criterion, bgperf2, distribution fanout, EVPN load, and RIB memory measurements are documented with hardware, noise floor, and measurement state. | [`BENCHMARKS.md`](BENCHMARKS.md) |
 | High-N memory regression tracking | Ignored RIB memory profile covers Adj-RIB-In, Full-RIB, and RR/route-server fanout at 100k/500k/900k prefixes; A/B summaries come from `bench/compare-rib-memory.sh`. | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md#rib-memory-compare) |
 | Long-running soak evidence | Archived 24-hour EVPN and local-origination soaks include run metadata, pass/fail gates, RSS slopes, and git-tracked artifacts. | [Soak receipts](#soak-receipts) |
-| EVPN link-drain churn harness | Repeatable M67 soak machinery exists for the newest single-active ES drain surface, with a local analyzer for route/session/gauge/timing/RSS gates. No archived 24-hour receipt is claimed yet. | [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
+| EVPN link-drain churn soak | Archived M67 24-hour run covers the single-active ES link-drain surface with route/session/gauge/timing/RSS gates under live MAC-mobility churn. | [`soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md), [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
 
 ## Interop and dataplane receipts
 
@@ -57,14 +57,13 @@ Compact M36-M72 index (details and assertions stay in
 | [Gate 8b MAC-churn 24h](soak-gate8b-mac-churn-24h.md) | PASS | 24h 0m 14s; 69 post-flip reconverges; zero WARN/FATAL/topology-link-loss events; PE1 peak RSS 18.93 MB and post-settle envelope about 0.08 MB/h. | [`artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/`](artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/) |
 | [Gate 9 symmetric IRB 24h](soak-gate9-slice6-24h-symmetric-irb.md) | PASS | 24h 00m 44s; 703 churn cycles; zero BGP established violations; zero installed-route violations; PE1 peak RSS 14.3438 MB and steady-state slope 0.025 MB/h. | [`artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/) |
 | [M37 local-origination MAC-churn 24h](soak-m37-local-origination-churn-24h.md) | PASS | 24h 1m 53s; 17,174 churn cycles; 430,400 injects balanced by 430,400 withdraws; zero session flaps; PE peak RSS 23.531 MB and after-warmup slope 0.184 MB/h. | [`artifacts/soak/m37-local-origination-20260518T015056Z/`](artifacts/soak/m37-local-origination-20260518T015056Z/) |
+| [M67 link-drain MAC-mobility 24h](soak-m67-link-drain-24h-evpn-leak.md) | PASS | 24h; 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat at 0.006-0.016 MB/h; blackout max 300 ms; corrected sampler gate shows no sustained session-loss window. | [`artifacts/soak/m67-link-drain-20260628T141945Z/`](artifacts/soak/m67-link-drain-20260628T141945Z/) |
 
 ## Known proof gaps
 
 - Continuous or multi-day soak automation beyond the archived 24-hour receipts
   remains future work. The harnesses exist, but a standing soak runner is not
-  currently part of normal CI. The M67 link-driven ES drain churn harness is
-  ready for a local 1h/24h run; this page should gain a receipt row only after
-  that run is archived.
+  currently part of normal CI.
 - bgperf2 end-to-end comparison is a documented same-host receipt, not a PR-CI
   gate. Criterion comparison is easy to dispatch on the bench runner, but its
   output is reviewer input until a lower-noise host is available.

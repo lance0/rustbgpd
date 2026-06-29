@@ -34,6 +34,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   growth fixed for EVPN above. The intern table is now reclaimed on those
   paths; the announce path collects only when a replacement actually occurred,
   keeping the initial-load flood off the collection cost.
+- **M67 soak session sampler no longer fails on isolated CLI/query misses.**
+  The link-drain churn analyzer now distinguishes transient VTEP-side
+  `rbgp neighbor` sampling misses from a sustained non-Established window,
+  records the miss count and max consecutive run in `report.json`, and keeps
+  real multi-sample session loss as a failing gate.
 
 ## [0.43.0] — 2026-06-27
 

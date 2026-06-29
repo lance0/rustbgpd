@@ -396,7 +396,10 @@ python3 tests/soak/analyze-m67-link-drain-soak.py \
 Publish the 24h postmortem only after checking:
 
 - `report.json` verdict is `pass`.
-- vtep sessions to both PEs stay Established across all samples.
+- vtep sessions to both PEs show no sustained non-Established window. The
+  sampler records the VTEP's `rbgp neighbor -j` state; isolated CLI/query
+  misses are counted in `session_probe_transients`, while a run longer than
+  `--session-transient-samples` fails the gate.
 - Docker restart counters for vtep/pe1/pe2 stay flat.
 - Every cycle observes pe1 link drain, pe2 DF promotion, AC-gate handover,
   bounded ping blackout, held recovery, pe1 DF restoration, and the CE MAC Type

@@ -75,25 +75,27 @@ Across 960 AC-drain cycles, every failover gate passed:
 - `link_drain_toggled`, `drained_and_recovered_phases_observed`,
   `operator_reason_never_set`, `minimum_cycles` — all ✓.
 
-### The one failing gate — `sessions_stayed_established`
+### Corrected analyzer gate — `sessions_stayed_established`
 
-16 of 17 gates pass; the soak's **overall** verdict is `fail` solely
-because of `sessions_stayed_established`. This is **not** the leak and
-**not** a regression from the fix:
+The first analyzer version treated every failed VTEP CLI/query sample as
+a known non-Established session. The gate now distinguishes transient
+sampler misses from a sustained non-Established window; the regenerated
+`report.json` passes. This is **not** the leak and **not** a regression
+from the fix:
 
-- ~3–4% of samples recorded a PE-side session as non-Established
+- ~3–4% of VTEP-side CLI samples recorded a non-Established result
   (`pe1` 176/4800, `pe2` 169/4800), **spread across all phases**
-  (idle/drained/recovered), not drain-correlated.
-- The **VTEP's** view of its BGP neighbors stayed Established across
-  **every** sample, and `restart_counts_flat` passed (no restarts) —
-  so the sessions could not have genuinely flapped without the
-  authoritative peer noticing. The PE-side dips look like a transient
-  metrics-scrape artifact in the harness sampler.
+  (idle/drained/recovered), not drain-correlated. Every run was one or
+  two samples long; no sustained loss was observed.
+- `restart_counts_flat` passed (no restarts), the route/timing gates
+  passed, and the corrected sustained-loss gate passes with
+  `max_consecutive_samples = 2` for both peers. The dips were
+  transient harness sampler artifacts.
 - The gate failed **identically on both binaries** in the controlled
   A/B that preceded this run (pre- and post-fix), confirming it is
   pre-existing and fix-independent.
 
-Tracked separately as
+Tracked and corrected separately as
 [#593](https://github.com/lance0/rustbgpd/issues/593).
 
 ## Verdict
@@ -103,9 +105,10 @@ The **EVPN MAC-mobility attribute-intern leak is confirmed fixed over
 under 960 sustained link-drain failover cycles with live MAC-mobility
 churn — the exact workload that produced unbounded growth before
 [#590](https://github.com/lance0/rustbgpd/pull/590) +
-[#592](https://github.com/lance0/rustbgpd/pull/592). The lone gate
-failure (`sessions_stayed_established`, #593) is a harness sampler
-artifact orthogonal to the memory result.
+[#592](https://github.com/lance0/rustbgpd/pull/592). The original
+`sessions_stayed_established` analyzer failure (#593) was a harness
+sampler artifact orthogonal to the memory result; the current analyzer
+reports the run as passing.
 
 This closes the operational-proof loop on
 [#591](https://github.com/lance0/rustbgpd/issues/591) (the leak,

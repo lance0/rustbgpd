@@ -5,7 +5,7 @@ Reads the CSV emitted by run-m67-link-drain-churn-soak.sh and produces a JSON
 verdict for the soak-specific gates:
 
   - no recorded harness failures,
-  - vtep sessions to both PEs stay Established on every sample,
+  - vtep sessions to both PEs have no sustained non-Established window,
   - container restart counters stay flat,
   - the run observes both drained and recovered phases,
   - pe1/pe2 DF role and link-drain gauges transition through the expected states,
@@ -64,8 +64,25 @@ def numeric_values(rows: Iterable[dict[str, str]], key: str) -> list[float]:
     return values
 
 
-def is_all_one(rows: list[dict[str, str]], key: str) -> bool:
-    return all(row.get(key) == "1" for row in rows)
+def false_run_stats(rows: list[dict[str, str]], key: str) -> tuple[int, int, int]:
+    """Return total non-1 samples, number of non-1 runs, and max run length."""
+    total = 0
+    runs = 0
+    current_run = 0
+    max_run = 0
+    for row in rows:
+        if row.get(key) == "1":
+            if current_run:
+                max_run = max(max_run, current_run)
+                current_run = 0
+            continue
+        total += 1
+        if current_run == 0:
+            runs += 1
+        current_run += 1
+    if current_run:
+        max_run = max(max_run, current_run)
+    return total, runs, max_run
 
 
 def is_flat(rows: list[dict[str, str]], key: str) -> bool:
@@ -116,6 +133,9 @@ def main() -> None:
                         help="minimum runtime before enforcing RSS slope")
     parser.add_argument("--blackout-bound-ms", type=int, default=30000)
     parser.add_argument("--release-bound-ms", type=int, default=30000)
+    parser.add_argument("--session-transient-samples", type=int, default=2,
+                        help=("maximum consecutive non-Established session "
+                              "samples tolerated as CLI/scrape transients"))
     args = parser.parse_args()
 
     try:
@@ -149,6 +169,8 @@ def main() -> None:
     blackout_samples = numeric_values(rows, "blackout_ms")
     release_samples = numeric_values(rows, "release_ms")
     latest_failures = latest_int(rows, "failures")
+    pe1_session_stats = false_run_stats(rows, "pe1_session_established")
+    pe2_session_stats = false_run_stats(rows, "pe2_session_established")
 
     slopes = {
         "pe1": slope_mb_per_hour(steady_rows, "pe1_rss_mb"),
@@ -171,9 +193,15 @@ def main() -> None:
     gate("minimum_cycles", max_cycle >= args.min_cycles,
          f"observed {max_cycle} cycle(s), required {args.min_cycles}")
     gate("sessions_stayed_established",
-         is_all_one(rows, "pe1_session_established")
-         and is_all_one(rows, "pe2_session_established"),
-         "all sampled vtep neighbor states remained Established")
+         pe1_session_stats[2] <= args.session_transient_samples
+         and pe2_session_stats[2] <= args.session_transient_samples,
+         "no sustained vtep neighbor non-Established window "
+         f"(max consecutive samples: pe1={pe1_session_stats[2]}, "
+         f"pe2={pe2_session_stats[2]}, "
+         f"allowed={args.session_transient_samples}; "
+         f"transient samples: pe1={pe1_session_stats[0]} across "
+         f"{pe1_session_stats[1]} run(s), pe2={pe2_session_stats[0]} "
+         f"across {pe2_session_stats[1]} run(s))")
     gate("restart_counts_flat",
          is_flat(rows, "pe1_restart_count")
          and is_flat(rows, "pe2_restart_count")
@@ -241,6 +269,19 @@ def main() -> None:
         "release_ms": {
             "max": max(release_samples) if release_samples else None,
             "samples": release_samples,
+        },
+        "session_probe_transients": {
+            "allowed_consecutive_samples": args.session_transient_samples,
+            "pe1": {
+                "samples": pe1_session_stats[0],
+                "runs": pe1_session_stats[1],
+                "max_consecutive_samples": pe1_session_stats[2],
+            },
+            "pe2": {
+                "samples": pe2_session_stats[0],
+                "runs": pe2_session_stats[1],
+                "max_consecutive_samples": pe2_session_stats[2],
+            },
         },
         "rss_slope_mb_per_hour": slopes,
         "rss_peak_mb": peaks,

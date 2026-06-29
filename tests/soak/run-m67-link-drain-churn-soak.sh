@@ -215,9 +215,21 @@ wait_ac_state() {
     return 1
 }
 
-session_established() {
+session_state() {
     local peer=${1:?}
-    vtep_ctl neighbor "$peer" 2>/dev/null | grep -qi "establ"
+    vtep_ctl neighbor "$peer" -j 2>/dev/null \
+        | jq -r '.state // empty' 2>/dev/null || true
+}
+
+session_established() {
+    local peer=${1:?} state
+    for _ in 1 2 3; do
+        state=$(session_state "$peer")
+        [ "$state" = "Established" ] && return 0
+        [ -n "$state" ] && return 1
+        sleep 0.2
+    done
+    return 1
 }
 
 wait_vtep_established() {
