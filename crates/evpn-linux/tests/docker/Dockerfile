@@ -28,10 +28,16 @@
 # (it calls unshare(CLONE_NEWNET)); `bridge link set` needs NET_ADMIN.
 # `--cap-add` keeps the surface tighter than `--privileged`.
 
-FROM rust:1.95-bookworm
+# Trixie (Debian 13) rather than bookworm: it ships iproute2 >= 6.3, which
+# the ADR-0094 EVPN split-horizon tests need for the tc-flower `l2_miss` key
+# (bookworm's iproute2 6.1 rejects it). Same pinned Rust 1.95 toolchain, so the
+# only userland change is the newer iproute2 — exactly what the netns/tc tests
+# require, with no cross-release apt-pinning.
+FROM rust:1.95-trixie
 
 # Toolchain bits that the privileged tests shell out to:
-#   - iproute2: `ip netns`, `ip link`, `bridge link`, `bridge fdb`
+#   - iproute2 (>= 6.3): `ip netns`, `ip link`, `bridge link`, `bridge fdb`,
+#     and `tc filter ... flower l2_miss` (ADR-0094)
 #   - iputils-ping: broadcast pings (`ping -b`)
 #   - procps: `sysctl` (used by the spike to enable broadcast pings)
 RUN apt-get update && apt-get install -y --no-install-recommends \

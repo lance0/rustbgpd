@@ -2,10 +2,11 @@
 
 **Status:** Accepted — spike disproved the `enc_src_ip` softswitch mechanism; A2
 deferred as ASIC/offload-dependent (documented limitation). See "Spike result".
-**Revisited by [ADR-0094](0094-evpn-vxlan-nondf-filtering-l2miss.md)** — the
-kernel `l2_miss` primitive (mainline 6.5, added for EVPN non-DF filtering)
-postdates this spike and reopens the softswitch path on a mechanism not tested
-here.
+**Revisited by [ADR-0094](0094-evpn-vxlan-nondf-filtering-l2miss.md)** — the kernel
+`l2_miss` primitive (mainline 6.5) was evaluated as a possible softswitch path. A
+2-PE spike confirmed it does **non-DF filtering** (a refinement of A1), **not** the
+A2 local-bias this ADR is about: the DF-side ES-peer loop needs the stripped overlay
+source. **This A2 deferral stands.**
 **Date:** 2026-05-22
 
 ## Context
