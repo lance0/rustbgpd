@@ -72,7 +72,13 @@ impl PeerManager {
                 if let Some(pending) = pending {
                     debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
                     self.unregister_session(pending.session_id);
-                    let _ = pending.handle.shutdown().await;
+                    let _ = self
+                        .shutdown_handle_bounded(
+                            peer_addr,
+                            "BackToIdle pending inbound candidate",
+                            pending.handle,
+                        )
+                        .await;
                     return;
                 }
 
@@ -104,7 +110,13 @@ impl PeerManager {
                         self.unregister_session(managed.session_id);
                         if let Some(pending) = managed.pending_inbound.take() {
                             self.unregister_session(pending.session_id);
-                            let _ = pending.handle.shutdown().await;
+                            let _ = self
+                                .shutdown_handle_bounded(
+                                    peer_addr,
+                                    "BackToIdle dynamic pending inbound",
+                                    pending.handle,
+                                )
+                                .await;
                         }
                         // Auto-removal is a full peer deletion (the
                         // ManagedPeer is gone; a re-accepted peer at
@@ -113,9 +125,25 @@ impl PeerManager {
                         // join the session task first so the reap runs
                         // after its last transport-side emission, the
                         // same ordering the static delete path uses.
-                        let _ = managed.handle.shutdown().await;
-                        self.reap_deleted_peer_metric_series(peer_addr, &managed.transport_config)
+                        let shutdown = self
+                            .shutdown_handle_bounded(
+                                peer_addr,
+                                "BackToIdle dynamic primary",
+                                managed.handle,
+                            )
                             .await;
+                        if shutdown.joined() {
+                            self.reap_deleted_peer_metric_series(
+                                peer_addr,
+                                &managed.transport_config,
+                            )
+                            .await;
+                        } else {
+                            info!(
+                                %peer_addr,
+                                "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
+                            );
+                        }
                     }
                     self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                     // Skip pending inbound logic for removed dynamic peers
@@ -138,7 +166,13 @@ impl PeerManager {
                         .and_then(|m| m.pending_inbound.take())
                     {
                         self.unregister_session(pending.session_id);
-                        let _ = pending.handle.shutdown().await;
+                        let _ = self
+                            .shutdown_handle_bounded(
+                                peer_addr,
+                                "BackToIdle dropped pending inbound",
+                                pending.handle,
+                            )
+                            .await;
                         if withheld {
                             info!(%peer_addr, "BFD withholding — dropped inbound collision candidate instead of promoting");
                         }

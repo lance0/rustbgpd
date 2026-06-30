@@ -27,7 +27,7 @@ use rustbgpd_bfd::SessionState;
 
 use crate::bfd_runtime::{BfdRuntimeConfig, BfdSessionParams, BfdStateChange};
 
-use super::PeerManager;
+use super::{PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager};
 
 /// State for RFC 5882 coupling, owned by `PeerManager`.
 pub(super) struct BfdCoupling {
@@ -236,7 +236,11 @@ impl PeerManager {
                 c.held_down.remove(&peer);
             }
             if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
-                if let Err(e) = managed.handle.start().await {
+                if let Err(e) = managed
+                    .handle
+                    .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                    .await
+                {
                     warn!(%peer, error = %e, "BFD permits BGP: failed to (re)start session");
                 } else if change.remote_admin_down {
                     info!(%peer, "BFD remote AdminDown — allowing BGP (RFC 5882 §4.1)");
@@ -272,12 +276,18 @@ impl PeerManager {
                     .and_then(|managed| managed.pending_inbound.take());
                 if let Some(pending) = pending {
                     self.unregister_session(pending.session_id);
-                    let _ = pending.handle.shutdown().await;
+                    let _ = self
+                        .shutdown_handle_bounded(peer, "BFD down pending inbound", pending.handle)
+                        .await;
                     info!(%peer, "BFD down — shut down pending inbound collision candidate");
                 }
                 if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
                     let reason = bytes::Bytes::from_static(b"BFD session down");
-                    if let Err(e) = managed.handle.stop(Some(reason)).await {
+                    if let Err(e) = managed
+                        .handle
+                        .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await
+                    {
                         warn!(%peer, error = %e, "BFD down: failed to stop BGP session");
                     } else {
                         info!(%peer, diagnostic = ?change.diagnostic,

@@ -6,7 +6,9 @@ use rustbgpd_transport::{PeerHandle, SessionIdentity, StateQueryOutcome};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
-use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound};
+use super::{
+    ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
+};
 
 impl PeerManager {
     pub(super) async fn spawn_pending_inbound(
@@ -49,14 +51,18 @@ impl PeerManager {
             self.transport_event_sink.clone(),
         );
 
-        if let Err(e) = handle.start().await {
+        if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
             warn!(%peer_addr, error = %e, "failed to start inbound collision candidate");
-            let _ = handle.shutdown().await;
+            let _ = self
+                .shutdown_handle_bounded(peer_addr, "inbound candidate start failure", handle)
+                .await;
             return false;
         }
 
         let Some(managed) = self.peers.get_mut(&peer_key) else {
-            let _ = handle.shutdown().await;
+            let _ = self
+                .shutdown_handle_bounded(peer_addr, "inbound candidate missing peer", handle)
+                .await;
             return false;
         };
         debug_assert!(
@@ -65,7 +71,9 @@ impl PeerManager {
         );
         if managed.pending_inbound.is_some() {
             info!(%peer_addr, "collision candidate appeared while starting another, dropping newer inbound");
-            let _ = handle.shutdown().await;
+            let _ = self
+                .shutdown_handle_bounded(peer_addr, "inbound candidate duplicate", handle)
+                .await;
             return false;
         }
         managed.pending_inbound = Some(PendingInbound { handle, session_id });
@@ -199,7 +207,7 @@ impl PeerManager {
                     self.transport_event_sink.clone(),
                 );
 
-                if let Err(e) = handle.start().await {
+                if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
                     warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
                     return;
                 }
@@ -388,7 +396,10 @@ impl PeerManager {
                     .and_then(|m| m.pending_inbound.take())
                 {
                     self.unregister_session(pending.session_id);
-                    let _ = pending.handle.collision_dump().await;
+                    let _ = pending
+                        .handle
+                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await;
                 }
             }
             std::cmp::Ordering::Less => {
@@ -400,7 +411,9 @@ impl PeerManager {
                     "collision: remote wins, replacing with inbound"
                 );
                 if let Some(old_handle) = self.promote_pending_inbound_handle(&peer_key) {
-                    let _ = old_handle.collision_dump().await;
+                    let _ = old_handle
+                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await;
                 }
             }
             std::cmp::Ordering::Equal => {
@@ -416,7 +429,10 @@ impl PeerManager {
                     .and_then(|m| m.pending_inbound.take())
                 {
                     self.unregister_session(pending.session_id);
-                    let _ = pending.handle.collision_dump().await;
+                    let _ = pending
+                        .handle
+                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await;
                 }
             }
         }
@@ -443,7 +459,10 @@ impl PeerManager {
         let Some(old_handle) = self.promote_pending_inbound_handle(peer_key) else {
             return false;
         };
-        let _ = old_handle.shutdown().await;
+        let address = peer_key.address;
+        let _ = self
+            .shutdown_handle_bounded(address, "promote pending inbound old primary", old_handle)
+            .await;
         true
     }
 
@@ -488,13 +507,19 @@ impl PeerManager {
         self.register_session(session_id, &peer_key);
 
         // Shut down the old session
-        let _ = old_handle.shutdown().await;
+        let _ = self
+            .shutdown_handle_bounded(peer_addr, "replace with inbound old primary", old_handle)
+            .await;
 
         // Start the new inbound session — trigger TcpConnectionConfirmed
         let Some(managed) = self.peers.get(&peer_key) else {
             return;
         };
-        if let Err(e) = managed.handle.start().await {
+        if let Err(e) = managed
+            .handle
+            .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+        {
             warn!(%peer_addr, error = %e, "failed to start inbound session");
         } else {
             info!(%peer_addr, "inbound session started");

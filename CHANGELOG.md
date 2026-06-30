@@ -104,6 +104,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   treating an ORF-carrying ROUTE-REFRESH as handled. Stale-session,
   unregistered-peer, dropped-reply, and timed-out ORF updates now fall back to
   the plain Route Refresh path instead of silently suppressing re-advertisement.
+- **PeerManager lifecycle commands are bounded on stalled sessions.** Start,
+  stop, collision-dump, shutdown, and operator Route Refresh command paths now
+  use bounded session-command sends / joins when driven by the single
+  PeerManager actor. A peer whose session task stops draining its bounded
+  command channel now returns a targeted timeout or logs best-effort cleanup
+  failure instead of wedging unrelated peer RPC/reconcile work. Shutdown shares
+  a single deadline budget across the command send and task join, and a failed
+  dynamic-accept start aborts the orphaned session task.
 
 ## [0.44.0] — 2026-06-29
 

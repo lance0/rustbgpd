@@ -374,6 +374,22 @@ pub struct PeerHandle {
 const COMMAND_BUFFER: usize = 8;
 
 impl PeerHandle {
+    async fn send_simple_command_timeout(
+        &self,
+        command: PeerCommand,
+        operation: &'static str,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        match tokio::time::timeout(deadline, self.commands.send(command)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(PeerCommandError::SessionExited),
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation,
+                deadline,
+            }),
+        }
+    }
+
     /// Test-only constructor that wraps an already-spawned task plus
     /// its command sender. Lets tests in dependent crates substitute a
     /// fake session task for failure-mode coverage that real session
@@ -736,6 +752,22 @@ impl PeerHandle {
         self.commands.send(PeerCommand::Start).await
     }
 
+    /// Send a Start command with a bounded deadline.
+    ///
+    /// Use this from actor/RPC/admin paths. A session task parked on TCP write
+    /// back-pressure may stop draining its bounded command channel; the
+    /// unbounded [`Self::start`] helper is retained for call sites that can
+    /// tolerate waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn start_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::Start, "start", deadline)
+            .await
+    }
+
     /// Send a Stop command for graceful teardown.
     ///
     /// The optional `reason` is included in the Cease NOTIFICATION (RFC 8203).
@@ -748,6 +780,21 @@ impl PeerHandle {
         reason: Option<Bytes>,
     ) -> Result<(), mpsc::error::SendError<PeerCommand>> {
         self.commands.send(PeerCommand::Stop { reason }).await
+    }
+
+    /// Send a Stop command with a bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn stop_timeout(
+        &self,
+        reason: Option<Bytes>,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::Stop { reason }, "stop", deadline)
+            .await
     }
 
     /// Send a Shutdown command and wait for the task to finish.
@@ -767,6 +814,17 @@ impl PeerHandle {
     /// Returns an error if the session task has already exited.
     pub async fn collision_dump(&self) -> Result<(), mpsc::error::SendError<PeerCommand>> {
         self.commands.send(PeerCommand::CollisionDump).await
+    }
+
+    /// Send a `CollisionDump` command with a bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn collision_dump_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::CollisionDump, "collision_dump", deadline)
+            .await
     }
 
     /// Send a ROUTE-REFRESH message for the given address family.
@@ -789,6 +847,45 @@ impl PeerHandle {
             .await
             .map_err(|_| PeerCommandError::SessionExited)?;
         reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+    }
+
+    /// Send a ROUTE-REFRESH command with a bounded deadline.
+    ///
+    /// Wraps both the command-channel send and the session-side reply wait so a
+    /// single stalled peer cannot park the peer-manager actor during
+    /// `soft_reset_in`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error describing why the message was not sent, including
+    /// [`PeerCommandError::TimedOut`] when the deadline expires.
+    pub async fn send_route_refresh_timeout(
+        &self,
+        afi: Afi,
+        safi: Safi,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::SendRouteRefresh {
+                    afi,
+                    safi,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "send_route_refresh",
+                deadline,
+            }),
+        }
     }
 
     /// Query the current session state.
@@ -1213,6 +1310,103 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(250),
             "query_state_with should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    fn handle_with_full_command_channel() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
+        let (tx, rx) = mpsc::channel::<PeerCommand>(1);
+        let task = tokio::spawn(async { Ok::<(), TransportError>(()) });
+        (PeerHandle { commands: tx, task }, rx)
+    }
+
+    async fn fill_command_channel(handle: &PeerHandle) {
+        handle
+            .commands
+            .send(PeerCommand::Start)
+            .await
+            .expect("receiver is intentionally kept alive");
+    }
+
+    fn assert_timed_out(result: &Result<(), PeerCommandError>, operation: &'static str) {
+        assert!(
+            matches!(
+                result,
+                Err(PeerCommandError::TimedOut {
+                    operation: actual,
+                    ..
+                }) if *actual == operation
+            ),
+            "expected {operation} timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.start_timeout(deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "start");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "start_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.stop_timeout(None, deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "stop");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "stop_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collision_dump_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.collision_dump_timeout(deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "collision_dump");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "collision_dump_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_route_refresh_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle
+            .send_route_refresh_timeout(Afi::Ipv4, Safi::Unicast, deadline)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "send_route_refresh");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "send_route_refresh_timeout should bound at ~50ms, took {elapsed:?}"
         );
     }
 }

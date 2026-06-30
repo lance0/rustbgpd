@@ -303,11 +303,30 @@ impl PeerManager {
             self.unregister_session(managed.session_id);
             if let Some(pending) = managed.pending_inbound.take() {
                 self.unregister_session(pending.session_id);
-                let _ = pending.handle.shutdown().await;
+                let _ = self
+                    .shutdown_handle_bounded(
+                        peer_key.address,
+                        "dynamic rollback pending inbound",
+                        pending.handle,
+                    )
+                    .await;
             }
-            let _ = managed.handle.shutdown().await;
-            self.reap_deleted_peer_metric_series(peer_key.address, &managed.transport_config)
+            let shutdown = self
+                .shutdown_handle_bounded(
+                    peer_key.address,
+                    "dynamic rollback primary",
+                    managed.handle,
+                )
                 .await;
+            if shutdown.joined() {
+                self.reap_deleted_peer_metric_series(peer_key.address, &managed.transport_config)
+                    .await;
+            } else {
+                warn!(
+                    peer = %peer_key,
+                    "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
+                );
+            }
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             removed += 1;
             info!(
