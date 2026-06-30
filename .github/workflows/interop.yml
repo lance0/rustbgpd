@@ -28,6 +28,9 @@ name: Interop
 #     distinct path_ids over a 4-node topology (rustbgpd between
 #     two upstreams + one client). Wire-level path_id encoding +
 #     capability-negotiation fragility.
+#   - M73 (~10 s test): BGP-LS reflection (RFC 9552) — GoBGP v4
+#     source injects a Node NLRI, rustbgpd reflects it as RR, and
+#     GoBGP v4 sink validates receipt plus withdrawal.
 #
 # Operational + security tier — BMP monitoring, transport security,
 # FlowSpec:
@@ -286,6 +289,44 @@ jobs:
           label: M17
           topology: tests/interop/m17-addpath-frr.clab.yml
           script: tests/interop/scripts/test-m17-addpath-frr.sh
+
+  m73:
+    name: M73 — BGP-LS reflection (GoBGP 4.6.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build gobgp:bgpls
+        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+
+      - name: Run M73 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M73
+          topology: tests/interop/m73-bgpls-reflection-gobgp.clab.yml
+          script: tests/interop/scripts/test-m73-bgpls-reflection-gobgp.sh
 
   m22:
     name: M22 — FlowSpec (FRR 10.3.1)

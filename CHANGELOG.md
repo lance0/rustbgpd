@@ -31,6 +31,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transport encoder preserves opaque RFC 9552 NLRI bytes and applies the same
   RFC 4456 `ORIGINATOR_ID` / `CLUSTER_LIST` reflection attributes used by the
   existing families.
+- **M73 GoBGP interop proof for BGP-LS reflection.** The hosted interop suite
+  now includes a GoBGP 4.6.0 source -> rustbgpd route reflector -> GoBGP 4.6.0
+  sink receipt for ADR-0077. GoBGP injects an RFC 9552 BGP-LS Node NLRI,
+  rustbgpd exposes it through `rbgp rib bgpls`, the sink receives the reflected
+  route with the BGP-LS Attribute payload intact, and source withdrawal removes
+  the object from both rustbgpd and the sink.
 - **ADR-0063 EVPN runtime convergence — additive ES member expansion.**
   `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff` now treat an
   additive candidate that adds L2VNIs and expands an existing Ethernet

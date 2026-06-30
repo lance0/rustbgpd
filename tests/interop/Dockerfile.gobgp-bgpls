@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+
+# Dedicated GoBGP image for the BGP-LS interop receipt.
+#
+# The shared `gobgp:interop` image intentionally stays on the v3 line used by
+# the EVPN M71/M72 fixtures. M73 needs stable BGP-LS CLI injection support, so
+# it pins a separate v4 image instead of changing those existing receipts.
+
+FROM golang:1.25-bookworm AS builder
+
+ARG GOBGP_VERSION=v4.6.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${GOBGP_VERSION}" https://github.com/osrg/gobgp.git .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gobgp ./cmd/gobgp
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gobgpd ./cmd/gobgpd
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/gobgp /usr/local/bin/gobgp
+COPY --from=builder /out/gobgpd /usr/local/bin/gobgpd
+
+EXPOSE 179 50051
+
+CMD ["gobgpd"]

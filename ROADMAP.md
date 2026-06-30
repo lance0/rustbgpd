@@ -160,11 +160,12 @@ has it, no broad performance sprints without profile evidence.
   opaque NLRI/TLV bytes through `RibService.ListBgpLsRoutes` and
   `rbgp rib bgpls`. **Done:** BGP-LS routes now flow through initial table
   dumps, outbound reflection/export, route-refresh replay, and dirty
-  Adj-RIB-Out resync for eligible negotiated peers. GR entry now
-  conservatively withdraws BGP-LS routes and Enhanced Route Refresh sweeps
-  omitted BGP-LS objects instead of reporting stale controller-feed data as
-  live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, and local
-  topology production remain deferred.
+  Adj-RIB-Out resync for eligible negotiated peers; M73 proves the SAFI 71
+  reflection and withdrawal path with a GoBGP 4.6.0 route source and sink. GR
+  entry now conservatively withdraws BGP-LS routes and Enhanced Route Refresh
+  sweeps omitted BGP-LS objects instead of reporting stale controller-feed data
+  as live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, BGP-LS VPN
+  interop, and local topology production remain deferred.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix
@@ -879,17 +880,17 @@ has it, no broad performance sprints without profile evidence.
   client's best path from the *client's* topological vantage point instead of the
   RR's own — an on-identity RR feature. Heavily gated, though: RFC 9107 §3.1
   admits only an IGP or BGP-LS as the topology source for the per-client SPF, and
-  rustbgpd runs no IGP (and won't). So ORR remains more than the BGP-LS
-  receive/API slice: it needs BGP-LS reflection/export, an in-daemon link-state
-  DB + SPF engine, and then a per-client best-path dimension (with Add-Path to
+  rustbgpd runs no IGP (and won't). So ORR remains more than today's BGP-LS
+  reflection slice: it needs an in-daemon link-state DB + SPF engine, and then a
+  per-client best-path dimension (with Add-Path to
   distribute the multiple bests), touching the
   single-best-path RIB core. No open-source peer ships it (FRR's request has sat
   open since 2018; BIRD / GoBGP / OpenBGPd lack it; only Cisco / Juniper / Nokia
   do). Not yet an open-source parity gap — but it is drawing renewed attention in
   the SONiC / DC-NOS ecosystem rustbgpd competes in (where the NOS's FRR can
   already source the IGP topology ORR needs), so track it as a possible future
-  DC-fabric RR baseline rather than dismiss it. Revisit when BGP-LS reflection
-  and semantic LSDB/SPF substrate are plausible and the demand signal firms.
+  DC-fabric RR baseline rather than dismiss it. Revisit when a semantic
+  LSDB/SPF substrate is plausible and the demand signal firms.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.
