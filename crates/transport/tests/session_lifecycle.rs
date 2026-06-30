@@ -25,24 +25,11 @@ const LOCAL_ASN: u32 = 65001;
 const REMOTE_ASN: u32 = 65002;
 
 fn test_peer_config() -> PeerConfig {
-    PeerConfig {
-        local_asn: LOCAL_ASN,
-        remote_asn: REMOTE_ASN,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 5,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    }
+    let mut config = PeerConfig::new(LOCAL_ASN, REMOTE_ASN, Ipv4Addr::new(10, 0, 0, 1));
+    config.connect_retry_secs = 5;
+    config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    config.gr_restart_time = 120;
+    config
 }
 
 fn mock_open() -> OpenMessage {

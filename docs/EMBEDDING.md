@@ -16,7 +16,7 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 | Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
 |--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
 | `rustbgpd-wire`          | **Yes** (crates.io, latest 0.13.0) | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | No (`publish = false`) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Stabilize next   | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-fsm`           | Staged (decoupled `0.1.0`) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Publish next     | Pure RFC 4271 FSM; no I/O. |
 | `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | After fsm        | VRP table + RTR client. |
 | `rustbgpd-rib`           | No           | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
 | `rustbgpd-policy`        | No           | wire                              | —                          | Later            | Import/export policy. |
@@ -186,7 +186,7 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 # Cargo.toml  (after fsm is published)
 [dependencies]
 rustbgpd-wire = "0.13"
-rustbgpd-fsm = "0.45"
+rustbgpd-fsm = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -274,7 +274,7 @@ the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
    `crates/wire/Cargo.toml` and the CHANGELOG. This is the foundation — nothing
    else can publish before it because every internal crate depends on it.
 
-2. **`rustbgpd-fsm` (publish next, as 0.45.0 or a decoupled 0.1.0).** Why:
+2. **`rustbgpd-fsm` (publish next, as a decoupled `0.1.0`).** Why:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling. It can publish the moment `wire` is on crates.io.
    - It is the smallest, purest building block a second consumer needs. A test

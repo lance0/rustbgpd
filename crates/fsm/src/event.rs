@@ -5,6 +5,7 @@ use rustbgpd_wire::{Afi, DecodeError, NotificationMessage, OpenMessage, Safi};
 
 /// Input events that drive FSM transitions.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Event {
     // ── Admin ──────────────────────────────────────────
     /// Operator requests the session be started.

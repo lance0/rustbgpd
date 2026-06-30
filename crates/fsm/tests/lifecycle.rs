@@ -8,24 +8,11 @@ use rustbgpd_wire::{Afi, Capability, OpenMessage, Safi};
 use rustbgpd_fsm::{Action, Event, PeerConfig, Session, SessionState, TimerType};
 
 fn test_config() -> PeerConfig {
-    PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    }
+    let mut config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    config.connect_retry_secs = 30;
+    config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    config.gr_restart_time = 120;
+    config
 }
 
 fn peer_open() -> OpenMessage {

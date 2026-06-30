@@ -22,24 +22,10 @@ use tokio::sync::oneshot;
 use super::*;
 
 fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
-    let peer_config = PeerConfig {
-        local_asn,
-        remote_asn,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -54,24 +40,10 @@ fn make_test_session_with_rib(
     local_asn: u32,
     remote_asn: u32,
 ) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
-    let peer_config = PeerConfig {
-        local_asn,
-        remote_asn,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -93,24 +65,10 @@ fn make_test_session_with_rib_and_bmp(
     mpsc::Receiver<RibUpdate>,
     mpsc::Receiver<BmpEvent>,
 ) {
-    let peer_config = PeerConfig {
-        local_asn,
-        remote_asn,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -140,31 +98,15 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     if extended_nexthop {
         extended_nexthop_families.insert((Afi::Ipv4, Safi::Unicast), Afi::Ipv6);
     }
-    NegotiatedSession {
-        peer_asn: remote_asn,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        hold_time: 90,
-        keepalive_interval: 30,
-        peer_capabilities: vec![],
-        four_octet_as: true,
-        negotiated_families: vec![(Afi::Ipv4, Safi::Unicast)],
-        peer_gr_capable: false,
-        peer_restart_state: false,
-        peer_restart_time: 0,
-        peer_gr_families: vec![],
-        peer_notification_gr: false,
-        peer_llgr_capable: false,
-        peer_llgr_families: vec![],
-        peer_route_refresh: false,
-        peer_enhanced_route_refresh: false,
-        peer_extended_message: false,
-        local_role: None,
-        remote_role: None,
-        role_negotiated: false,
-        extended_nexthop_families,
-        add_path_families: HashMap::new(),
-        negotiated_orf_recv: Vec::new(),
-    }
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = remote_asn;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    negotiated.extended_nexthop_families = extended_nexthop_families;
+    negotiated
 }
 
 fn install_test_negotiated_session(session: &mut PeerSession, negotiated: NegotiatedSession) {
@@ -2883,31 +2825,13 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
 
 /// Import policy is applied before `RoutesReceived` reaches the RIB.
 /// Denied routes are filtered locally in transport and never forwarded.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear test scaffold + many fields per PolicyStatement; splitting hurts readability"
-)]
 #[tokio::test]
 async fn import_policy_denied_routes_do_not_reach_rib() {
     // Create a session with import policy that denies 198.51.100.0/24
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -3022,24 +2946,10 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
 async fn import_decision_cache_records_deny_and_permit_for_explain() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -3182,32 +3092,14 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
 /// session could return a decision recorded on the *previous* session
 /// for any prefix the peer has not yet re-advertised. Mirrors the
 /// per-session permit/deny counter reset in the same handler.
-#[expect(
-    clippy::too_many_lines,
-    reason = "regression test keeps the multi-step policy refresh scenario readable"
-)]
 #[tokio::test]
 async fn session_down_flushes_import_decision_cache() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -3406,24 +3298,10 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         reply_rx.await.expect("session replied")
     }
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -3665,24 +3543,10 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
 async fn explain_disabled_stores_no_decisions() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.explain_enabled = false;
     let metrics = BgpMetrics::new();
@@ -3744,24 +3608,10 @@ async fn explain_disabled_stores_no_decisions() {
 )]
 #[tokio::test]
 async fn import_policy_chain_accumulates_community_and_local_pref() {
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -3893,24 +3743,10 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
 
 #[tokio::test]
 async fn update_import_policy_applies_to_future_updates() {
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -4051,24 +3887,10 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         .unwrap();
 
     // Session import policy denies the stale prefix, but permits the new one.
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -4177,24 +3999,10 @@ async fn err_denied_replacement_is_swept_at_eorr() {
 
 #[tokio::test]
 async fn import_policy_match_next_hop_filters_route() {
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -4714,24 +4522,10 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
     use rustbgpd_rpki::{ValidationSnapshot, VrpEntry, VrpTable};
     use tokio::sync::watch;
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -4861,24 +4655,10 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
     use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot};
     use tokio::sync::watch;
 
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -5044,31 +4824,13 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
     session.config.cluster_id = Some(local_cluster_id);
 
     // Negotiate L2VPN/EVPN so the withdrawal isn't family-filtered.
-    let negotiated = NegotiatedSession {
-        peer_asn: 65001,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        hold_time: 90,
-        keepalive_interval: 30,
-        peer_capabilities: vec![],
-        four_octet_as: true,
-        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
-        peer_gr_capable: false,
-        peer_restart_state: false,
-        peer_restart_time: 0,
-        peer_gr_families: vec![],
-        peer_notification_gr: false,
-        peer_llgr_capable: false,
-        peer_llgr_families: vec![],
-        peer_route_refresh: false,
-        peer_enhanced_route_refresh: false,
-        peer_extended_message: false,
-        local_role: None,
-        remote_role: None,
-        role_negotiated: false,
-        extended_nexthop_families: HashMap::new(),
-        add_path_families: HashMap::new(),
-        negotiated_orf_recv: Vec::new(),
-    };
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = 65001;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
@@ -5159,31 +4921,13 @@ async fn evpn_routes_counted_toward_max_prefix() {
     session.test_install_stream(client);
     establish_test_session(&mut session, 65001).await;
     session.config.max_prefixes = Some(2);
-    let negotiated = NegotiatedSession {
-        peer_asn: 65001,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        hold_time: 90,
-        keepalive_interval: 30,
-        peer_capabilities: vec![],
-        four_octet_as: true,
-        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
-        peer_gr_capable: false,
-        peer_restart_state: false,
-        peer_restart_time: 0,
-        peer_gr_families: vec![],
-        peer_notification_gr: false,
-        peer_llgr_capable: false,
-        peer_llgr_families: vec![],
-        peer_route_refresh: false,
-        peer_enhanced_route_refresh: false,
-        peer_extended_message: false,
-        local_role: None,
-        remote_role: None,
-        role_negotiated: false,
-        extended_nexthop_families: HashMap::new(),
-        add_path_families: HashMap::new(),
-        negotiated_orf_recv: Vec::new(),
-    };
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = 65001;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
@@ -5265,31 +5009,13 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
     // eBGP session — AS_PATH loop only triggers when the peer's UPDATE
     // contains our local ASN, which only happens across an eBGP boundary.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    let negotiated = NegotiatedSession {
-        peer_asn: 65002,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-        hold_time: 90,
-        keepalive_interval: 30,
-        peer_capabilities: vec![],
-        four_octet_as: true,
-        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
-        peer_gr_capable: false,
-        peer_restart_state: false,
-        peer_restart_time: 0,
-        peer_gr_families: vec![],
-        peer_notification_gr: false,
-        peer_llgr_capable: false,
-        peer_llgr_families: vec![],
-        peer_route_refresh: false,
-        peer_enhanced_route_refresh: false,
-        peer_extended_message: false,
-        local_role: None,
-        remote_role: None,
-        role_negotiated: false,
-        extended_nexthop_families: HashMap::new(),
-        add_path_families: HashMap::new(),
-        negotiated_orf_recv: Vec::new(),
-    };
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = 65002;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
@@ -5763,24 +5489,10 @@ fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str) -> f64 {
 fn backpressure_test_session(
     rib_capacity: usize,
 ) -> (PeerSession, mpsc::Receiver<RibUpdate>, BgpMetrics) {
-    let peer_config = PeerConfig {
-        local_asn: 65001,
-        remote_asn: 65002,
-        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-        hold_time: 90,
-        connect_retry_secs: 30,
-        families: vec![(Afi::Ipv4, Safi::Unicast)],
-        graceful_restart: false,
-        gr_restart_time: 120,
-        llgr_stale_time: 0,
-        add_path_receive: false,
-        add_path_send: false,
-        add_path_send_max: 0,
-        local_role: None,
-        strict_role: false,
-        prefix_orf_receive: false,
-        disable_ipv4_unicast: false,
-    };
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
