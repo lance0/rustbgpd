@@ -141,6 +141,15 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `validate_update_attributes_with_options`, e.g. accepting a link-local-primary
   IPv4 `MP_REACH_NLRI` next-hop on a scoped unnumbered session (RFC 8950)
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
+- **`UpdateMessage::build`** / **`UpdateMessage::try_build`** — build a wire
+  UPDATE from typed components; `try_build` is the fallible counterpart that
+  returns `EncodeError` (e.g. `ValueOutOfRange` for an oversized FlowSpec rule
+  vector) instead of panicking, since structured `MP_REACH_NLRI` /
+  `MP_UNREACH_NLRI` attribute encoding is now fallible (0.13.0)
+- **`Afi`** / **`Safi`** — IANA address-family identifiers; the BGP-LS codec
+  adds `Afi::BgpLs` (16388) plus `Safi::BgpLs` (71) and `Safi::BgpLsVpn` (72)
+  (0.13.0). These enums are not `#[non_exhaustive]`, so exhaustive downstream
+  matches must add arms for the new variants
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /
   `COMMUNITY_NO_EXPORT_SUBCONFED` (RFC 1997), `COMMUNITY_BLACKHOLE` (RFC 7999),

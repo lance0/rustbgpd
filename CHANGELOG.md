@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-06-30
+
 ### Added
 
 - **ADR-0077 BGP-LS receive/API tranche.** `families` now accepts
@@ -47,6 +49,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actors, and any failed publish restores committed snapshots and withdraws
   speculative IMET. ES field changes, member removals, existing-member
   additions, arbitrary relinks, and IP-VRF identity edits still fail closed.
+
+### Changed
+
+- **`rustbgpd-wire` 0.12.0 → 0.13.0 (breaking).** The decoupled wire crate
+  gains BGP-LS (RFC 9552) codec support, which adds `Afi::BgpLs` and
+  `Safi::BgpLs` (71) / `Safi::BgpLsVpn` (72) variants to the `Afi`/`Safi`
+  enums — exhaustive downstream matches must add arms. Structured
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attribute encoding is now fallible
+  (returns `EncodeError` for oversized FlowSpec rule vectors instead of
+  panicking), and `UpdateMessage::try_build` is added as the fallible
+  counterpart to `UpdateMessage::build`.
 
 ### Fixed
 
