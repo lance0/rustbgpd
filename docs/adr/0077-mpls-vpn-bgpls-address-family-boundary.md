@@ -191,9 +191,11 @@ then made BGP-LS reachable only as a typed vertical slice: explicit
 Loc-RIB storage keyed by BGP-LS identity, opaque API/CLI export, and
 fail-closed rejection of BGP-LS Add-Path until route identity and reflection
 semantics are pinned. It also omits BGP-LS from GR/LLGR stale-preservation
-capabilities until that lifecycle is implemented for the typed RIB. Outbound
-reflection/export remains the next slice rather than a side effect of adding
-AFI/SAFI constants.
+capabilities until that lifecycle is implemented for the typed RIB; until then,
+GR entry conservatively withdraws BGP-LS routes and Enhanced Route Refresh
+sweeps omitted BGP-LS objects at EoRR/timeout so stale controller-feed data is
+not reported as live. Outbound reflection/export remains the next slice rather
+than a side effect of adding AFI/SAFI constants.
 
 The VPNv4/VPNv6 wire substrate follows the same rule. The callable codec for
 RFC 8277 label stacks plus RFC 4364 / RFC 4659 RD-prefixed VPN prefixes is

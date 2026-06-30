@@ -674,6 +674,17 @@ impl AdjRibIn {
         self.bgpls_routes.remove(key).is_some()
     }
 
+    /// Withdraw all BGP-LS routes from this Adj-RIB-In.
+    ///
+    /// BGP-LS GR/LLGR stale preservation is not implemented yet, so GR entry
+    /// uses this helper to make the conservative exclusion explicit instead of
+    /// accidentally retaining stale controller-feed objects as live.
+    pub fn withdraw_all_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
+        let keys: Vec<_> = self.bgpls_routes.keys().cloned().collect();
+        self.bgpls_routes.clear();
+        keys
+    }
+
     /// Look up a BGP-LS route by opaque key.
     #[must_use]
     pub fn get_bgpls(&self, key: &BgpLsRouteKey) -> Option<&BgpLsRibRoute> {

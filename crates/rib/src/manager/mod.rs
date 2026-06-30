@@ -105,6 +105,8 @@ pub struct RibManager {
     refresh_stale_flowspec: HashMap<IpAddr, HashSet<(Afi, FlowSpecRule, u32)>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
     refresh_stale_evpn: HashMap<IpAddr, HashSet<rustbgpd_wire::EvpnRouteKey>>,
+    /// BGP-LS routes still awaiting replacement during an inbound refresh.
+    refresh_stale_bgpls: HashMap<IpAddr, HashSet<crate::route::BgpLsRouteKey>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
     refresh_stale_counts: HashMap<(IpAddr, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
@@ -519,6 +521,7 @@ impl RibManager {
             refresh_stale_routes: HashMap::new(),
             refresh_stale_flowspec: HashMap::new(),
             refresh_stale_evpn: HashMap::new(),
+            refresh_stale_bgpls: HashMap::new(),
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
@@ -631,6 +634,7 @@ impl RibManager {
         self.refresh_stale_routes.remove(&peer);
         self.refresh_stale_flowspec.remove(&peer);
         self.refresh_stale_evpn.remove(&peer);
+        self.refresh_stale_bgpls.remove(&peer);
         self.refresh_stale_counts
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
         self.refresh_deadlines
@@ -1580,26 +1584,50 @@ impl RibManager {
         announced: Vec<crate::route::BgpLsRibRoute>,
         withdrawn: Vec<crate::route::BgpLsRouteKey>,
     ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
         let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
         let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut any_replaced = false;
 
         for key in withdrawn {
+            let family = key.family.to_afi_safi();
             if rib.withdraw_bgpls(&key) {
-                affected.insert(key);
+                affected.insert(key.clone());
+            }
+            if active_refresh.contains(&family)
+                && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
+                && stale.remove(&key)
+            {
+                *removed_stale_counts.entry(family).or_default() += 1;
             }
         }
 
         for route in announced {
             let key = route.key();
+            let family = route.family.to_afi_safi();
             any_replaced |= rib.insert_bgpls(route);
-            affected.insert(key);
+            affected.insert(key.clone());
+            if active_refresh.contains(&family)
+                && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
+                && stale.remove(&key)
+            {
+                *removed_stale_counts.entry(family).or_default() += 1;
+            }
         }
 
         if any_replaced {
             rib.gc_intern_table();
         }
 
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
         self.recompute_bgpls_keys(affected);
     }
 
