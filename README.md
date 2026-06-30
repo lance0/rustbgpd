@@ -54,7 +54,7 @@ diversity scripts remain local / manual gates. See
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
-Future BGP-LS, VPNv4/v6, RTC, and labeled-unicast work is scoped by
+Future BGP-LS production, VPNv4/v6, RTC, and labeled-unicast work is scoped by
 [ADR-0077](docs/adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
 families must land as typed route-family slices or unreachable substrate, not as
 unicast `Prefix` shortcuts or MPLS dataplane creep.
@@ -250,7 +250,7 @@ transaction-backed config subset:
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to config when started with `--config`), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain`, `ExplainImportPolicy` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, and import-policy decision explain |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN and BGP-LS), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
 | `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
@@ -411,7 +411,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, true RFC VLAN-aware bundle / non-zero Ethernet Tag service, EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, VPNv4/v6, labeled-unicast, Route Target Constraints, BGP-LS local topology production, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation

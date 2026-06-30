@@ -178,24 +178,24 @@ runtime effects predictably.
 
 The first implementation guard for this boundary is the wire codec's MP-NLRI
 family classifier. `MP_REACH_NLRI` / `MP_UNREACH_NLRI` may only dispatch to
-the current complete verticals: IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, and
-L2VPN EVPN. Other recognized AFI/SAFI combinations reject before NLRI parsing,
-so adding a future SAFI cannot accidentally reinterpret VPN, RTC, BGP-LS, or
-labeled payloads as ordinary unicast `Prefix` data.
+the current complete verticals: IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN
+EVPN, and BGP-LS / BGP-LS VPN. Other recognized AFI/SAFI combinations reject
+before NLRI parsing, so adding a future SAFI cannot accidentally reinterpret
+VPN, RTC, or labeled payloads as ordinary unicast `Prefix` data.
 
 The first BGP-LS implementation steps follow this rule deliberately. The wire
 crate first exposed a standalone RFC 9552 NLRI/TLV codec for raw fixtures while
 the daemon still rejected BGP-LS at MP-BGP dispatch. The receive/API tranche
 then made BGP-LS reachable only as a typed vertical slice: explicit
 `linkstate` / `linkstate_vpn` family negotiation, dedicated Adj-RIB-In /
-Loc-RIB storage keyed by BGP-LS identity, opaque API/CLI export, and
-fail-closed rejection of BGP-LS Add-Path until route identity and reflection
-semantics are pinned. It also omits BGP-LS from GR/LLGR stale-preservation
-capabilities until that lifecycle is implemented for the typed RIB; until then,
-GR entry conservatively withdraws BGP-LS routes and Enhanced Route Refresh
-sweeps omitted BGP-LS objects at EoRR/timeout so stale controller-feed data is
-not reported as live. Outbound reflection/export remains the next slice rather
-than a side effect of adding AFI/SAFI constants.
+Loc-RIB storage keyed by BGP-LS identity, opaque API/CLI export, and outbound
+reflection/export through the same Adj-RIB-Out, route-refresh, dirty-resync,
+and RFC 4456 route-reflector pipeline used by the existing families. It still
+rejects BGP-LS Add-Path until that route-identity lifecycle is pinned, and it
+omits BGP-LS from GR/LLGR stale-preservation capabilities until that lifecycle
+is implemented for the typed RIB; until then, GR entry conservatively withdraws
+BGP-LS routes and Enhanced Route Refresh sweeps omitted BGP-LS objects at
+EoRR/timeout so stale controller-feed data is not reported as live.
 
 The VPNv4/VPNv6 wire substrate follows the same rule. The callable codec for
 RFC 8277 label stacks plus RFC 4364 / RFC 4659 RD-prefixed VPN prefixes is
@@ -255,7 +255,7 @@ Therefore:
 
 ### 7. BGP-LS is a controller-feed feature, not a local topology engine
 
-BGP-LS support, if pursued, starts as receive / reflect / API-export:
+BGP-LS support starts as receive / reflect / API-export:
 
 - rustbgpd can be a BGP-LS **propagator** or controller-facing exporter.
 - It is not initially a BGP-LS **producer** from OSPF, IS-IS, RSVP-TE, Segment

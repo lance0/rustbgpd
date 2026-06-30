@@ -18,11 +18,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   opaque topology objects with RFC 4271-style best-path selection. The new
   `RibService.ListBgpLsRoutes` (`sensitive_read`) and `rbgp rib bgpls` CLI
   expose family, NLRI type, next-hop, peer, raw descriptor/payload bytes, and
-  raw BGP-LS Attribute bytes for controller-facing export. This tranche is
-  receive/API-only: rustbgpd still does not originate local BGP-LS, compute
-  paths from BGP-LS data, or reflect BGP-LS routes outbound until the ADR-0077
-  reflection/export tranche lands, and BGP-LS is omitted from GR/LLGR stale
-  preservation until that lifecycle is implemented for the typed RIB.
+  raw BGP-LS Attribute bytes for controller-facing export. rustbgpd still does
+  not originate local BGP-LS objects, compute paths from BGP-LS data, or
+  negotiate BGP-LS Add-Path / GR / LLGR stale preservation until those typed
+  lifecycle slices land.
+- **ADR-0077 BGP-LS reflection/export tranche.** BGP-LS and BGP-LS VPN routes
+  now participate in the existing route-reflector distribution pipeline:
+  inbound changes recompute Loc-RIB, eligible negotiated peers receive outbound
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI`, initial table dumps include BGP-LS
+  routes, route-refresh requests replay the requested BGP-LS family, and dirty
+  Adj-RIB-Out resyncs cover BGP-LS alongside unicast / FlowSpec / EVPN. The
+  transport encoder preserves opaque RFC 9552 NLRI bytes and applies the same
+  RFC 4456 `ORIGINATOR_ID` / `CLUSTER_LIST` reflection attributes used by the
+  existing families.
 - **ADR-0063 EVPN runtime convergence — additive ES member expansion.**
   `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff` now treat an
   additive candidate that adds L2VNIs and expands an existing Ethernet

@@ -598,14 +598,13 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
 - `"ipv4_flowspec"` — IPv4 FlowSpec (AFI 1, SAFI 133, RFC 8955)
 - `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
-- `"linkstate"` — BGP-LS (AFI 16388, SAFI 71, RFC 9552). This v1
-  tranche is receive/API-only: learned BGP-LS routes are stored in the
-  RIB and exposed through `RibService.ListBgpLsRoutes` / `rbgp rib bgpls`,
-  but rustbgpd does not originate local BGP-LS objects or reflect BGP-LS
-  routes outbound yet. GR/LLGR stale preservation is not negotiated for
-  BGP-LS until the reflection/export tranche owns the full lifecycle.
+- `"linkstate"` — BGP-LS (AFI 16388, SAFI 71, RFC 9552). Learned BGP-LS
+  routes are stored in the RIB, exposed through `RibService.ListBgpLsRoutes` /
+  `rbgp rib bgpls`, and reflected to eligible negotiated peers. rustbgpd does
+  not originate local BGP-LS objects, compute paths from BGP-LS data, or
+  negotiate BGP-LS Add-Path / GR / LLGR stale preservation yet.
 - `"linkstate_vpn"` — BGP-LS VPN (AFI 16388, SAFI 72, RFC 9552), with
-  the same receive/API-only scope as `linkstate`.
+  the same controller-feed / reflection scope as `linkstate`.
 - `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Two
   deployment modes share the family:
   - **RR mode (Phase 1):** the daemon reflects all five RFC 7432

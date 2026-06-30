@@ -43,8 +43,9 @@ suite implementation.
 families out of OPEN negotiation, config, and route APIs until either private
 substrate remains unreachable or a complete typed family slice lands. BGP-LS is
 `Partial`: the receive/API slice negotiates `linkstate` / `linkstate_vpn`,
-stores opaque RFC 9552 objects, and exposes them through gRPC/CLI, while
-outbound reflection/export and local LSDB production remain deferred. The
+stores opaque RFC 9552 objects, exposes them through gRPC/CLI, and reflects
+them to eligible negotiated peers, while local LSDB production remains
+deferred. The
 boundary avoids treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
 IPv4/IPv6 `Prefix` routes.
 

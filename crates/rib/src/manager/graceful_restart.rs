@@ -160,7 +160,7 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if !bgpls_affected.is_empty() {
-            self.recompute_bgpls_keys(bgpls_affected);
+            self.recompute_bgpls_keys(&bgpls_affected);
             // Reclaim attribute sets stranded by the BGP-LS withdrawals above.
             // The gc_intern_table() earlier in this method ran before this
             // recompute, while the Loc-RIB still held the selected-route Arc

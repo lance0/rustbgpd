@@ -146,21 +146,25 @@ has it, no broad performance sprints without profile evidence.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
-- **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive/API slice in
-  progress).* ADR-0077 draws the address-family-expansion boundaries while the
+- **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive + reflection
+  slice in progress).* ADR-0077 draws the address-family-expansion boundaries while the
   substrate is still small: a control-plane AFI/SAFI route-key model for
   VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
   Constraints (RFC 4684), and BGP-LS (RFC 9552, which obsoletes RFC 7752), with
-  BGP-LS *receive/API export* and route-reflector-only VPN/MPLS families as the
-  on-identity entry points (controller-feed / RR, not a forwarding plane).
+  BGP-LS *receive/API export plus reflection* and route-reflector-only VPN/MPLS
+  families as the on-identity entry points (controller-feed / RR, not a
+  forwarding plane).
   **Done:** the BGP-LS wire/RIB/API tranche accepts `linkstate` /
   `linkstate_vpn`, decodes BGP-LS and BGP-LS VPN MP_REACH/MP_UNREACH, stores
   learned topology objects in typed Adj-RIB-In / Loc-RIB tables, and exposes
   opaque NLRI/TLV bytes through `RibService.ListBgpLsRoutes` and
-  `rbgp rib bgpls`. GR entry now conservatively withdraws BGP-LS routes and
-  Enhanced Route Refresh sweeps omitted BGP-LS objects instead of reporting
-  stale controller-feed data as live; true BGP-LS GR/LLGR stale preservation is
-  still deferred. Reflection/export remains the next ADR-0077 slice.
+  `rbgp rib bgpls`. **Done:** BGP-LS routes now flow through initial table
+  dumps, outbound reflection/export, route-refresh replay, and dirty
+  Adj-RIB-Out resync for eligible negotiated peers. GR entry now
+  conservatively withdraws BGP-LS routes and Enhanced Route Refresh sweeps
+  omitted BGP-LS objects instead of reporting stale controller-feed data as
+  live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, and local
+  topology production remain deferred.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix

@@ -1026,12 +1026,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListBgpLsRoutes
 ```
 
-`ListBgpLsRoutes` is the ADR-0077 receive/API surface. It preserves BGP-LS
-routes as opaque RFC 9552 objects: raw Route Distinguisher bytes for BGP-LS
-VPN, raw NLRI descriptor/payload bytes, and raw BGP-LS Attribute (type 29)
-bytes when present. The daemon does not synthesize BGP-LS from a local LSDB,
-compute paths from BGP-LS data, or reflect BGP-LS routes outbound in this
-tranche. It also does not negotiate GR/LLGR stale preservation for BGP-LS yet.
+`ListBgpLsRoutes` is the ADR-0077 controller-facing BGP-LS surface. It
+preserves BGP-LS routes as opaque RFC 9552 objects: raw Route Distinguisher
+bytes for BGP-LS VPN, raw NLRI descriptor/payload bytes, and raw BGP-LS
+Attribute (type 29) bytes when present. Negotiated BGP-LS routes can also be
+reflected to eligible peers through the normal route-reflector pipeline. The
+daemon does not synthesize BGP-LS from a local LSDB, compute paths from BGP-LS
+data, or negotiate BGP-LS Add-Path / GR / LLGR stale preservation yet.
 
 ### List BLACKHOLE discard status
 

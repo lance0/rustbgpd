@@ -1627,7 +1627,7 @@ impl RibManager {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
         self.update_peer_refresh_metrics(peer);
-        self.recompute_bgpls_keys(affected);
+        self.recompute_bgpls_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
         }
@@ -1639,17 +1639,9 @@ impl RibManager {
     /// Shared by the receive path and the peer-teardown cleanup so a departed
     /// peer's routes fall back to the next-best remaining candidate (or are
     /// removed when no peer still advertises the key), mirroring the
-    /// unicast/FlowSpec/EVPN recompute pattern. BGP-LS is receive/API-only for
-    /// this tranche, so there is no outbound distribution step.
-    fn recompute_bgpls_keys(&mut self, affected: HashSet<crate::route::BgpLsRouteKey>) {
-        for key in affected {
-            let candidates: Vec<_> = self
-                .ribs
-                .values()
-                .filter_map(|rib| rib.get_bgpls(&key).cloned())
-                .collect();
-            self.loc_rib.recompute_bgpls(key, candidates.iter());
-        }
+    /// unicast/FlowSpec/EVPN recompute + distribution pattern.
+    fn recompute_bgpls_keys(&mut self, affected: &HashSet<crate::route::BgpLsRouteKey>) {
+        self.recompute_and_distribute_bgpls(affected);
     }
 
     fn handle_query_mrt_snapshot(&mut self, reply: tokio::sync::oneshot::Sender<MrtSnapshotData>) {

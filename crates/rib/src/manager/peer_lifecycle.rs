@@ -244,6 +244,8 @@ impl RibManager {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
+            bgpls_announce: vec![],
+            bgpls_withdraw: vec![],
             request_refresh_all_negotiated: true,
         };
         if record.outbound_tx.try_send(update).is_err() {
@@ -343,7 +345,7 @@ impl RibManager {
         // would strand in `loc_rib.bgpls_routes` until process restart and
         // surface through `ListBgpLsRoutes` as if still live.
         if !bgpls_affected.is_empty() {
-            self.recompute_bgpls_keys(bgpls_affected);
+            self.recompute_bgpls_keys(&bgpls_affected);
         }
     }
 
@@ -612,6 +614,8 @@ impl RibManager {
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
+        let mut bgpls_announce = Vec::new();
+        let mut bgpls_withdraw = Vec::new();
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
@@ -781,6 +785,34 @@ impl RibManager {
             );
         }
 
+        let all_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
+            .loc_rib
+            .iter_bgpls()
+            .map(crate::route::BgpLsRibRoute::key)
+            .collect();
+        if !all_bgpls_keys.is_empty() {
+            Self::stage_bgpls_routes(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_bgpls_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
+                &mut bgpls_announce,
+                &mut bgpls_withdraw,
+                false, // initial dump — equality check is correct
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let mut eor_families = self
             .peer_sendable_families
@@ -817,7 +849,9 @@ impl RibManager {
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
             || !evpn_announce.is_empty()
-            || !evpn_withdraw.is_empty();
+            || !evpn_withdraw.is_empty()
+            || !bgpls_announce.is_empty()
+            || !bgpls_withdraw.is_empty();
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update(
                 peer,
@@ -830,6 +864,8 @@ impl RibManager {
                 fs_withdraw,
                 evpn_announce,
                 evpn_withdraw,
+                bgpls_announce,
+                bgpls_withdraw,
             );
         if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
@@ -860,6 +896,8 @@ impl RibManager {
                 flowspec_withdraw: vec![],
                 evpn_announce: vec![],
                 evpn_withdraw: vec![],
+                bgpls_announce: vec![],
+                bgpls_withdraw: vec![],
                 request_refresh_all_negotiated: false,
             };
             if tx.try_send(eor).is_err() {
