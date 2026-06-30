@@ -23,10 +23,11 @@
 //! ## Convergence — push notification + periodic backstop
 //!
 //! The originator subscribes to the RIB's [`EvpnRouteEvent`] broadcast
-//! (added by Gate 7c) and reacts to each best-path change synchronously,
-//! driving `on_remote_changed` from the event payload's `best` field
-//! directly — no follow-up `QueryEvpnRoutes` round-trip needed. The
-//! 5 s `poll_tick` is retained as a backstop for two narrow cases:
+//! (added by Gate 7c) and uses Type 2 best-path changes as wakeups for a
+//! full `QueryEvpnRoutes` projection. Ready Type 2 bursts are coalesced
+//! into one query so mass route churn does not serialize one full repoll
+//! per event. The 5 s `poll_tick` is retained as a backstop for two
+//! narrow cases:
 //!   1. The broadcast subscriber lagged (capacity 4096 dropped events);
 //!      a full repoll re-establishes the cache.
 //!   2. The originator started after the RIB had already converged —
@@ -67,7 +68,7 @@ use crate::evpn_originator::duplicate_mac::{handle_originator_command, recover_d
 use crate::evpn_originator::lifecycle::apply_runtime_model;
 use crate::evpn_originator::observation::handle_observation;
 use crate::evpn_originator::rib_polling::{
-    handle_evpn_event, recv_evpn_event, repoll_rib, subscribe_evpn_events,
+    handle_evpn_event_coalesced, recv_evpn_event, repoll_rib, subscribe_evpn_events,
 };
 use crate::evpn_originator::rib_write::{
     drain_to_withdraws, extract_ip_from_key, next_hop_path_attribute,
@@ -688,8 +689,9 @@ async fn originator_loop(
             }
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
-                    handle_evpn_event(
-                        &ev,
+                    handle_evpn_event_coalesced(
+                        ev,
+                        &mut evpn_event_rx,
                         &runtime.instances,
                         &mut state,
                         &runtime.rib_tx,

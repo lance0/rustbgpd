@@ -222,6 +222,16 @@ impl DuplicateMacDetector {
         })
     }
 
+    /// Whether any move-window or active-quarantine state remains for `key`.
+    ///
+    /// Daemon-side owners use this after [`Self::expire`] to keep their
+    /// sidecar key indexes in lockstep without exposing the detector's window
+    /// map.
+    #[must_use]
+    pub fn has_state(&self, key: DuplicateMacKey) -> bool {
+        self.windows.contains_key(&key)
+    }
+
     /// Clear all duplicate-MAC detector state for one key.
     ///
     /// Returns true when a move window or active quarantine existed.
@@ -356,9 +366,9 @@ mod tests {
             detector.record_move(key(), now, cfg),
             DuplicateMacDecision::Recorded { window_count: 1 }
         );
-        assert!(detector.windows.contains_key(&key()));
+        assert!(detector.has_state(key()));
         assert!(detector.expire(now + Duration::from_secs(11)).is_empty());
-        assert!(!detector.windows.contains_key(&key()));
+        assert!(!detector.has_state(key()));
     }
 
     #[test]

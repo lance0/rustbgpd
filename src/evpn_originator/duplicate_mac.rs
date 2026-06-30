@@ -282,6 +282,10 @@ pub(super) async fn recover_duplicate_macs(
     drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) {
     let recovered = state.duplicate_mac_detector.expire(Instant::now());
+    let detector = &state.duplicate_mac_detector;
+    state
+        .known_duplicate_mac_keys
+        .retain(|key| detector.has_state(*key));
     for key in recovered {
         state.known_duplicate_mac_keys.remove(&key);
         metrics.set_evpn_duplicate_mac_quarantine_active(

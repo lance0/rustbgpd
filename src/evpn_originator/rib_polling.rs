@@ -10,6 +10,8 @@ use crate::evpn_originator::duplicate_mac::{
     remote_route_processing_suppressed, suppress_local_originations_for_mac,
 };
 
+type StickyMacWinnerKey = (EvpnInstanceId, MacAddress, IpAddr, Option<u32>);
+
 /// Subscribe to the RIB's EVPN route-event broadcast. Returns `None`
 /// if the RIB channel is full / closed or if the reply was dropped —
 /// the originator's 5 s poll backstop covers both cases.
@@ -34,6 +36,43 @@ pub(super) async fn recv_evpn_event(
         Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReadyEvpnEventDrain {
+    /// Ready events consumed from the broadcast receiver after the triggering
+    /// event. The triggering event itself is not included.
+    pub(super) drained_events: usize,
+    /// Number of lagged events reported while draining.
+    pub(super) lagged_events: u64,
+    /// Whether the broadcast channel closed while draining.
+    pub(super) closed: bool,
+}
+
+pub(super) fn evpn_event_requires_repoll(event: &EvpnRouteEvent) -> bool {
+    matches!(event.key, EvpnRouteKey::MacIp { .. })
+}
+
+pub(super) fn drain_ready_evpn_events(
+    rx: &mut broadcast::Receiver<EvpnRouteEvent>,
+) -> ReadyEvpnEventDrain {
+    let mut drain = ReadyEvpnEventDrain::default();
+    loop {
+        match rx.try_recv() {
+            Ok(_event) => {
+                drain.drained_events += 1;
+            }
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                drain.lagged_events = drain.lagged_events.saturating_add(skipped);
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                drain.closed = true;
+                break;
+            }
+        }
+    }
+    drain
 }
 
 /// Re-poll the RIB, build fresh contender views (both MAC-only and
@@ -207,6 +246,7 @@ pub(super) async fn repoll_rib(
 ///
 /// Non-Type-2 events return early — the originator does not react
 /// to Type 1/3/4/5 best-path changes today.
+#[cfg(test)]
 pub(super) async fn handle_evpn_event(
     event: &EvpnRouteEvent,
     instances: &EvpnInstanceTable,
@@ -216,7 +256,7 @@ pub(super) async fn handle_evpn_event(
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
-    if !matches!(event.key, EvpnRouteKey::MacIp { .. }) {
+    if !evpn_event_requires_repoll(event) {
         return;
     }
     if let Err(e) = repoll_rib(
@@ -231,6 +271,69 @@ pub(super) async fn handle_evpn_event(
     {
         warn!(error = %e, "EVPN originator: event-triggered repoll failed");
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_evpn_event_coalesced(
+    event: EvpnRouteEvent,
+    rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,
+    instances: &EvpnInstanceTable,
+    state: &mut OriginatorState,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    if !evpn_event_requires_repoll(&event) {
+        return;
+    }
+    let drain = rx.as_mut().map(drain_ready_evpn_events).unwrap_or_default();
+    if drain.lagged_events > 0 {
+        warn!(
+            skipped = drain.lagged_events,
+            "EVPN originator: event broadcast lagged while coalescing; skipped events are absorbed by the authoritative full repoll"
+        );
+    }
+    if drain.closed {
+        warn!("EVPN originator: RIB event broadcast closed; reverting to poll-only");
+        *rx = None;
+    }
+    if let Err(e) = repoll_rib(
+        instances,
+        rib_tx,
+        state,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await
+    {
+        warn!(
+            error = %e,
+            coalesced_events = drain.drained_events,
+            lagged_events = drain.lagged_events,
+            "EVPN originator: event-triggered repoll failed"
+        );
+    }
+}
+
+fn sticky_by_mac_winner(
+    projected: &[(ProjectedEvpnRoute, bool)],
+) -> BTreeMap<StickyMacWinnerKey, bool> {
+    let mut sticky_by_winner = BTreeMap::new();
+    for (route, sticky) in projected {
+        let raw_vni = route.label1.as_vni();
+        if raw_vni == 0 {
+            continue;
+        }
+        let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(raw_vni) else {
+            continue;
+        };
+        sticky_by_winner
+            .entry((vni, route.mac, route.next_hop, route.mobility_sequence))
+            .or_insert(*sticky);
+    }
+    sticky_by_winner
 }
 
 /// Build both contender maps from a flat set of best-path
@@ -272,19 +375,16 @@ pub(super) fn build_remote_views(
             ))
         })
         .collect();
+    let sticky_by_winner = sticky_by_mac_winner(&projected);
 
     // --- MAC-only map (collapses to per-(VNI, MAC) winner) ---
     let table = project_evpn_routes(instances, projected.iter().map(|(p, _)| p.clone()));
     let mut mac_view: RemoteMacViewMap = BTreeMap::new();
     for ((vni, mac), entry) in table.iter() {
-        let sticky = projected
-            .iter()
-            .find(|(p, _)| {
-                p.mac == *mac
-                    && p.next_hop == entry.remote_vtep_ip
-                    && p.mobility_sequence == entry.mobility_sequence
-            })
-            .is_some_and(|(_, s)| *s);
+        let sticky = sticky_by_winner
+            .get(&(*vni, *mac, entry.remote_vtep_ip, entry.mobility_sequence))
+            .copied()
+            .unwrap_or(false);
         mac_view.insert(
             (*vni, *mac),
             RemoteMacView {
