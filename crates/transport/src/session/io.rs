@@ -14,12 +14,13 @@ const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 impl PeerSession {
     /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
     ///
-    /// Returns `true` if at least one Address-Prefix ORF group of a negotiated
+    /// Returns `true` if every emitted Address-Prefix ORF group of a negotiated
     /// type was accepted by the RIB — its `PeerOrfUpdate` handler installs the
     /// filter, lifts the §6 initial-advertisement gate, and re-floods. Returns
     /// `false` for a plain refresh, an ORF whose groups are all un-negotiated
-    /// types (incl. the legacy type 128, which rustbgpd never advertises), or a
-    /// RIB-side rejection; the caller then takes the normal re-advertise path.
+    /// types (incl. the legacy type 128, which rustbgpd never advertises), or
+    /// any RIB-side rejection/drop/timeout; the caller then takes the normal
+    /// re-advertise path.
     pub(super) async fn process_inbound_orf(
         &mut self,
         afi: rustbgpd_wire::Afi,
@@ -79,37 +80,37 @@ impl PeerSession {
             {
                 warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
                 failed = true;
-            } else {
-                match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
-                    Ok(Ok(Ok(()))) => {
-                        accepted = true;
-                    }
-                    Ok(Ok(Err(err))) => {
-                        failed = true;
-                        warn!(
-                            peer = %self.peer_label,
-                            ?afi, ?safi,
-                            error = %err,
-                            "RIB rejected ORF update — falling back to plain route refresh"
-                        );
-                    }
-                    Ok(Err(_)) => {
-                        failed = true;
-                        warn!(
-                            peer = %self.peer_label,
-                            ?afi, ?safi,
-                            "RIB dropped ORF update reply — falling back to plain route refresh"
-                        );
-                    }
-                    Err(_) => {
-                        failed = true;
-                        warn!(
-                            peer = %self.peer_label,
-                            ?afi, ?safi,
-                            timeout_ms = %ORF_RIB_REPLY_TIMEOUT.as_millis(),
-                            "RIB ORF update reply timed out — falling back to plain route refresh"
-                        );
-                    }
+                break;
+            }
+            match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    accepted = true;
+                }
+                Ok(Ok(Err(err))) => {
+                    failed = true;
+                    warn!(
+                        peer = %self.peer_label,
+                        ?afi, ?safi,
+                        error = %err,
+                        "RIB rejected ORF update — falling back to plain route refresh"
+                    );
+                }
+                Ok(Err(_)) => {
+                    failed = true;
+                    warn!(
+                        peer = %self.peer_label,
+                        ?afi, ?safi,
+                        "RIB dropped ORF update reply — falling back to plain route refresh"
+                    );
+                }
+                Err(_) => {
+                    failed = true;
+                    warn!(
+                        peer = %self.peer_label,
+                        ?afi, ?safi,
+                        timeout_ms = %ORF_RIB_REPLY_TIMEOUT.as_millis(),
+                        "RIB ORF update reply timed out — falling back to plain route refresh"
+                    );
                 }
             }
         }
