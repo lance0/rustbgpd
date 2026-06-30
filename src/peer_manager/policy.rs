@@ -470,13 +470,9 @@ impl PeerManager {
         // AdjRibIn were accepted under the old policy and stay there
         // until the peer re-advertises. Without an automatic refresh
         // here, a permit→deny edit silently leaves forbidden routes
-        // flowing. PolicyChain doesn't derive PartialEq (would
-        // require touching nested types in other crates); the Debug
-        // representation is deterministic for this comparison since
-        // both sides come from the same `effective_policy_chains_for_neighbor`
-        // resolver and `PolicyChain.policies` is a `Vec` (stable order).
-        let import_changed = format!("{:?}", managed.import_policy) != format!("{import_policy:?}");
-        let export_changed = format!("{:?}", managed.export_policy) != format!("{export_policy:?}");
+        // flowing.
+        let import_changed = managed.import_policy != import_policy;
+        let export_changed = managed.export_policy != export_policy;
 
         // Drain any pending refresh / pending export-apply from a
         // prior call. If a previous round wanted to retry but the

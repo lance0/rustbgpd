@@ -3800,12 +3800,9 @@ fn attribute_chain_move_reasons(
 ///   chain-reference itself; otherwise tagged as a coarse
 ///   `neighbor_set` or global-chain reason.
 ///
-/// `PolicyChain` doesn't derive `PartialEq` (would require touching
-/// nested types in other crates); resolved chain equality goes via
-/// `format!("{:?}", ...)`. Both sides come from the same
-/// `effective_policy_chains_for_neighbor` resolver and
-/// `PolicyChain.policies` is a `Vec` (stable order), so the Debug
-/// output is deterministic enough for diff-style equality.
+/// Resolved chain equality is structural and order-sensitive: both sides come
+/// from the same `effective_policy_chains_for_neighbor` resolver and
+/// `PolicyChain.policies` is a `Vec` whose order is policy semantics.
 ///
 /// Resolution failure (invalid chain reference) is treated as
 /// "skip" — the load path already validates the new config, so
@@ -3842,10 +3839,8 @@ fn compute_effective_neighbor_impact(
             continue;
         };
 
-        let import_moved = format!("{:?}", old_resolved.import_policy)
-            != format!("{:?}", new_resolved.import_policy);
-        let export_moved = format!("{:?}", old_resolved.export_policy)
-            != format!("{:?}", new_resolved.export_policy);
+        let import_moved = old_resolved.import_policy != new_resolved.import_policy;
+        let export_moved = old_resolved.export_policy != new_resolved.export_policy;
         // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
         // add_path, ...) lives in transport_config; a group reassignment changes
         // the neighbor's raw record. Either means the impact is not a pure
@@ -3972,10 +3967,8 @@ fn dynamic_range_effective_impact(
             continue;
         };
 
-        let import_moved = format!("{:?}", old_resolved.import_policy)
-            != format!("{:?}", new_resolved.import_policy);
-        let export_moved = format!("{:?}", old_resolved.export_policy)
-            != format!("{:?}", new_resolved.export_policy);
+        let import_moved = old_resolved.import_policy != new_resolved.import_policy;
+        let export_moved = old_resolved.export_policy != new_resolved.export_policy;
         let peer_group_reassigned = old_range.peer_group != new_range.peer_group;
         // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
         // ...) lives in transport_config and cannot be live-applied by a policy
