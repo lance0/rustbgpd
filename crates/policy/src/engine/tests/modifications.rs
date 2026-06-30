@@ -200,6 +200,39 @@ fn merge_exact_large_community_lists_preserves_later_wins_order() {
 }
 
 #[test]
+fn merge_exact_community_lists_set_path_preserves_later_wins_order() {
+    // Drive merge_from with >4-element add/remove lists on both sides so the
+    // adaptive set-backed conflict check (use_exact_list_set: each len > 4 and
+    // product > 32) runs instead of the small-input linear scan. The output
+    // must be byte-identical to the linear path: retain_without keeps surviving
+    // items in original order, a later add cancels an earlier remove (and vice
+    // versa), and the trailing un-deduped extend is preserved.
+    let c = |n: u16| (65001u32 << 16) | u32::from(n);
+    let mut merged = RouteModifications {
+        communities_add: vec![c(1), c(2), c(3), c(4), c(5), c(6)],
+        communities_remove: vec![c(20), c(21), c(22), c(10), c(11), c(12)],
+        ..Default::default()
+    };
+    merged.merge_from(RouteModifications {
+        communities_add: vec![c(10), c(11), c(12), c(13), c(14), c(15)],
+        communities_remove: vec![c(2), c(4), c(6), c(7), c(8), c(9)],
+        ..Default::default()
+    });
+
+    // add = retain_without([1..=6], new_remove=[2,4,6,7,8,9]) ++ new_add
+    assert_eq!(
+        merged.communities_add,
+        vec![c(1), c(3), c(5), c(10), c(11), c(12), c(13), c(14), c(15)]
+    );
+    // remove = retain_without([20,21,22,10,11,12], new_add=[10..=15]) ++ new_remove;
+    // the later add of c(10..12) cancels their earlier removal (later-wins).
+    assert_eq!(
+        merged.communities_remove,
+        vec![c(20), c(21), c(22), c(2), c(4), c(6), c(7), c(8), c(9)]
+    );
+}
+
+#[test]
 fn apply_extended_community_remove_matches_semantic_equivalent() {
     let mut attrs = vec![PathAttribute::ExtendedCommunities(vec![make_rt_as4(
         65001, 100,
