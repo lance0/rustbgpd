@@ -68,6 +68,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   match criteria now scan only their matching community family, and standard /
   large community add/remove paths use adaptive exact-list conflict checks while
   preserving existing policy ordering and later-wins semantics.
+- **FlowSpec MP-BGP encode hardening from the repo-wide audit.** Structured
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI` FlowSpec encoding now returns
+  `EncodeError::ValueOutOfRange` for oversized public rule vectors instead of
+  panicking inside the attribute encoder. The error is propagated through the
+  MRT RIB exporter and a new fallible `UpdateMessage::try_build`.
 - **EVPN originator churn bounds from the repo-wide audit.** Duplicate-MAC
   move-window sidecar keys are pruned when inactive windows age out, Type 2
   route-event bursts coalesce into a single full RIB repoll, and MAC-only remote

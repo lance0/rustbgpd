@@ -131,7 +131,7 @@ fn bench_attr_decode(c: &mut Criterion) {
 
     let typical = typical_attributes();
     let mut typical_buf = Vec::new();
-    encode_path_attributes(&typical, &mut typical_buf, true, false);
+    encode_path_attributes(&typical, &mut typical_buf, true, false).unwrap();
     group.bench_with_input(
         BenchmarkId::new("typical", typical.len()),
         &typical_buf,
@@ -142,7 +142,7 @@ fn bench_attr_decode(c: &mut Criterion) {
 
     let rich = rich_attributes();
     let mut rich_buf = Vec::new();
-    encode_path_attributes(&rich, &mut rich_buf, true, false);
+    encode_path_attributes(&rich, &mut rich_buf, true, false).unwrap();
     group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich_buf, |b, buf| {
         b.iter(|| decode_path_attributes(buf, true, &[]).unwrap());
     });
@@ -160,7 +160,7 @@ fn bench_attr_encode(c: &mut Criterion) {
         |b, attrs| {
             b.iter(|| {
                 let mut buf = Vec::with_capacity(128);
-                encode_path_attributes(attrs, &mut buf, true, false);
+                encode_path_attributes(attrs, &mut buf, true, false).unwrap();
                 buf
             });
         },
@@ -170,7 +170,7 @@ fn bench_attr_encode(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich, |b, attrs| {
         b.iter(|| {
             let mut buf = Vec::with_capacity(256);
-            encode_path_attributes(attrs, &mut buf, true, false);
+            encode_path_attributes(attrs, &mut buf, true, false).unwrap();
             buf
         });
     });

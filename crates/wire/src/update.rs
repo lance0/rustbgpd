@@ -227,6 +227,12 @@ impl UpdateMessage {
     ///
     /// When `add_path` is true, path IDs are included in the wire encoding.
     /// When false, only the prefix is encoded (path IDs are ignored).
+    ///
+    /// # Panics
+    ///
+    /// Panics if locally constructed path attributes cannot be encoded. Use
+    /// [`Self::try_build`] when the attributes come from an untrusted or
+    /// unchecked source.
     #[must_use]
     pub fn build(
         announced: &[Ipv4NlriEntry],
@@ -236,6 +242,31 @@ impl UpdateMessage {
         add_path: bool,
         ipv4_unicast_mode: Ipv4UnicastMode,
     ) -> Self {
+        Self::try_build(
+            announced,
+            withdrawn,
+            attributes,
+            four_octet_as,
+            add_path,
+            ipv4_unicast_mode,
+        )
+        .expect("structured UPDATE attributes must be validated before build")
+    }
+
+    /// Fallible form of [`Self::build`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError`] if any structured path attribute contains a
+    /// value that cannot be represented on the wire.
+    pub fn try_build(
+        announced: &[Ipv4NlriEntry],
+        withdrawn: &[Ipv4NlriEntry],
+        attributes: &[PathAttribute],
+        four_octet_as: bool,
+        add_path: bool,
+        ipv4_unicast_mode: Ipv4UnicastMode,
+    ) -> Result<Self, EncodeError> {
         let mut withdrawn_buf = Vec::new();
         if matches!(ipv4_unicast_mode, Ipv4UnicastMode::Body) {
             if add_path {
@@ -253,7 +284,7 @@ impl UpdateMessage {
                 &mut attrs_buf,
                 four_octet_as,
                 add_path,
-            );
+            )?;
         }
 
         let mut nlri_buf = Vec::new();
@@ -266,11 +297,11 @@ impl UpdateMessage {
             }
         }
 
-        Self {
+        Ok(Self {
             withdrawn_routes: Bytes::from(withdrawn_buf),
             path_attributes: Bytes::from(attrs_buf),
             nlri: Bytes::from(nlri_buf),
-        }
+        })
     }
 
     /// Total encoded size in bytes.

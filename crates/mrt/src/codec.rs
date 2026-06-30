@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use rustbgpd_rib::route::{EvpnRibRoute, Route};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
+use rustbgpd_wire::error::EncodeError as WireEncodeError;
 use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
 use thiserror::Error;
 
@@ -45,6 +46,9 @@ pub enum EncodeError {
         /// The actual value that was too large.
         value: usize,
     },
+    /// A BGP path attribute could not be encoded.
+    #[error("path attribute encode failed: {0}")]
+    AttributeEncode(#[from] WireEncodeError),
 }
 
 /// Encode the 12-byte MRT common header.
@@ -280,7 +284,7 @@ fn encode_rib_entry(
     buf.extend_from_slice(&entry.originated_time.to_be_bytes());
 
     let mut attr_buf = Vec::new();
-    encode_mrt_rib_attributes(&entry.attributes, &mut attr_buf);
+    encode_mrt_rib_attributes(&entry.attributes, &mut attr_buf)?;
     let attr_len = u16::try_from(attr_buf.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
         value: attr_buf.len(),
@@ -297,19 +301,23 @@ fn encode_rib_entry(
 /// SAFI, Reserved, and NLRI fields are omitted because the RIB entry
 /// header already carries that information. All other attributes
 /// encode identically to a regular BGP UPDATE.
-fn encode_mrt_rib_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>) {
+fn encode_mrt_rib_attributes(
+    attrs: &[PathAttribute],
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
     let others: Vec<PathAttribute> = attrs
         .iter()
         .filter(|a| !matches!(a, PathAttribute::MpReachNlri(_)))
         .cloned()
         .collect();
-    encode_path_attributes(&others, buf, true, false);
+    encode_path_attributes(&others, buf, true, false)?;
 
     for attr in attrs {
         if let PathAttribute::MpReachNlri(mp) = attr {
             encode_mrt_mp_reach(mp.next_hop, mp.link_local_next_hop, buf);
         }
     }
+    Ok(())
 }
 
 /// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.

@@ -486,17 +486,6 @@ pub fn try_encode_flowspec_nlri(
     Ok(())
 }
 
-/// Encode `FlowSpec` NLRI rules to wire bytes.
-///
-/// Locally constructed rules must be checked with
-/// [`FlowSpecRule::validate_encoded_len`] before they reach this encoder.
-/// Rules decoded from a peer are already bounded by the on-wire 12-bit
-/// `FlowSpec` length prefix.
-pub(crate) fn encode_flowspec_nlri(rules: &[FlowSpecRule], buf: &mut Vec<u8>, afi: Afi) {
-    try_encode_flowspec_nlri(rules, buf, afi)
-        .expect("FlowSpec NLRI encoder received an oversized rule");
-}
-
 /// Decode `FlowSpec` NLRI length prefix.
 fn decode_flowspec_length(buf: &[u8]) -> Result<(usize, usize), DecodeError> {
     if buf.is_empty() {
@@ -1172,7 +1161,7 @@ mod tests {
             ],
         };
         let mut buf = Vec::new();
-        encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4);
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], rule);
@@ -1201,7 +1190,7 @@ mod tests {
             }])],
         };
         let mut buf = Vec::new();
-        encode_flowspec_nlri(&[rule1.clone(), rule2.clone()], &mut buf, Afi::Ipv4);
+        try_encode_flowspec_nlri(&[rule1.clone(), rule2.clone()], &mut buf, Afi::Ipv4).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap();
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0], rule1);
@@ -1494,7 +1483,7 @@ mod tests {
             }])],
         };
         let mut buf = Vec::new();
-        encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6);
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv6).unwrap();
         assert_eq!(decoded[0], rule);
     }
@@ -1521,7 +1510,7 @@ mod tests {
             ],
         };
         let mut buf = Vec::new();
-        encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6);
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv6).unwrap();
         assert_eq!(decoded[0], rule);
     }
@@ -1632,7 +1621,7 @@ mod tests {
         };
         assert!(rule.validate().is_ok());
         let mut buf = Vec::new();
-        encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4);
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap();
         assert_eq!(decoded[0], rule);
     }
