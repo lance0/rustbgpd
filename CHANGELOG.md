@@ -59,6 +59,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saturates instead of wrapping back to fast retries, and cursor-gap
   `missed_count` calculation no longer overflows for
   `from_event_id = u64::MAX`.
+- **Policy hot-path allocation cleanup from the repo-wide audit.** Policy
+  chains now compare structurally instead of formatting resolved chains through
+  `Debug` on reload / hot-apply classification paths, and standalone deny
+  statements return the documented empty-modification result without cloning
+  discarded route modifications.
 - **BGP-LS routes no longer survive stale lifecycle transitions as live data.**
   The receive/API tranche intentionally does not implement BGP-LS GR/LLGR
   stale preservation yet, but the RIB lifecycle paths now enforce that boundary:

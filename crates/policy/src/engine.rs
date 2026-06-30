@@ -30,7 +30,7 @@ pub enum PolicyAction {
 }
 
 /// The result of evaluating a policy: an action plus any route modifications.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyResult {
     /// Whether the route is permitted or denied.
     pub action: PolicyAction,
@@ -110,7 +110,7 @@ pub enum RouteType {
 }
 
 /// Named neighbor-set match compiled from config.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NeighborSetMatch {
     /// Exact peer-address matches.
     pub addresses: Vec<IpAddr>,
@@ -145,7 +145,7 @@ pub enum NextHopAction {
 }
 
 /// Route attribute modifications to apply after a policy match.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteModifications {
     /// Override `LOCAL_PREF` to this value.
     pub set_local_pref: Option<u32>,
@@ -506,6 +506,14 @@ impl AsPathRegex {
     }
 }
 
+impl PartialEq for AsPathRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Eq for AsPathRegex {}
+
 impl fmt::Debug for AsPathRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AsPathRegex")
@@ -519,7 +527,7 @@ impl fmt::Debug for AsPathRegex {
 /// Entries can match on prefix, next-hop, community, `AS_PATH` regex, or combinations.
 /// When multiple conditions are specified, all must be true (AND).
 /// Within community matching, any match suffices (OR).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyStatement {
     /// Prefix to match. If `None`, the entry matches any prefix.
     pub prefix: Option<Prefix>,
@@ -738,7 +746,7 @@ impl PolicyStatement {
 }
 
 /// An ordered list of policy statements with a default action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     /// Ordered list of statements; first match wins.
     pub entries: Vec<PolicyStatement>,
@@ -752,9 +760,12 @@ impl Policy {
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
         for entry in &self.entries {
             if entry.matches(ctx) {
-                return PolicyResult {
-                    action: entry.action,
-                    modifications: entry.modifications.clone(),
+                return match entry.action {
+                    PolicyAction::Permit => PolicyResult {
+                        action: PolicyAction::Permit,
+                        modifications: entry.modifications.clone(),
+                    },
+                    PolicyAction::Deny => PolicyResult::deny(),
                 };
             }
         }
@@ -783,7 +794,7 @@ pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> Polic
 /// names enter the system (via `resolve_chain` in `src/config/parse.rs`,
 /// which already has the name in hand at the moment it builds each
 /// `Policy`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedPolicy {
     /// Configured policy name (`None` for inline / anonymous policies).
     pub name: Option<String>,
@@ -840,7 +851,7 @@ pub struct PolicyEvaluation {
 /// continues to the next policy. If a policy returns `Deny`, the route
 /// is rejected immediately. After all policies, the route is permitted
 /// with the accumulated modifications.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyChain {
     /// Policies evaluated in order; modifications accumulate across permits.
     pub policies: Vec<NamedPolicy>,

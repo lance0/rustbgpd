@@ -301,6 +301,58 @@ fn chain_default_deny_stops_chain() {
 }
 
 #[test]
+fn deny_statement_discards_modifications() {
+    let mut deny = stmt(None, PolicyAction::Deny, vec![]);
+    deny.modifications = RouteModifications {
+        set_local_pref: Some(200),
+        communities_add: vec![100],
+        ..RouteModifications::default()
+    };
+    let policy = Policy {
+        entries: vec![deny],
+        default_action: PolicyAction::Permit,
+    };
+
+    let result = policy.evaluate(&ctx(
+        v4_prefix([10, 0, 0, 0], 8),
+        &[],
+        &[],
+        &[],
+        "",
+        0,
+        RpkiValidation::NotFound,
+    ));
+
+    assert_eq!(result, PolicyResult::deny());
+}
+
+#[test]
+fn policy_chain_equality_is_structural_and_order_sensitive() {
+    let first = make_permit_policy_with_lp(100);
+    let second = make_permit_policy_with_lp(200);
+    assert_eq!(
+        PolicyChain::new(vec![first.clone(), second.clone()]),
+        PolicyChain::new(vec![first.clone(), second.clone()])
+    );
+    assert_ne!(
+        PolicyChain::new(vec![first.clone(), second.clone()]),
+        PolicyChain::new(vec![second, first])
+    );
+}
+
+#[test]
+fn as_path_regex_equality_uses_configured_pattern() {
+    assert_eq!(
+        AsPathRegex::new("_65000_").unwrap(),
+        AsPathRegex::new("_65000_").unwrap()
+    );
+    assert_ne!(
+        AsPathRegex::new("_65000_").unwrap(),
+        AsPathRegex::new("65000").unwrap()
+    );
+}
+
+#[test]
 fn evaluate_chain_none_returns_permit() {
     let r = evaluate_chain(
         None,
