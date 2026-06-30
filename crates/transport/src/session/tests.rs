@@ -5436,6 +5436,17 @@ fn orf_rr(orf_type: OrfType, entries: OrfEntries) -> RouteRefreshMessage {
     orf_rr_with_when(WhenToRefresh::Immediate, orf_type, entries)
 }
 
+fn orf_rr_with_groups(groups: Vec<OrfEntryGroup>) -> RouteRefreshMessage {
+    RouteRefreshMessage::new_with_orf(
+        Afi::Ipv4,
+        Safi::Unicast,
+        OrfPayload {
+            when_to_refresh: WhenToRefresh::Immediate,
+            groups,
+        },
+    )
+}
+
 fn one_permit_entry() -> OrfEntries {
     OrfEntries::AddressPrefix(vec![AddressPrefixOrf {
         action: OrfAction::Add,
@@ -5603,6 +5614,55 @@ async fn inbound_orf_rejected_by_rib_falls_through_to_plain_refresh() {
         "RIB rejection must not silently suppress plain Route Refresh fallback"
     );
     assert_eq!((update.afi, update.safi), (Afi::Ipv4, Safi::Unicast));
+}
+
+#[tokio::test]
+async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(neg);
+
+    let rr = orf_rr_with_groups(vec![
+        OrfEntryGroup {
+            orf_type: OrfType::AddressPrefix,
+            entries: one_permit_entry(),
+        },
+        OrfEntryGroup {
+            orf_type: OrfType::AddressPrefix,
+            entries: one_permit_entry(),
+        },
+    ]);
+    let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
+    tokio::pin!(process);
+
+    let first = tokio::select! {
+        msg = rib_rx.recv() => msg.expect("first PeerOrfUpdate should be emitted"),
+        handled = &mut process => panic!("process_inbound_orf returned before first RIB reply: {handled}"),
+    };
+    let RibUpdate::PeerOrfUpdate { reply, .. } = first else {
+        panic!("expected first RibUpdate::PeerOrfUpdate");
+    };
+    reply
+        .send(Ok(()))
+        .expect("process_inbound_orf should await first RIB reply");
+
+    let second = tokio::select! {
+        msg = rib_rx.recv() => msg.expect("second PeerOrfUpdate should be emitted"),
+        handled = &mut process => panic!("process_inbound_orf returned before second RIB reply: {handled}"),
+    };
+    let RibUpdate::PeerOrfUpdate { reply, .. } = second else {
+        panic!("expected second RibUpdate::PeerOrfUpdate");
+    };
+    reply
+        .send(Err("peer no longer registered".to_string()))
+        .expect("process_inbound_orf should await second RIB reply");
+
+    let handled = process.await;
+    assert!(
+        !handled,
+        "any RIB rejection must fall through to the plain Route Refresh path"
+    );
 }
 
 #[tokio::test]

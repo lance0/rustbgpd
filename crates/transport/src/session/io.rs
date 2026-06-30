@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(100);
+const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl PeerSession {
     /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
@@ -41,7 +41,8 @@ impl PeerSession {
             );
             return false;
         }
-        let mut handled = false;
+        let mut accepted = false;
+        let mut failed = false;
         for group in &orf.groups {
             // rustbgpd only negotiates/advertises the standard type 64.
             if group.orf_type != OrfType::AddressPrefix {
@@ -77,12 +78,14 @@ impl PeerSession {
                 .is_err()
             {
                 warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
+                failed = true;
             } else {
                 match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
                     Ok(Ok(Ok(()))) => {
-                        handled = true;
+                        accepted = true;
                     }
                     Ok(Ok(Err(err))) => {
+                        failed = true;
                         warn!(
                             peer = %self.peer_label,
                             ?afi, ?safi,
@@ -91,6 +94,7 @@ impl PeerSession {
                         );
                     }
                     Ok(Err(_)) => {
+                        failed = true;
                         warn!(
                             peer = %self.peer_label,
                             ?afi, ?safi,
@@ -98,6 +102,7 @@ impl PeerSession {
                         );
                     }
                     Err(_) => {
+                        failed = true;
                         warn!(
                             peer = %self.peer_label,
                             ?afi, ?safi,
@@ -108,7 +113,7 @@ impl PeerSession {
                 }
             }
         }
-        handled
+        accepted && !failed
     }
 
     /// Encode `msg` and enqueue it on the writer's **priority** channel
