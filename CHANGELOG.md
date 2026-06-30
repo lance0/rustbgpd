@@ -50,6 +50,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Control-plane lifecycle hardening from the repo-wide audit.** RIB
+  GR/LLGR stale-clear, injected-route, and unicast / EVPN withdraw paths now
+  garbage-collect interned attribute sets only after the Loc-RIB recompute drops
+  selected-route clones, closing the remaining one-cycle orphan cases around the
+  M67 intern-GC fix. Failed OpenSent/OpenConfirm teardown now clears negotiated
+  session metadata before the FSM returns to Idle, connect-retry accounting
+  saturates instead of wrapping back to fast retries, and cursor-gap
+  `missed_count` calculation no longer overflows for
+  `from_event_id = u64::MAX`.
 - **BGP-LS routes no longer survive stale lifecycle transitions as live data.**
   The receive/API tranche intentionally does not implement BGP-LS GR/LLGR
   stale preservation yet, but the RIB lifecycle paths now enforce that boundary:

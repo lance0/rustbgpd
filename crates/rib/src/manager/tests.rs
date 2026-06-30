@@ -15101,6 +15101,186 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
 }
 
 #[test]
+fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
+    // Pure withdraw of the current best path must GC after Loc-RIB recompute:
+    // before that recompute, the selected-route Arc keeps the withdrawn
+    // attribute set alive and a pre-recompute GC cannot reclaim it.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    manager.process_announce_chunk(peer, vec![route]);
+    assert_eq!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
+        Some(peer)
+    );
+    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+
+    assert_eq!(
+        manager.ribs[&peer].len(),
+        0,
+        "withdraw batch must remove the route from Adj-RIB-In"
+    );
+    assert!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).is_none(),
+        "withdraw recompute must remove the selected Loc-RIB clone"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        0,
+        "post-recompute GC must reclaim the withdrawn route's interned attributes"
+    );
+}
+
+#[test]
+fn unicast_inject_replace_reclaims_attr_intern_after_loc_rib_recompute() {
+    // The local injection path can replace the same prefix repeatedly without
+    // an intervening withdraw. GC must run after recompute drops the selected
+    // Loc-RIB clone of the previous local route; otherwise the final replaced
+    // attribute set survives until one more unrelated GC event.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let moves = 5000u32;
+    for seq in 0..moves {
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        manager.handle_inject_route(route, reply_tx);
+    }
+
+    assert_eq!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+    );
+    assert_eq!(
+        manager.ribs[&LOCAL_PEER].intern_len(),
+        1,
+        "injected unicast re-originations must leave only the live route's interned attrs"
+    );
+}
+
+#[test]
+fn unicast_withdraw_injected_reclaims_attr_intern_after_loc_rib_recompute() {
+    // Withdrawing the selected local route must GC after recompute, because
+    // the Loc-RIB clone keeps its interned attribute set alive during the
+    // Adj-RIB-In removal itself.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    let (reply_tx, _reply_rx) = oneshot::channel();
+    manager.handle_inject_route(route, reply_tx);
+    assert_eq!(manager.ribs[&LOCAL_PEER].intern_len(), 1);
+
+    let (reply_tx, _reply_rx) = oneshot::channel();
+    manager.handle_withdraw_injected(Prefix::V4(prefix), 0, reply_tx);
+
+    assert!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).is_none(),
+        "withdrawing the injected route must recompute it out of the Loc-RIB"
+    );
+    assert_eq!(
+        manager.ribs[&LOCAL_PEER].intern_len(),
+        0,
+        "withdraw-injected must reclaim the selected route's interned attrs"
+    );
+}
+
+#[test]
+fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
+    // LLGR promotion injects a local LLGR_STALE community through COW while
+    // the Loc-RIB still holds the selected pre-promotion Arc. EoR later strips
+    // that local community through another COW. The EoR path must GC after the
+    // Loc-RIB recompute drops the stale selected-route clone, otherwise the old
+    // interned set survives until an unrelated future GC event.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    manager.process_announce_chunk(peer, vec![route]);
+    assert_eq!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
+        Some(peer)
+    );
+    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    });
+    manager.sweep_gr_stale(peer);
+    assert!(
+        manager
+            .ribs
+            .get(&peer)
+            .and_then(|rib| rib.iter().next())
+            .is_some_and(|route| route.is_llgr_stale),
+        "GR expiry should promote the retained route into LLGR stale state"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        1,
+        "the pre-promotion interned set is retained until EoR recomputes the Loc-RIB"
+    );
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert!(
+        manager
+            .ribs
+            .get(&peer)
+            .and_then(|rib| rib.iter().next())
+            .is_some_and(|route| !route.is_llgr_stale),
+        "End-of-RIB should clear LLGR stale on the retained route"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        0,
+        "LLGR EoR stale-clear must reclaim the orphaned pre-promotion interned set"
+    );
+}
+
+#[test]
 fn unicast_announce_replace_reclaims_attr_intern() {
     // Unicast analogue of `evpn_announce_replace_reclaims_attr_intern`: a peer
     // re-advertises the SAME prefix with a fresh attribute set on every update
@@ -15123,8 +15303,8 @@ fn unicast_announce_replace_reclaims_attr_intern() {
     }
 
     let intern = manager.ribs[&peer].intern_len();
-    assert!(
-        intern <= 2,
+    assert_eq!(
+        intern, 1,
         "unicast re-advertise (replace, no withdraw) churn leaked the intern table: \
          {intern} interned sets after {moves} replaces (must collapse to the single \
          live route's set)"

@@ -259,7 +259,7 @@ fn envelope_prefix_length_matches(prefix: Option<&String>, want: u32) -> bool {
 /// too, not the filtered subset, so collectors do not interpret
 /// `missed_count` as "events of the requested type missed".
 pub(crate) fn build_cursor_gap_event(requested_from: u64, oldest_retained: u64) -> proto::BgpEvent {
-    let missed_count = oldest_retained.saturating_sub(requested_from + 1);
+    let missed_count = oldest_retained.saturating_sub(requested_from.saturating_add(1));
     let reason = format!(
         "cursor older than retained history; \
          requested_from_event_id={requested_from} \
