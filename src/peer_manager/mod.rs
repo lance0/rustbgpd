@@ -18,7 +18,7 @@ use rustbgpd_transport::{
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::policy_admin::{
@@ -60,6 +60,13 @@ const PEER_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 /// If a policy update fails this deadline, the new policy still applies on
 /// the peer's next session restart — the warn! is just a heads-up.
 const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Hard deadline for any single peer-session lifecycle command send or
+/// shutdown join driven by the `PeerManager` actor. The session command channel
+/// is bounded, so a session task parked on TCP write back-pressure can stop
+/// draining it; actor paths must fail/log within this deadline instead of
+/// blocking every peer's RPC/reconcile work behind one stalled session.
+const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// ADR-0073: deadline for an `ExplainImportPolicy` round-trip to a
 /// session task. Bounded for the same reason as the policy-update
@@ -149,6 +156,19 @@ struct ManagedPeer {
     /// would come up advertising untagged routes during the very
     /// maintenance window the toggle was supposed to cover.
     advertise_graceful_shutdown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PeerShutdownOutcome {
+    Joined,
+    TimedOut,
+}
+
+impl PeerShutdownOutcome {
+    #[must_use]
+    pub(super) fn joined(self) -> bool {
+        matches!(self, Self::Joined)
+    }
 }
 
 struct PendingInbound {
@@ -992,17 +1012,30 @@ impl PeerManager {
                             });
                             let _ = reply.send(result);
                         }
-                            PeerManagerCommand::Shutdown => {
-                                info!("peer manager shutting down {} peers", self.peers.len());
-                                for (addr, mut managed) in self.peers.drain() {
-                                    debug!(%addr, "shutting down peer");
-                                    if let Some(pending) = managed.pending_inbound.take() {
-                                        let _ = pending.handle.shutdown().await;
-                                    }
-                                    match managed.handle.shutdown().await {
-                                    Ok(Ok(())) => debug!(%addr, "peer shut down"),
-                                    Ok(Err(e)) => warn!(%addr, error = %e, "peer shutdown error"),
-                                    Err(e) => error!(%addr, error = %e, "peer task join error"),
+                        PeerManagerCommand::Shutdown => {
+                            info!("peer manager shutting down {} peers", self.peers.len());
+                            let drained: Vec<_> = self.peers.drain().collect();
+                            for (addr, mut managed) in drained {
+                                debug!(%addr, "shutting down peer");
+                                if let Some(pending) = managed.pending_inbound.take() {
+                                    let _ = self
+                                        .shutdown_handle_bounded(
+                                            addr.address,
+                                            "PeerManager shutdown pending inbound",
+                                            pending.handle,
+                                        )
+                                        .await;
+                                }
+                                if self
+                                    .shutdown_handle_bounded(
+                                        addr.address,
+                                        "PeerManager shutdown primary",
+                                        managed.handle,
+                                    )
+                                    .await
+                                    .joined()
+                                {
+                                    debug!(%addr, "peer shut down");
                                 }
                             }
                             return;

@@ -12,9 +12,43 @@ use tracing::{debug, error, info, warn};
 
 use crate::policy_admin::apply_config_event;
 
-use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PeerManager};
+use super::{
+    ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT, PeerManager,
+    PeerShutdownOutcome,
+};
 
 impl PeerManager {
+    pub(super) async fn shutdown_handle_bounded(
+        &self,
+        address: std::net::IpAddr,
+        context: &'static str,
+        handle: PeerHandle,
+    ) -> PeerShutdownOutcome {
+        match handle
+            .shutdown_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+        {
+            Ok(Ok(())) => PeerShutdownOutcome::Joined,
+            Ok(Err(e)) => {
+                warn!(%address, %context, error = %e, "peer shutdown returned transport error");
+                PeerShutdownOutcome::Joined
+            }
+            Err(rustbgpd_transport::PeerShutdownError::Join(e)) => {
+                error!(%address, %context, error = %e, "peer task join error during shutdown");
+                PeerShutdownOutcome::Joined
+            }
+            Err(rustbgpd_transport::PeerShutdownError::TimedOut { .. }) => {
+                warn!(
+                    %address,
+                    %context,
+                    timeout_ms = %PEER_LIFECYCLE_COMMAND_TIMEOUT.as_millis(),
+                    "peer shutdown timed out; aborted session task and continuing without parking PeerManager"
+                );
+                PeerShutdownOutcome::TimedOut
+            }
+        }
+    }
+
     fn removed_peer_config(peer: &PeerKey, managed: &ManagedPeer) -> PeerManagerNeighborConfig {
         let tc = &managed.transport_config;
         PeerManagerNeighborConfig {
@@ -179,7 +213,7 @@ impl PeerManager {
         let withhold = enabled && self.bfd_should_withhold(&address);
         if enabled
             && !withhold
-            && let Err(e) = handle.start().await
+            && let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await
         {
             warn!(%address, error = %e, "failed to start peer session");
             return Err(PeerLifecycleError::Internal(format!(
@@ -482,13 +516,11 @@ impl PeerManager {
             // behind it) on one wedged peer. The sweep is best-effort by
             // contract — a peer that can't be signaled keeps its running
             // config until it reconnects, same as a send error.
-            let signaled = tokio::time::timeout(
-                PEER_POLICY_UPDATE_TIMEOUT,
-                managed.handle.stop(Some(reason)),
-            )
-            .await
-            .map_err(|_| "timed out signaling session reset".to_string())
-            .and_then(|sent| sent.map_err(|e| e.to_string()));
+            let signaled = managed
+                .handle
+                .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string());
             match signaled {
                 Ok(()) => {
                     info!(
@@ -601,13 +633,16 @@ impl PeerManager {
         self.unregister_session(managed.session_id);
         if let Some(pending) = managed.pending_inbound.take() {
             self.unregister_session(pending.session_id);
-            let _ = pending.handle.shutdown().await;
+            let _ = self
+                .shutdown_handle_bounded(address, "delete pending inbound", pending.handle)
+                .await;
         }
 
-        match managed.handle.shutdown().await {
-            Ok(Ok(())) => info!(%address, "peer deleted"),
-            Ok(Err(e)) => warn!(%address, error = %e, "peer shutdown error during delete"),
-            Err(e) => error!(%address, error = %e, "peer task join error during delete"),
+        let shutdown = self
+            .shutdown_handle_bounded(address, "delete primary", managed.handle)
+            .await;
+        if shutdown.joined() {
+            info!(%address, "peer deleted");
         }
 
         if sync_config_snapshot {
@@ -625,9 +660,14 @@ impl PeerManager {
         // *deleted* peers only — never on a session flap (the session
         // task records its final transitions before the shutdown join
         // above, so this runs after the last transport-side emission).
-        if reap_metric_series {
+        if reap_metric_series && shutdown.joined() {
             self.reap_deleted_peer_metric_series(address, &managed.transport_config)
                 .await;
+        } else if reap_metric_series {
+            warn!(
+                %address,
+                "skipping deleted-peer metric reap because session shutdown did not join before the deadline"
+            );
         }
         Ok(removed_config)
     }
@@ -714,7 +754,9 @@ impl PeerManager {
         };
         if let Some(pending) = pending {
             self.unregister_session(pending.session_id);
-            let _ = pending.handle.shutdown().await;
+            let _ = self
+                .shutdown_handle_bounded(address, "disable pending inbound", pending.handle)
+                .await;
         }
         let managed = self
             .peers
@@ -722,7 +764,7 @@ impl PeerManager {
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed
             .handle
-            .stop(reason)
+            .stop_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
             .map_err(|e| PeerLifecycleError::Internal(format!("failed to stop peer: {e}")))?;
         self.publish_peer_lifecycle_event(
@@ -885,7 +927,11 @@ impl PeerManager {
         };
 
         for (afi, safi) in &target_families {
-            if let Err(e) = managed.handle.send_route_refresh(*afi, *safi).await {
+            if let Err(e) = managed
+                .handle
+                .send_route_refresh_timeout(*afi, *safi, PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await
+            {
                 warn!(%address, error = %e, "failed to send route refresh");
                 return Err(PeerLifecycleError::Internal(format!(
                     "send failed: route refresh to {address}: {e}"

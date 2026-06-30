@@ -14,7 +14,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 use tracing::Instrument;
 
@@ -75,6 +75,36 @@ impl fmt::Display for PeerCommandError {
 }
 
 impl std::error::Error for PeerCommandError {}
+
+/// Error returned by bounded peer-session shutdown.
+#[derive(Debug)]
+pub enum PeerShutdownError {
+    /// Shutdown command delivery or task join did not complete before the
+    /// caller's deadline. The session task has been aborted before returning
+    /// this error.
+    TimedOut {
+        /// Stable operation name used in operator-facing error text.
+        operation: &'static str,
+        /// Deadline that expired.
+        deadline: Duration,
+    },
+    /// The session task joined with an error before the deadline.
+    Join(JoinError),
+}
+
+impl fmt::Display for PeerShutdownError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut {
+                operation,
+                deadline,
+            } => write!(f, "{operation} timed out after {deadline:?}"),
+            Self::Join(error) => write!(f, "session task join error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerShutdownError {}
 
 /// Role of a session relative to the `PeerManager` entry that owns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +404,22 @@ pub struct PeerHandle {
 const COMMAND_BUFFER: usize = 8;
 
 impl PeerHandle {
+    async fn send_simple_command_timeout(
+        &self,
+        command: PeerCommand,
+        operation: &'static str,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        match tokio::time::timeout(deadline, self.commands.send(command)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(PeerCommandError::SessionExited),
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation,
+                deadline,
+            }),
+        }
+    }
+
     /// Test-only constructor that wraps an already-spawned task plus
     /// its command sender. Lets tests in dependent crates substitute a
     /// fake session task for failure-mode coverage that real session
@@ -736,6 +782,22 @@ impl PeerHandle {
         self.commands.send(PeerCommand::Start).await
     }
 
+    /// Send a Start command with a bounded deadline.
+    ///
+    /// Use this from actor/RPC/admin paths. A session task parked on TCP write
+    /// back-pressure may stop draining its bounded command channel; the
+    /// unbounded [`Self::start`] helper is retained for call sites that can
+    /// tolerate waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn start_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::Start, "start", deadline)
+            .await
+    }
+
     /// Send a Stop command for graceful teardown.
     ///
     /// The optional `reason` is included in the Cease NOTIFICATION (RFC 8203).
@@ -750,6 +812,21 @@ impl PeerHandle {
         self.commands.send(PeerCommand::Stop { reason }).await
     }
 
+    /// Send a Stop command with a bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn stop_timeout(
+        &self,
+        reason: Option<Bytes>,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::Stop { reason }, "stop", deadline)
+            .await
+    }
+
     /// Send a Shutdown command and wait for the task to finish.
     ///
     /// # Errors
@@ -760,6 +837,51 @@ impl PeerHandle {
         self.task.await
     }
 
+    /// Send a Shutdown command and wait for the task within a single bounded
+    /// deadline.
+    ///
+    /// The `deadline` is a single budget shared across both the bounded
+    /// command-channel send and the task join — it is an absolute instant, not
+    /// re-applied per phase — so the total wait never exceeds `deadline`. If the
+    /// deadline expires in either phase, the session task is aborted before
+    /// returning [`PeerShutdownError::TimedOut`]. This avoids the actor-wedge fix
+    /// turning into an unowned live-session leak.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerShutdownError::TimedOut`] after aborting the task when the
+    /// deadline expires, or [`PeerShutdownError::Join`] if the task joined with
+    /// an error before the deadline.
+    pub async fn shutdown_timeout(
+        mut self,
+        deadline: Duration,
+    ) -> Result<Result<(), TransportError>, PeerShutdownError> {
+        let deadline_at = tokio::time::Instant::now() + deadline;
+        if tokio::time::timeout_at(deadline_at, self.commands.send(PeerCommand::Shutdown))
+            .await
+            .is_err()
+        {
+            self.task.abort();
+            let _ = self.task.await;
+            return Err(PeerShutdownError::TimedOut {
+                operation: "shutdown",
+                deadline,
+            });
+        }
+
+        match tokio::time::timeout_at(deadline_at, &mut self.task).await {
+            Ok(result) => result.map_err(PeerShutdownError::Join),
+            Err(_elapsed) => {
+                self.task.abort();
+                let _ = self.task.await;
+                Err(PeerShutdownError::TimedOut {
+                    operation: "shutdown",
+                    deadline,
+                })
+            }
+        }
+    }
+
     /// Send a `CollisionDump` command (Cease/7 and tear down).
     ///
     /// # Errors
@@ -767,6 +889,17 @@ impl PeerHandle {
     /// Returns an error if the session task has already exited.
     pub async fn collision_dump(&self) -> Result<(), mpsc::error::SendError<PeerCommand>> {
         self.commands.send(PeerCommand::CollisionDump).await
+    }
+
+    /// Send a `CollisionDump` command with a bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn collision_dump_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::CollisionDump, "collision_dump", deadline)
+            .await
     }
 
     /// Send a ROUTE-REFRESH message for the given address family.
@@ -789,6 +922,45 @@ impl PeerHandle {
             .await
             .map_err(|_| PeerCommandError::SessionExited)?;
         reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+    }
+
+    /// Send a ROUTE-REFRESH command with a bounded deadline.
+    ///
+    /// Wraps both the command-channel send and the session-side reply wait so a
+    /// single stalled peer cannot park the peer-manager actor during
+    /// `soft_reset_in`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error describing why the message was not sent, including
+    /// [`PeerCommandError::TimedOut`] when the deadline expires.
+    pub async fn send_route_refresh_timeout(
+        &self,
+        afi: Afi,
+        safi: Safi,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::SendRouteRefresh {
+                    afi,
+                    safi,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "send_route_refresh",
+                deadline,
+            }),
+        }
     }
 
     /// Query the current session state.
@@ -1213,6 +1385,136 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(250),
             "query_state_with should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    fn handle_with_full_command_channel() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
+        let (tx, rx) = mpsc::channel::<PeerCommand>(1);
+        let task = tokio::spawn(async { Ok::<(), TransportError>(()) });
+        (PeerHandle { commands: tx, task }, rx)
+    }
+
+    async fn fill_command_channel(handle: &PeerHandle) {
+        handle
+            .commands
+            .send(PeerCommand::Start)
+            .await
+            .expect("receiver is intentionally kept alive");
+    }
+
+    fn assert_timed_out(result: &Result<(), PeerCommandError>, operation: &'static str) {
+        assert!(
+            matches!(
+                result,
+                Err(PeerCommandError::TimedOut {
+                    operation: actual,
+                    ..
+                }) if *actual == operation
+            ),
+            "expected {operation} timeout, got {result:?}"
+        );
+    }
+
+    fn assert_shutdown_timed_out(
+        result: &Result<Result<(), TransportError>, PeerShutdownError>,
+        operation: &'static str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(PeerShutdownError::TimedOut {
+                    operation: actual,
+                    ..
+                }) if *actual == operation
+            ),
+            "expected {operation} timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.start_timeout(deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "start");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "start_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.stop_timeout(None, deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "stop");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "stop_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collision_dump_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.collision_dump_timeout(deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "collision_dump");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "collision_dump_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_route_refresh_with_bounds_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle
+            .send_route_refresh_timeout(Afi::Ipv4, Safi::Unicast, deadline)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert_timed_out(&result, "send_route_refresh");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "send_route_refresh_timeout should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_bounds_aborts_when_command_channel_is_full() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = handle.shutdown_timeout(deadline).await;
+        let elapsed = start.elapsed();
+
+        assert_shutdown_timed_out(&result, "shutdown");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "shutdown_timeout should bound at ~50ms, took {elapsed:?}"
         );
     }
 }

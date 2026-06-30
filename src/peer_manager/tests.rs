@@ -4327,6 +4327,114 @@ async fn channel_full_policy_update_bails_and_preserves_pending_refresh() {
     let _ = finish_tx.send(());
 }
 
+#[tokio::test]
+async fn channel_full_soft_reset_in_returns_timeout_instead_of_wedging_manager() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(1);
+    assert!(
+        session_tx.try_send(PeerCommand::Start).is_ok(),
+        "pre-fill the session command channel so route-refresh send blocks"
+    );
+    let (finish_tx, finish_rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _session_rx = session_rx;
+        let _ = finish_rx.await;
+        Ok(())
+    });
+    let handle = PeerHandle::from_parts(session_tx, task);
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        mgr.soft_reset_in(key(addr), vec![(Afi::Ipv4, Safi::Unicast)]),
+    )
+    .await
+    .expect("soft_reset_in should return under the lifecycle command deadline");
+
+    assert!(
+        result.is_err(),
+        "full session command channel must surface as a failed soft reset, not a silent success"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("timed out") && err.contains("route refresh"),
+        "error should preserve the channel-full route-refresh timeout detail: {err}"
+    );
+
+    let _ = finish_tx.send(());
+}
+
+#[tokio::test]
+async fn channel_full_disable_peer_returns_timeout_instead_of_wedging_manager() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(1);
+    assert!(
+        session_tx.try_send(PeerCommand::Start).is_ok(),
+        "pre-fill the session command channel so stop send blocks"
+    );
+    let (finish_tx, finish_rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _session_rx = session_rx;
+        let _ = finish_rx.await;
+        Ok(())
+    });
+    let handle = PeerHandle::from_parts(session_tx, task);
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    let result = tokio::time::timeout(Duration::from_secs(2), mgr.disable_peer(key(addr), None))
+        .await
+        .expect("disable_peer should return under the lifecycle command deadline");
+
+    assert!(
+        result.is_err(),
+        "full session command channel must surface as a failed disable, not a silent success"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("timed out") && err.contains("stop"),
+        "error should preserve the channel-full stop timeout detail: {err}"
+    );
+    assert!(
+        !mgr.peers
+            .get(&key(addr))
+            .expect("peer remains managed")
+            .enabled,
+        "disable marks desired admin state before signaling the stuck session"
+    );
+
+    let _ = finish_tx.send(());
+}
+
 /// A peer handle that acknowledges policy hot-applies (and route refreshes), so
 /// `update_runtime_policies_for_peer_key` succeeds and advances bookkeeping.
 /// `fake_peer_handle`'s catch-all never replies to UpdateImport/ExportPolicy, so
