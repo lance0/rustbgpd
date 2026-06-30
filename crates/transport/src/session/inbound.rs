@@ -959,7 +959,7 @@ impl PeerSession {
                                 v.validate_rpki(&prefix, origin_asn)
                             });
                         let ctx = RouteContext {
-                            prefix,
+                            prefix: Some(prefix),
                             next_hop: Some(body_next_hop),
                             extended_communities: update_ecs,
                             communities: update_communities,
@@ -1118,13 +1118,10 @@ impl PeerSession {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {
                             // Apply import policy using the destination prefix
-                            // component (if present) for prefix matching
+                            // component (if present) for prefix matching.
                             let dest_prefix = rule.destination_prefix();
-                            let fs_prefix = dest_prefix.unwrap_or(Prefix::V4(
-                                rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
-                            ));
                             let ctx = RouteContext {
-                                prefix: fs_prefix,
+                                prefix: dest_prefix,
                                 next_hop: None,
                                 extended_communities: update_ecs,
                                 communities: update_communities,
@@ -1133,9 +1130,11 @@ impl PeerSession {
                                 as_path_len: aspath_len,
                                 validation_state: validation
                                     .as_ref()
-                                    .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
-                                        v.validate_rpki(&fs_prefix, origin_asn)
-                                    }),
+                                    .zip(dest_prefix.as_ref())
+                                    .map_or(
+                                        rustbgpd_wire::RpkiValidation::NotFound,
+                                        |(v, prefix)| v.validate_rpki(prefix, origin_asn),
+                                    ),
                                 aspa_state: mp_aspa_state,
                                 peer_address: Some(self.peer_ip),
                                 peer_asn: policy_peer_asn,
@@ -1189,16 +1188,18 @@ impl PeerSession {
                     }
 
                     if mp.safi == Safi::Evpn {
-                        // EVPN announced routes — typed TLVs, not prefixes.
-                        // Policy context uses a placeholder 0.0.0.0/0 prefix
-                        // so RT / ext-community / AS_PATH match clauses work;
-                        // match_prefix against the placeholder is effectively
-                        // a no-op. RT-based filtering is the expected model.
-                        let placeholder_prefix =
-                            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+                        // EVPN Types 1-4 are prefixless for policy purposes;
+                        // Type 5 carries a real IP prefix (RFC 9136).
                         for route in &mp.evpn_announced {
+                            let policy_prefix = match route {
+                                rustbgpd_wire::EvpnRoute::IpPrefix(t5) => match t5.prefix {
+                                    rustbgpd_wire::EvpnIpPrefixValue::V4(p) => Some(Prefix::V4(p)),
+                                    rustbgpd_wire::EvpnIpPrefixValue::V6(p) => Some(Prefix::V6(p)),
+                                },
+                                _ => None,
+                            };
                             let ctx = RouteContext {
-                                prefix: placeholder_prefix,
+                                prefix: policy_prefix,
                                 next_hop: Some(mp.next_hop),
                                 extended_communities: update_ecs,
                                 communities: update_communities,
@@ -1253,14 +1254,12 @@ impl PeerSession {
 
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         // BGP-LS announced routes — opaque topology objects,
-                        // not unicast prefixes. Prefix policy predicates see a
-                        // placeholder; AS_PATH/community/RT predicates still
+                        // not unicast prefixes. Prefix predicates therefore do
+                        // not match; AS_PATH/community/RT predicates still
                         // operate on the real path attributes.
-                        let placeholder_prefix =
-                            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
                         for nlri in &mp.bgpls_announced {
                             let ctx = RouteContext {
-                                prefix: placeholder_prefix,
+                                prefix: None,
                                 next_hop: Some(mp.next_hop),
                                 extended_communities: update_ecs,
                                 communities: update_communities,
@@ -1325,7 +1324,7 @@ impl PeerSession {
                                 v.validate_rpki(&entry.prefix, origin_asn)
                             });
                         let ctx = RouteContext {
-                            prefix: entry.prefix,
+                            prefix: Some(entry.prefix),
                             next_hop: Some(mp.next_hop),
                             extended_communities: update_ecs,
                             communities: update_communities,

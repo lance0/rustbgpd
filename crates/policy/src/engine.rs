@@ -65,8 +65,11 @@ impl PolicyResult {
 /// Borrowed route data used for policy evaluation.
 #[derive(Debug, Clone, Copy)]
 pub struct RouteContext<'a> {
-    /// The route's NLRI prefix.
-    pub prefix: Prefix,
+    /// The route's NLRI prefix, when the address family carries one.
+    ///
+    /// Prefix predicates do not match prefixless families such as BGP-LS
+    /// topology NLRIs.
+    pub prefix: Option<Prefix>,
     /// The route's resolved next-hop, if any.
     pub next_hop: Option<IpAddr>,
     /// Extended communities attached to the route.
@@ -689,7 +692,9 @@ impl PolicyStatement {
 
         // --- Tier 2: prefix match (O(1) masking; cheap and usually selective).
         if let Some(p) = self.prefix
-            && !self.matches_prefix(p, ctx.prefix)
+            && !ctx
+                .prefix
+                .is_some_and(|candidate| self.matches_prefix(p, candidate))
         {
             return false;
         }

@@ -375,12 +375,11 @@ impl RibManager {
                 }
                 rib_len = rib.len();
                 evpn_len = rib.evpn_len();
-                // GC the attribute intern table once per pass: LLGR
-                // promotion adds the LLGR_STALE community (so the route's
-                // attribute Arc is replaced) and non-LLGR sweeps drop
-                // routes outright. Both leave the prior interned vectors
-                // with strong_count==1, which sticks until some later
-                // unicast withdraw happens to call gc_intern_table.
+                // First GC catches interned sets made unreachable by direct
+                // Adj-RIB-In mutation (LLGR COW promotion or non-LLGR family
+                // sweeps). A second GC below runs after Loc-RIB recompute
+                // drops selected-route clones that were still holding old
+                // Arcs alive here.
                 rib.gc_intern_table();
             }
             if !non_llgr_families.is_empty() {
@@ -396,6 +395,11 @@ impl RibManager {
             }
             if !evpn_affected.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn_affected);
+            }
+            if (!affected.is_empty() || !fs_affected.is_empty() || !evpn_affected.is_empty())
+                && let Some(rib) = self.ribs.get_mut(&peer)
+            {
+                rib.gc_intern_table();
             }
             self.metrics
                 .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
@@ -430,7 +434,10 @@ impl RibManager {
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), 0, 0)
             };
-        if !swept.is_empty() {
+        let had_swept = !swept.is_empty();
+        let had_fs_swept = !fs_swept.is_empty();
+        let had_evpn_swept = !evpn_swept.is_empty();
+        if had_swept {
             info!(%peer, count = swept.len(), "swept stale routes");
             let affected: HashSet<Prefix> = swept.into_iter().collect();
             self.metrics
@@ -438,15 +445,20 @@ impl RibManager {
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
-        if !fs_swept.is_empty() {
+        if had_fs_swept {
             let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
-        if !evpn_swept.is_empty() {
+        if had_evpn_swept {
             let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
             self.metrics
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if (had_swept || had_fs_swept || had_evpn_swept)
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            rib.gc_intern_table();
         }
 
         self.release_peer_state_if_departed(peer);
@@ -474,7 +486,10 @@ impl RibManager {
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), 0, 0)
             };
-        if !swept.is_empty() {
+        let had_swept = !swept.is_empty();
+        let had_fs_swept = !fs_swept.is_empty();
+        let had_evpn_swept = !evpn_swept.is_empty();
+        if had_swept {
             info!(%peer, count = swept.len(), "swept LLGR-stale routes");
             let affected: HashSet<Prefix> = swept.into_iter().collect();
             self.metrics
@@ -482,15 +497,20 @@ impl RibManager {
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
-        if !fs_swept.is_empty() {
+        if had_fs_swept {
             let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
-        if !evpn_swept.is_empty() {
+        if had_evpn_swept {
             let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
             self.metrics
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if (had_swept || had_fs_swept || had_evpn_swept)
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            rib.gc_intern_table();
         }
 
         self.release_peer_state_if_departed(peer);

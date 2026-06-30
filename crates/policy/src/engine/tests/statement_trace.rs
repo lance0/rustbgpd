@@ -45,7 +45,7 @@ fn empty_chain_is_permit_with_no_steps() {
 
 fn plain_ctx(prefix: Prefix) -> RouteContext<'static> {
     RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &[],

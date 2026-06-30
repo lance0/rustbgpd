@@ -77,6 +77,41 @@ fn exact_match_permit() {
 }
 
 #[test]
+fn prefix_predicate_does_not_match_prefixless_context() {
+    let pl = Policy {
+        entries: vec![stmt(
+            Some(v4_entry([0, 0, 0, 0], 0)),
+            PolicyAction::Permit,
+            vec![],
+        )],
+        default_action: PolicyAction::Deny,
+    };
+    let ctx = RouteContext {
+        prefix: None,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+
+    assert_eq!(
+        super::super::evaluate_policy(Some(&pl), &ctx).action,
+        PolicyAction::Deny
+    );
+}
+
+#[test]
 fn ge_le_range() {
     let pl = Policy {
         entries: vec![PolicyStatement {

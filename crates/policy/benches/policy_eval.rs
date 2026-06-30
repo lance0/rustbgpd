@@ -105,7 +105,7 @@ fn bench_policy_eval(c: &mut Criterion) {
     let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     let ctx = RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: Some(peer_ip),
         extended_communities: &[],
         communities: &communities,
@@ -259,7 +259,7 @@ fn predicate_ctx<'a>(
     peer_ip: IpAddr,
 ) -> RouteContext<'a> {
     RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: Some(peer_ip),
         extended_communities: &[],
         communities,

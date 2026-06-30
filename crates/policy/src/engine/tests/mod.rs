@@ -38,7 +38,7 @@ fn ctx<'a>(
     validation_state: RpkiValidation,
 ) -> RouteContext<'a> {
     RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities,
         communities,

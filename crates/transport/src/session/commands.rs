@@ -243,7 +243,7 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
         let ctx = RouteContext {
-            prefix,
+            prefix: Some(prefix),
             next_hop: decision.next_hop,
             extended_communities: &cached.extended_communities,
             communities: &cached.communities,

@@ -31,7 +31,7 @@ fn evpn_route_type_filters_by_type() {
 
     let prefix = v4_prefix([0, 0, 0, 0], 0);
     let make_ctx = |evpn_type: Option<u8>| RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &[],
@@ -97,7 +97,7 @@ fn evpn_route_type_unset_matches_all() {
 
     let prefix = v4_prefix([0, 0, 0, 0], 0);
     let ctx = RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &[],

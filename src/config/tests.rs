@@ -6456,7 +6456,7 @@ import_policy_chain = ["bump-local-pref"]
     ));
     let comms = [rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN];
     let ctx = RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &comms,
@@ -6666,7 +6666,7 @@ import_policy_chain = ["strip-communities"]
     ));
     let comms = [rustbgpd_wire::COMMUNITY_BLACKHOLE];
     let ctx = RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &comms,

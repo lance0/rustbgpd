@@ -69,7 +69,7 @@ fn route_as_path(route: &Route) -> Option<&AsPath> {
 
 fn export_ctx(prefix: Prefix, aspath_str: &str) -> RouteContext<'_> {
     RouteContext {
-        prefix,
+        prefix: Some(prefix),
         next_hop: None,
         extended_communities: &[],
         communities: &[],

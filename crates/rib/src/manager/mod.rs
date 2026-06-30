@@ -1255,7 +1255,7 @@ impl RibManager {
                     };
                     let aspath_len = cand.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                     let ctx = RouteContext {
-                        prefix,
+                        prefix: Some(prefix),
                         next_hop: Some(cand.next_hop),
                         extended_communities: cand.extended_communities(),
                         communities: cand.communities(),
