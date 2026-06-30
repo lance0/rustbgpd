@@ -468,48 +468,48 @@ impl PeerSession {
                     1,
                 );
 
-                // ADR-0072 follow-up: structured event surface. Emit
-                // after the legacy counter so the
-                // counter-vs-event-stream consistency is monotone.
-                // One event per blocked route — the outer loop is
-                // already per-route, so this matches the counter's
-                // per-route increment.
-                let otc_value = route.attributes.iter().find_map(|a| match a {
-                    PathAttribute::OnlyToCustomer(asn) => Some(*asn),
-                    PathAttribute::Unknown(raw)
-                        if raw.type_code
-                            == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-                            && raw.data.len() == 4 =>
-                    {
-                        Some(u32::from_be_bytes([
-                            raw.data[0],
-                            raw.data[1],
-                            raw.data[2],
-                            raw.data[3],
-                        ]))
-                    }
-                    _ => None,
-                });
-                let as_path_string = route
-                    .attributes
-                    .iter()
-                    .find_map(|a| match a {
-                        PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
+                if self.event_sink().wants_otc_route_blocked() {
+                    // ADR-0072 follow-up: structured event surface. Emit
+                    // after the legacy counter so the counter-vs-event-stream
+                    // consistency is monotone. One event per blocked route —
+                    // the outer loop is already per-route, so this matches the
+                    // counter's per-route increment.
+                    let otc_value = route.attributes.iter().find_map(|a| match a {
+                        PathAttribute::OnlyToCustomer(asn) => Some(*asn),
+                        PathAttribute::Unknown(raw)
+                            if raw.type_code
+                                == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+                                && raw.data.len() == 4 =>
+                        {
+                            Some(u32::from_be_bytes([
+                                raw.data[0],
+                                raw.data[1],
+                                raw.data[2],
+                                raw.data[3],
+                            ]))
+                        }
                         _ => None,
-                    })
-                    .unwrap_or_default();
-                let otc_event = crate::event_sink::OtcRouteBlockedEvent {
-                    peer: self.peer_ip,
-                    direction: crate::event_sink::OtcDirection::Egress,
-                    reason:
-                        rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
-                    prefixes: vec![route.prefix.to_string()],
-                    local_role: self.config.peer.local_role,
-                    remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
-                    otc_value,
-                    as_path: as_path_string,
-                };
-                self.event_sink().publish_otc_route_blocked(&otc_event);
+                    });
+                    let as_path_string = route
+                        .attributes
+                        .iter()
+                        .find_map(|a| match a {
+                            PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let otc_event = crate::event_sink::OtcRouteBlockedEvent {
+                        peer: self.peer_ip,
+                        direction: crate::event_sink::OtcDirection::Egress,
+                        reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
+                        prefixes: vec![route.prefix.to_string()],
+                        local_role: self.config.peer.local_role,
+                        remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
+                        otc_value,
+                        as_path: as_path_string,
+                    };
+                    self.event_sink().publish_otc_route_blocked(&otc_event);
+                }
 
                 continue;
             }

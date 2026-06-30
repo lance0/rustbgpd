@@ -112,6 +112,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failure instead of wedging unrelated peer RPC/reconcile work. Shutdown shares
   a single deadline budget across the command send and task join, and a failed
   dynamic-accept start aborts the orphaned session task.
+- **Transport/FSM low-risk tail cleanup from the repo-wide audit.** Inbound
+  UPDATE decode now reuses the negotiated Add-Path receive-family set instead
+  of rebuilding it per UPDATE, OTC route-blocked paths skip event-only prefix
+  rendering when no event-history sink consumes the structured event, and
+  dynamic-peer dead-letter overflow now evicts the oldest pending entry
+  deterministically instead of depending on `HashMap` iteration order.
 
 ## [0.44.0] — 2026-06-29
 

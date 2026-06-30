@@ -7812,6 +7812,55 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     drop(next_client_stream);
 }
 
+#[tokio::test]
+async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut config = make_dynamic_manager_config();
+    config.global.dynamic_neighbor_limit = Some(2);
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let counters = Arc::new(FakePeerCounters::default());
+    let first = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let third = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+
+    for addr in [first, second, third] {
+        insert_test_managed_peer(
+            &mut mgr,
+            addr,
+            fake_peer_handle(addr, SessionState::Established, None, counters.clone()),
+            true,
+        );
+        mgr.dead_letter_pending_for(addr);
+    }
+
+    assert!(
+        !mgr.dead_lettered_pending.contains_key(&first),
+        "oldest pending entry should be evicted at cap"
+    );
+    assert!(
+        mgr.dead_lettered_pending.contains_key(&second),
+        "newer pending entry should be retained"
+    );
+    assert!(
+        mgr.dead_lettered_pending.contains_key(&third),
+        "newly inserted pending entry should be retained"
+    );
+}
+
 #[test]
 fn build_transport_config_sets_restart_window_for_eligible_static_peer() {
     let (_tx, rx) = mpsc::channel(1);

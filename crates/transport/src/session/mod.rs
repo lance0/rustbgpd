@@ -121,6 +121,10 @@ pub(crate) struct PeerSession {
     /// Address families negotiated via MP-BGP capabilities. Used to filter
     /// inbound `MP_REACH_NLRI` and outbound route advertisements.
     negotiated_families: Vec<(Afi, Safi)>,
+    /// Families for which Add-Path receive was negotiated. Built once at
+    /// `SessionEstablished` and reused by inbound UPDATE decode instead of
+    /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
+    add_path_receive_families: Vec<(Afi, Safi)>,
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
     stop_requested: bool,
@@ -438,6 +442,7 @@ impl PeerSession {
             link_local_next_hop_scope,
             negotiated: None,
             negotiated_families: Vec::new(),
+            add_path_receive_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
@@ -538,6 +543,7 @@ impl PeerSession {
             link_local_next_hop_scope,
             negotiated: None,
             negotiated_families: Vec::new(),
+            add_path_receive_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
