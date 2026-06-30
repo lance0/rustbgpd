@@ -67,7 +67,7 @@ wait_gobgp_established() {
     log "Waiting for $label session to $peer..."
     for i in $(seq 1 45); do
         local state
-        state=$(gobgp_neighbor "$container" | grep "$peer" || true)
+        state=$(gobgp_neighbor "$container" | grep -F -- "$peer" || true)
         if echo "$state" | grep -qi "establ"; then
             ok "$label session established (attempt $i)"
             return 0
