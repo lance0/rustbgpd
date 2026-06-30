@@ -948,6 +948,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             &self.state.groups,
             intent.instances.as_ref(),
         );
+        self.prune_stale_fdb_permanent_failures(intent.remote_macs.as_ref());
 
         // ADR-0059 mixed-family alias fallback warn: log only for
         // `(VNI, MAC)` keys that newly entered the fallback this pass.
@@ -1280,17 +1281,21 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // configuration is gone. The diff handles empty intent
         // naturally — `desired_*` sets evaluate empty and Phase D
         // removals fire for every kernel row.
-        if !intent.ip_vrfs.is_empty() || !self.state.l3_owned.is_empty() {
-            let ready_l3vxlan_ifindex: std::collections::BTreeMap<IpVrfId, u32> = ip_vrf_status_map
-                .iter()
-                .filter_map(|(id, status)| match status {
-                    rustbgpd_evpn::ip_vrf::IpVrfStatus::Ready {
-                        l3vxlan_ifindex, ..
-                    } => Some((*id, *l3vxlan_ifindex)),
-                    rustbgpd_evpn::ip_vrf::IpVrfStatus::NotReady { .. } => None,
-                })
-                .collect();
+        let ready_l3vxlan_ifindex: std::collections::BTreeMap<IpVrfId, u32> = ip_vrf_status_map
+            .iter()
+            .filter_map(|(id, status)| match status {
+                rustbgpd_evpn::ip_vrf::IpVrfStatus::Ready {
+                    l3vxlan_ifindex, ..
+                } => Some((*id, *l3vxlan_ifindex)),
+                rustbgpd_evpn::ip_vrf::IpVrfStatus::NotReady { .. } => None,
+            })
+            .collect();
+        self.prune_stale_l3_permanent_failures(
+            intent.remote_ip_prefixes.as_ref(),
+            &ready_l3vxlan_ifindex,
+        );
 
+        if !intent.ip_vrfs.is_empty() || !self.state.l3_owned.is_empty() {
             // ADR-0079 L3 sweep: one-shot adoption pass over kernel
             // rows carrying our L3 ownership markers — `proto bgp` +
             // onlink routes in configured `[[evpn_ip_vrfs]]` tables,
@@ -3261,6 +3266,140 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             | DataplaneOp::RemoveL3VxlanFdb { .. }
             | DataplaneOp::InstallL3FdbNhg { .. }
             | DataplaneOp::RemoveL3FdbNhg { .. } => {}
+        }
+    }
+
+    fn prune_stale_fdb_permanent_failures(&mut self, desired: &RemoteMacTable) {
+        if self.state.permanent_failures.is_empty() {
+            return;
+        }
+
+        let mut live_keys: BTreeSet<(EvpnInstanceId, MacAddress)> =
+            desired.iter().map(|(&(vni, mac), _)| (vni, mac)).collect();
+        live_keys.extend(self.state.owned.iter().map(|(&(vni, mac), _)| (vni, mac)));
+        live_keys.extend(
+            self.state
+                .adopted_fdb
+                .iter()
+                .map(|&(vni, _, mac)| (vni, mac)),
+        );
+
+        let before = self.state.permanent_failures.len();
+        self.state
+            .permanent_failures
+            .retain(|key, _| live_keys.contains(key));
+        let removed = before.saturating_sub(self.state.permanent_failures.len());
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                "pruned stale FDB permanent-failure suppressions for withdrawn desired rows"
+            );
+        }
+    }
+
+    fn prune_stale_l3_permanent_failures(
+        &mut self,
+        desired: &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
+        ready_l3vxlan_ifindex: &BTreeMap<IpVrfId, u32>,
+    ) {
+        if self.state.l3_permanent_failures.is_empty() {
+            return;
+        }
+
+        let mut desired_routes: BTreeSet<(IpVrfId, EvpnIpPrefixValue)> = BTreeSet::new();
+        let mut desired_vrfs: BTreeSet<IpVrfId> = BTreeSet::new();
+        let mut desired_neighbors: BTreeSet<(u32, IpAddr)> = BTreeSet::new();
+        let mut desired_fdb: BTreeSet<(u32, MacAddress)> = BTreeSet::new();
+        let mut desired_groups: BTreeSet<(crate::group_state::L3NhgKey, EvpnIpPrefixValue)> =
+            BTreeSet::new();
+
+        for ((vrf_id, prefix), entry) in desired.iter() {
+            desired_routes.insert((*vrf_id, *prefix));
+            desired_vrfs.insert(*vrf_id);
+            if let Some(ifindex) = ready_l3vxlan_ifindex.get(vrf_id) {
+                for next_hop in entry.targets.next_hops() {
+                    desired_neighbors.insert((*ifindex, *next_hop));
+                }
+                desired_fdb.insert((*ifindex, entry.router_mac));
+                if entry.targets.next_hops().len() >= 2 {
+                    desired_groups.insert((
+                        crate::group_state::L3NhgKey::new(*vrf_id, *ifindex, entry.router_mac),
+                        *prefix,
+                    ));
+                }
+            }
+        }
+
+        let owned_routes: BTreeSet<_> = self.state.l3_owned.installs.keys().copied().collect();
+        let owned_neighbors: BTreeSet<_> = self
+            .state
+            .l3_owned
+            .kernel_neighbors
+            .keys()
+            .copied()
+            .collect();
+        let owned_fdb: BTreeSet<_> = self.state.l3_owned.kernel_fdb.keys().copied().collect();
+        let owned_groups: BTreeSet<_> = self
+            .state
+            .l3_groups
+            .iter_route_refs()
+            .map(|(&(_, prefix), group_key)| (*group_key, prefix))
+            .collect();
+        let adopted_routes: BTreeSet<_> = self.state.adopted_l3_routes.keys().copied().collect();
+        let adopted_neighbors: BTreeSet<_> =
+            self.state.adopted_l3_neighbors.keys().copied().collect();
+        let adopted_fdb: BTreeSet<_> = self.state.adopted_l3_fdb.keys().copied().collect();
+
+        let before = self.state.l3_permanent_failures.len();
+        self.state
+            .l3_permanent_failures
+            .retain(|key, op| match key {
+                L3OpKey::Route { vrf_id, prefix } => {
+                    let route = (*vrf_id, *prefix);
+                    desired_routes.contains(&route)
+                        || owned_routes.contains(&route)
+                        || adopted_routes.contains(&route)
+                }
+                L3OpKey::Neighbor {
+                    l3vxlan_ifindex,
+                    next_hop,
+                } => {
+                    let neighbor = (*l3vxlan_ifindex, *next_hop);
+                    desired_neighbors.contains(&neighbor)
+                        || owned_neighbors.contains(&neighbor)
+                        || adopted_neighbors.contains(&neighbor)
+                        || l3_op_vrf_id(op).is_some_and(|vrf_id| {
+                            desired_vrfs.contains(&vrf_id)
+                                && !ready_l3vxlan_ifindex.contains_key(&vrf_id)
+                        })
+                }
+                L3OpKey::Fdb {
+                    l3vxlan_ifindex,
+                    router_mac,
+                } => {
+                    let fdb = (*l3vxlan_ifindex, *router_mac);
+                    desired_fdb.contains(&fdb)
+                        || owned_fdb.contains(&fdb)
+                        || adopted_fdb.contains(&fdb)
+                        || l3_op_vrf_id(op).is_some_and(|vrf_id| {
+                            desired_vrfs.contains(&vrf_id)
+                                && !ready_l3vxlan_ifindex.contains_key(&vrf_id)
+                        })
+                }
+                L3OpKey::Group { group_key, prefix } => {
+                    let route = (group_key.vrf_id, *prefix);
+                    desired_groups.contains(&(*group_key, *prefix))
+                        || owned_groups.contains(&(*group_key, *prefix))
+                        || (desired_routes.contains(&route)
+                            && !ready_l3vxlan_ifindex.contains_key(&group_key.vrf_id))
+                }
+            });
+        let removed = before.saturating_sub(self.state.l3_permanent_failures.len());
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                "pruned stale L3 permanent-failure suppressions for withdrawn desired rows"
+            );
         }
     }
 
@@ -6330,6 +6469,22 @@ fn l3_op_key(op: &DataplaneOp) -> Option<L3OpKey> {
             group_key: *group_key,
             prefix: *prefix,
         }),
+        _ => None,
+    }
+}
+
+fn l3_op_vrf_id(op: &DataplaneOp) -> Option<IpVrfId> {
+    match op {
+        DataplaneOp::AddRemoteIpRoute { vrf_id, .. }
+        | DataplaneOp::RemoveRemoteIpRoute { vrf_id, .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { vrf_id, .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { vrf_id, .. }
+        | DataplaneOp::AddL3Neighbor { vrf_id, .. }
+        | DataplaneOp::RemoveL3Neighbor { vrf_id, .. }
+        | DataplaneOp::AddL3VxlanFdb { vrf_id, .. }
+        | DataplaneOp::RemoveL3VxlanFdb { vrf_id, .. }
+        | DataplaneOp::InstallL3FdbNhg { vrf_id, .. }
+        | DataplaneOp::RemoveL3FdbNhg { vrf_id, .. } => Some(*vrf_id),
         _ => None,
     }
 }

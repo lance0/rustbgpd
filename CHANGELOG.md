@@ -69,6 +69,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route-event bursts coalesce into a single full RIB repoll, and MAC-only remote
   view construction indexes sticky metadata once per poll instead of scanning
   every projected route for every winner.
+- **EVPN Linux permanent-failure suppression is cleared when desired state is
+  withdrawn.** A permanent kernel failure still suppresses the exact same
+  L2/L3 dataplane op while the row remains desired, but withdrawing the failed
+  MAC or Type 5 prefix now prunes the stale suppression record so a later
+  same-shape re-add is attempted without requiring a daemon restart.
 - **BGP-LS routes no longer survive stale lifecycle transitions as live data.**
   The receive/API tranche intentionally does not implement BGP-LS GR/LLGR
   stale preservation yet, but the RIB lifecycle paths now enforce that boundary:

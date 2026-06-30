@@ -1224,6 +1224,61 @@ async fn permanent_failure_suppression_is_per_op_fingerprint() {
     h.shutdown().await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn permanent_failure_suppression_is_pruned_after_desired_withdraw() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let target = DataplaneOp::AddRemoteFdb {
+        vni: vni(100),
+        mac: mac(1),
+        vlan: None,
+        dst: ipa("10.0.0.2"),
+    };
+    h.handle.inject_failure_kernel_too_old(Some(target));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    let after_first = h.handle.apply_count();
+    assert!(
+        after_first >= 1,
+        "first apply did not run; got count={after_first}"
+    );
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+
+    h.intent_tx
+        .send(intent(2, inst.clone(), RemoteMacTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+    let after_withdraw = h.handle.apply_count();
+
+    let mut macs_readded = RemoteMacTable::builder();
+    macs_readded
+        .insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(3, inst, macs_readded.build()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 3).await;
+
+    assert!(
+        h.handle.apply_count() > after_withdraw,
+        "same-shape re-add after desired withdraw stayed permanently suppressed"
+    );
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "same-shape re-add after desired withdraw did not program the FDB"
+    );
+
+    h.shutdown().await;
+}
+
 // 9. Cross-key isolation: a permanent failure on (VNI, MAC=1) MUST
 //    NOT block a separate (VNI, MAC=2) from being applied. Earlier
 //    generation-wide suppression had cross-key bleed via the
@@ -3224,6 +3279,62 @@ async fn l3_permanent_route_failure_suppresses_until_shape_changes() {
         rustbgpd_evpn_linux::in_memory::InMemoryL3RouteTargets::Ecmp { next_hops }
             if next_hops == &vec![ipa("10.0.0.2"), ipa("10.0.0.4")]
     ));
+
+    h.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn l3_permanent_route_failure_is_pruned_after_desired_withdraw() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    let target = DataplaneOp::AddRemoteIpRouteEcmp {
+        vrf_id: l3_vrf_id(),
+        prefix: l3_prefix(),
+        table_id: L3_TABLE_ID,
+        l3vxlan_ifindex: L3_IFINDEX,
+        next_hops: vec![ipa("10.0.0.2"), ipa("10.0.0.3")],
+        router_mac: l3_router_mac(),
+    };
+    h.handle.inject_failure_kernel_too_old(Some(target));
+
+    h.intent_tx
+        .send(l3_intent(
+            1,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    assert!(
+        !h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        "permanent route failure must leave the route uninstalled"
+    );
+
+    h.intent_tx
+        .send(l3_intent(2, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+    let after_withdraw = h.handle.apply_count();
+
+    h.intent_tx
+        .send(l3_intent(
+            3,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3")]),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 3).await;
+
+    assert!(
+        h.handle.apply_count() > after_withdraw,
+        "same-shape L3 route re-add after desired withdraw stayed permanently suppressed"
+    );
+    assert!(
+        h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        "same-shape L3 route re-add after desired withdraw did not program the route"
+    );
 
     h.shutdown().await;
 }
