@@ -61,8 +61,8 @@ pub(super) fn evpn_routes_equal(
 }
 
 /// BGP-LS counterpart of [`routes_equal`]. The opaque NLRI key is supplied by
-/// the map key; equality here covers the advertised payload that can change
-/// while the key stays stable.
+/// the map key; equality here covers the selected-route metadata and attributes
+/// that can change while the opaque route identity stays stable.
 pub(super) fn bgpls_routes_equal(
     a: &crate::route::BgpLsRibRoute,
     b: &crate::route::BgpLsRibRoute,
