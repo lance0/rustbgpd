@@ -291,7 +291,7 @@ pub(super) async fn handle_evpn_event_coalesced(
     if drain.lagged_events > 0 {
         warn!(
             skipped = drain.lagged_events,
-            "EVPN originator: event broadcast lagged while coalescing; falling back to full repoll"
+            "EVPN originator: event broadcast lagged while coalescing; skipped events are absorbed by the authoritative full repoll"
         );
     }
     if drain.closed {
