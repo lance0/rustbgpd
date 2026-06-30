@@ -656,9 +656,10 @@ impl AdjRibIn {
     /// Insert or replace a BGP-LS route, keyed by opaque RFC 9552 identity.
     ///
     /// Returns `true` if an existing route at the same opaque key was replaced.
-    /// A replacement may strand the previous route's interned attribute set, so
-    /// BGP-LS batch callers run [`Self::gc_intern_table`] once when any insert
-    /// returned `true`.
+    /// A replacement may strand the previous route's interned attribute set.
+    /// BGP-LS batch callers run [`Self::gc_intern_table`] once after any
+    /// replacement or real withdrawal, after Loc-RIB recomputation has dropped
+    /// any selected-route clone.
     pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) -> bool {
         let key = route.key();
         if let Some(existing) = self.attr_intern.get(&route.attributes) {

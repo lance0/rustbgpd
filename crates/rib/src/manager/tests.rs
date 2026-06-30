@@ -14735,6 +14735,46 @@ fn unicast_announce_replace_reclaims_attr_intern() {
 }
 
 #[test]
+fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
+    // BGP-LS routes use the same per-peer attribute intern table as unicast
+    // and EVPN. A pure withdraw must GC after the affected Loc-RIB key is
+    // recomputed; otherwise the selected route clone keeps the withdrawn
+    // attribute set alive during the sweep and leaves one orphan behind per
+    // churn cycle.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let moves = 256u32;
+    for seq in 0..moves {
+        let route = make_bgpls_route(peer_addr, 24, seq);
+        let key = route.key();
+        manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+        manager.handle_bgpls_routes_received(peer, vec![], vec![key]);
+    }
+
+    let rib = &manager.ribs[&peer];
+    assert_eq!(
+        rib.bgpls_len(),
+        0,
+        "every churned BGP-LS route was withdrawn from the Adj-RIB-In"
+    );
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        0,
+        "every churned BGP-LS route was removed from the Loc-RIB"
+    );
+    assert_eq!(
+        rib.intern_len(),
+        0,
+        "BGP-LS pure-withdraw churn leaked the intern table: {} interned sets after {moves} withdraws",
+        rib.intern_len()
+    );
+}
+
+#[test]
 fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     // A GR-down that preserves some families keeps the peer Adj-RIB-In shell
     // alive. If EVPN is not preserved, that GR entry prunes EVPN routes through

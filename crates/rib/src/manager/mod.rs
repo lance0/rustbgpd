@@ -1589,39 +1589,38 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
         let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
-        let mut any_replaced = false;
+        let mut needs_intern_gc = false;
 
-        for key in withdrawn {
-            let family = key.family.to_afi_safi();
-            if rib.withdraw_bgpls(&key) {
+        {
+            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            for key in withdrawn {
+                let family = key.family.to_afi_safi();
+                if rib.withdraw_bgpls(&key) {
+                    needs_intern_gc = true;
+                    affected.insert(key.clone());
+                }
+                if active_refresh.contains(&family)
+                    && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    *removed_stale_counts.entry(family).or_default() += 1;
+                }
+            }
+
+            for route in announced {
+                let key = route.key();
+                let family = route.family.to_afi_safi();
+                needs_intern_gc |= rib.insert_bgpls(route);
                 affected.insert(key.clone());
+                if active_refresh.contains(&family)
+                    && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    *removed_stale_counts.entry(family).or_default() += 1;
+                }
             }
-            if active_refresh.contains(&family)
-                && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                && stale.remove(&key)
-            {
-                *removed_stale_counts.entry(family).or_default() += 1;
-            }
-        }
-
-        for route in announced {
-            let key = route.key();
-            let family = route.family.to_afi_safi();
-            any_replaced |= rib.insert_bgpls(route);
-            affected.insert(key.clone());
-            if active_refresh.contains(&family)
-                && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                && stale.remove(&key)
-            {
-                *removed_stale_counts.entry(family).or_default() += 1;
-            }
-        }
-
-        if any_replaced {
-            rib.gc_intern_table();
         }
 
         for ((afi, safi), count) in removed_stale_counts {
@@ -1629,6 +1628,9 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_bgpls_keys(affected);
+        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
+            rib.gc_intern_table();
+        }
     }
 
     /// Recompute the Loc-RIB BGP-LS selection for each affected key across the
