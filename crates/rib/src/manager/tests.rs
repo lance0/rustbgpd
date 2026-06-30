@@ -14818,3 +14818,107 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
         "GR family pruning must reclaim EVPN attribute intern entries"
     );
 }
+
+#[test]
+fn graceful_restart_entry_gcs_attr_intern_for_loc_rib_selected_bgpls() {
+    // BGP-LS is never GR-preserved, so a GR-down withdraws all of a peer's
+    // BGP-LS routes. Unlike the EVPN prune test above (which inserts directly
+    // into the Adj-RIB-In), these routes are SELECTED into the Loc-RIB via the
+    // receive path, so the Loc-RIB holds a second Arc clone of each interned
+    // attribute set. GC must therefore run AFTER the GR-entry Loc-RIB recompute;
+    // otherwise the gc that runs before it is a no-op for every selected route
+    // (strong_count is still 2) and each GR cycle leaks one interned set per
+    // BGP-LS route.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let count = 64u32;
+    for seq in 0..count {
+        // Distinct payload suffix => distinct key; distinct LOCAL_PREF =>
+        // distinct interned attribute set, so each route is selected into the
+        // Loc-RIB carrying its own Arc clone.
+        let route = make_bgpls_route(peer_addr, u8::try_from(seq).unwrap(), 100 + seq);
+        manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+    }
+    assert_eq!(manager.ribs[&peer].intern_len(), count as usize);
+    assert_eq!(manager.loc_rib.iter_bgpls().count(), count as usize);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+
+    let rib = manager
+        .ribs
+        .get(&peer)
+        .expect("GR-preserved peer shell should stay alive");
+    assert_eq!(rib.bgpls_len(), 0, "BGP-LS is never GR-preserved");
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        0,
+        "GR entry withdraws BGP-LS from the Loc-RIB"
+    );
+    assert_eq!(
+        rib.intern_len(),
+        0,
+        "GR entry must reclaim the interned attribute sets of the Loc-RIB-selected \
+         BGP-LS routes it withdraws (gc must run after the Loc-RIB recompute)"
+    );
+}
+
+#[test]
+fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
+    // An Enhanced Route Refresh that sweeps an omitted BGP-LS route at EoRR must
+    // reclaim that route's interned attribute set. The swept route was selected
+    // into the Loc-RIB, so the Loc-RIB held a second Arc clone; GC must run
+    // AFTER finish_route_refresh's Loc-RIB recompute, not before it. The two
+    // routes carry DISTINCT attributes so the swept route has its own interned
+    // set (identical attributes would share one set kept alive by the survivor,
+    // masking the leak).
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let survivor = make_bgpls_route(peer_addr, 21, 100);
+    let omitted = make_bgpls_route(peer_addr, 22, 200);
+    manager.handle_bgpls_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
+    assert_eq!(manager.ribs[&peer].intern_len(), 2);
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    });
+    // Reannounce only the survivor; the omitted route stays stale and is swept.
+    manager.handle_bgpls_routes_received(peer, vec![survivor], vec![]);
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    });
+
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        1,
+        "EoRR sweeps the omitted BGP-LS route, leaving only the survivor"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        1,
+        "EoRR sweep must reclaim the swept route's interned attribute set \
+         (gc must run after finish_route_refresh's Loc-RIB recompute)"
+    );
+}

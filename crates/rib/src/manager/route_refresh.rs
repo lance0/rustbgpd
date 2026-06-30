@@ -801,6 +801,16 @@ impl RibManager {
         }
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(bgpls_affected);
+            // Reclaim attribute sets stranded by the stale-BGP-LS withdrawals
+            // above. The earlier gc_intern_table() ran before this recompute,
+            // while the Loc-RIB still held the selected-route Arc clones, so
+            // those orphans survived (gc only frees a set whose sole remaining
+            // holder is the intern table). Now that recompute_bgpls_keys has
+            // dropped the Loc-RIB clones, gc reclaims them — mirroring the
+            // receive path's recompute-then-gc ordering.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 }
