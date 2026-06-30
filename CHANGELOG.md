@@ -95,6 +95,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Address-Prefix ORF update carrying any other value now resets the installed
   ORF list for that family/type and forces a safe outbound resync instead of
   treating the unknown value as defer-like state.
+- **RIB unicast recompute avoids per-prefix candidate vector allocation.**
+  Best-path recompute now streams each affected prefix's candidate routes
+  directly from peer Adj-RIB-In tables into `LocRib::recompute`, preserving
+  selection behavior while avoiding a transient `Vec` on every affected prefix.
 
 ## [0.44.0] — 2026-06-29
 
