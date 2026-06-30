@@ -340,8 +340,8 @@ impl PeerManager {
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer
     /// about to be auto-removed, so a re-establishing peer at the same
     /// address inherits the retry. No-op if neither flag is set.
-    /// Bounded at `dynamic_neighbor_limit` — over-cap evicts an
-    /// arbitrary entry with `warn!` to surface pathological churn.
+    /// Bounded at `dynamic_neighbor_limit` — over-cap evicts the oldest
+    /// live entry with `warn!` to surface pathological churn.
     pub(super) fn dead_letter_pending_for(&mut self, peer_addr: IpAddr) {
         let Some(peer_key) = self.unique_peer_key_for_address(peer_addr) else {
             return;
@@ -361,19 +361,23 @@ impl PeerManager {
             graceful_shutdown: managed.advertise_graceful_shutdown,
         };
         let cap = self.dynamic_neighbor_limit as usize;
-        if cap > 0
-            && !self.dead_lettered_pending.contains_key(&peer_addr)
-            && self.dead_lettered_pending.len() >= cap
-            && let Some(victim) = self.dead_lettered_pending.keys().next().copied()
-        {
-            warn!(
-                %peer_addr,
-                evicted = %victim,
-                cap,
-                "dead-letter pending table at cap, evicting an existing entry — \
-                 dynamic peers churning faster than they re-establish"
-            );
-            self.dead_lettered_pending.remove(&victim);
+        let is_new = !self.dead_lettered_pending.contains_key(&peer_addr);
+        if cap > 0 && is_new && self.dead_lettered_pending.len() >= cap {
+            while let Some(victim) = self.dead_lettered_pending_order.pop_front() {
+                if self.dead_lettered_pending.remove(&victim).is_some() {
+                    warn!(
+                        %peer_addr,
+                        evicted = %victim,
+                        cap,
+                        "dead-letter pending table at cap, evicting oldest existing entry — \
+                         dynamic peers churning faster than they re-establish"
+                    );
+                    break;
+                }
+            }
+        }
+        if is_new {
+            self.dead_lettered_pending_order.push_back(peer_addr);
         }
         self.dead_lettered_pending.insert(peer_addr, entry);
     }
@@ -385,6 +389,8 @@ impl PeerManager {
         let Some(prev) = self.dead_lettered_pending.remove(&peer_addr) else {
             return;
         };
+        self.dead_lettered_pending_order
+            .retain(|candidate| *candidate != peer_addr);
         let Some(managed) = self
             .unique_peer_key_for_address(peer_addr)
             .and_then(|key| self.peers.get_mut(&key))

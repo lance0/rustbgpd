@@ -330,6 +330,17 @@ impl PeerSession {
                     );
                     self.negotiated_families
                         .clone_from(&neg.negotiated_families);
+                    self.add_path_receive_families = neg
+                        .add_path_families
+                        .iter()
+                        .filter_map(|(family, mode)| {
+                            if matches!(mode, AddPathMode::Receive | AddPathMode::Both) {
+                                Some(*family)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
 
                     // Compute sendable families: start from negotiated,
                     // then for eBGP remove IPv6 unicast if no valid
@@ -551,6 +562,7 @@ impl PeerSession {
 
                     self.negotiated = None;
                     self.negotiated_families.clear();
+                    self.add_path_receive_families.clear();
                     self.clear_known_routes();
                     self.local_open_pdu = None;
                     self.remote_open_pdu = None;

@@ -115,6 +115,15 @@ pub struct OtcRouteBlockedEvent {
 /// hand it off; sinks that need to retain state clone what they
 /// need.
 pub trait TransportEventSink: Send + Sync + 'static {
+    /// Whether this sink retains structured OTC route-blocked events.
+    ///
+    /// The default is `true` for real sinks. The no-op sink overrides this so
+    /// the session can skip building event-only strings while preserving the
+    /// counters and warnings that remain authoritative without event history.
+    fn wants_otc_route_blocked(&self) -> bool {
+        true
+    }
+
     /// Hand an [`OtcRouteBlockedEvent`] to the sink. Called from
     /// `PeerSession` **after** the existing counter +
     /// per-`NeighborState` scalar have been updated, so the legacy
@@ -134,5 +143,9 @@ pub trait TransportEventSink: Send + Sync + 'static {
 pub struct NoopTransportEventSink;
 
 impl TransportEventSink for NoopTransportEventSink {
+    fn wants_otc_route_blocked(&self) -> bool {
+        false
+    }
+
     fn publish_otc_route_blocked(&self, _event: &OtcRouteBlockedEvent) {}
 }

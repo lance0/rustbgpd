@@ -227,8 +227,11 @@ pub struct PeerManager {
     /// peers auto-removed by `BackToIdle`. Restored on the next inbound
     /// from the same address. Bounded at `dynamic_neighbor_limit` so a
     /// pathological churn pattern can't grow it without bound; an over-
-    /// cap insert evicts an arbitrary existing entry with a `warn!`.
+    /// cap insert evicts the oldest recorded address with a `warn!`.
     dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
+    /// Insertion order for [`Self::dead_lettered_pending`]. Stale addresses
+    /// are skipped lazily when the bounded table needs to evict.
+    dead_lettered_pending_order: VecDeque<IpAddr>,
     next_session_id: u64,
     /// ADR-0067 step 4 — RFC 5882 coupling. `PeerManager` owns the desired BFD
     /// session set; the BFD actor is a pure session-runner that reconciles it.
@@ -396,6 +399,7 @@ impl PeerManager {
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
             dead_lettered_pending: HashMap::new(),
+            dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,
             current_config,
             bfd_coupling: None,

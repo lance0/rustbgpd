@@ -167,6 +167,24 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     }
 }
 
+fn install_test_negotiated_session(session: &mut PeerSession, negotiated: NegotiatedSession) {
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.add_path_receive_families = negotiated
+        .add_path_families
+        .iter()
+        .filter_map(|(family, mode)| {
+            if matches!(mode, AddPathMode::Receive | AddPathMode::Both) {
+                Some(*family)
+            } else {
+                None
+            }
+        })
+        .collect();
+    session.negotiated = Some(negotiated);
+}
+
 fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
     let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_tag])
         .expect("fixture BGP-LS NLRI decodes")
@@ -4250,10 +4268,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
     negotiated
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    install_test_negotiated_session(&mut session, negotiated);
 
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -4306,10 +4321,7 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
     negotiated
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    install_test_negotiated_session(&mut session, negotiated);
 
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
