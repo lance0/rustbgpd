@@ -24,22 +24,25 @@ impl PeerManager {
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
-        match tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, handle.shutdown()).await {
-            Ok(Ok(Ok(()))) => PeerShutdownOutcome::Joined,
-            Ok(Ok(Err(e))) => {
+        match handle
+            .shutdown_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+        {
+            Ok(Ok(())) => PeerShutdownOutcome::Joined,
+            Ok(Err(e)) => {
                 warn!(%address, %context, error = %e, "peer shutdown returned transport error");
                 PeerShutdownOutcome::Joined
             }
-            Ok(Err(e)) => {
+            Err(rustbgpd_transport::PeerShutdownError::Join(e)) => {
                 error!(%address, %context, error = %e, "peer task join error during shutdown");
                 PeerShutdownOutcome::Joined
             }
-            Err(_elapsed) => {
+            Err(rustbgpd_transport::PeerShutdownError::TimedOut { .. }) => {
                 warn!(
                     %address,
                     %context,
                     timeout_ms = %PEER_LIFECYCLE_COMMAND_TIMEOUT.as_millis(),
-                    "peer shutdown timed out; continuing without parking PeerManager"
+                    "peer shutdown timed out; aborted session task and continuing without parking PeerManager"
                 );
                 PeerShutdownOutcome::TimedOut
             }
