@@ -65,6 +65,7 @@ rbgp rib advertised <addr>
 rbgp rib --prefix <prefix> --explain
 rbgp rib blackholes
 rbgp rib fib
+rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
 
 rbgp policy list
 rbgp policy get <name>

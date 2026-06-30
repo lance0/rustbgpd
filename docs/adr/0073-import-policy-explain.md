@@ -7,8 +7,8 @@
 
 `rustbgpctl` already explains *export* decisions cleanly: RIB owns
 both the candidate route and the export-policy chain
-(`crates/rib/src/manager/distribution.rs:70`), and the RPC surface
-hangs off the route-explain group at `proto/rustbgpd.proto:934`
+(`crates/rib/src/manager/distribution.rs:94`), and the RPC surface
+hangs off the route-explain group at `proto/rustbgpd.proto:937`
 (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
@@ -17,7 +17,7 @@ There is no equivalent for **import**. The operator question
 - Import policy is evaluated in the transport layer at
   the `evaluate_chain_with_attribution` call sites in
   `crates/transport/src/session/inbound.rs` (for example the IPv4
-  unicast body path around line 892). A denied route drops at that
+  unicast body path around line 979). A denied route drops at that
   point and never reaches RIB. Existing tests pin this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
@@ -25,7 +25,7 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_import_routes_{permitted,denied}_total{peer}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs:829`) carries
+- `PolicyEvaluation` (`crates/policy/src/engine.rs:870`) carries
   the terminal-decision policy + action, which is what an explain
   surface should report — but it is consumed and discarded at the
   eval site.
@@ -266,14 +266,17 @@ review added the enable flag (7). They are pinned here, not deferred:
 | 3 | EVICTED tracker | **Yes**, kept compact: lossy recent-eviction key set / bloom-ish ring, false-positive-only. A wrong `EVICTED` is operationally better than a wrong `NOT_SEEN`. |
 | 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + matched policy + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
 | 5 | Add-Path | Include `path_id` in the cache key and the response. CLI accepts optional `--path-id`. Without it, return all matching entries for the prefix (a clear multi-path response), never an arbitrary first hit. |
-| 6 | Statement-level trace | **No in v1.** Terminal `matched_policy` only, aligned with the existing `PolicyEvaluation` shape. Enrichment is a separate ADR if operator feedback says terminal attribution is insufficient. |
+| 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," terminal `matched_policy` only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on the explain response (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
 | 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `true`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so `enabled = false` costs one boolean per UPDATE and stores nothing. Default-on is only defensible *because* this off-switch exists alongside the conservative cap. |
 
 ## Out of scope
 
 - FlowSpec and EVPN AFI/SAFIs. Separate ADRs.
 - Export-explain rework.
-- Statement-level policy trace inside `PolicyEvaluation`.
+- Storing the statement-level policy trace *inside* `PolicyEvaluation`.
+  (The statement-level trace itself shipped — see Decision 6 — but it is
+  re-derived at query time from the cached pre-policy context, not stored
+  on `PolicyEvaluation`.)
 - Bulk "show every denied import for this peer" surface. v1 is
   point-query only.
 - Durable cross-restart import-decision history. The cache is
@@ -293,18 +296,19 @@ built in stages but is not split across PRs:
    `WITHDRAWN` tombstones.
 2. CLI + Add-Path semantics: `rustbgpctl policy explain`, text + JSON
    renderers, AFI inferred from the prefix, all-paths vs `--path-id`.
-3. (deferred, not in this PR) Statement-level enrichment of
-   `PolicyEvaluation` and the cached entry — only if operator feedback
-   says terminal-only attribution is insufficient.
+3. (shipped in a later PR) Statement-level trace: `repeated
+   ImportExplainStatementStep statements = 13` on the explain response,
+   re-derived at query time from the cached pre-policy context (not stored
+   inside `PolicyEvaluation`) and rendered by the CLI.
 
 ## Anchors
 
 - Eval call sites: `evaluate_chain_with_attribution` in
   `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
   and MP-unicast paths)
-- `PolicyEvaluation`: `crates/policy/src/engine.rs:829`
-- Export-explain reference: `crates/rib/src/manager/distribution.rs:70`,
-  RPC at `proto/rustbgpd.proto:934`
+- `PolicyEvaluation`: `crates/policy/src/engine.rs:870`
+- Export-explain reference: `crates/rib/src/manager/distribution.rs:94`,
+  RPC at `proto/rustbgpd.proto:937`
 - Existing import counters: `record_import_policy_eval` at
   `crates/transport/src/session/inbound.rs:21`
 - Authz tier reference: `crates/api/src/authz.rs`

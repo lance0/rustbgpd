@@ -210,7 +210,9 @@ resolved.
   exceptions.** SIGHUP and the gRPC `EvpnService.ApplyEvpnRuntime` path
   both use the ADR-0063 coordinator for supported live shapes:
   L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, additive
-  build-up, atomic tenant teardown, `ip_vrf` relink, standalone and
+  build-up, additive ES `member_vnis` expansion (adding L2VNIs that join
+  an existing Ethernet Segment's member set in the same request, ADR-0063),
+  atomic tenant teardown, `ip_vrf` relink, standalone and
   IP-VRF-linked L2VNI swaps, and L2VNI-only add/delete/redefine
   compositions. Unsupported candidates fail closed without advancing the
   committed generation. Two shape classes remain outside the hot-apply

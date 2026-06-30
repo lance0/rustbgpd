@@ -29,9 +29,11 @@ These run on every push and PR (`.github/workflows/ci.yml`,
       `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
       --security-opt apparmor=unconfined` against `ubuntu-latest`'s
       6.x kernel
-- [ ] **Interop tier** — M1, M10, M13, M14, M15, M17, M22, M24, M25,
-      M29, M30, M34, M35, M35b, M35c against FRR 10.3.1 via
-      containerlab
+- [ ] **Interop tier** — the PR-gated foundation interop jobs in
+      `.github/workflows/interop.yml` (against FRR 10.3.1 via
+      containerlab) are green; that workflow is the authoritative job
+      set, so check it rather than re-listing M-numbers here. New this
+      cycle: BGP-LS receive + reflection (M73).
 
 ## Documentation hygiene
 

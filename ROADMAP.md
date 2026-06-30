@@ -51,6 +51,7 @@ those.
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP exporter (7854), MRT dump (6396) | Shipped | EVPN + unicast |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types |
+| BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077) |
 
 For per-release feature deltas see [CHANGELOG.md](CHANGELOG.md); for the
 build-order history see [docs/milestones.md](docs/milestones.md).
@@ -146,8 +147,9 @@ has it, no broad performance sprints without profile evidence.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
-- **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive + reflection
-  slice in progress).* ADR-0077 draws the address-family-expansion boundaries while the
+- **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive + reflection +
+  API-export slice shipped; VPNv4/v6, labeled-unicast, RTC deferred).*
+  ADR-0077 draws the address-family-expansion boundaries while the
   substrate is still small: a control-plane AFI/SAFI route-key model for
   VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
   Constraints (RFC 4684), and BGP-LS (RFC 9552, which obsoletes RFC 7752), with

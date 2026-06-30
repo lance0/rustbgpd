@@ -91,7 +91,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 87 | 83 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 90 | 86 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML when started with `--config`); overlapping ranges resolve by longest-prefix-match |
@@ -180,7 +180,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 87 | 100%+ (83 `rustbgpd.v1` RPCs plus gNMI) |
+| gRPC RPCs | ~55 | 90 | 100%+ (86 `rustbgpd.v1` RPCs plus gNMI) |
 | Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |
