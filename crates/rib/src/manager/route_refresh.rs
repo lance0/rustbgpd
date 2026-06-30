@@ -148,6 +148,9 @@ impl RibManager {
             if !evpn_affected.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn_affected);
             }
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
 
             let peer_label = peer.to_string();
             let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
@@ -215,6 +218,9 @@ impl RibManager {
             }
             if !evpn_affected.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn_affected);
+            }
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
             }
 
             let peer_label = peer.to_string();

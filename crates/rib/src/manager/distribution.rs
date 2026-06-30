@@ -625,8 +625,6 @@ impl RibManager {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
             }
-            rib.gc_intern_table();
-
             debug!(%peer, routes = rib.len(), "rib updated");
             (rib.len(), rib.flowspec_len())
         };
@@ -648,6 +646,9 @@ impl RibManager {
             let changed = self.recompute_best(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 
@@ -664,6 +665,7 @@ impl RibManager {
         let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
         let mut affected = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
+        let mut any_replaced = false;
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -671,7 +673,6 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
 
-            let mut any_replaced = false;
             for mut route in announced {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
@@ -692,16 +693,6 @@ impl RibManager {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
             }
-            // Reclaim any interned attribute set stranded by an in-place
-            // replacement (same prefix re-advertised with changed attributes,
-            // no intervening withdraw). Skipped when nothing was replaced: the
-            // initial-load flood is all first-time inserts, so this stays off
-            // the bulk hot path and fires only on steady-state re-advertise
-            // churn — the unicast analogue of the EVPN MAC-mobility leak.
-            if any_replaced {
-                rib.gc_intern_table();
-            }
-
             debug!(%peer, routes = rib.len(), "rib updated");
             (rib.len(), rib.flowspec_len())
         };
@@ -723,6 +714,9 @@ impl RibManager {
             let changed = self.recompute_best(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
+            if any_replaced && let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 
@@ -814,11 +808,6 @@ impl RibManager {
                     }
                 }
             }
-            // Reclaim attribute sets stranded by these withdrawals (and by any
-            // earlier same-key re-advertise still referenced only here). Under
-            // MAC Mobility every move mints a fresh interned set, so the intern
-            // table leaks without this sweep. Mirrors the unicast withdraw chunk.
-            rib.gc_intern_table();
             rib.evpn_len()
         };
         self.metrics
@@ -827,6 +816,9 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 
@@ -843,6 +835,7 @@ impl RibManager {
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         let mut removed_stale_count = 0usize;
+        let mut any_replaced = false;
         let evpn_len = {
             let rib = self
                 .ribs
@@ -852,7 +845,7 @@ impl RibManager {
                 debug!(%peer, route_type = route.route_type(), "evpn announced");
                 let key = route.key();
                 affected.insert(key);
-                rib.insert_evpn(route);
+                any_replaced |= rib.insert_evpn(route);
                 // Enhanced Route Refresh: re-advertised key removes from
                 // the stale set so EoRR's sweep doesn't withdraw it.
                 if evpn_refresh_active
@@ -862,10 +855,6 @@ impl RibManager {
                     removed_stale_count += 1;
                 }
             }
-            // Re-advertising a key with a new attribute set (MAC Mobility seq
-            // churn) replaces the route and strands its previous interned set;
-            // reclaim it here so steady-state re-advertise churn stays bounded.
-            rib.gc_intern_table();
             rib.evpn_len()
         };
         self.metrics
@@ -874,6 +863,9 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
+            if any_replaced && let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 
@@ -1007,10 +999,7 @@ impl RibManager {
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        rib.insert(route);
-        // Re-originating a local route on every change strands the prior
-        // interned attribute set; reclaim it (mirrors `handle_inject_evpn`).
-        rib.gc_intern_table();
+        let replaced = rib.insert(route);
         debug!(%prefix, "injected local route");
         self.metrics
             .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
@@ -1019,6 +1008,9 @@ impl RibManager {
         affected.insert(prefix);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
+        if replaced && let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+            rib.gc_intern_table();
+        }
 
         let _ = reply.send(Ok(()));
     }
@@ -1034,9 +1026,6 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
-            // Reclaim the interned attribute set the withdrawn route held
-            // (mirrors `handle_withdraw_evpn`).
-            rib.gc_intern_table();
             debug!(%prefix, "withdrawn injected route");
             self.metrics
                 .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
@@ -1044,6 +1033,9 @@ impl RibManager {
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
+            if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+                rib.gc_intern_table();
+            }
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
@@ -1102,14 +1094,14 @@ impl RibManager {
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        rib.insert_evpn(route);
-        // Local re-origination replaces the injected route's attribute set on
-        // every MAC Mobility move; reclaim the stranded interned set.
-        rib.gc_intern_table();
+        let replaced = rib.insert_evpn(route);
         debug!(?key, "injected local EVPN route");
         let mut evpn_affected = HashSet::new();
         evpn_affected.insert(key);
         self.recompute_and_distribute_evpn(&evpn_affected);
+        if replaced && let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+            rib.gc_intern_table();
+        }
         let _ = reply.send(Ok(()));
     }
 
@@ -1124,10 +1116,12 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw_evpn(&key) {
             debug!(?key, "withdrawn injected EVPN route");
-            rib.gc_intern_table();
             let mut evpn_affected = HashSet::new();
             evpn_affected.insert(key);
             self.recompute_and_distribute_evpn(&evpn_affected);
+            if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+                rib.gc_intern_table();
+            }
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(

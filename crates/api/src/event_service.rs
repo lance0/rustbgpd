@@ -1949,6 +1949,18 @@ mod tests {
         assert_eq!(events_tx.receiver_count(), 0);
     }
 
+    #[test]
+    fn cursor_gap_event_saturates_requested_cursor_before_subtracting() {
+        let event = cursor::build_cursor_gap_event(u64::MAX, u64::MAX);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(
+            lag.missed_count, 0,
+            "u64::MAX cursor must not wrap before saturating the retained-floor gap"
+        );
+    }
+
     #[tokio::test]
     async fn route_lag_emits_missed_event_signal() {
         let (rib_tx, events_tx) = spawn_fake_rib();

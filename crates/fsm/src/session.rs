@@ -56,7 +56,10 @@ impl Session {
         self.state
     }
 
-    /// Negotiated session parameters (available after `OpenConfirm`).
+    /// Negotiated session parameters while OpenConfirm/Established state is live.
+    ///
+    /// Cleared on every transition back to Idle so operator-facing state queries
+    /// never report stale metadata from a failed handshake.
     #[must_use]
     pub fn negotiated(&self) -> Option<&NegotiatedSession> {
         self.negotiated.as_ref()
@@ -159,7 +162,7 @@ impl Session {
             }
 
             Event::TcpConnectionFails => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::StopTimer(TimerType::ConnectRetry),
                     Action::StartTimer(
@@ -208,7 +211,7 @@ impl Session {
             }
 
             Event::TcpConnectionFails => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::StopTimer(TimerType::ConnectRetry),
                     Action::StartTimer(
@@ -244,7 +247,7 @@ impl Session {
             ),
 
             Event::TcpConnectionFails => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
@@ -273,7 +276,7 @@ impl Session {
                     actions
                 }
                 Err(notification) => {
-                    self.connect_retry_counter += 1;
+                    self.increment_connect_retry_counter();
                     let mut actions = Vec::with_capacity(5);
                     // Observability hook for RFC 9234 Role-Mismatch (2/11):
                     // emit a typed action so transport can label
@@ -302,7 +305,7 @@ impl Session {
             },
 
             Event::NotificationReceived(_) => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
@@ -368,7 +371,7 @@ impl Session {
             }
 
             Event::NotificationReceived(_) => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
@@ -379,7 +382,7 @@ impl Session {
             }
 
             Event::TcpConnectionFails => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
@@ -451,7 +454,7 @@ impl Session {
             }
 
             Event::UpdateValidationError(notif) => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 self.negotiated = None;
                 let mut actions = vec![
                     Action::SessionDown,
@@ -465,7 +468,7 @@ impl Session {
             }
 
             Event::NotificationReceived(_) => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 self.negotiated = None;
                 let mut actions = vec![
                     Action::SessionDown,
@@ -478,7 +481,7 @@ impl Session {
             }
 
             Event::TcpConnectionFails => {
-                self.connect_retry_counter += 1;
+                self.increment_connect_retry_counter();
                 self.negotiated = None;
                 let mut actions = vec![
                     Action::SessionDown,
@@ -521,8 +524,15 @@ impl Session {
     /// Transition to a new state, returning the `StateChanged` action.
     fn transition_to(&mut self, new: SessionState) -> Action {
         let old = self.state;
+        if new == SessionState::Idle {
+            self.negotiated = None;
+        }
         self.state = new;
         Action::StateChanged { old, new }
+    }
+
+    fn increment_connect_retry_counter(&mut self) {
+        self.connect_retry_counter = self.connect_retry_counter.saturating_add(1);
     }
 
     /// Build the OPEN message from our config.
@@ -572,7 +582,7 @@ impl Session {
         subcode: u8,
         data: Bytes,
     ) -> Vec<Action> {
-        self.connect_retry_counter += 1;
+        self.increment_connect_retry_counter();
         let notification = rustbgpd_wire::NotificationMessage::new(code, subcode, data);
         let mut actions = vec![
             Action::SendNotification(notification),
@@ -587,7 +597,7 @@ impl Session {
 
     /// Close TCP, stop timers, transition to Idle (no NOTIFICATION).
     fn enter_idle_silent(&mut self) -> Vec<Action> {
-        self.connect_retry_counter += 1;
+        self.increment_connect_retry_counter();
         let mut actions = vec![
             Action::CloseTcpConnection,
             Action::StopTimer(TimerType::ConnectRetry),
@@ -1077,9 +1087,14 @@ mod tests {
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
         s.handle_event(Event::OpenReceived(peer_open()));
+        assert!(s.negotiated().is_some());
         let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            s.negotiated().is_none(),
+            "OpenConfirm teardown must not leave negotiated metadata visible in Idle"
+        );
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::SendNotification(n) if n.code == NotificationCode::Cease
@@ -1092,9 +1107,14 @@ mod tests {
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
         s.handle_event(Event::OpenReceived(peer_open()));
+        assert!(s.negotiated().is_some());
         let actions = s.handle_event(Event::HoldTimerExpires);
 
         assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            s.negotiated().is_none(),
+            "OpenConfirm hold-expiry teardown must clear negotiated metadata"
+        );
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::SendNotification(n) if n.code == NotificationCode::HoldTimerExpired
@@ -1110,9 +1130,14 @@ mod tests {
 
         let notif =
             rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
+        assert!(s.negotiated().is_some());
         let actions = s.handle_event(Event::NotificationReceived(notif));
 
         assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            s.negotiated().is_none(),
+            "OpenConfirm NOTIFICATION teardown must clear negotiated metadata"
+        );
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::CloseTcpConnection
@@ -1125,9 +1150,14 @@ mod tests {
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
         s.handle_event(Event::OpenReceived(peer_open()));
+        assert!(s.negotiated().is_some());
         let actions = s.handle_event(Event::TcpConnectionFails);
 
         assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            s.negotiated().is_none(),
+            "OpenConfirm TCP failure must clear negotiated metadata"
+        );
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::CloseTcpConnection
@@ -1295,6 +1325,23 @@ mod tests {
 
         s.connect_retry_counter = 10;
         assert_eq!(s.connect_retry_duration(), 300);
+    }
+
+    #[test]
+    fn connect_retry_counter_saturates_at_u32_max() {
+        let mut s = Session::new(test_config());
+        s.handle_event(Event::ManualStart);
+        assert_eq!(s.state(), SessionState::Connect);
+        s.connect_retry_counter = u32::MAX;
+
+        let actions = s.handle_event(Event::TcpConnectionFails);
+        assert_eq!(s.state(), SessionState::Active);
+        assert_eq!(s.connect_retry_counter(), u32::MAX);
+        assert_eq!(
+            connect_retry_timer_secs(&actions),
+            Some(300),
+            "saturating the diagnostic counter must not wrap back to the fast retry path"
+        );
     }
 
     #[test]

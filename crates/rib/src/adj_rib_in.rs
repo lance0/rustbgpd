@@ -466,7 +466,9 @@ impl AdjRibIn {
     /// strands the previous interned set. Callers must run [`Self::gc_intern_table`]
     /// after a batch of inserts/withdraws to reclaim it — see the EVPN
     /// announce/withdraw/inject paths in the RIB manager.
-    pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) {
+    ///
+    /// Returns `true` if an existing route at the same key was replaced.
+    pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) -> bool {
         let key = route.key();
         // Re-advertising a key drops any record that *we* locally injected
         // LLGR_STALE on the prior version of it — exactly as unicast `insert`
@@ -480,7 +482,7 @@ impl AdjRibIn {
         } else {
             self.attr_intern.insert(route.attributes.clone());
         }
-        self.evpn_routes.insert(key, route);
+        self.evpn_routes.insert(key, route).is_some()
     }
 
     /// Withdraw an EVPN route. Returns `true` if it existed.
