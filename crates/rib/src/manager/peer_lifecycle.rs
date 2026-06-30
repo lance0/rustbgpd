@@ -322,6 +322,10 @@ impl RibManager {
             .iter_evpn()
             .map(crate::route::EvpnRibRoute::key)
             .collect();
+        let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = rib
+            .iter_bgpls()
+            .map(crate::route::BgpLsRibRoute::key)
+            .collect();
         debug!(%peer, cleared = count, "peer adj-rib-in cleared");
         self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
         self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
@@ -332,6 +336,14 @@ impl RibManager {
         }
         if !evpn_affected.is_empty() {
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        // BGP-LS is receive/API-only (no outbound distribution yet), so a
+        // departed peer's routes must fall back to the next-best remaining
+        // candidate or be removed from the Loc-RIB. Without this the entries
+        // would strand in `loc_rib.bgpls_routes` until process restart and
+        // surface through `ListBgpLsRoutes` as if still live.
+        if !bgpls_affected.is_empty() {
+            self.recompute_bgpls_keys(bgpls_affected);
         }
     }
 

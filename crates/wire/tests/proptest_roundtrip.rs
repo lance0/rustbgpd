@@ -291,9 +291,8 @@ proptest! {
     fn bgpls_substrate_decoders_never_panic(
         data in proptest::collection::vec(any::<u8>(), 0..2048),
     ) {
-        // The BGP-LS codec is deliberately unreachable from MP-BGP dispatch
-        // today, so exercise the substrate directly instead of relying on
-        // decode_message coverage.
+        // Direct codec coverage keeps opaque NLRI/TLV preservation pinned
+        // independently from the daemon's BGP-LS receive path.
         let _ = decode_bgpls_nlri(&data);
         let _ = decode_bgpls_vpn_nlri(&data);
         let _ = decode_bgpls_tlvs(&data);

@@ -76,10 +76,16 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ipv4, Safi::FlowSpec) => "ipv4_flowspec",
         (Afi::Ipv6, Safi::FlowSpec) => "ipv6_flowspec",
         (Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn",
+        (Afi::BgpLs, Safi::BgpLs) => "bgpls",
+        (Afi::BgpLs, Safi::BgpLsVpn) => "bgpls_vpn",
         (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
         (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
         (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
-        | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec) => "unsupported",
+        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
+        | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
+        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec) => {
+            "unsupported"
+        }
     }
 }
 

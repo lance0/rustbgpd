@@ -428,6 +428,7 @@ mod tests {
                 }],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
+                bgpls_announced: vec![],
             }),
         ];
 

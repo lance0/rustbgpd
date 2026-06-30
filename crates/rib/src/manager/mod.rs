@@ -685,6 +685,16 @@ impl RibManager {
                     );
                 }
             }
+            RibUpdate::BgpLsRoutesReceived {
+                peer,
+                session_id,
+                announced,
+                withdrawn,
+            } => {
+                if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", "bgpls") {
+                    self.handle_bgpls_routes_received(peer, announced, withdrawn);
+                }
+            }
             RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
@@ -899,6 +909,11 @@ impl RibManager {
             RibUpdate::QueryEvpnRoutes { reply } => {
                 let routes: Vec<crate::route::EvpnRibRoute> =
                     self.loc_rib.iter_evpn().cloned().collect();
+                let _ = reply.send(routes);
+            }
+            RibUpdate::QueryBgpLsRoutes { reply } => {
+                let routes: Vec<crate::route::BgpLsRibRoute> =
+                    self.loc_rib.iter_bgpls().cloned().collect();
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
@@ -1556,6 +1571,54 @@ impl RibManager {
         let routes: Vec<_> = self.loc_rib.iter_flowspec().cloned().collect();
         if reply.send(routes).is_err() {
             warn!("FlowSpec query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_bgpls_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::BgpLsRibRoute>,
+        withdrawn: Vec<crate::route::BgpLsRouteKey>,
+    ) {
+        let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+        let mut affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
+        let mut any_replaced = false;
+
+        for key in withdrawn {
+            if rib.withdraw_bgpls(&key) {
+                affected.insert(key);
+            }
+        }
+
+        for route in announced {
+            let key = route.key();
+            any_replaced |= rib.insert_bgpls(route);
+            affected.insert(key);
+        }
+
+        if any_replaced {
+            rib.gc_intern_table();
+        }
+
+        self.recompute_bgpls_keys(affected);
+    }
+
+    /// Recompute the Loc-RIB BGP-LS selection for each affected key across the
+    /// current set of peer Adj-RIB-Ins.
+    ///
+    /// Shared by the receive path and the peer-teardown cleanup so a departed
+    /// peer's routes fall back to the next-best remaining candidate (or are
+    /// removed when no peer still advertises the key), mirroring the
+    /// unicast/FlowSpec/EVPN recompute pattern. BGP-LS is receive/API-only for
+    /// this tranche, so there is no outbound distribution step.
+    fn recompute_bgpls_keys(&mut self, affected: HashSet<crate::route::BgpLsRouteKey>) {
+        for key in affected {
+            let candidates: Vec<_> = self
+                .ribs
+                .values()
+                .filter_map(|rib| rib.get_bgpls(&key).cloned())
+                .collect();
+            self.loc_rib.recompute_bgpls(key, candidates.iter());
         }
     }
 

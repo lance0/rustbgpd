@@ -12,11 +12,13 @@ use tracing::debug;
 use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
-    EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute,
-    RibUpdate, Route, RouteEventType,
+    BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
+    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType,
 };
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix};
+use rustbgpd_wire::{
+    Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix, bgpls::BgpLsNlriType,
+};
 
 /// Live snapshot provider for daemon-owned BLACKHOLE discard status.
 pub type BlackholeDiscardSnapshotFn =
@@ -1472,6 +1474,47 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListEvpnResponse { routes }))
     }
 
+    async fn list_bgp_ls_routes(
+        &self,
+        request: Request<proto::ListBgpLsRequest>,
+    ) -> Result<Response<proto::ListBgpLsResponse>, Status> {
+        let req = request.into_inner();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryBgpLsRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let peer_filter = req.peer_filter;
+        let family_filter = req.afi_safi;
+        let type_filter = req.nlri_type_filter;
+        let routes = all_routes
+            .iter()
+            .filter(|route| {
+                if family_filter != proto::AddressFamily::Unspecified as i32
+                    && bgpls_family_to_proto(route.family) as i32 != family_filter
+                {
+                    return false;
+                }
+                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                    return false;
+                }
+                if type_filter != 0 && u32::from(route.nlri.nlri_type.as_u16()) != type_filter {
+                    return false;
+                }
+                true
+            })
+            .map(bgpls_route_to_proto)
+            .collect();
+
+        Ok(Response::new(proto::ListBgpLsResponse { routes }))
+    }
+
     async fn set_fib_table(
         &self,
         request: Request<proto::SetFibTableRequest>,
@@ -1712,7 +1755,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let afi_safi = match route.afi {
         Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
         Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
-        Afi::L2Vpn => proto::AddressFamily::Unspecified,
+        Afi::L2Vpn | Afi::BgpLs => proto::AddressFamily::Unspecified,
     };
 
     proto::FlowSpecRouteEntry {
@@ -1723,6 +1766,80 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         as_path,
         communities,
         extended_communities,
+    }
+}
+
+fn bgpls_family_to_proto(family: BgpLsFamily) -> proto::AddressFamily {
+    match family {
+        BgpLsFamily::LinkState => proto::AddressFamily::BgpLs,
+        BgpLsFamily::LinkStateVpn => proto::AddressFamily::BgpLsVpn,
+    }
+}
+
+fn bgpls_family_label(family: BgpLsFamily) -> &'static str {
+    match family {
+        BgpLsFamily::LinkState => "linkstate",
+        BgpLsFamily::LinkStateVpn => "linkstate_vpn",
+    }
+}
+
+fn bgpls_nlri_type_name(nlri_type: BgpLsNlriType) -> String {
+    match nlri_type {
+        BgpLsNlriType::Node => "node".to_string(),
+        BgpLsNlriType::Link => "link".to_string(),
+        BgpLsNlriType::Ipv4TopologyPrefix => "ipv4_topology_prefix".to_string(),
+        BgpLsNlriType::Ipv6TopologyPrefix => "ipv6_topology_prefix".to_string(),
+        BgpLsNlriType::Unknown(value) => format!("unknown_{value}"),
+    }
+}
+
+pub(crate) fn bgpls_route_to_proto(route: &BgpLsRibRoute) -> proto::BgpLsRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+    let mut bgp_ls_attribute = Vec::new();
+
+    for attr in route.attributes.iter() {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => communities.extend(c),
+            PathAttribute::ExtendedCommunities(ecs) => {
+                extended_communities.extend(ecs.iter().map(|ec| ec.as_u64()));
+            }
+            PathAttribute::Unknown(raw) if raw.type_code == 29 => {
+                bgp_ls_attribute = raw.data.to_vec();
+            }
+            _ => {}
+        }
+    }
+
+    proto::BgpLsRouteEntry {
+        afi_safi: bgpls_family_to_proto(route.family) as i32,
+        family: bgpls_family_label(route.family).to_string(),
+        nlri_type: u32::from(route.nlri.nlri_type.as_u16()),
+        nlri_type_name: bgpls_nlri_type_name(route.nlri.nlri_type),
+        route_distinguisher: route.nlri.route_distinguisher.unwrap_or_default().to_vec(),
+        payload: route.nlri.payload.to_vec(),
+        descriptor: route
+            .nlri
+            .descriptor_bytes()
+            .map_or_else(Vec::new, ToOwned::to_owned),
+        next_hop: route.next_hop.to_string(),
+        peer_address: route.peer.to_string(),
+        as_path,
+        communities,
+        extended_communities,
+        stale: route.is_stale,
+        llgr_stale: route.is_llgr_stale,
+        path_id: route.path_id,
+        bgp_ls_attribute,
     }
 }
 
@@ -1917,11 +2034,15 @@ fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
 mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
+    use std::time::Instant;
 
+    use bytes::Bytes;
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
 
-    use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix};
+    use rustbgpd_wire::{
+        AsPath, Ipv4Prefix, Ipv6Prefix, RawAttribute, bgpls::decode_bgpls_vpn_nlri,
+    };
 
     use super::*;
     use crate::test_support::metrics_text as gather_text;
@@ -1939,6 +2060,57 @@ mod tests {
             metric: 200,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn bgpls_route_to_proto_preserves_opaque_vpn_fields() {
+        let nlri = decode_bgpls_vpn_nlri(&[
+            0xfd, 0xe8, 0, 12, // type 65000, length = RD + 4 bytes
+            0, 0, 0xfd, 0xe8, 0, 0, 0, 42, // RD
+            0xde, 0xad, 0xbe, 0xef, // opaque payload
+        ])
+        .expect("fixture BGP-LS VPN NLRI decodes")
+        .pop()
+        .expect("fixture contains one NLRI");
+
+        let route = BgpLsRibRoute {
+            family: BgpLsFamily::LinkStateVpn,
+            nlri,
+            next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
+            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            attributes: Arc::new(vec![
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
+                }),
+                PathAttribute::Communities(vec![0x0001_0002]),
+                PathAttribute::Unknown(RawAttribute {
+                    flags: 0x80,
+                    type_code: 29,
+                    data: Bytes::from_static(&[0xba, 0xdc, 0x0d, 0xe0]),
+                }),
+            ]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: true,
+            is_llgr_stale: false,
+            path_id: 9,
+        };
+
+        let entry = bgpls_route_to_proto(&route);
+        assert_eq!(entry.afi_safi, proto::AddressFamily::BgpLsVpn as i32);
+        assert_eq!(entry.family, "linkstate_vpn");
+        assert_eq!(entry.nlri_type, 65_000);
+        assert_eq!(entry.nlri_type_name, "unknown_65000");
+        assert_eq!(entry.route_distinguisher, [0, 0, 0xfd, 0xe8, 0, 0, 0, 42]);
+        assert_eq!(entry.payload, [0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(entry.next_hop, "192.0.2.1");
+        assert_eq!(entry.peer_address, "192.0.2.2");
+        assert_eq!(entry.as_path, [64512, 64513]);
+        assert_eq!(entry.communities, [0x0001_0002]);
+        assert_eq!(entry.bgp_ls_attribute, [0xba, 0xdc, 0x0d, 0xe0]);
+        assert!(entry.stale);
+        assert_eq!(entry.path_id, 9);
     }
 
     #[tokio::test]

@@ -510,7 +510,9 @@ fn decode_orf_prefix(raw: &mut &[u8], family: Afi, prefix_len: u8) -> Result<Pre
     let max_len = match family {
         Afi::Ipv4 => 32,
         Afi::Ipv6 => 128,
-        Afi::L2Vpn => unreachable!("Address-Prefix ORF parser is gated to IP unicast families"),
+        Afi::L2Vpn | Afi::BgpLs => {
+            unreachable!("Address-Prefix ORF parser is gated to IP unicast families")
+        }
     };
     if prefix_len > max_len {
         return Err(DecodeError::InvalidNetworkField {
@@ -536,7 +538,9 @@ fn decode_orf_prefix(raw: &mut &[u8], family: Afi, prefix_len: u8) -> Result<Pre
             octets[..byte_count].copy_from_slice(&raw[..byte_count]);
             Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(octets), prefix_len))
         }
-        Afi::L2Vpn => unreachable!("Address-Prefix ORF parser is gated to IP unicast families"),
+        Afi::L2Vpn | Afi::BgpLs => {
+            unreachable!("Address-Prefix ORF parser is gated to IP unicast families")
+        }
     };
     *raw = &raw[byte_count..];
     Ok(prefix)

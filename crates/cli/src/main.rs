@@ -636,6 +636,20 @@ enum RibAction {
         #[arg(long)]
         page_token: Option<String>,
     },
+    /// Show BGP-LS routes learned from peers (RFC 9552)
+    #[command(name = "bgpls", visible_alias = "bgp-ls")]
+    BgpLs {
+        /// BGP-LS family filter: linkstate (aliases bgpls, bgp-ls) or
+        /// linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+        /// Peer IP address filter
+        #[arg(long)]
+        peer: Option<String>,
+        /// NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)
+        #[arg(long)]
+        nlri_type: Option<u32>,
+    },
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -1290,6 +1304,35 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     )?;
                     return commands::rib::blackholes(connection, json).await;
                 }
+                Some(RibAction::BgpLs {
+                    family: bgpls_family,
+                    peer,
+                    nlri_type,
+                }) => {
+                    reject_rib_status_filters(
+                        binary_name,
+                        "bgpls",
+                        RibStatusFilterArgs {
+                            family: &None,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    let family = bgpls_family.or(family);
+                    return commands::rib::bgpls(
+                        connection,
+                        family.as_deref(),
+                        peer,
+                        nlri_type,
+                        json,
+                    )
+                    .await;
+                }
                 _ => {}
             }
 
@@ -1387,7 +1430,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
                 }
-                Some(RibAction::Blackholes | RibAction::Fib { .. }) => {
+                Some(RibAction::Blackholes | RibAction::Fib { .. } | RibAction::BgpLs { .. }) => {
                     unreachable!("RIB status subcommands return before route filter handling")
                 }
                 Some(RibAction::Add {
@@ -2112,6 +2155,38 @@ mod tests {
             assert_eq!(address, "10.0.0.1");
         } else {
             panic!("expected Rib Received command");
+        }
+    }
+
+    #[test]
+    fn test_parse_rib_bgpls() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "bgpls",
+            "--family",
+            "linkstate_vpn",
+            "--peer",
+            "192.0.2.1",
+            "--nlri-type",
+            "1",
+        ])
+        .unwrap();
+        if let Command::Rib {
+            action:
+                Some(RibAction::BgpLs {
+                    family,
+                    peer,
+                    nlri_type,
+                }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(family.as_deref(), Some("linkstate_vpn"));
+            assert_eq!(peer.as_deref(), Some("192.0.2.1"));
+            assert_eq!(nlri_type, Some(1));
+        } else {
+            panic!("expected Rib BGP-LS command");
         }
     }
 

@@ -18,7 +18,8 @@ use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
-    EvpnRibRoute, FlowSpecRoute, NextHopScope, OutboundRouteUpdate, RibUpdate, Route,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope,
+    OutboundRouteUpdate, RibUpdate, Route,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -197,6 +198,9 @@ pub(crate) struct PeerSession {
     /// Accepted EVPN routes from this peer (RFC 7432 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_evpn: HashSet<EvpnRouteKey>,
+    /// Accepted BGP-LS routes from this peer (RFC 9552 opaque keys). Counted
+    /// toward max-prefix enforcement for the same reason.
+    known_bgpls: HashSet<BgpLsRouteKey>,
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
@@ -298,10 +302,13 @@ impl PeerSession {
 
     /// Total accepted route count across all negotiated families: unicast
     /// (unique prefixes, ignoring Add-Path multiplicity), `FlowSpec` rules,
-    /// and EVPN keys. Used by max-prefix enforcement so a peer can't slip
+    /// EVPN keys, and BGP-LS objects. Used by max-prefix enforcement so a peer can't slip
     /// past the cap by flooding non-unicast NLRI.
     pub(super) fn known_prefix_count(&self) -> usize {
-        self.known_prefix_refcounts.len() + self.known_flowspec.len() + self.known_evpn.len()
+        self.known_prefix_refcounts.len()
+            + self.known_flowspec.len()
+            + self.known_evpn.len()
+            + self.known_bgpls.len()
     }
 
     fn remember_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
@@ -343,6 +350,7 @@ impl PeerSession {
         self.known_prefix_refcounts.clear();
         self.known_flowspec.clear();
         self.known_evpn.clear();
+        self.known_bgpls.clear();
     }
 
     fn link_local_next_hop_scope_from_config(config: &TransportConfig) -> Option<NextHopScope> {
@@ -451,6 +459,7 @@ impl PeerSession {
             known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
+            known_bgpls: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -550,6 +559,7 @@ impl PeerSession {
             known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
+            known_bgpls: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,

@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0077 BGP-LS receive/API tranche.** `families` now accepts
+  `linkstate` / `linkstate_vpn` (AFI 16388, SAFI 71/72), the wire parser
+  decodes RFC 9552 BGP-LS and BGP-LS VPN `MP_REACH_NLRI` /
+  `MP_UNREACH_NLRI`, and the transport/RIB store learned BGP-LS routes as
+  opaque topology objects with RFC 4271-style best-path selection. The new
+  `RibService.ListBgpLsRoutes` (`sensitive_read`) and `rbgp rib bgpls` CLI
+  expose family, NLRI type, next-hop, peer, raw descriptor/payload bytes, and
+  raw BGP-LS Attribute bytes for controller-facing export. This tranche is
+  receive/API-only: rustbgpd still does not originate local BGP-LS, compute
+  paths from BGP-LS data, or reflect BGP-LS routes outbound until the ADR-0077
+  reflection/export tranche lands, and BGP-LS is omitted from GR/LLGR stale
+  preservation until that lifecycle is implemented for the typed RIB.
 - **ADR-0063 EVPN runtime convergence — additive ES member expansion.**
   `EvpnService.ApplyEvpnRuntime`, SIGHUP, and static `rustbgpd --diff` now treat an
   additive candidate that adds L2VNIs and expands an existing Ethernet

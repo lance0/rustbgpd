@@ -16,6 +16,8 @@ enum AddressFamily {
   ADDRESS_FAMILY_IPV4_FLOWSPEC = 3;
   ADDRESS_FAMILY_IPV6_FLOWSPEC = 4;
   ADDRESS_FAMILY_L2VPN_EVPN = 5;
+  ADDRESS_FAMILY_BGP_LS = 6;
+  ADDRESS_FAMILY_BGP_LS_VPN = 7;
 }
 
 enum SessionState {
@@ -949,6 +951,7 @@ service RibService {
   rpc WatchRouteEvents(WatchRoutesRequest) returns (stream BgpEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
+  rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2038,6 +2041,43 @@ message ListEvpnRequest {
 
 message ListEvpnResponse {
   repeated EvpnRouteEntry routes = 1;
+}
+
+// BGP-LS route entry in the RIB (RFC 9552). The route identity stays opaque:
+// unknown NLRI types and TLVs are exported as bytes instead of being projected
+// into unicast prefixes or synthetic topology structs.
+message BgpLsRouteEntry {
+  AddressFamily afi_safi = 1;
+  string family = 2;
+  uint32 nlri_type = 3;
+  string nlri_type_name = 4;
+  bytes route_distinguisher = 5;
+  bytes payload = 6;
+  bytes descriptor = 7;
+  string next_hop = 8;
+  string peer_address = 9;
+  repeated uint32 as_path = 10;
+  repeated uint32 communities = 11;
+  repeated uint64 extended_communities = 12;
+  bool stale = 13;
+  bool llgr_stale = 14;
+  uint32 path_id = 15;
+  // Raw BGP-LS Attribute path attribute payload (type 29), when present.
+  bytes bgp_ls_attribute = 16;
+}
+
+// Filter BGP-LS route listings. All filters are optional.
+message ListBgpLsRequest {
+  // BGP-LS or BGP-LS VPN. Unspecified = all.
+  AddressFamily afi_safi = 1;
+  // Only routes from this peer, empty = any.
+  string peer_filter = 2;
+  // Only routes with this raw NLRI type. 0 = no filter.
+  uint32 nlri_type_filter = 3;
+}
+
+message ListBgpLsResponse {
+  repeated BgpLsRouteEntry routes = 1;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3

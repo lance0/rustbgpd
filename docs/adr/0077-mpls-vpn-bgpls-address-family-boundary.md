@@ -183,11 +183,17 @@ L2VPN EVPN. Other recognized AFI/SAFI combinations reject before NLRI parsing,
 so adding a future SAFI cannot accidentally reinterpret VPN, RTC, BGP-LS, or
 labeled payloads as ordinary unicast `Prefix` data.
 
-The first BGP-LS implementation step follows this rule deliberately: the wire
-crate may expose a standalone RFC 9552 NLRI/TLV codec for raw test fixtures and
-future storage work, but that codec remains unreachable from MP-BGP dispatch
-until the BGP-LS vertical slice also includes family negotiation, RIB storage,
-policy/export behavior, object caps, API/CLI exposure, docs, and interop.
+The first BGP-LS implementation steps follow this rule deliberately. The wire
+crate first exposed a standalone RFC 9552 NLRI/TLV codec for raw fixtures while
+the daemon still rejected BGP-LS at MP-BGP dispatch. The receive/API tranche
+then made BGP-LS reachable only as a typed vertical slice: explicit
+`linkstate` / `linkstate_vpn` family negotiation, dedicated Adj-RIB-In /
+Loc-RIB storage keyed by BGP-LS identity, opaque API/CLI export, and
+fail-closed rejection of BGP-LS Add-Path until route identity and reflection
+semantics are pinned. It also omits BGP-LS from GR/LLGR stale-preservation
+capabilities until that lifecycle is implemented for the typed RIB. Outbound
+reflection/export remains the next slice rather than a side effect of adding
+AFI/SAFI constants.
 
 The VPNv4/VPNv6 wire substrate follows the same rule. The callable codec for
 RFC 8277 label stacks plus RFC 4364 / RFC 4659 RD-prefixed VPN prefixes is

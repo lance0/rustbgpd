@@ -6,10 +6,10 @@ use crate::output::{
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddPathRequest, BlackholeDiscardState, DeletePathRequest, ExplainAdvertisedRouteRequest,
-    ExplainBestPathRequest, ExplainBestPathResponse, ExplainDecision, FibRouteState,
-    ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest,
-    Route,
+    AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
+    ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
+    ExplainDecision, FibRouteState, ListBgpLsRequest, ListBlackholeDiscardsRequest,
+    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, Route,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -120,6 +120,36 @@ fn include_fib_page_meta(filters: &FibRouteFilterOpts) -> bool {
     filters.page_size.is_some_and(|page_size| page_size > 0)
 }
 
+fn parse_bgpls_family(family: Option<&str>) -> Result<i32, CliError> {
+    let Some(family) = family else {
+        return Ok(AddressFamily::Unspecified as i32);
+    };
+    match output::parse_family(family) {
+        Some(value)
+            if value == AddressFamily::BgpLs as i32 || value == AddressFamily::BgpLsVpn as i32 =>
+        {
+            Ok(value)
+        }
+        Some(_) | None => Err(CliError::Argument(format!(
+            "unsupported BGP-LS family {family:?}; expected linkstate \
+             (aliases: bgpls, bgp-ls, bgp_ls) or linkstate_vpn \
+             (aliases: bgpls-vpn, bgp-ls-vpn, bgp_ls_vpn)"
+        ))),
+    }
+}
+
+fn make_bgpls_request(
+    family: Option<&str>,
+    peer: Option<String>,
+    nlri_type: Option<u32>,
+) -> Result<ListBgpLsRequest, CliError> {
+    Ok(ListBgpLsRequest {
+        afi_safi: parse_bgpls_family(family)?,
+        peer_filter: peer.unwrap_or_default(),
+        nlri_type_filter: nlri_type.unwrap_or(0),
+    })
+}
+
 fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
     if json {
         output::print_json_pretty(&JsonRoutes(routes))?;
@@ -127,6 +157,37 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliErr
         println!("No routes");
     } else {
         output::print_route_table(routes);
+    }
+    Ok(())
+}
+
+fn print_bgpls_routes(routes: &[BgpLsRouteEntry], json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&JsonBgpLsRoutes(routes))?;
+    } else if routes.is_empty() {
+        println!("No BGP-LS routes");
+    } else {
+        println!(
+            "{:<12} {:<18} {:<12} {:<18} {:<18} Payload",
+            "Family", "NLRI Type", "RD", "Next Hop", "Peer"
+        );
+        println!("{}", "-".repeat(104));
+        for route in routes {
+            let rd = if route.route_distinguisher.is_empty() {
+                "-".to_string()
+            } else {
+                hex_lower(&route.route_distinguisher)
+            };
+            println!(
+                "{:<12} {:<18} {:<12} {:<18} {:<18} {}",
+                bgpls_family_display(route),
+                bgpls_type_display(route),
+                rd,
+                route.next_hop,
+                route.peer_address,
+                hex_lower(&route.payload)
+            );
+        }
     }
     Ok(())
 }
@@ -144,6 +205,95 @@ impl Serialize for JsonRoutes<'_> {
         }
         seq.end()
     }
+}
+
+struct JsonBgpLsRoutes<'a>(&'a [BgpLsRouteEntry]);
+
+impl Serialize for JsonBgpLsRoutes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for route in self.0 {
+            seq.serialize_element(&JsonBgpLsRouteRef(route))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonBgpLsRouteRef<'a>(&'a BgpLsRouteEntry);
+
+impl Serialize for JsonBgpLsRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut len = 14;
+        if route.path_id != 0 {
+            len += 1;
+        }
+        if route.llgr_stale {
+            len += 1;
+        }
+        if route.stale {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("family", bgpls_family_display(route))?;
+        map.serialize_entry("nlri_type", &route.nlri_type)?;
+        map.serialize_entry("nlri_type_name", &route.nlri_type_name)?;
+        map.serialize_entry(
+            "route_distinguisher",
+            &hex_lower(&route.route_distinguisher),
+        )?;
+        map.serialize_entry("payload", &hex_lower(&route.payload))?;
+        map.serialize_entry("descriptor", &hex_lower(&route.descriptor))?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("peer_address", &route.peer_address)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("communities", &JsonCommunities(&route.communities))?;
+        map.serialize_entry("extended_communities", &route.extended_communities)?;
+        map.serialize_entry("bgp_ls_attribute", &hex_lower(&route.bgp_ls_attribute))?;
+        if route.path_id != 0 {
+            map.serialize_entry("path_id", &route.path_id)?;
+        }
+        if route.stale {
+            map.serialize_entry("stale", &route.stale)?;
+        }
+        if route.llgr_stale {
+            map.serialize_entry("llgr_stale", &route.llgr_stale)?;
+        }
+        map.end()
+    }
+}
+
+fn bgpls_family_display(route: &BgpLsRouteEntry) -> &str {
+    if route.family.is_empty() {
+        output::format_family(route.afi_safi)
+    } else {
+        &route.family
+    }
+}
+
+fn bgpls_type_display(route: &BgpLsRouteEntry) -> String {
+    if route.nlri_type_name.is_empty() {
+        route.nlri_type.to_string()
+    } else {
+        format!("{} ({})", route.nlri_type, route.nlri_type_name)
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 struct JsonRouteRef<'a>(&'a Route);
@@ -916,6 +1066,22 @@ pub async fn fib(
     print_fib_routes(&resp, json, include_fib_page_meta(&filters))
 }
 
+pub async fn bgpls(
+    connection: Connection,
+    family: Option<&str>,
+    peer: Option<String>,
+    nlri_type: Option<u32>,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?)
+        .await?
+        .into_inner();
+    print_bgpls_routes(&resp.routes, json)
+}
+
 pub async fn received(
     connection: Connection,
     address: &str,
@@ -1166,6 +1332,33 @@ mod tests {
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
         assert!(req.peer_address.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bgpls_sends_filters_and_renders_raw_bytes() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        bgpls(
+            connection,
+            Some("linkstate"),
+            Some("198.51.100.1".to_string()),
+            Some(1),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let req = server
+            .state
+            .last_list_bgpls
+            .lock()
+            .await
+            .clone()
+            .expect("BGP-LS request captured");
+        assert_eq!(req.afi_safi, AddressFamily::BgpLs as i32);
+        assert_eq!(req.peer_filter, "198.51.100.1");
+        assert_eq!(req.nlri_type_filter, 1);
     }
 
     #[tokio::test]

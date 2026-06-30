@@ -150,6 +150,9 @@ pub fn parse_family(family: &str) -> Option<i32> {
         "ipv6_unicast" | "ipv6-unicast" | "ipv6" => Some(proto::AddressFamily::Ipv6Unicast as i32),
         "ipv4_flowspec" | "ipv4-flowspec" => Some(proto::AddressFamily::Ipv4Flowspec as i32),
         "ipv6_flowspec" | "ipv6-flowspec" => Some(proto::AddressFamily::Ipv6Flowspec as i32),
+        "bgpls" | "bgp_ls" | "bgp-ls" | "linkstate" => Some(proto::AddressFamily::BgpLs as i32),
+        "bgpls_vpn" | "bgpls-vpn" | "bgp_ls_vpn" | "bgp-ls-vpn" | "linkstate_vpn"
+        | "linkstate-vpn" => Some(proto::AddressFamily::BgpLsVpn as i32),
         _ => None,
     }
 }
@@ -161,6 +164,8 @@ pub fn format_family(afi: i32) -> &'static str {
         2 => "ipv6_unicast",
         3 => "ipv4_flowspec",
         4 => "ipv6_flowspec",
+        6 => "bgp_ls",
+        7 => "bgp_ls_vpn",
         _ => "unknown",
     }
 }

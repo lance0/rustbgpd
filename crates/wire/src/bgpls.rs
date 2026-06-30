@@ -1,9 +1,9 @@
-//! BGP-LS NLRI codec substrate (RFC 9552).
+//! BGP-LS NLRI codec (RFC 9552).
 //!
-//! This module is deliberately not wired into `MP_REACH_NLRI` /
-//! `MP_UNREACH_NLRI` dispatch yet. It provides byte-stable helpers for the
-//! future BGP-LS receive/store/export slice while keeping BGP-LS unreachable
-//! from peers until the full route-family vertical exists.
+//! The daemon's ADR-0077 receive/API slice uses this module from
+//! `MP_REACH_NLRI` / `MP_UNREACH_NLRI` dispatch while keeping BGP-LS objects
+//! opaque. Reflection/export and local topology production are separate daemon
+//! features, not wire-crate behavior.
 
 use bytes::Bytes;
 

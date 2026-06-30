@@ -36,13 +36,16 @@ suite implementation.
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |
 | VPN FlowSpec | No | No | No | Yes | No |
-| BGP-LS (RFC 9552) | No | Yes | No | Yes | No |
+| BGP-LS (RFC 9552) | Partial | Yes | No | Yes | No |
 | SR Policy | No | No | No | Yes | No |
 
-`No` for rustbgpd VPN/MPLS/BGP-LS families is intentional today: ADR-0077 keeps
-those families out of OPEN negotiation, config, and route APIs until either
-private substrate remains unreachable or a complete typed family slice lands.
-The boundary avoids treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
+`No` for rustbgpd VPN/MPLS families is intentional today: ADR-0077 keeps those
+families out of OPEN negotiation, config, and route APIs until either private
+substrate remains unreachable or a complete typed family slice lands. BGP-LS is
+`Partial`: the receive/API slice negotiates `linkstate` / `linkstate_vpn`,
+stores opaque RFC 9552 objects, and exposes them through gRPC/CLI, while
+outbound reflection/export and local LSDB production remain deferred. The
+boundary avoids treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
 IPv4/IPv6 `Prefix` routes.
 
 [^evpn]: rustbgpd EVPN is **alpha** and Linux/VXLAN-only. Shipped and

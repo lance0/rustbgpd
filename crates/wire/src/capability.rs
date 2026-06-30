@@ -13,6 +13,8 @@ pub enum Afi {
     Ipv6 = 2,
     /// Layer-2 VPN (AFI 25) — carrier family for EVPN (RFC 7432).
     L2Vpn = 25,
+    /// BGP Link-State (AFI 16388, RFC 9552).
+    BgpLs = 16_388,
 }
 
 impl Afi {
@@ -23,6 +25,7 @@ impl Afi {
             1 => Some(Self::Ipv4),
             2 => Some(Self::Ipv6),
             25 => Some(Self::L2Vpn),
+            16_388 => Some(Self::BgpLs),
             _ => None,
         }
     }
@@ -38,6 +41,10 @@ pub enum Safi {
     Multicast = 2,
     /// RFC 7432 EVPN — only valid with [`Afi::L2Vpn`].
     Evpn = 70,
+    /// RFC 9552 BGP-LS — only valid with [`Afi::BgpLs`].
+    BgpLs = 71,
+    /// RFC 9552 BGP-LS VPN — only valid with [`Afi::BgpLs`].
+    BgpLsVpn = 72,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
 }
@@ -50,6 +57,8 @@ impl Safi {
             1 => Some(Self::Unicast),
             2 => Some(Self::Multicast),
             70 => Some(Self::Evpn),
+            71 => Some(Self::BgpLs),
+            72 => Some(Self::BgpLsVpn),
             133 => Some(Self::FlowSpec),
             _ => None,
         }

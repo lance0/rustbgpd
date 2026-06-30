@@ -29,10 +29,11 @@ pub enum RouteOrigin {
     Local,
 }
 
-/// BGP-LS route family carried by ADR-0077 substrate.
+/// BGP-LS route family carried by the ADR-0077 receive/API slice.
 ///
 /// This is deliberately independent from wire-level `Afi`/`Safi` enums while
-/// BGP-LS remains unreachable from OPEN negotiation and MP-BGP dispatch.
+/// the RIB keeps BGP-LS as its own typed family instead of reusing unicast
+/// prefix identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BgpLsFamily {
     /// AFI 16388 / SAFI 71 — base BGP-LS.
@@ -49,7 +50,7 @@ impl BgpLsFamily {
     }
 }
 
-/// Opaque BGP-LS route identity for the RIB substrate.
+/// Opaque BGP-LS route identity for the RIB.
 ///
 /// The key preserves the complete NLRI identity bytes from the wire codec, so
 /// unknown NLRI types and descriptor TLVs remain distinguishable without display
@@ -320,11 +321,10 @@ pub struct FlowSpecRoute {
     pub path_id: u32,
 }
 
-/// A single BGP-LS route stored by the inert ADR-0077 RIB substrate.
+/// A single BGP-LS route stored by the ADR-0077 receive/API slice.
 ///
-/// This type is intentionally not reachable from peer UPDATE dispatch yet. It
-/// exists so the future negotiated BGP-LS slice has a family-honest route key
-/// and storage model instead of reusing unicast [`Prefix`].
+/// The route remains opaque: rustbgpd stores and exposes RFC 9552 identity and
+/// TLV bytes without building a local LSDB or computing paths from BGP-LS data.
 #[derive(Debug, Clone)]
 pub struct BgpLsRibRoute {
     /// Base BGP-LS or BGP-LS VPN.
@@ -352,6 +352,12 @@ pub struct BgpLsRibRoute {
 }
 
 impl BgpLsRibRoute {
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
+    }
+
     /// Identity key suitable for BGP-LS Adj-RIB-In, Loc-RIB, and Adj-RIB-Out maps.
     #[must_use]
     pub fn key(&self) -> BgpLsRouteKey {

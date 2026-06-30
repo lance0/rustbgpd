@@ -393,6 +393,7 @@ impl PeerSession {
                             .collect(),
                         flowspec_withdrawn: vec![],
                         evpn_withdrawn: vec![],
+                        bgpls_withdrawn: vec![],
                     })];
                     UpdateMessage::build(
                         &[],
@@ -430,6 +431,7 @@ impl PeerSession {
                 withdrawn: v6_withdraw,
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -589,6 +591,7 @@ impl PeerSession {
                     announced: group.prefixes,
                     flowspec_announced: vec![],
                     evpn_announced: vec![],
+                    bgpls_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -762,6 +765,7 @@ impl PeerSession {
                 announced: group.prefixes,
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
+                bgpls_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -797,9 +801,9 @@ impl PeerSession {
                 match afi {
                     Afi::Ipv4 => v4_fs_withdraw.push(rule.clone()),
                     Afi::Ipv6 => v6_fs_withdraw.push(rule.clone()),
-                    Afi::L2Vpn => unreachable!(
+                    Afi::L2Vpn | Afi::BgpLs => unreachable!(
                         "FlowSpec rule determined IPv4/IPv6 AFI from its destination_prefix \
-                         just above; L2VPN is not reachable here"
+                         just above; non-IP AFIs are not reachable here"
                     ),
                 }
             }
@@ -813,6 +817,7 @@ impl PeerSession {
                     withdrawn: vec![],
                     flowspec_withdrawn: rules,
                     evpn_withdrawn: vec![],
+                    bgpls_withdrawn: vec![],
                 })];
                 let msg = UpdateMessage::build(
                     &[],
@@ -904,6 +909,7 @@ impl PeerSession {
                     announced: vec![],
                     flowspec_announced: rules,
                     evpn_announced: vec![],
+                    bgpls_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -974,6 +980,7 @@ impl PeerSession {
                     withdrawn: vec![],
                     flowspec_withdrawn: vec![],
                     evpn_withdrawn: vec![],
+                    bgpls_withdrawn: vec![],
                 })];
                 UpdateMessage::build(
                     &[],
@@ -1024,6 +1031,7 @@ impl PeerSession {
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: routes[idx..end].to_vec(),
+                bgpls_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1086,6 +1094,7 @@ impl PeerSession {
                 withdrawn: vec![],
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: routes[idx..end].to_vec(),
+                bgpls_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],

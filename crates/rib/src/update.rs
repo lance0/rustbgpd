@@ -12,7 +12,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
 use crate::event::{EvpnRouteEvent, RouteEvent};
-use crate::route::{EvpnRibRoute, FibInstallCandidate, FlowSpecRoute, Route};
+use crate::route::{
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate, FlowSpecRoute, Route,
+};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
@@ -226,6 +228,17 @@ pub enum RibUpdate {
         evpn_announced: Vec<EvpnRibRoute>,
         /// EVPN route keys withdrawn.
         evpn_withdrawn: Vec<EvpnRouteKey>,
+    },
+    /// Peer session sent us BGP-LS routes (RFC 9552).
+    BgpLsRoutesReceived {
+        /// Source peer address.
+        peer: IpAddr,
+        /// Transport session identity of the session that received these routes.
+        session_id: u64,
+        /// Newly announced BGP-LS routes.
+        announced: Vec<BgpLsRibRoute>,
+        /// Withdrawn BGP-LS route keys.
+        withdrawn: Vec<BgpLsRouteKey>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown {
@@ -629,6 +642,11 @@ pub enum RibUpdate {
     QueryEvpnRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
+    },
+    /// Query BGP-LS routes from the Loc-RIB (RFC 9552).
+    QueryBgpLsRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<BgpLsRibRoute>>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {
