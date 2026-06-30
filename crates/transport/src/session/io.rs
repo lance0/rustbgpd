@@ -5,18 +5,21 @@ use super::{
 };
 use crate::config::TransportConfig;
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
+
+const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl PeerSession {
     /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
     ///
     /// Returns `true` if at least one Address-Prefix ORF group of a negotiated
-    /// type was forwarded to the RIB — its `PeerOrfUpdate` handler installs the
+    /// type was accepted by the RIB — its `PeerOrfUpdate` handler installs the
     /// filter, lifts the §6 initial-advertisement gate, and re-floods. Returns
-    /// `false` for a plain refresh, or an ORF whose groups are all
-    /// un-negotiated types (incl. the legacy type 128, which rustbgpd never
-    /// advertises); the caller then takes the normal re-advertise path.
+    /// `false` for a plain refresh, an ORF whose groups are all un-negotiated
+    /// types (incl. the legacy type 128, which rustbgpd never advertises), or a
+    /// RIB-side rejection; the caller then takes the normal re-advertise path.
     pub(super) async fn process_inbound_orf(
         &mut self,
         afi: rustbgpd_wire::Afi,
@@ -58,7 +61,7 @@ impl PeerSession {
                 }],
                 OrfEntries::Raw(_) => continue,
             };
-            let (reply, _rx) = oneshot::channel();
+            let (reply, rx) = oneshot::channel();
             if self
                 .rib_tx
                 .send(RibUpdate::PeerOrfUpdate {
@@ -75,7 +78,34 @@ impl PeerSession {
             {
                 warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
             } else {
-                handled = true;
+                match tokio::time::timeout(ORF_RIB_REPLY_TIMEOUT, rx).await {
+                    Ok(Ok(Ok(()))) => {
+                        handled = true;
+                    }
+                    Ok(Ok(Err(err))) => {
+                        warn!(
+                            peer = %self.peer_label,
+                            ?afi, ?safi,
+                            error = %err,
+                            "RIB rejected ORF update — falling back to plain route refresh"
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        warn!(
+                            peer = %self.peer_label,
+                            ?afi, ?safi,
+                            "RIB dropped ORF update reply — falling back to plain route refresh"
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            peer = %self.peer_label,
+                            ?afi, ?safi,
+                            timeout_ms = %ORF_RIB_REPLY_TIMEOUT.as_millis(),
+                            "RIB ORF update reply timed out — falling back to plain route refresh"
+                        );
+                    }
+                }
             }
         }
         handled

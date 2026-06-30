@@ -99,6 +99,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Best-path recompute now streams each affected prefix's candidate routes
   directly from peer Adj-RIB-In tables into `LocRib::recompute`, preserving
   selection behavior while avoiding a transient `Vec` on every affected prefix.
+- **Address-Prefix ORF updates now honor the RIB completion result.** The
+  transport session now waits for the RIB's bounded `PeerOrfUpdate` reply before
+  treating an ORF-carrying ROUTE-REFRESH as handled. Stale-session,
+  unregistered-peer, dropped-reply, and timed-out ORF updates now fall back to
+  the plain Route Refresh path instead of silently suppressing re-advertisement.
 
 ## [0.44.0] — 2026-06-29
 
