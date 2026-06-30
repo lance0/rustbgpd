@@ -928,12 +928,8 @@ impl RibManager {
         let mut changed = HashSet::new();
         for prefix in affected {
             let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
-            let candidates: Vec<_> = self
-                .ribs
-                .values()
-                .flat_map(|rib| rib.iter_prefix(prefix))
-                .collect();
-            let did_change = self.loc_rib.recompute(*prefix, candidates.into_iter());
+            let candidates = self.ribs.values().flat_map(|rib| rib.iter_prefix(prefix));
+            let did_change = self.loc_rib.recompute(*prefix, candidates);
             if did_change {
                 changed.insert(*prefix);
                 let current_best = self.loc_rib.get(prefix);
