@@ -342,6 +342,8 @@ impl RibManager {
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
+        let mut bgpls_announce = Vec::new();
+        let mut bgpls_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -433,6 +435,35 @@ impl RibManager {
                     &target_peer_label,
                     &mut evpn_announce,
                     &mut evpn_withdraw,
+                    false, // route refresh re-emits via empty refresh_view
+                );
+            }
+        } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+            let bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
+                .loc_rib
+                .iter_bgpls()
+                .filter(|route| route.family == bgpls_family)
+                .map(crate::route::BgpLsRibRoute::key)
+                .collect();
+            if !bgpls_keys.is_empty() {
+                Self::stage_bgpls_routes(
+                    loc_rib,
+                    &refresh_view,
+                    &self.peer_is_rr_client,
+                    &bgpls_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut bgpls_announce,
+                    &mut bgpls_withdraw,
                     false, // route refresh re-emits via empty refresh_view
                 );
             }
@@ -532,6 +563,8 @@ impl RibManager {
                 fs_withdraw,
                 evpn_announce,
                 evpn_withdraw,
+                bgpls_announce,
+                bgpls_withdraw,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
@@ -593,6 +626,8 @@ impl RibManager {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
+            bgpls_announce: vec![],
+            bgpls_withdraw: vec![],
             request_refresh_all_negotiated: false,
         };
         if tx.try_send(eor).is_err() {
@@ -800,7 +835,7 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if !bgpls_affected.is_empty() {
-            self.recompute_bgpls_keys(bgpls_affected);
+            self.recompute_bgpls_keys(&bgpls_affected);
             // Reclaim attribute sets stranded by the stale-BGP-LS withdrawals
             // above. The earlier gc_intern_table() ran before this recompute,
             // while the Loc-RIB still held the selected-route Arc clones, so

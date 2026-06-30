@@ -22,6 +22,10 @@ fn evpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::L2Vpn, Safi::Evpn)]
 }
 
+fn bgpls_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::BgpLs, Safi::BgpLs)]
+}
+
 fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
     let route = EvpnRoute::Imet(EvpnImet {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -428,6 +432,325 @@ async fn bgpls_routes_received_recompute_and_withdraw() {
 
     let best_after_withdraw_a = query_bgpls_routes(&tx).await;
     assert!(best_after_withdraw_a.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(update.bgpls_announce.len(), 1);
+    assert_eq!(update.bgpls_announce[0].key(), key);
+    assert!(update.bgpls_withdraw.is_empty());
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![key.clone()],
+    })
+    .await
+    .unwrap();
+
+    let withdraw = out_rx.recv().await.unwrap();
+    assert!(withdraw.bgpls_announce.is_empty());
+    assert_eq!(withdraw.bgpls_withdraw, vec![key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: other,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: other_out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut other_out_rx).await;
+
+    let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 32, 100);
+    let key = route.key();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let reflected = other_out_rx.recv().await.unwrap();
+    assert_eq!(reflected.bgpls_announce.len(), 1);
+    assert_eq!(reflected.bgpls_announce[0].key(), key);
+
+    let source_self_echo =
+        tokio::time::timeout(Duration::from_millis(50), source_out_rx.recv()).await;
+    assert!(
+        source_self_echo.is_err(),
+        "BGP-LS routes must not be reflected back to the source peer"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bgpls_routes_received_does_not_reflect_to_unsendable_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        announced: vec![make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 32, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let no_update = tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await;
+    assert!(
+        no_update.is_err(),
+        "peer without BGP-LS in sendable_families must not receive reflected routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn dirty_resync_includes_bgpls_routes_after_channel_full() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let route1 = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100);
+    let key1 = route1.key();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route1],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let route2 = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 35, 100);
+    let key2 = route2.key();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route2],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let first = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("first BGP-LS announce must arrive")
+        .expect("channel open");
+    assert_eq!(first.bgpls_announce.len(), 1);
+    assert_eq!(first.bgpls_announce[0].key(), key1);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_key2 = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update
+                    .bgpls_announce
+                    .iter()
+                    .any(|route| route.key() == key2)
+                {
+                    saw_key2 = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_key2,
+        "dirty resync must eventually deliver the second BGP-LS announce to the target peer"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn send_initial_table_includes_bgpls_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 33, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert_eq!(update.bgpls_announce.len(), 1);
+    assert_eq!(update.bgpls_announce[0].key(), key);
+    assert!(update.bgpls_withdraw.is_empty());
+
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, bgpls_sendable());
 
     drop(tx);
     handle.await.unwrap();
@@ -3563,6 +3886,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
+            bgpls_announce: vec![],
+            bgpls_withdraw: vec![],
             request_refresh_all_negotiated: false,
         })
         .await
@@ -5253,6 +5578,83 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     assert_eq!(update.flowspec_announce[0].rule, fs_rule);
     assert!(update.flowspec_withdraw.is_empty());
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::FlowSpec)]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_refresh_bgpls_re_advertises_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let _initial = out_rx.recv().await.unwrap();
+    let _eor = out_rx.recv().await.unwrap();
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
+        peer: target,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(update.bgpls_announce.len(), 1);
+    assert_eq!(update.bgpls_announce[0].key(), key);
+    assert!(update.bgpls_withdraw.is_empty());
+    assert_eq!(update.end_of_rib, vec![(Afi::BgpLs, Safi::BgpLs)]);
+    assert_eq!(
+        update.refresh_markers,
+        vec![
+            (
+                Afi::BgpLs,
+                Safi::BgpLs,
+                rustbgpd_wire::RouteRefreshSubtype::BoRR
+            ),
+            (
+                Afi::BgpLs,
+                Safi::BgpLs,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR
+            ),
+        ]
+    );
 
     drop(tx);
     handle.await.unwrap();

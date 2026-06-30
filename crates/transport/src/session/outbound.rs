@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{
-    Afi, AsPath, AsPathSegment, BgpRole, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
-    FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri,
-    MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix,
-    RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug,
-    info, is_ipv6_link_local, is_private_asn, warn,
+    Afi, AsPath, AsPathSegment, BgpLsRibRoute, BgpLsRouteKey, BgpRole, EvpnRibRoute, EvpnRoute,
+    EvpnRouteKey, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
+    Ipv6Addr, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute,
+    PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi,
+    UpdateMessage, debug, info, is_ipv6_link_local, is_private_asn, warn,
 };
 
 fn has_otc(attrs: &[PathAttribute]) -> bool {
@@ -854,6 +854,55 @@ impl PeerSession {
             }
         }
 
+        // Send BGP-LS withdrawals via MP_UNREACH_NLRI, grouped by SAFI and
+        // chunked so the RIB never commits a route that transport could not
+        // enqueue.
+        if !update.bgpls_withdraw.is_empty() {
+            let mut base_routes = Vec::new();
+            let mut vpn_routes = Vec::new();
+            for key in &update.bgpls_withdraw {
+                let nlri = bgpls_nlri_from_key(key);
+                match key.family {
+                    rustbgpd_rib::BgpLsFamily::LinkState
+                        if self
+                            .negotiated_families
+                            .contains(&(Afi::BgpLs, Safi::BgpLs)) =>
+                    {
+                        base_routes.push(nlri);
+                    }
+                    rustbgpd_rib::BgpLsFamily::LinkStateVpn
+                        if self
+                            .negotiated_families
+                            .contains(&(Afi::BgpLs, Safi::BgpLsVpn)) =>
+                    {
+                        vpn_routes.push(nlri);
+                    }
+                    _ => {}
+                }
+            }
+            let max_len = usize::from(self.max_message_len());
+            if !base_routes.is_empty()
+                && !self.send_bgpls_unreach_chunked(
+                    Safi::BgpLs,
+                    &base_routes,
+                    four_octet_as,
+                    max_len,
+                )
+            {
+                return;
+            }
+            if !vpn_routes.is_empty()
+                && !self.send_bgpls_unreach_chunked(
+                    Safi::BgpLsVpn,
+                    &vpn_routes,
+                    four_octet_as,
+                    max_len,
+                )
+            {
+                return;
+            }
+        }
+
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
         // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
@@ -881,6 +930,54 @@ impl PeerSession {
             for (next_hop, attrs, routes) in evpn_groups {
                 if !self.send_evpn_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len)
                 {
+                    return;
+                }
+            }
+        }
+
+        // Send BGP-LS announcements via MP_REACH_NLRI, grouped by
+        // (family, next-hop, attributes) and chunked.
+        if !update.bgpls_announce.is_empty() {
+            #[allow(
+                clippy::type_complexity,
+                reason = "BGP-LS UPDATE grouping keeps family, next-hop, attributes, and route batch identity explicit"
+            )]
+            let mut bgpls_groups: Vec<(
+                rustbgpd_rib::BgpLsFamily,
+                IpAddr,
+                Vec<PathAttribute>,
+                Vec<rustbgpd_wire::bgpls::BgpLsNlri>,
+            )> = Vec::new();
+            for bgpls_route in &update.bgpls_announce {
+                let safi = bgpls_route.family.to_afi_safi().1;
+                if !self.negotiated_families.contains(&(Afi::BgpLs, safi)) {
+                    continue;
+                }
+                let attrs = self.prepare_outbound_attributes_bgpls(bgpls_route, is_ebgp);
+                let nh = bgpls_route.next_hop;
+                if let Some(group) = bgpls_groups.iter_mut().find(|(family, g_nh, g_attrs, _)| {
+                    *family == bgpls_route.family && *g_nh == nh && *g_attrs == attrs
+                }) {
+                    group.3.push(bgpls_route.nlri.clone());
+                } else {
+                    bgpls_groups.push((
+                        bgpls_route.family,
+                        nh,
+                        attrs,
+                        vec![bgpls_route.nlri.clone()],
+                    ));
+                }
+            }
+            let max_len = usize::from(self.max_message_len());
+            for (family, next_hop, attrs, routes) in bgpls_groups {
+                if !self.send_bgpls_reach_chunked(
+                    family.to_afi_safi().1,
+                    next_hop,
+                    &attrs,
+                    &routes,
+                    four_octet_as,
+                    max_len,
+                ) {
                     return;
                 }
             }
@@ -1120,6 +1217,121 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+
+    /// Send a batch of BGP-LS announcements as one or more `MP_REACH_NLRI`
+    /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
+    fn send_bgpls_reach_chunked(
+        &mut self,
+        safi: Safi,
+        next_hop: IpAddr,
+        base_attrs: &[PathAttribute],
+        routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::BgpLs,
+                safi,
+                next_hop,
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: routes[idx..end].to_vec(),
+            }));
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single BGP-LS route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS announce UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+
+    /// Send a batch of BGP-LS withdrawals as one or more `MP_UNREACH_NLRI`
+    /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
+    fn send_bgpls_unreach_chunked(
+        &mut self,
+        safi: Safi,
+        routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi: Afi::BgpLs,
+                safi,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: routes[idx..end].to_vec(),
+            })];
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single BGP-LS withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS withdrawal UPDATE");
                 return false;
             }
             self.updates_sent += 1;
@@ -1529,6 +1741,118 @@ impl PeerSession {
         self.strip_llgr_stale_if_needed(&mut attrs, (Afi::L2Vpn, Safi::Evpn));
 
         attrs
+    }
+
+    /// Prepare outbound attributes for a reflected BGP-LS route. Mirrors
+    /// EVPN/FlowSpec: `NEXT_HOP` and MP framing live in `MP_REACH_NLRI`, not in
+    /// the attribute set, while RR attributes are added for iBGP reflection.
+    pub(super) fn prepare_outbound_attributes_bgpls(
+        &self,
+        route: &BgpLsRibRoute,
+        is_ebgp: bool,
+    ) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+
+        for attr in route.attributes.iter() {
+            match attr {
+                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
+                                }
+                            }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
+                        }
+                    }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
+                }
+                PathAttribute::NextHop(_)
+                | PathAttribute::MpReachNlri(_)
+                | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+
+        if is_ebgp
+            && !self.config.route_server_client
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
+        {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            if !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
+        }
+
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
+        self.strip_llgr_stale_if_needed(&mut attrs, route.family.to_afi_safi());
+
+        attrs
+    }
+}
+
+/// Build a BGP-LS NLRI from an Adj-RIB-Out key, used when emitting
+/// `MP_UNREACH_NLRI` withdrawals. The key stores the opaque bytes required by
+/// RFC 9552, including the optional VPN Route Distinguisher.
+fn bgpls_nlri_from_key(key: &BgpLsRouteKey) -> rustbgpd_wire::bgpls::BgpLsNlri {
+    rustbgpd_wire::bgpls::BgpLsNlri {
+        nlri_type: key.nlri.nlri_type,
+        route_distinguisher: key.nlri.route_distinguisher,
+        payload: key.nlri.payload.clone(),
     }
 }
 

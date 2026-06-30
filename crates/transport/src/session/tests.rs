@@ -13,6 +13,7 @@ use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, OrfAction, OrfEntries,
     OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute, WhenToRefresh,
+    bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
 };
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -163,6 +164,32 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
         extended_nexthop_families,
         add_path_families: HashMap::new(),
         negotiated_orf_recv: Vec::new(),
+    }
+}
+
+fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
+    let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_tag])
+        .expect("fixture BGP-LS NLRI decodes")
+        .pop()
+        .expect("fixture contains one NLRI");
+
+    rustbgpd_rib::BgpLsRibRoute {
+        family: rustbgpd_rib::BgpLsFamily::LinkState,
+        nlri,
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
     }
 }
 
@@ -909,6 +936,8 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
 
@@ -917,6 +946,142 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     };
     let parsed = msg.parse(true, false, &[]).unwrap();
     assert_eq!(parsed.announced.len(), 2);
+}
+
+#[tokio::test]
+async fn send_route_update_emits_bgpls_reach_and_unreach() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::BgpLs, Safi::BgpLs)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let route = make_bgpls_route(0xcc);
+    let key = route.key();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![route.clone()],
+        bgpls_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected BGP-LS MP_REACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("BGP-LS announcement must use MP_REACH");
+    assert_eq!(mp.afi, Afi::BgpLs);
+    assert_eq!(mp.safi, Safi::BgpLs);
+    assert_eq!(mp.next_hop, route.next_hop);
+    assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
+
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![key],
+        request_refresh_all_negotiated: false,
+    });
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected BGP-LS MP_UNREACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("BGP-LS withdrawal must use MP_UNREACH");
+    assert_eq!(mp.afi, Afi::BgpLs);
+    assert_eq!(mp.safi, Safi::BgpLs);
+    assert_eq!(mp.bgpls_withdrawn, vec![route.nlri]);
+}
+
+#[tokio::test]
+async fn oversized_bgpls_output_tears_down_session() {
+    use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::BgpLs, Safi::BgpLs)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let mut route = make_bgpls_route(0xdd);
+    route.nlri = BgpLsNlri::try_new(
+        BgpLsNlriType::Unknown(65_000),
+        None,
+        Bytes::from(vec![0xab; usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)]),
+    )
+    .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
+
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![route],
+        bgpls_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+
+    assert!(
+        session.read_half.is_none(),
+        "structurally unsendable BGP-LS output must tear down the peer"
+    );
+    let join = session
+        .writer_join
+        .take()
+        .expect("writer_join stays for run-loop observation after teardown");
+    let Message::Notification(notif) = read_single_bgp_message(&mut server).await else {
+        panic!("expected Cease/Out-of-Resources for oversize BGP-LS output");
+    };
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::OUT_OF_RESOURCES);
+
+    let result = tokio::time::timeout(Duration::from_secs(2), join)
+        .await
+        .expect("writer should exit after oversize-triggered teardown")
+        .expect("writer join should not panic");
+    assert!(result.is_ok());
 }
 
 /// `OutboundRouteUpdate::request_refresh_all_negotiated` (the RIB
@@ -950,6 +1115,8 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
 
@@ -999,6 +1166,8 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
 
@@ -1065,6 +1234,8 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
 
@@ -1125,6 +1296,8 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
 
@@ -2281,6 +2454,8 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2328,6 +2503,8 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2382,6 +2559,8 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2436,6 +2615,8 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2484,6 +2665,8 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2544,6 +2727,8 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2596,6 +2781,8 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 
@@ -2649,6 +2836,8 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
 

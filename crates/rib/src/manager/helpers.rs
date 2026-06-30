@@ -60,6 +60,21 @@ pub(super) fn evpn_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// BGP-LS counterpart of [`routes_equal`]. The opaque NLRI key is supplied by
+/// the map key; equality here covers the advertised payload that can change
+/// while the key stays stable.
+pub(super) fn bgpls_routes_equal(
+    a: &crate::route::BgpLsRibRoute,
+    b: &crate::route::BgpLsRibRoute,
+) -> bool {
+    a.family == b.family
+        && a.nlri == b.nlri
+        && a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && a.path_id == b.path_id
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+}
+
 #[must_use]
 pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     match prefix {

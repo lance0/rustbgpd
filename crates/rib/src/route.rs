@@ -391,6 +391,69 @@ impl BgpLsRibRoute {
             path_id: self.path_id,
         }
     }
+
+    /// Extract the `AS_PATH`, returning `None` if absent.
+    #[must_use]
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit `LOCAL_PREF`, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit MED, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::Communities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract EXTENDED COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
 }
 
 impl FlowSpecRoute {

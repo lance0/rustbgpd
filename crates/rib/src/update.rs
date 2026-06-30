@@ -39,6 +39,10 @@ pub struct OutboundRouteUpdate {
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
     pub evpn_withdraw: Vec<EvpnRouteKey>,
+    /// BGP-LS routes to announce (RFC 9552).
+    pub bgpls_announce: Vec<BgpLsRibRoute>,
+    /// BGP-LS route keys to withdraw.
+    pub bgpls_withdraw: Vec<BgpLsRouteKey>,
     /// Ask the session task to send a ROUTE-REFRESH *request* toward the
     /// peer (RFC 2918) for **every negotiated family**, so the peer
     /// re-advertises its routes. Used by the RIB manager's
