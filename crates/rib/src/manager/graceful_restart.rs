@@ -8,11 +8,16 @@ use tracing::info;
 
 use super::RibManager;
 use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_aspa, validate_route_rpki};
+use crate::route::{BgpLsFamily, BgpLsRouteKey};
 
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
         reason = "GR peer-up carries negotiated restart and LLGR session state together"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "GR entry owns session teardown plus per-family stale/withdraw behavior"
     )]
     pub(super) fn handle_peer_graceful_restart(
         &mut self,
@@ -50,10 +55,27 @@ impl RibManager {
         }
 
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
+        let bgpls_gr_families: Vec<(Afi, Safi)> = gr_families
+            .iter()
+            .copied()
+            .filter(|(afi, safi)| BgpLsFamily::from_afi_safi(*afi, *safi).is_some())
+            .collect();
+        if !bgpls_gr_families.is_empty() {
+            info!(
+                %peer,
+                families = ?bgpls_gr_families,
+                "excluding BGP-LS from GR stale preservation; typed stale lifecycle is not implemented"
+            );
+        }
+        let gr_families: Vec<(Afi, Safi)> = gr_families
+            .into_iter()
+            .filter(|(afi, safi)| BgpLsFamily::from_afi_safi(*afi, *safi).is_none())
+            .collect();
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
+        let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // EVPN has a single family tuple, so the inner mark_stale_evpn
@@ -74,6 +96,15 @@ impl RibManager {
             for prefix in withdrawn {
                 affected.insert(prefix);
             }
+            let withdrawn_bgpls = rib.withdraw_all_bgpls();
+            if !withdrawn_bgpls.is_empty() {
+                info!(
+                    %peer,
+                    count = withdrawn_bgpls.len(),
+                    "withdrew BGP-LS routes on GR entry; stale preservation is not implemented for BGP-LS"
+                );
+            }
+            bgpls_affected.extend(withdrawn_bgpls);
             // EVPN has a single family tuple; sweep all EVPN routes if
             // the peer didn't advertise GR for (L2Vpn, Evpn).
             if !gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
@@ -127,6 +158,19 @@ impl RibManager {
         }
         if !evpn_affected.is_empty() {
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if !bgpls_affected.is_empty() {
+            self.recompute_bgpls_keys(bgpls_affected);
+            // Reclaim attribute sets stranded by the BGP-LS withdrawals above.
+            // The gc_intern_table() earlier in this method ran before this
+            // recompute, while the Loc-RIB still held the selected-route Arc
+            // clones, so those orphans survived (gc only frees a set whose sole
+            // remaining holder is the intern table). Now that recompute_bgpls_keys
+            // has dropped the Loc-RIB clones, gc reclaims them — mirroring the
+            // receive path's recompute-then-gc ordering.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
 
         // Shared per-session outbound teardown (Adj-RIB-Out, export

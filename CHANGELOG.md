@@ -36,6 +36,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BGP-LS routes no longer survive stale lifecycle transitions as live data.**
+  The receive/API tranche intentionally does not implement BGP-LS GR/LLGR
+  stale preservation yet, but the RIB lifecycle paths now enforce that boundary:
+  a peer entering Graceful Restart withdraws and recomputes its BGP-LS routes,
+  and Enhanced Route Refresh tracks BGP-LS stale snapshots so omitted objects
+  are swept at EoRR/timeout instead of remaining visible through
+  `ListBgpLsRoutes`.
 - **Invalid ORF `When-to-refresh` values no longer install hidden deferred
   filters.** RFC 5291 defines only `IMMEDIATE` and `DEFER`; a negotiated
   Address-Prefix ORF update carrying any other value now resets the installed

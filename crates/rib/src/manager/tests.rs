@@ -518,6 +518,96 @@ async fn bgpls_peer_down_clears_or_falls_back_loc_rib() {
     handle.await.unwrap();
 }
 
+/// BGP-LS GR/LLGR stale preservation is deliberately not implemented in the
+/// receive/API tranche. A peer entering GR must therefore withdraw its BGP-LS
+/// objects conservatively instead of leaving them visible as live topology
+/// data. Two peers advertise the same key so the test pins both fallback and
+/// final removal.
+#[tokio::test]
+async fn bgpls_gr_entry_withdraws_or_falls_back_loc_rib() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 2);
+    let best_peer = IpAddr::V4(best_advertiser);
+    let alternate_peer = IpAddr::V4(alternate_advertiser);
+
+    let route_a = make_bgpls_route(best_advertiser, 10, 200);
+    let route_b = make_bgpls_route(alternate_advertiser, 10, 100);
+    assert_eq!(route_a.key(), route_b.key());
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: best_peer,
+        announced: vec![route_a],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: alternate_peer,
+        announced: vec![route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_before = query_bgpls_routes(&tx).await;
+    assert_eq!(best_before.len(), 1);
+    assert_eq!(best_before[0].peer, best_peer);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: best_peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+            forwarding_preserved: true,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+
+    let after_winner_gr = query_bgpls_routes(&tx).await;
+    assert_eq!(
+        after_winner_gr.len(),
+        1,
+        "BGP-LS GR entry should fall back to the surviving peer"
+    );
+    assert_eq!(after_winner_gr[0].peer, alternate_peer);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: alternate_peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let after_last_gr = query_bgpls_routes(&tx).await;
+    assert!(
+        after_last_gr.is_empty(),
+        "BGP-LS GR entry should not retain the last peer's route as stale/live"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn closed_query_channel_does_not_block_primary_channel() {
     let (tx, rx) = mpsc::channel(64);
@@ -5549,6 +5639,132 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     let received = query_received_routes(&tx, peer).await;
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].prefix, Prefix::V6(v6_prefix));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route1 = make_bgpls_route(peer_addr, 21, 100);
+    let route2 = make_bgpls_route(peer_addr, 22, 100);
+    let key1 = route1.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route1.clone(), route2],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+    let before_refresh = query_bgpls_routes(&tx).await;
+    assert_eq!(before_refresh.len(), 2);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 2.0);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route1],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let during_refresh = query_bgpls_routes(&tx).await;
+    assert_eq!(during_refresh.len(), 2);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 1.0);
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+
+    let after_refresh = query_bgpls_routes(&tx).await;
+    assert_eq!(after_refresh.len(), 1);
+    assert_eq!(after_refresh[0].key(), key1);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 0.0, 0.0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route = make_bgpls_route(peer_addr, 23, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+    let before_withdraw = query_bgpls_routes(&tx).await;
+    assert_eq!(before_withdraw.len(), 1);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 1.0);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: vec![key],
+    })
+    .await
+    .unwrap();
+    let after_withdraw = query_bgpls_routes(&tx).await;
+    assert!(after_withdraw.is_empty());
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 0.0);
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+
+    let after_refresh = query_bgpls_routes(&tx).await;
+    assert!(after_refresh.is_empty());
+    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 0.0, 0.0);
 
     drop(tx);
     handle.await.unwrap();
@@ -14519,6 +14735,46 @@ fn unicast_announce_replace_reclaims_attr_intern() {
 }
 
 #[test]
+fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
+    // BGP-LS routes use the same per-peer attribute intern table as unicast
+    // and EVPN. A pure withdraw must GC after the affected Loc-RIB key is
+    // recomputed; otherwise the selected route clone keeps the withdrawn
+    // attribute set alive during the sweep and leaves one orphan behind per
+    // churn cycle.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let moves = 256u32;
+    for seq in 0..moves {
+        let route = make_bgpls_route(peer_addr, 24, seq);
+        let key = route.key();
+        manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+        manager.handle_bgpls_routes_received(peer, vec![], vec![key]);
+    }
+
+    let rib = &manager.ribs[&peer];
+    assert_eq!(
+        rib.bgpls_len(),
+        0,
+        "every churned BGP-LS route was withdrawn from the Adj-RIB-In"
+    );
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        0,
+        "every churned BGP-LS route was removed from the Loc-RIB"
+    );
+    assert_eq!(
+        rib.intern_len(),
+        0,
+        "BGP-LS pure-withdraw churn leaked the intern table: {} interned sets after {moves} withdraws",
+        rib.intern_len()
+    );
+}
+
+#[test]
 fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     // A GR-down that preserves some families keeps the peer Adj-RIB-In shell
     // alive. If EVPN is not preserved, that GR entry prunes EVPN routes through
@@ -14560,5 +14816,109 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
         rib.intern_len(),
         0,
         "GR family pruning must reclaim EVPN attribute intern entries"
+    );
+}
+
+#[test]
+fn graceful_restart_entry_gcs_attr_intern_for_loc_rib_selected_bgpls() {
+    // BGP-LS is never GR-preserved, so a GR-down withdraws all of a peer's
+    // BGP-LS routes. Unlike the EVPN prune test above (which inserts directly
+    // into the Adj-RIB-In), these routes are SELECTED into the Loc-RIB via the
+    // receive path, so the Loc-RIB holds a second Arc clone of each interned
+    // attribute set. GC must therefore run AFTER the GR-entry Loc-RIB recompute;
+    // otherwise the gc that runs before it is a no-op for every selected route
+    // (strong_count is still 2) and each GR cycle leaks one interned set per
+    // BGP-LS route.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let count = 64u32;
+    for seq in 0..count {
+        // Distinct payload suffix => distinct key; distinct LOCAL_PREF =>
+        // distinct interned attribute set, so each route is selected into the
+        // Loc-RIB carrying its own Arc clone.
+        let route = make_bgpls_route(peer_addr, u8::try_from(seq).unwrap(), 100 + seq);
+        manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+    }
+    assert_eq!(manager.ribs[&peer].intern_len(), count as usize);
+    assert_eq!(manager.loc_rib.iter_bgpls().count(), count as usize);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+
+    let rib = manager
+        .ribs
+        .get(&peer)
+        .expect("GR-preserved peer shell should stay alive");
+    assert_eq!(rib.bgpls_len(), 0, "BGP-LS is never GR-preserved");
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        0,
+        "GR entry withdraws BGP-LS from the Loc-RIB"
+    );
+    assert_eq!(
+        rib.intern_len(),
+        0,
+        "GR entry must reclaim the interned attribute sets of the Loc-RIB-selected \
+         BGP-LS routes it withdraws (gc must run after the Loc-RIB recompute)"
+    );
+}
+
+#[test]
+fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
+    // An Enhanced Route Refresh that sweeps an omitted BGP-LS route at EoRR must
+    // reclaim that route's interned attribute set. The swept route was selected
+    // into the Loc-RIB, so the Loc-RIB held a second Arc clone; GC must run
+    // AFTER finish_route_refresh's Loc-RIB recompute, not before it. The two
+    // routes carry DISTINCT attributes so the swept route has its own interned
+    // set (identical attributes would share one set kept alive by the survivor,
+    // masking the leak).
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let survivor = make_bgpls_route(peer_addr, 21, 100);
+    let omitted = make_bgpls_route(peer_addr, 22, 200);
+    manager.handle_bgpls_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
+    assert_eq!(manager.ribs[&peer].intern_len(), 2);
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    });
+    // Reannounce only the survivor; the omitted route stays stale and is swept.
+    manager.handle_bgpls_routes_received(peer, vec![survivor], vec![]);
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    });
+
+    assert_eq!(
+        manager.loc_rib.iter_bgpls().count(),
+        1,
+        "EoRR sweeps the omitted BGP-LS route, leaving only the survivor"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        1,
+        "EoRR sweep must reclaim the swept route's interned attribute set \
+         (gc must run after finish_route_refresh's Loc-RIB recompute)"
     );
 }

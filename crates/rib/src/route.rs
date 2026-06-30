@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
-    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
@@ -43,6 +43,25 @@ pub enum BgpLsFamily {
 }
 
 impl BgpLsFamily {
+    /// Convert a wire AFI/SAFI pair into the typed BGP-LS RIB family.
+    #[must_use]
+    pub fn from_afi_safi(afi: Afi, safi: Safi) -> Option<Self> {
+        match (afi, safi) {
+            (Afi::BgpLs, Safi::BgpLs) => Some(Self::LinkState),
+            (Afi::BgpLs, Safi::BgpLsVpn) => Some(Self::LinkStateVpn),
+            _ => None,
+        }
+    }
+
+    /// Convert the typed BGP-LS RIB family back to its wire AFI/SAFI pair.
+    #[must_use]
+    pub fn to_afi_safi(self) -> (Afi, Safi) {
+        match self {
+            Self::LinkState => (Afi::BgpLs, Safi::BgpLs),
+            Self::LinkStateVpn => (Afi::BgpLs, Safi::BgpLsVpn),
+        }
+    }
+
     /// Whether this family requires the NLRI to carry an 8-octet Route Distinguisher.
     #[must_use]
     pub fn requires_route_distinguisher(self) -> bool {

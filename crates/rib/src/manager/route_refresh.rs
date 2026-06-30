@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use super::helpers::{ERR_REFRESH_TIMEOUT, afi_safi_label, gauge_val, prefix_family};
 use super::{PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_out::AdjRibOut;
+use crate::route::BgpLsFamily;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
@@ -261,6 +262,17 @@ impl RibManager {
                 stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
                 for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
                     if stale.insert((route.afi, route.rule.clone(), route.path_id)) {
+                        stale_count += 1;
+                    }
+                }
+            } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+                let stale = self.refresh_stale_bgpls.entry(peer).or_default();
+                stale.retain(|key| key.family != bgpls_family);
+                for route in rib
+                    .iter_bgpls()
+                    .filter(|route| route.family == bgpls_family)
+                {
+                    if stale.insert(route.key()) {
                         stale_count += 1;
                     }
                 }
@@ -666,10 +678,26 @@ impl RibManager {
         } else {
             Vec::new()
         };
+        let stale_bgpls_keys: Vec<crate::route::BgpLsRouteKey> =
+            if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+                self.refresh_stale_bgpls
+                    .get(&peer)
+                    .map(|stale| {
+                        stale
+                            .iter()
+                            .filter(|key| key.family == bgpls_family)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
+        let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for (prefix, path_id) in &stale_route_keys {
                 if rib.withdraw(prefix, *path_id) {
@@ -686,11 +714,20 @@ impl RibManager {
                     evpn_affected.insert(*key);
                 }
             }
+            for key in &stale_bgpls_keys {
+                if rib.withdraw_bgpls(key) {
+                    bgpls_affected.insert(key.clone());
+                }
+            }
             // Reclaim attribute interns dropped by the bulk withdraw —
             // each withdraw above can leave a `strong_count==1` Arc in
             // the intern table that wouldn't otherwise be GC'd until
             // some unrelated future withdraw on this peer.
-            if !affected.is_empty() || !fs_affected.is_empty() || !evpn_affected.is_empty() {
+            if !affected.is_empty()
+                || !fs_affected.is_empty()
+                || !evpn_affected.is_empty()
+                || !bgpls_affected.is_empty()
+            {
                 rib.gc_intern_table();
             }
             self.metrics
@@ -729,6 +766,18 @@ impl RibManager {
         if family == (Afi::L2Vpn, Safi::Evpn) {
             self.refresh_stale_evpn.remove(&peer);
         }
+        if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+            let clear_bgpls_stale_entry =
+                if let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer) {
+                    stale.retain(|key| key.family != bgpls_family);
+                    stale.is_empty()
+                } else {
+                    false
+                };
+            if clear_bgpls_stale_entry {
+                self.refresh_stale_bgpls.remove(&peer);
+            }
+        }
         self.refresh_stale_counts.remove(&(peer, afi, safi));
 
         let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
@@ -749,6 +798,19 @@ impl RibManager {
         }
         if !evpn_affected.is_empty() {
             self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if !bgpls_affected.is_empty() {
+            self.recompute_bgpls_keys(bgpls_affected);
+            // Reclaim attribute sets stranded by the stale-BGP-LS withdrawals
+            // above. The earlier gc_intern_table() ran before this recompute,
+            // while the Loc-RIB still held the selected-route Arc clones, so
+            // those orphans survived (gc only frees a set whose sole remaining
+            // holder is the intern table). Now that recompute_bgpls_keys has
+            // dropped the Loc-RIB clones, gc reclaims them — mirroring the
+            // receive path's recompute-then-gc ordering.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
         }
     }
 }

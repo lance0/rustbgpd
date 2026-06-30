@@ -656,9 +656,10 @@ impl AdjRibIn {
     /// Insert or replace a BGP-LS route, keyed by opaque RFC 9552 identity.
     ///
     /// Returns `true` if an existing route at the same opaque key was replaced.
-    /// A replacement may strand the previous route's interned attribute set, so
-    /// BGP-LS batch callers run [`Self::gc_intern_table`] once when any insert
-    /// returned `true`.
+    /// A replacement may strand the previous route's interned attribute set.
+    /// BGP-LS batch callers run [`Self::gc_intern_table`] once after any
+    /// replacement or real withdrawal, after Loc-RIB recomputation has dropped
+    /// any selected-route clone.
     pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) -> bool {
         let key = route.key();
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
@@ -672,6 +673,17 @@ impl AdjRibIn {
     /// Withdraw a BGP-LS route. Returns `true` if it existed.
     pub fn withdraw_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
         self.bgpls_routes.remove(key).is_some()
+    }
+
+    /// Withdraw all BGP-LS routes from this Adj-RIB-In.
+    ///
+    /// BGP-LS GR/LLGR stale preservation is not implemented yet, so GR entry
+    /// uses this helper to make the conservative exclusion explicit instead of
+    /// accidentally retaining stale controller-feed objects as live.
+    pub fn withdraw_all_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
+        let keys: Vec<_> = self.bgpls_routes.keys().cloned().collect();
+        self.bgpls_routes.clear();
+        keys
     }
 
     /// Look up a BGP-LS route by opaque key.

@@ -157,7 +157,10 @@ has it, no broad performance sprints without profile evidence.
   `linkstate_vpn`, decodes BGP-LS and BGP-LS VPN MP_REACH/MP_UNREACH, stores
   learned topology objects in typed Adj-RIB-In / Loc-RIB tables, and exposes
   opaque NLRI/TLV bytes through `RibService.ListBgpLsRoutes` and
-  `rbgp rib bgpls`. Reflection/export remains the next ADR-0077 slice.
+  `rbgp rib bgpls`. GR entry now conservatively withdraws BGP-LS routes and
+  Enhanced Route Refresh sweeps omitted BGP-LS objects instead of reporting
+  stale controller-feed data as live; true BGP-LS GR/LLGR stale preservation is
+  still deferred. Reflection/export remains the next ADR-0077 slice.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix
