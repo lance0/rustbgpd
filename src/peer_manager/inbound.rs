@@ -209,6 +209,16 @@ impl PeerManager {
 
                 if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
                     warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
+                    // The session task was already spawned; the handle is never
+                    // stored, so shut it down (abort-on-timeout) rather than
+                    // dropping it and orphaning a wedged task.
+                    let _ = self
+                        .shutdown_handle_bounded(
+                            peer_addr.ip(),
+                            "dynamic peer start failure",
+                            handle,
+                        )
+                        .await;
                     return;
                 }
 

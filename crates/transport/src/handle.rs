@@ -837,12 +837,15 @@ impl PeerHandle {
         self.task.await
     }
 
-    /// Send a Shutdown command and wait for the task with a bounded deadline.
+    /// Send a Shutdown command and wait for the task within a single bounded
+    /// deadline.
     ///
-    /// If either the bounded command-channel send or the task join exceeds
-    /// `deadline`, the session task is aborted before returning
-    /// [`PeerShutdownError::TimedOut`]. This avoids the actor-wedge fix turning
-    /// into an unowned live-session leak.
+    /// The `deadline` is a single budget shared across both the bounded
+    /// command-channel send and the task join — it is an absolute instant, not
+    /// re-applied per phase — so the total wait never exceeds `deadline`. If the
+    /// deadline expires in either phase, the session task is aborted before
+    /// returning [`PeerShutdownError::TimedOut`]. This avoids the actor-wedge fix
+    /// turning into an unowned live-session leak.
     ///
     /// # Errors
     ///
@@ -853,7 +856,8 @@ impl PeerHandle {
         mut self,
         deadline: Duration,
     ) -> Result<Result<(), TransportError>, PeerShutdownError> {
-        if tokio::time::timeout(deadline, self.commands.send(PeerCommand::Shutdown))
+        let deadline_at = tokio::time::Instant::now() + deadline;
+        if tokio::time::timeout_at(deadline_at, self.commands.send(PeerCommand::Shutdown))
             .await
             .is_err()
         {
@@ -865,7 +869,7 @@ impl PeerHandle {
             });
         }
 
-        match tokio::time::timeout(deadline, &mut self.task).await {
+        match tokio::time::timeout_at(deadline_at, &mut self.task).await {
             Ok(result) => result.map_err(PeerShutdownError::Join),
             Err(_elapsed) => {
                 self.task.abort();
