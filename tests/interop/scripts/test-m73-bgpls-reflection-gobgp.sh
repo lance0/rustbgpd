@@ -52,12 +52,11 @@ gobgp_neighbor() {
 
 gobgp_ls_json() {
     local container=${1:?}
-    gobgp "$container" global rib -a ls -j 2>/dev/null || echo "{}"
+    gobgp "$container" global rib -a ls -j
 }
 
 rustbgpd_bgpls_json() {
-    docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 rib bgpls -j 2>/dev/null \
-        || echo "[]"
+    docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 rib bgpls -j
 }
 
 wait_gobgp_established() {
@@ -87,15 +86,19 @@ wait_rustbgpd_bgpls_count() {
 
     log "Waiting for rustbgpd BGP-LS count = $want ($label)..."
     for i in $(seq 1 30); do
-        local routes count
-        routes=$(rustbgpd_bgpls_json)
-        count=$(echo "$routes" | jq '[.[] | select(.family == "linkstate" and .peer_address == "10.0.0.2" and .nlri_type == 1)] | length')
+        local routes matching count
+        if ! routes=$(rustbgpd_bgpls_json); then
+            fail "rbgp BGP-LS query failed"
+            return 1
+        fi
+        matching=$(echo "$routes" | jq -c '[.[] | select(.family == "linkstate" and .peer_address == "10.0.0.2" and .nlri_type == 1)]')
+        count=$(echo "$matching" | jq 'length')
         if [ "$count" -eq "$want" ]; then
             ok "rustbgpd BGP-LS count is $want (attempt $i)"
             if [ "$want" -gt 0 ]; then
                 local attr_len payload_len
-                attr_len=$(echo "$routes" | jq -r '.[0].bgp_ls_attribute | length')
-                payload_len=$(echo "$routes" | jq -r '.[0].payload | length')
+                attr_len=$(echo "$matching" | jq -r '.[0].bgp_ls_attribute | length')
+                payload_len=$(echo "$matching" | jq -r '.[0].payload | length')
                 if [ "$attr_len" -gt 0 ] && [ "$payload_len" -gt 0 ]; then
                     ok "rustbgpd exposes non-empty opaque BGP-LS payload and attribute"
                 else
@@ -116,8 +119,12 @@ wait_sink_node_present() {
     log "Waiting for GoBGP sink to receive reflected BGP-LS node..."
     for i in $(seq 1 30); do
         local rib
-        rib=$(gobgp_ls_json "$GOBGP_SINK")
-        if echo "$rib" | grep -q "\"name\":\"$NODE_NAME\""; then
+        if ! rib=$(gobgp_ls_json "$GOBGP_SINK"); then
+            fail "GoBGP sink BGP-LS RIB query failed"
+            return 1
+        fi
+        if echo "$rib" | jq -e --arg name "$NODE_NAME" \
+            '.. | objects | select(.name? == $name)' >/dev/null; then
             ok "GoBGP sink received reflected node with BGP-LS Attribute (attempt $i)"
             return 0
         fi
@@ -133,8 +140,12 @@ wait_sink_node_absent() {
     log "Waiting for GoBGP sink to remove reflected BGP-LS node..."
     for i in $(seq 1 30); do
         local rib
-        rib=$(gobgp_ls_json "$GOBGP_SINK")
-        if ! echo "$rib" | grep -q "\"name\":\"$NODE_NAME\""; then
+        if ! rib=$(gobgp_ls_json "$GOBGP_SINK"); then
+            fail "GoBGP sink BGP-LS RIB query failed"
+            return 1
+        fi
+        if ! echo "$rib" | jq -e --arg name "$NODE_NAME" \
+            '.. | objects | select(.name? == $name)' >/dev/null; then
             ok "GoBGP sink removed reflected node (attempt $i)"
             return 0
         fi
