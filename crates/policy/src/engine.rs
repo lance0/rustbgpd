@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fmt;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 
 use regex::Regex;
@@ -19,6 +21,8 @@ pub(crate) const IMPLICIT_LOCAL_PREF: u32 = 100;
 /// Implicit `MED` used when a route arrives without the attribute.
 /// RFC 4271 §5.1.4 specifies 0.
 pub(crate) const IMPLICIT_MED: u32 = 0;
+
+const EXACT_LIST_SET_THRESHOLD: usize = 32;
 
 /// Action taken when a prefix matches a policy entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,20 +232,32 @@ impl RouteModifications {
 }
 
 /// Merge add/remove lists where equality is exact and later policy wins.
-fn merge_exact_list<T: PartialEq>(
+fn merge_exact_list<T: Clone + Eq + Hash>(
     current_add: &mut Vec<T>,
     current_remove: &mut Vec<T>,
     new_add: Vec<T>,
     new_remove: Vec<T>,
 ) {
-    for item in &new_remove {
-        current_add.retain(|existing| existing != item);
-    }
-    for item in &new_add {
-        current_remove.retain(|existing| existing != item);
-    }
+    retain_without(current_add, &new_remove);
+    retain_without(current_remove, &new_add);
     current_add.extend(new_add);
     current_remove.extend(new_remove);
+}
+
+fn retain_without<T: Clone + Eq + Hash>(items: &mut Vec<T>, remove: &[T]) {
+    if items.is_empty() || remove.is_empty() {
+        return;
+    }
+    if use_exact_list_set(items.len(), remove.len()) {
+        let remove_set: HashSet<T> = remove.iter().cloned().collect();
+        items.retain(|existing| !remove_set.contains(existing));
+    } else {
+        items.retain(|existing| !remove.contains(existing));
+    }
+}
+
+fn use_exact_list_set(left_len: usize, right_len: usize) -> bool {
+    left_len > 4 && right_len > 4 && left_len.saturating_mul(right_len) > EXACT_LIST_SET_THRESHOLD
 }
 
 /// Merge add/remove lists where values have logical equivalence and later policy wins.
@@ -337,6 +353,20 @@ impl CommunityMatch {
                     && lc.local_data2 == *local_data2
             }
             _ => false,
+        }
+    }
+
+    fn matches_route_communities(&self, ctx: &RouteContext<'_>) -> bool {
+        match self {
+            CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => ctx
+                .extended_communities
+                .iter()
+                .any(|ec| self.matches_ec(ec)),
+            CommunityMatch::Standard { value } => ctx.communities.contains(value),
+            CommunityMatch::LargeCommunity { .. } => ctx
+                .large_communities
+                .iter()
+                .any(|lc| self.matches_large(lc)),
         }
     }
 }
@@ -672,13 +702,13 @@ impl PolicyStatement {
             return false;
         }
 
-        // --- Tier 4: community scan (O(criteria × route communities)).
+        // --- Tier 4: community scan. Dispatch by criterion type so a standard
+        // match never scans extended or large communities, and vice versa.
         if !self.match_community.is_empty() {
-            let community_ok = self.match_community.iter().any(|cm| {
-                ctx.extended_communities.iter().any(|ec| cm.matches_ec(ec))
-                    || ctx.communities.iter().any(|c| cm.matches_standard(*c))
-                    || ctx.large_communities.iter().any(|lc| cm.matches_large(lc))
-            });
+            let community_ok = self
+                .match_community
+                .iter()
+                .any(|cm| cm.matches_route_communities(ctx));
             if !community_ok {
                 return false;
             }
@@ -1043,7 +1073,7 @@ pub fn apply_modifications(
         &mods.communities_add,
         &mods.communities_remove,
         |a| match a {
-            PathAttribute::Communities(c) => Some(c.clone()),
+            PathAttribute::Communities(c) => Some(c),
             _ => None,
         },
         |a| matches!(a, PathAttribute::Communities(_)),
@@ -1063,7 +1093,7 @@ pub fn apply_modifications(
         &mods.large_communities_add,
         &mods.large_communities_remove,
         |a| match a {
-            PathAttribute::LargeCommunities(c) => Some(c.clone()),
+            PathAttribute::LargeCommunities(c) => Some(c),
             _ => None,
         },
         |a| matches!(a, PathAttribute::LargeCommunities(_)),
@@ -1101,27 +1131,58 @@ fn upsert_attr(
 }
 
 /// Add/remove community-style attributes (standard, extended, large).
-fn apply_community_mods<T: Clone + PartialEq>(
+fn apply_community_mods<T: Clone + Eq + Hash>(
     attrs: &mut Vec<PathAttribute>,
     add: &[T],
     remove: &[T],
-    extract: impl Fn(&PathAttribute) -> Option<Vec<T>>,
+    extract: impl Fn(PathAttribute) -> Option<Vec<T>>,
     predicate: impl Fn(&PathAttribute) -> bool,
     wrap: impl Fn(Vec<T>) -> PathAttribute,
 ) {
     if add.is_empty() && remove.is_empty() {
         return;
     }
-    let mut items: Vec<T> = attrs.iter().find_map(&extract).unwrap_or_default();
-    items.retain(|v| !remove.contains(v));
-    for v in add {
-        if !items.contains(v) {
-            items.push(v.clone());
+
+    let mut items = Vec::new();
+    let mut found = false;
+    let mut index = 0;
+    while index < attrs.len() {
+        if predicate(&attrs[index]) {
+            let attr = attrs.remove(index);
+            if !found {
+                items = extract(attr).expect("community attribute predicate and extractor agree");
+                found = true;
+            }
+        } else {
+            index += 1;
         }
     }
-    attrs.retain(|a| !predicate(a));
+
+    apply_exact_community_delta(&mut items, add, remove);
     if !items.is_empty() {
         attrs.push(wrap(items));
+    }
+}
+
+fn apply_exact_community_delta<T: Clone + Eq + Hash>(items: &mut Vec<T>, add: &[T], remove: &[T]) {
+    retain_without(items, remove);
+    if add.is_empty() {
+        return;
+    }
+
+    if use_exact_list_set(items.len(), add.len()) {
+        let mut existing: HashSet<T> = items.iter().cloned().collect();
+        for item in add {
+            if existing.insert(item.clone()) {
+                items.push(item.clone());
+            }
+        }
+    } else {
+        for item in add {
+            if !items.contains(item) {
+                items.push(item.clone());
+            }
+        }
     }
 }
 
