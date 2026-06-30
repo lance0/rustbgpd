@@ -160,11 +160,12 @@ has it, no broad performance sprints without profile evidence.
   opaque NLRI/TLV bytes through `RibService.ListBgpLsRoutes` and
   `rbgp rib bgpls`. **Done:** BGP-LS routes now flow through initial table
   dumps, outbound reflection/export, route-refresh replay, and dirty
-  Adj-RIB-Out resync for eligible negotiated peers. GR entry now
-  conservatively withdraws BGP-LS routes and Enhanced Route Refresh sweeps
-  omitted BGP-LS objects instead of reporting stale controller-feed data as
-  live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, and local
-  topology production remain deferred.
+  Adj-RIB-Out resync for eligible negotiated peers; M73 proves the SAFI 71
+  reflection and withdrawal path with a GoBGP 4.6.0 route source and sink. GR
+  entry now conservatively withdraws BGP-LS routes and Enhanced Route Refresh
+  sweeps omitted BGP-LS objects instead of reporting stale controller-feed data
+  as live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, BGP-LS VPN
+  interop, and local topology production remain deferred.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix

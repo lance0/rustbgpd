@@ -296,7 +296,9 @@ operationally reachable.
 Each family needs at least one real-peer interop before it leaves alpha:
 
 - FRR for labeled-unicast, L3VPN, and BGP-LS.
-- GoBGP for API/control-plane parity and BGP-LS route objects.
+- GoBGP for API/control-plane parity and BGP-LS route objects. The first
+  BGP-LS reflection receipt is M73: GoBGP 4.6.0 source -> rustbgpd RR ->
+  GoBGP 4.6.0 sink for SAFI 71 Node NLRI reflection and withdrawal.
 - BIRD 3.x for MPLS/VPN route-reflector behavior where applicable.
 - OpenBGPD for VPN interoperability if the supported shape matches the feature.
 - OpenDaylight BGPCEP or another controller for BGP-LS export if BGP-LS is the

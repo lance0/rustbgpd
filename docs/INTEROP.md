@@ -24,7 +24,8 @@ foundation interop milestone scenarios on every PR (the rest of the
 matrix below runs on the hosted kernel-dataplane workflow or manual gates).
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
-- **Address-family + topology** — MP-BGP, RR, multi-path: **M10**, **M14**, **M17**.
+- **Address-family + topology** — MP-BGP, RR, multi-path, BGP-LS reflection:
+  **M10**, **M14**, **M17**, **M73**.
 - **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**.
 - **EVPN + SIGHUP** — control-plane sanity, MAC reflection, policy soft-reset: **M29**, **M30**, **M34**.
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
@@ -79,8 +80,8 @@ prove the positive state and final withdrawal or cleanup.
 The remaining interop scripts are local / manual gates because they
 need substantial wall-clock (M11/M16 GR/LLGR, M33 scale soak),
 additional fixtures (StayRTR / mock RTR v2 server), or
-broader platform-diversity validation (BIRD, GoBGP — exercising alternate
-implementations beyond the protected BIRD TCP-AO smoke).
+broader platform-diversity validation (BIRD and non-CI GoBGP cases beyond
+the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
 
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
@@ -103,6 +104,7 @@ implementations beyond the protected BIRD TCP-AO smoke).
 | FRR + StayRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
 | GoBGP | 4.3.0 | `tests/interop/m23-gobgp.clab.yml` | Tested (M23) | Bidirectional route exchange | Custom image: `docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/` | — |
+| GoBGP ×2 | 4.6.0 | `tests/interop/m73-bgpls-reflection-gobgp.clab.yml` | Tested (M73) | ADR-0077 BGP-LS reflection/export real-peer receipt | Three-node iBGP topology: GoBGP source -> rustbgpd RR -> GoBGP sink, all negotiating BGP-LS (`AFI 16388 / SAFI 71`). The source injects one deterministic RFC 9552 Node NLRI (`node-name m73-node`) through the GoBGP CLI; the driver asserts rustbgpd exposes it through `rbgp rib bgpls` with non-empty opaque payload and BGP-LS Attribute bytes, the sink receives the reflected route with the Node-name BGP-LS Attribute intact, and source withdrawal removes the route from rustbgpd and the sink. This proves SAFI 71 reflection and withdrawal only; BGP-LS VPN SAFI 72, local topology production, Add-Path, and GR/LLGR stale preservation remain deferred. **Hosted CI** in `.github/workflows/interop.yml` (no kernel features required). | Dedicated image: `docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop` |
 | FRR + BMP receiver | 10.3.1 | `tests/interop/m24-bmp-frr.clab.yml` | Tested (M24) | BMP Initiation, PeerUp, RouteMonitoring | Python TCP receiver validates message types and ordering | — |
 | FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
