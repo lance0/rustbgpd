@@ -64,6 +64,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Debug` on reload / hot-apply classification paths, and standalone deny
   statements return the documented empty-modification result without cloning
   discarded route modifications.
+- **Policy community-list hot-path cleanup from the repo-wide audit.** Community
+  match criteria now scan only their matching community family, and standard /
+  large community add/remove paths use adaptive exact-list conflict checks while
+  preserving existing policy ordering and later-wins semantics.
 - **EVPN originator churn bounds from the repo-wide audit.** Duplicate-MAC
   move-window sidecar keys are pruned when inactive windows age out, Type 2
   route-event bursts coalesce into a single full RIB repoll, and MAC-only remote

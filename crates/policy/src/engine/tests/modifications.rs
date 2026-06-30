@@ -122,6 +122,84 @@ fn apply_community_add_remove() {
 }
 
 #[test]
+fn apply_community_add_remove_preserves_order_and_legacy_attr_position() {
+    let c1 = (65001u32 << 16) | 0x0064;
+    let c2 = (65001u32 << 16) | 0x00C8;
+    let c3 = (65001u32 << 16) | 0x012C;
+    let mut attrs = vec![
+        PathAttribute::Communities(vec![c1, c2]),
+        PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+    ];
+    let mods = RouteModifications {
+        communities_add: vec![c2, c3, c3],
+        communities_remove: vec![c1],
+        ..Default::default()
+    };
+
+    apply_modifications(&mut attrs, &mods);
+
+    assert!(matches!(
+        attrs.as_slice(),
+        [
+            PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            PathAttribute::Communities(_)
+        ]
+    ));
+    let comms = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::Communities(c) => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(comms, &[c2, c3]);
+}
+
+#[test]
+fn merge_exact_community_lists_preserves_later_wins_order() {
+    let c1 = (65001u32 << 16) | 0x0064;
+    let c2 = (65001u32 << 16) | 0x00C8;
+    let c3 = (65001u32 << 16) | 0x012C;
+    let c4 = (65001u32 << 16) | 0x0190;
+    let c5 = (65001u32 << 16) | 0x01F4;
+    let mut merged = RouteModifications {
+        communities_add: vec![c1, c2],
+        communities_remove: vec![c3],
+        ..Default::default()
+    };
+    merged.merge_from(RouteModifications {
+        communities_add: vec![c3, c4, c4],
+        communities_remove: vec![c2, c5],
+        ..Default::default()
+    });
+
+    assert_eq!(merged.communities_add, vec![c1, c3, c4, c4]);
+    assert_eq!(merged.communities_remove, vec![c2, c5]);
+}
+
+#[test]
+fn merge_exact_large_community_lists_preserves_later_wins_order() {
+    let lc1 = LargeCommunity::new(65001, 1, 100);
+    let lc2 = LargeCommunity::new(65001, 1, 200);
+    let lc3 = LargeCommunity::new(65001, 1, 300);
+    let lc4 = LargeCommunity::new(65001, 1, 400);
+    let lc5 = LargeCommunity::new(65001, 1, 500);
+    let mut merged = RouteModifications {
+        large_communities_add: vec![lc1, lc2],
+        large_communities_remove: vec![lc3],
+        ..Default::default()
+    };
+    merged.merge_from(RouteModifications {
+        large_communities_add: vec![lc3, lc4, lc4],
+        large_communities_remove: vec![lc2, lc5],
+        ..Default::default()
+    });
+
+    assert_eq!(merged.large_communities_add, vec![lc1, lc3, lc4, lc4]);
+    assert_eq!(merged.large_communities_remove, vec![lc2, lc5]);
+}
+
+#[test]
 fn apply_extended_community_remove_matches_semantic_equivalent() {
     let mut attrs = vec![PathAttribute::ExtendedCommunities(vec![make_rt_as4(
         65001, 100,
