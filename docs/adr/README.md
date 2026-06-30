@@ -102,6 +102,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0091](0091-evpn-managed-netdev-creation.md) | rustbgpd-managed netdev creation | Accepted | 2026-06-19 |
 | [0092](0092-evpn-vlan-aware-bundle-service.md) | EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag) | Accepted | 2026-06-19 |
 | [0093](0093-evpn-vlan-macip-fdb-correlation.md) | VLAN MAC+IP attribution via FDB correlation on raw bridge ifindexes | Proposed | 2026-06-19 |
+| [0094](0094-evpn-vxlan-nondf-filtering-l2miss.md) | EVPN VXLAN all-active BUM filtering via kernel l2_miss (revisits ADR-0065) | Accepted (negative result) | 2026-06-29 |
 
 ## Template
 

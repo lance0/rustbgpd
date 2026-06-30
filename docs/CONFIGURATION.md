@@ -2128,6 +2128,8 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `df_dont_preempt` | bool   | no       | `false`       | RFC 9785 Don't-Preempt (non-revertive): when `true`, advertise DP=1 in the Type 4 DF Election extcomm. Only valid with `"highest-preference"` / `"lowest-preference"` — rejected for default-modulo / HRW. Origination + parse only today: the DP bit is not yet an election input (stateful non-revertive election is deferred), so a peer's DP=1 does not currently change which PE rustbgpd elects. |
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1, suppresses all-active aliasing ECMP for remote single-active ES reachability, and enables the receive-side backup-path pre-install path from ADR-0083 |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
+| `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
+| `recovery_delay_secs` | u64 | no       | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it |
 
 ### What gets originated
 
@@ -2719,7 +2721,7 @@ starting:
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
-| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, or `"linkstate_vpn"` | `unsupported address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, or `"linkstate_vpn"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |

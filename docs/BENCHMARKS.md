@@ -107,9 +107,11 @@ in `tests/soak/README.md` under "Host mutex".
 ## Running
 
 ```bash
-# All benchmarks (every package's benches; the targets live in different
-# crates, so a bare --bench cannot resolve them — run them per-package below
-# or use no args to sweep the whole workspace)
+# Default-feature benchmarks. A bare `cargo bench` runs only the targets that
+# build with default features (codec, rib_ops, policy_eval, explain_snapshot,
+# validate); the three `bench-internals`-gated targets (fanout, inbound_attrs,
+# fib_projection) are skipped and must be run explicitly with
+# `--features bench-internals` as shown below.
 cargo bench
 
 # Wire codec only
@@ -118,8 +120,14 @@ cargo bench -p rustbgpd-wire --bench codec
 # RIB only
 cargo bench -p rustbgpd-rib --bench rib_ops
 
-# Root-daemon FIB projection internals
+# Root-daemon FIB projection internals (requires bench-internals)
 cargo bench --features bench-internals --bench fib_projection
+
+# Inbound UPDATE attribute-clone churn (requires bench-internals)
+cargo bench -p rustbgpd-transport --features bench-internals --bench inbound_attrs
+
+# RPKI origin-validation microbench (RFC 6811)
+cargo bench -p rustbgpd-rpki --bench validate
 
 # Policy chain eval + the explain-snapshot clone cost
 cargo bench -p rustbgpd-policy --bench policy_eval

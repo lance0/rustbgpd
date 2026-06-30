@@ -18,9 +18,10 @@ events.
   outbound connections; passive mode supported
 - **TCP MD5 signatures** (RFC 2385) and **GTSM** (RFC 5082) via raw
   socket options
-- **TCP-AO foundation** (RFC 5925) — internal Linux socket primitive plus
-  `GlobalService.GetGlobal` / `rbgp global` capability status;
-  runtime config/session wiring is still deferred
+- **TCP-AO** (RFC 5925) — static-neighbor TCP-AO keys are installed on the
+  active-open and accept sockets at session establishment, plus
+  `GlobalService.GetGlobal` / `rbgp global` capability status; the remaining
+  gap is dynamic key rotation / multi-key rollover (tracked, deferred)
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
 - **Import-decision explain** (ADR-0073) — a bounded per-session LRU

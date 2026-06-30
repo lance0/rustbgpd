@@ -42,10 +42,14 @@ rustbgpd --diff examples/rr-evpn-fabric/config.toml \
                 examples/evpn-vtep-leaf/config.toml
 ```
 
-`[[evpn_instances]]` edits are surfaced as **restart-required** in
-`--diff`. The runtime gRPC `EvpnService` shares the resolved instance
-table via an `Arc` built once at startup; there is still no SIGHUP swap
-surface for instance mutation (intentional — see ADR-0052 §Boundaries).
+Most `[[evpn_instances]]` edits now **hot-apply** at runtime via the
+ADR-0063 EVPN runtime coordinator — through both SIGHUP file-driven reload
+and the gRPC `EvpnService.ApplyEvpnRuntime`. `--diff` classifies each edit
+as **reload-applied** or **restart-required**: only the two by-design
+restart-required shape classes stay restart-required — L3VNI/device/table
+IP-VRF identity changes (kernel VRF lifecycle) and the broader ES / IP-VRF
+mixed-row edits that fall outside the L2VNI-only composer. See ADR-0063 and
+`KNOWN_ISSUES.md` for the full supported-shape list.
 
 ## Pre-create the Linux bridge/VXLAN devices
 
@@ -111,8 +115,11 @@ rbgp evpn diagnose
 ## What this example does NOT do (yet)
 
 - Create Linux bridge or VXLAN netdevs for you.
-- Enforce RFC 7432 §15 duplicate-MAC quarantine. Detection metrics are
-  exposed; quarantine action remains future work.
+- Enforce RFC 7432 §15 duplicate-MAC quarantine beyond what ships today:
+  detect-only quarantine (detection metrics exposed) plus the optional
+  `action = "suppress_local"` enforcement both ship. The M/N detector
+  withdraws and suppresses local Type 2 originations for the duplicate MAC
+  until recovery, clearable via `rbgp evpn clear-duplicate-mac`.
 - Configure an IP-VRF / L3VNI tenant. Gate 9 Type 5 origination and
   symmetric Interface-less IRB dataplane programming ship in the main daemon
   (`[[evpn_ip_vrfs]]`, `rbgp evpn vrfs`, M39), but this example is kept
