@@ -495,6 +495,51 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
 }
 
 #[tokio::test]
+async fn duplicate_mac_recovery_prunes_inactive_move_windows() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+    let cfg = DuplicateMacConfig::new(
+        DuplicateMacAction::DetectOnly,
+        Duration::from_millis(1),
+        5,
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .expect("test Instant can move backwards by 10 seconds");
+
+    assert_eq!(
+        state.duplicate_mac_detector.record_move(key, old, cfg),
+        DuplicateMacDecision::Recorded { window_count: 1 }
+    );
+    state.known_duplicate_mac_keys.insert(key);
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+    recover_duplicate_macs(
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &OriginatedLocalMacCounts::default(),
+        &std::collections::BTreeMap::new(),
+        &BTreeSet::new(),
+    )
+    .await;
+
+    assert!(
+        !state.known_duplicate_mac_keys.contains(&key),
+        "inactive sub-threshold move windows must not leave stale sidecar keys"
+    );
+    assert!(
+        !state.duplicate_mac_detector.has_state(key),
+        "detector expiry should also prune the underlying inactive move window"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
     let instances = instance_table_with(suppress_local_instance(100));
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
@@ -2190,6 +2235,83 @@ async fn handle_evpn_event_repolls_and_populates_remote_view() {
         .expect("event-triggered repoll must populate remote_view");
     assert_eq!(view.next_hop, ipa("10.0.0.2"));
     assert_eq!(view.mobility_sequence, Some(5));
+}
+
+#[tokio::test]
+async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
+    let instances = instance_table(100);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let query_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let query_count_clone = query_count.clone();
+    let _responder = tokio::spawn(async move {
+        while let Some(msg) = rib_rx.recv().await {
+            if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                query_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = reply.send(vec![]);
+            }
+        }
+    });
+
+    let (event_tx, event_rx) = broadcast::channel(16);
+    let mut event_rx = Some(event_rx);
+    event_tx
+        .send(evpn_event_macip(
+            100,
+            0xAA,
+            "10.0.0.2",
+            Some(1),
+            false,
+            rustbgpd_rib::RouteEventType::Added,
+            None,
+        ))
+        .unwrap();
+    event_tx
+        .send(evpn_event_macip(
+            100,
+            0xBB,
+            "10.0.0.3",
+            Some(2),
+            false,
+            rustbgpd_rib::RouteEventType::Added,
+            None,
+        ))
+        .unwrap();
+
+    let trigger = evpn_event_macip(
+        100,
+        0xCC,
+        "10.0.0.4",
+        Some(3),
+        false,
+        rustbgpd_rib::RouteEventType::Added,
+        None,
+    );
+    handle_evpn_event_coalesced(
+        trigger,
+        &mut event_rx,
+        &instances,
+        &mut state,
+        &rib_tx,
+        &metrics,
+        &counts,
+        &std::collections::BTreeMap::new(),
+    )
+    .await;
+
+    assert_eq!(
+        query_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a ready Type-2 event burst must collapse into one full RIB repoll"
+    );
+    assert!(
+        event_rx
+            .as_mut()
+            .is_some_and(|rx| matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty))),
+        "coalescing should drain the ready broadcast queue"
+    );
 }
 
 /// Regression: a lower-mobility-sequence Added event for a

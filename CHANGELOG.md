@@ -64,6 +64,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Debug` on reload / hot-apply classification paths, and standalone deny
   statements return the documented empty-modification result without cloning
   discarded route modifications.
+- **EVPN originator churn bounds from the repo-wide audit.** Duplicate-MAC
+  move-window sidecar keys are pruned when inactive windows age out, Type 2
+  route-event bursts coalesce into a single full RIB repoll, and MAC-only remote
+  view construction indexes sticky metadata once per poll instead of scanning
+  every projected route for every winner.
 - **BGP-LS routes no longer survive stale lifecycle transitions as live data.**
   The receive/API tranche intentionally does not implement BGP-LS GR/LLGR
   stale preservation yet, but the RIB lifecycle paths now enforce that boundary:
