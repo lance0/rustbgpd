@@ -186,7 +186,7 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 # Cargo.toml  (after fsm is published)
 [dependencies]
 rustbgpd-wire = "0.13"
-rustbgpd-fsm = "0.45"
+rustbgpd-fsm = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```

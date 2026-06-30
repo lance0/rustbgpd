@@ -21,7 +21,12 @@ pub enum TimerType {
 }
 
 /// Result of a successful OPEN exchange — the negotiated session parameters.
+///
+/// `#[non_exhaustive]`: new negotiated capabilities add fields here, so
+/// external crates build it from [`NegotiatedSession::default`] and assign
+/// the `pub` fields they need rather than using a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "negotiated OPEN state is clearer as explicit capability flags"
@@ -86,8 +91,43 @@ pub struct NegotiatedSession {
     pub negotiated_orf_recv: Vec<(Afi, Safi)>,
 }
 
+impl Default for NegotiatedSession {
+    /// A zeroed/empty negotiation: no peer ASN, an unspecified router ID,
+    /// no hold time, no advertised capabilities, and every optional feature
+    /// flag clear. `Ipv4Addr` and the per-feature collections have no derived
+    /// `Default` shape we want, so this is written by hand.
+    fn default() -> Self {
+        Self {
+            peer_asn: 0,
+            peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+            hold_time: 0,
+            keepalive_interval: 0,
+            peer_capabilities: Vec::new(),
+            local_role: None,
+            remote_role: None,
+            role_negotiated: false,
+            four_octet_as: false,
+            negotiated_families: Vec::new(),
+            peer_gr_capable: false,
+            peer_restart_state: false,
+            peer_restart_time: 0,
+            peer_gr_families: Vec::new(),
+            peer_route_refresh: false,
+            peer_enhanced_route_refresh: false,
+            peer_extended_message: false,
+            extended_nexthop_families: HashMap::new(),
+            peer_notification_gr: false,
+            peer_llgr_capable: false,
+            peer_llgr_families: Vec::new(),
+            add_path_families: HashMap::new(),
+            negotiated_orf_recv: Vec::new(),
+        }
+    }
+}
+
 /// Output actions produced by the FSM on each transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Action {
     /// Send an OPEN message to the peer.
     SendOpen(OpenMessage),

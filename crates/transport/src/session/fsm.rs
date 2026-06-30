@@ -609,6 +609,10 @@ impl PeerSession {
                     });
                     let _ = self.rib_tx.send(rib_msg).await;
                 }
+                // `fsm::Action` is `#[non_exhaustive]`. A future action variant
+                // this executor doesn't yet understand is treated as a no-op
+                // rather than failing to compile or panicking.
+                _ => {}
             }
         }
 

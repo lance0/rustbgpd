@@ -21,7 +21,13 @@ pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> boo
 }
 
 /// Configuration for a single BGP peer session.
+///
+/// `#[non_exhaustive]`: future BGP features add fields here, so external
+/// crates must build it via [`PeerConfig::new`] (then set optional fields)
+/// rather than a struct literal. The fields stay `pub` for in-place
+/// mutation and read access.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "PeerConfig mirrors independent negotiated BGP feature knobs"
@@ -66,7 +72,52 @@ pub struct PeerConfig {
     pub disable_ipv4_unicast: bool,
 }
 
+impl Default for PeerConfig {
+    /// Defaults suitable for a plain IPv4-unicast eBGP peer with no optional
+    /// capabilities negotiated: zero ASNs, an unspecified router ID, a 90s
+    /// hold time, a 120s connect-retry, an empty family set, and every
+    /// optional feature disabled. `Ipv4Addr` has no `Default`, so this is
+    /// written by hand.
+    fn default() -> Self {
+        Self {
+            local_asn: 0,
+            remote_asn: 0,
+            local_router_id: Ipv4Addr::UNSPECIFIED,
+            hold_time: 90,
+            connect_retry_secs: 120,
+            families: Vec::new(),
+            graceful_restart: false,
+            gr_restart_time: 0,
+            llgr_stale_time: 0,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+            local_role: None,
+            strict_role: false,
+            prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
+        }
+    }
+}
+
 impl PeerConfig {
+    /// Construct a `PeerConfig` for an IPv4-unicast eBGP peer with default
+    /// optional settings.
+    ///
+    /// Because `PeerConfig` is `#[non_exhaustive]`, external crates cannot
+    /// build it with a struct literal; use this constructor and then set any
+    /// optional fields in place (the fields are `pub`). The remaining fields
+    /// take their [`Default`] values.
+    #[must_use]
+    pub fn new(local_asn: u32, remote_asn: u32, local_router_id: Ipv4Addr) -> Self {
+        Self {
+            local_asn,
+            remote_asn,
+            local_router_id,
+            ..Default::default()
+        }
+    }
+
     /// The configured families minus IPv4 unicast when
     /// `disable_ipv4_unicast` is set — the family set every advertised
     /// capability and the negotiation intersection derive from. With the

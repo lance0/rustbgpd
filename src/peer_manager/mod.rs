@@ -465,24 +465,20 @@ impl PeerManager {
         } else {
             config.families.clone()
         };
-        let peer = PeerConfig {
-            local_asn: self.local_asn,
-            remote_asn: config.remote_asn,
-            local_router_id: self.router_id,
-            hold_time: config.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
-            connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-            families,
-            graceful_restart: config.graceful_restart,
-            gr_restart_time: config.gr_restart_time,
-            llgr_stale_time: config.llgr_stale_time,
-            add_path_receive: config.add_path_receive,
-            add_path_send: config.add_path_send,
-            add_path_send_max: config.add_path_send_max,
-            local_role: config.local_role,
-            strict_role: config.strict_role,
-            prefix_orf_receive: config.prefix_orf_receive,
-            disable_ipv4_unicast: config.disable_ipv4_unicast,
-        };
+        let mut peer = PeerConfig::new(self.local_asn, config.remote_asn, self.router_id);
+        peer.hold_time = config.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+        peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
+        peer.families = families;
+        peer.graceful_restart = config.graceful_restart;
+        peer.gr_restart_time = config.gr_restart_time;
+        peer.llgr_stale_time = config.llgr_stale_time;
+        peer.add_path_receive = config.add_path_receive;
+        peer.add_path_send = config.add_path_send;
+        peer.add_path_send_max = config.add_path_send_max;
+        peer.local_role = config.local_role;
+        peer.strict_role = config.strict_role;
+        peer.prefix_orf_receive = config.prefix_orf_receive;
+        peer.disable_ipv4_unicast = config.disable_ipv4_unicast;
         let scope_id = config.scope_id.or_else(|| {
             config
                 .interface

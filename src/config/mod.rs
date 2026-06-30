@@ -601,45 +601,41 @@ impl Config {
         let families = Self::resolved_families(neighbor, group, peer_addr)?;
         let add_path = Self::resolved_add_path(neighbor, group);
 
-        let peer = PeerConfig {
-            local_asn: self.global.asn,
-            remote_asn: neighbor.remote_asn,
-            local_router_id: router_id,
-            hold_time: neighbor
-                .hold_time
-                .or_else(|| group.and_then(|g| g.hold_time))
-                .unwrap_or(DEFAULT_HOLD_TIME),
-            connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-            families,
-            graceful_restart: neighbor
-                .graceful_restart
-                .or_else(|| group.and_then(|g| g.graceful_restart))
-                .unwrap_or(true),
-            gr_restart_time: neighbor
-                .gr_restart_time
-                .or_else(|| group.and_then(|g| g.gr_restart_time))
-                .unwrap_or(120),
-            llgr_stale_time: neighbor
-                .llgr_stale_time
-                .or_else(|| group.and_then(|g| g.llgr_stale_time))
-                .unwrap_or(0),
-            add_path_receive: add_path.as_ref().is_some_and(|c| c.receive),
-            add_path_send: add_path.as_ref().is_some_and(|c| c.send),
-            add_path_send_max: add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0),
-            local_role: Self::resolved_role(neighbor, group),
-            strict_role: neighbor
-                .strict_role
-                .or_else(|| group.and_then(|g| g.strict_role))
-                .unwrap_or(false),
-            prefix_orf_receive: neighbor
-                .prefix_orf_receive
-                .or_else(|| group.and_then(|g| g.prefix_orf_receive))
-                .unwrap_or(false),
-            disable_ipv4_unicast: neighbor
-                .disable_ipv4_unicast
-                .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
-                .unwrap_or(false),
-        };
+        let mut peer = PeerConfig::new(self.global.asn, neighbor.remote_asn, router_id);
+        peer.hold_time = neighbor
+            .hold_time
+            .or_else(|| group.and_then(|g| g.hold_time))
+            .unwrap_or(DEFAULT_HOLD_TIME);
+        peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
+        peer.families = families;
+        peer.graceful_restart = neighbor
+            .graceful_restart
+            .or_else(|| group.and_then(|g| g.graceful_restart))
+            .unwrap_or(true);
+        peer.gr_restart_time = neighbor
+            .gr_restart_time
+            .or_else(|| group.and_then(|g| g.gr_restart_time))
+            .unwrap_or(120);
+        peer.llgr_stale_time = neighbor
+            .llgr_stale_time
+            .or_else(|| group.and_then(|g| g.llgr_stale_time))
+            .unwrap_or(0);
+        peer.add_path_receive = add_path.as_ref().is_some_and(|c| c.receive);
+        peer.add_path_send = add_path.as_ref().is_some_and(|c| c.send);
+        peer.add_path_send_max = add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0);
+        peer.local_role = Self::resolved_role(neighbor, group);
+        peer.strict_role = neighbor
+            .strict_role
+            .or_else(|| group.and_then(|g| g.strict_role))
+            .unwrap_or(false);
+        peer.prefix_orf_receive = neighbor
+            .prefix_orf_receive
+            .or_else(|| group.and_then(|g| g.prefix_orf_receive))
+            .unwrap_or(false);
+        peer.disable_ipv4_unicast = neighbor
+            .disable_ipv4_unicast
+            .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+            .unwrap_or(false);
 
         let (remote_addr, peer_interface, peer_scope_id) =
             if let (IpAddr::V6(v6), Some(interface)) = (peer_addr, neighbor.interface.as_ref()) {
