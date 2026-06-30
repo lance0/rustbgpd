@@ -33,7 +33,7 @@ categories = ["network-programming"]
 # Internal crates
 rustbgpd-wire = { path = "crates/wire", version = "0.13" }
 rustbgpd-bfd = { path = "crates/bfd", version = "0.45.0" }
-rustbgpd-fsm = { path = "crates/fsm" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.1" }
 rustbgpd-transport = { path = "crates/transport", version = "0.45.0" }
 rustbgpd-rib = { path = "crates/rib", version = "0.45.0" }
 rustbgpd-policy = { path = "crates/policy", version = "0.45.0" }
