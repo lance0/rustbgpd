@@ -27,7 +27,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, VpnRibRoute, VpnRibRouteKey,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
+    VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
@@ -64,6 +65,8 @@ pub struct AdjRibIn {
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes keyed by RFC 4364 RD + prefix identity.
     vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
+    rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
     /// during promotion from GR-stale → LLGR-stale. Used to distinguish
     /// locally-injected communities (which we strip on clear) from
@@ -98,6 +101,7 @@ impl AdjRibIn {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            rtc_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             attr_intern: HashSet::with_capacity_and_hasher(
                 route_capacity.clamp(16, 64),
@@ -154,7 +158,7 @@ impl AdjRibIn {
     }
 
     /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
-    /// BGP-LS, and VPN — plus all secondary indices, stale tags, and the
+    /// BGP-LS, VPN, and RTC — plus all secondary indices, stale tags, and the
     /// attribute intern table. Used when the per-peer Adj-RIB-In needs to be
     /// wiped without also dropping the [`AdjRibIn`] struct itself.
     pub fn clear(&mut self) {
@@ -164,6 +168,7 @@ impl AdjRibIn {
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
+        self.rtc_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
         self.evpn_llgr_stale_local_tags.clear();
@@ -761,6 +766,56 @@ impl AdjRibIn {
         self.vpn_routes.len()
     }
 
+    /// Insert or replace an RT-Constrain route, interning its attribute set.
+    ///
+    /// Returns `true` if an existing route at the same NLRI + path-id was
+    /// replaced. A replacement may strand the previous route's interned
+    /// attribute set; RTC batch callers run [`Self::gc_intern_table`] once
+    /// after any replacement or real withdrawal, after Loc-RIB recomputation
+    /// has dropped any selected-route clone.
+    pub fn insert_rtc(&mut self, mut route: RtcRibRoute) -> bool {
+        let key = route.key();
+        if let Some(existing) = self.attr_intern.get(&route.attributes) {
+            route.attributes = existing.clone();
+        } else {
+            self.attr_intern.insert(route.attributes.clone());
+        }
+        self.rtc_routes.insert(key, route).is_some()
+    }
+
+    /// Withdraw an RTC route. Returns `true` if it existed.
+    pub fn withdraw_rtc(&mut self, key: &RtcRibRouteKey) -> bool {
+        self.rtc_routes.remove(key).is_some()
+    }
+
+    /// Withdraw all RTC routes from this Adj-RIB-In.
+    ///
+    /// RTC GR/LLGR stale preservation is not implemented, so GR entry uses
+    /// this helper to make the conservative exclusion explicit instead of
+    /// accidentally retaining stale membership routes as live.
+    pub fn withdraw_all_rtc(&mut self) -> Vec<RtcRibRouteKey> {
+        let keys: Vec<_> = self.rtc_routes.keys().cloned().collect();
+        self.rtc_routes.clear();
+        keys
+    }
+
+    /// Look up an RTC route by NLRI + path-id key.
+    #[must_use]
+    pub fn get_rtc(&self, key: &RtcRibRouteKey) -> Option<&RtcRibRoute> {
+        self.rtc_routes.get(key)
+    }
+
+    /// Iterate over all RTC routes in this Adj-RIB-In.
+    pub fn iter_rtc(&self) -> impl Iterator<Item = &RtcRibRoute> {
+        self.rtc_routes.values()
+    }
+
+    /// Return the number of RTC routes stored.
+    #[must_use]
+    pub fn rtc_len(&self) -> usize {
+        self.rtc_routes.len()
+    }
+
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
     pub fn iter_flowspec_rule(&self, rule: &FlowSpecRule) -> impl Iterator<Item = &FlowSpecRoute> {
         let target = rule.clone();
@@ -1008,7 +1063,7 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, MplsLabelEntry, Origin, PathAttribute,
-        RouteDistinguisher, Safi, VpnNlri, VpnPrefix,
+        RouteDistinguisher, RtcNlri, Safi, VpnNlri, VpnPrefix,
     };
 
     use super::*;
@@ -1198,6 +1253,123 @@ mod tests {
 
         rib.clear();
         assert_eq!(rib.vpn_len(), 0);
+        assert!(rib.is_empty());
+    }
+
+    fn rtc_nlri(local_admin: u32) -> RtcNlri {
+        // 2-octet-AS RT:65001:<local_admin>, origin AS 65001, full /96.
+        let rt = 0x0002_FDE9_0000_0000_u64 | u64::from(local_admin);
+        RtcNlri::new(65001, rt, 96).unwrap()
+    }
+
+    fn make_rtc_route(nlri: RtcNlri, peer_oct: u8) -> RtcRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        RtcRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn rtc_insert_get_replace_withdraw_round_trip() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = rtc_nlri(100);
+        let key = RtcRibRouteKey { nlri, path_id: 0 };
+
+        assert!(!rib.insert_rtc(make_rtc_route(nlri, 1)));
+        assert_eq!(rib.rtc_len(), 1);
+        assert_eq!(rib.iter_rtc().count(), 1);
+        assert_eq!(
+            rib.get_rtc(&key).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+
+        // Same NLRI + path_id replaces in place.
+        assert!(rib.insert_rtc(make_rtc_route(nlri, 2)));
+        assert_eq!(rib.rtc_len(), 1, "same key should replace");
+        assert_eq!(
+            rib.get_rtc(&key).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.withdraw_rtc(&key));
+        assert_eq!(rib.rtc_len(), 0);
+        assert!(!rib.withdraw_rtc(&key));
+    }
+
+    #[test]
+    fn rtc_withdraw_all_returns_keys_and_empties_table() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let a = rtc_nlri(100);
+        let b = rtc_nlri(200);
+        rib.insert_rtc(make_rtc_route(a, 1));
+        rib.insert_rtc(make_rtc_route(b, 1));
+        assert_eq!(rib.rtc_len(), 2);
+
+        let mut keys = rib.withdraw_all_rtc();
+        keys.sort_by_key(|k| k.nlri.route_target_bits);
+        assert_eq!(
+            keys,
+            vec![
+                RtcRibRouteKey {
+                    nlri: a,
+                    path_id: 0
+                },
+                RtcRibRouteKey {
+                    nlri: b,
+                    path_id: 0
+                },
+            ]
+        );
+        assert_eq!(rib.rtc_len(), 0);
+    }
+
+    #[test]
+    fn rtc_insert_reports_replacement_for_intern_gc() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = rtc_nlri(100);
+
+        assert!(!rib.insert_rtc(make_rtc_route(nlri, 1)));
+        assert_eq!(rib.intern_len(), 1);
+
+        let mut replacement = make_rtc_route(nlri, 2);
+        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+
+        assert!(rib.insert_rtc(replacement));
+        assert_eq!(
+            rib.intern_len(),
+            2,
+            "replacement strands the previous interned attribute set before GC"
+        );
+
+        rib.gc_intern_table();
+        assert_eq!(rib.intern_len(), 1);
+    }
+
+    #[test]
+    fn rtc_storage_is_isolated_from_unicast_and_vpn_tables() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        rib.insert_rtc(make_rtc_route(rtc_nlri(100), 1));
+
+        assert_eq!(rib.rtc_len(), 1);
+        assert_eq!(rib.len(), 0, "RTC storage must not touch unicast count");
+        assert_eq!(rib.vpn_len(), 0, "RTC storage must not touch VPN table");
+        assert_eq!(rib.bgpls_len(), 0, "RTC storage must not touch BGP-LS");
+
+        rib.clear();
+        assert_eq!(rib.rtc_len(), 0);
         assert!(rib.is_empty());
     }
 

@@ -48,6 +48,8 @@ pub enum Safi {
     /// RFC 4364 / RFC 4659 MPLS L3VPN (VPNv4/VPNv6) — only valid with
     /// [`Afi::Ipv4`] / [`Afi::Ipv6`].
     MplsVpn = 128,
+    /// RFC 4684 Route Target Constrain — only valid with [`Afi::Ipv4`].
+    RtConstrain = 132,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
 }
@@ -63,6 +65,7 @@ impl Safi {
             71 => Some(Self::BgpLs),
             72 => Some(Self::BgpLsVpn),
             128 => Some(Self::MplsVpn),
+            132 => Some(Self::RtConstrain),
             133 => Some(Self::FlowSpec),
             _ => None,
         }

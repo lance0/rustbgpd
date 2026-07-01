@@ -225,7 +225,13 @@ fn classify_mp_nlri_family(
         | (
             Afi::BgpLs,
             Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec | Safi::MplsVpn,
-        ) => Err(unsupported_mp_nlri_family(attribute, afi, safi)),
+        )
+        // RT-Constrain (SAFI 132) stays unreachable in the RTC substrate
+        // slice; the receive slice promotes (Ipv4, RtConstrain) to an
+        // accept arm.
+        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => {
+            Err(unsupported_mp_nlri_family(attribute, afi, safi))
+        }
     }
 }
 fn unsupported_mp_nlri_family(attribute: &'static str, afi: Afi, safi: Safi) -> DecodeError {

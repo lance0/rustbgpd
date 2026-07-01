@@ -173,6 +173,7 @@ impl RibManager {
                         Safi::BgpLs => "bgpls",
                         Safi::BgpLsVpn => "bgpls_vpn",
                         Safi::MplsVpn => "mpls_vpn",
+                        Safi::RtConstrain => "rtc",
                     }
                 ),
             });

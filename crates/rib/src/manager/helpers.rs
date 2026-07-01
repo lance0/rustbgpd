@@ -116,7 +116,10 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
         | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
-        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn) => "unsupported",
+        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn)
+        // RT-Constrain (SAFI 132) is unreachable until the receive slice
+        // promotes (Ipv4, RtConstrain) to "rtc".
+        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => "unsupported",
     }
 }
 
