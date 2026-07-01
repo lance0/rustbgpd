@@ -186,7 +186,7 @@ impl RibManager {
         };
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
-            prefix,
+            prefix: Some(prefix),
             next_hop: Some(best.next_hop),
             extended_communities: best.extended_communities(),
             communities: best.communities(),
@@ -1233,7 +1233,7 @@ impl RibManager {
             };
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
-                prefix: *prefix,
+                prefix: Some(*prefix),
                 next_hop: Some(candidate.next_hop),
                 extended_communities: candidate.extended_communities(),
                 communities: candidate.communities(),
@@ -1389,7 +1389,7 @@ impl RibManager {
         };
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
-            prefix: *prefix,
+            prefix: Some(*prefix),
             next_hop: Some(best.next_hop),
             extended_communities: best.extended_communities(),
             communities: best.communities(),
@@ -1549,7 +1549,7 @@ impl RibManager {
                 };
                 let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                 let ctx = RouteContext {
-                    prefix: prefix_for_policy,
+                    prefix: Some(prefix_for_policy),
                     next_hop: None,
                     extended_communities: best.extended_communities(),
                     communities: best.communities(),
@@ -1683,15 +1683,15 @@ impl RibManager {
             // carries a real IP prefix in its NLRI, so prefix-based policy
             // clauses can match against it directly. Types 1-4 don't carry
             // a prefix in any meaningful sense (they identify Ethernet
-            // Segments, MAC addresses, or multicast tags), so we substitute
-            // 0.0.0.0/0 — operators who need to filter Types 1-4 should use
-            // RT- or community-based clauses, not prefix matches.
+            // Segments, MAC addresses, or multicast tags), so prefix-based
+            // predicates do not match them. Operators who need to filter
+            // Types 1-4 should use RT- or community-based clauses.
             let policy_prefix = match &best.route {
                 rustbgpd_wire::EvpnRoute::IpPrefix(t5) => match t5.prefix {
-                    rustbgpd_wire::EvpnIpPrefixValue::V4(p) => Prefix::V4(p),
-                    rustbgpd_wire::EvpnIpPrefixValue::V6(p) => Prefix::V6(p),
+                    rustbgpd_wire::EvpnIpPrefixValue::V4(p) => Some(Prefix::V4(p)),
+                    rustbgpd_wire::EvpnIpPrefixValue::V6(p) => Some(Prefix::V6(p)),
                 },
-                _ => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                _ => None,
             };
             let aspath_str = if needs_as_path_string {
                 best.as_path()
@@ -1855,7 +1855,7 @@ impl RibManager {
             };
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
-                prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                prefix: None,
                 next_hop: Some(best.next_hop),
                 extended_communities: best.extended_communities(),
                 communities: best.communities(),

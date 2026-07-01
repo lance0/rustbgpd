@@ -6,6 +6,7 @@
 //! features, not wire-crate behavior.
 
 use bytes::Bytes;
+use std::fmt::Write as _;
 
 use crate::error::{DecodeError, EncodeError};
 
@@ -339,12 +340,13 @@ fn decode_bgpls_nlri_inner(input: &[u8], vpn: bool) -> Result<Vec<BgpLsNlri>, De
         let value = &input[offset..offset + total_len];
         let (route_distinguisher, payload) = split_bgpls_value(value, vpn, type_raw, offset)?;
         let nlri_type = BgpLsNlriType::from_u16(type_raw);
-        validate_bgpls_payload(nlri_type, payload, offset)?;
-        routes.push(BgpLsNlri {
-            nlri_type,
-            route_distinguisher,
-            payload: Bytes::copy_from_slice(payload),
-        });
+        if validate_bgpls_payload(nlri_type, payload, offset)? {
+            routes.push(BgpLsNlri {
+                nlri_type,
+                route_distinguisher,
+                payload: Bytes::copy_from_slice(payload),
+            });
+        }
         offset += total_len;
     }
     Ok(routes)
@@ -375,9 +377,9 @@ fn validate_bgpls_payload(
     nlri_type: BgpLsNlriType,
     payload: &[u8],
     offset: usize,
-) -> Result<(), DecodeError> {
+) -> Result<bool, DecodeError> {
     if !nlri_type.is_known() {
-        return Ok(());
+        return Ok(true);
     }
     if payload.len() < KNOWN_NLRI_MIN_PAYLOAD_LEN {
         return Err(malformed(format!(
@@ -386,25 +388,45 @@ fn validate_bgpls_payload(
             payload.len()
         )));
     }
-    decode_bgpls_nlri_tlvs(&payload[KNOWN_NLRI_MIN_PAYLOAD_LEN..]).map(drop)
+    let tlvs = decode_bgpls_tlvs(&payload[KNOWN_NLRI_MIN_PAYLOAD_LEN..])?;
+    Ok(bgpls_nlri_tlv_order_violation(&tlvs).is_none())
 }
 
 fn decode_bgpls_nlri_tlvs(input: &[u8]) -> Result<Vec<BgpLsTlv>, DecodeError> {
     let tlvs = decode_bgpls_tlvs(input)?;
-    validate_bgpls_nlri_tlv_order(&tlvs)?;
+    if let Some((left, right)) = bgpls_nlri_tlv_order_violation(&tlvs) {
+        return Err(malformed(format!(
+            "BGP-LS NLRI TLVs out of canonical order: {} before {}",
+            describe_bgpls_tlv_for_order(left),
+            describe_bgpls_tlv_for_order(right)
+        )));
+    }
     Ok(tlvs)
 }
 
-fn validate_bgpls_nlri_tlv_order(tlvs: &[BgpLsTlv]) -> Result<(), DecodeError> {
+fn bgpls_nlri_tlv_order_violation(tlvs: &[BgpLsTlv]) -> Option<(&BgpLsTlv, &BgpLsTlv)> {
     for window in tlvs.windows(2) {
         if !bgpls_nlri_tlv_le(&window[0], &window[1]) {
-            return Err(malformed(format!(
-                "BGP-LS NLRI TLVs out of canonical order: type {} before type {}",
-                window[0].type_code, window[1].type_code
-            )));
+            return Some((&window[0], &window[1]));
         }
     }
-    Ok(())
+    None
+}
+
+fn describe_bgpls_tlv_for_order(tlv: &BgpLsTlv) -> String {
+    let mut value_hex = String::new();
+    for byte in tlv.value.iter().take(8) {
+        write!(&mut value_hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    if tlv.value.len() > 8 {
+        value_hex.push_str("...");
+    }
+    format!(
+        "type {} len {} value 0x{}",
+        tlv.type_code,
+        tlv.value.len(),
+        value_hex
+    )
 }
 
 fn bgpls_nlri_tlv_le(left: &BgpLsTlv, right: &BgpLsTlv) -> bool {
@@ -453,6 +475,21 @@ mod tests {
             &[
                 BgpLsTlv::new(256, Bytes::from_static(&[0, 0, 253, 232])),
                 BgpLsTlv::new(515, Bytes::from_static(&[0x03, 0x00, 0x00, 0x01])),
+            ],
+            &mut payload,
+        )
+        .expect("fixture TLVs encode");
+        Bytes::from(payload)
+    }
+
+    fn unordered_node_payload() -> Bytes {
+        let mut payload = Vec::new();
+        payload.push(3);
+        payload.extend_from_slice(&7_u64.to_be_bytes());
+        encode_bgpls_tlvs(
+            &[
+                BgpLsTlv::new(515, Bytes::from_static(&[1])),
+                BgpLsTlv::new(256, Bytes::from_static(&[1])),
             ],
             &mut payload,
         )
@@ -599,25 +636,30 @@ mod tests {
     }
 
     #[test]
-    fn unordered_known_nlri_tlvs_are_malformed() {
-        let mut payload = Vec::new();
-        payload.push(3);
-        payload.extend_from_slice(&7_u64.to_be_bytes());
-        encode_bgpls_tlvs(
-            &[
-                BgpLsTlv::new(515, Bytes::from_static(&[1])),
-                BgpLsTlv::new(256, Bytes::from_static(&[1])),
-            ],
-            &mut payload,
-        )
-        .expect("fixture TLVs encode");
+    fn unordered_known_nlri_tlvs_are_discarded() {
         let route =
-            BgpLsNlri::try_new(BgpLsNlriType::Node, None, Bytes::from(payload)).expect("fits");
+            BgpLsNlri::try_new(BgpLsNlriType::Node, None, unordered_node_payload()).expect("fits");
         let mut bytes = Vec::new();
         encode_bgpls_nlri(&[route], &mut bytes).expect("encodes");
 
-        let err = decode_bgpls_nlri(&bytes).expect_err("unordered NLRI TLVs must fail");
-        assert!(err.to_string().contains("TLVs out of canonical order"));
+        let decoded = decode_bgpls_nlri(&bytes).expect("unordered NLRI is isolatable");
+        assert!(
+            decoded.is_empty(),
+            "unordered descriptor TLVs must discard the NLRI without resetting the session"
+        );
+    }
+
+    #[test]
+    fn unordered_known_nlri_tlvs_discard_only_that_nlri() {
+        let bad = BgpLsNlri::try_new(BgpLsNlriType::Node, None, unordered_node_payload())
+            .expect("bad fixture fits");
+        let good = BgpLsNlri::try_new(BgpLsNlriType::Node, None, node_payload())
+            .expect("good fixture fits");
+        let mut bytes = Vec::new();
+        encode_bgpls_nlri(&[bad, good.clone()], &mut bytes).expect("encodes");
+
+        let decoded = decode_bgpls_nlri(&bytes).expect("batch decode survives one bad NLRI");
+        assert_eq!(decoded, vec![good]);
     }
 
     #[test]
@@ -635,6 +677,44 @@ mod tests {
         let tlvs = decode_bgpls_tlvs(&bytes).expect("standalone TLV decode is syntax-only");
         assert_eq!(tlvs[0].type_code, 515);
         assert_eq!(tlvs[1].type_code, 256);
+    }
+
+    #[test]
+    fn descriptor_tlv_order_error_names_offending_pair() {
+        let mut bytes = Vec::new();
+        encode_bgpls_tlvs(
+            &[
+                BgpLsTlv::new(515, Bytes::from_static(&[1])),
+                BgpLsTlv::new(256, Bytes::from_static(&[1])),
+            ],
+            &mut bytes,
+        )
+        .expect("fixture TLVs encode");
+
+        let err = decode_bgpls_nlri_tlvs(&bytes).expect_err("unordered descriptors fail");
+        assert!(
+            err.to_string()
+                .contains("type 515 len 1 value 0x01 before type 256 len 1 value 0x01")
+        );
+    }
+
+    #[test]
+    fn descriptor_tlv_order_error_disambiguates_equal_types() {
+        let mut bytes = Vec::new();
+        encode_bgpls_tlvs(
+            &[
+                BgpLsTlv::new(256, Bytes::from_static(&[2])),
+                BgpLsTlv::new(256, Bytes::from_static(&[1])),
+            ],
+            &mut bytes,
+        )
+        .expect("fixture TLVs encode");
+
+        let err = decode_bgpls_nlri_tlvs(&bytes).expect_err("unordered descriptors fail");
+        assert!(
+            err.to_string()
+                .contains("type 256 len 1 value 0x02 before type 256 len 1 value 0x01")
+        );
     }
 
     #[test]

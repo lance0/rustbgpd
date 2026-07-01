@@ -161,10 +161,10 @@ pub enum EventSubscriptionItem {
     /// The caller's `from_event_id` is below the live retention floor
     /// as observed atomically with the first replay chunk. Carries the
     /// missed count over the global committed stream:
-    /// `floor - from_event_id - 1`. Emitted exactly once, as the
-    /// stream-leading item, when a gap is detected; gRPC translates
-    /// it to a leading `StreamLagEvent` and increments
-    /// `bgp_event_outbox_cursor_gap_total`.
+    /// `floor - (from_event_id + 1)`, using saturating arithmetic for
+    /// edge cursors. Emitted exactly once, as the stream-leading item,
+    /// when a gap is detected; gRPC translates it to a leading
+    /// `StreamLagEvent` and increments `bgp_event_outbox_cursor_gap_total`.
     RetentionGap(u64),
 }
 
@@ -310,13 +310,10 @@ async fn run_subscription(
                         return;
                     }
                 };
-                if let Some(floor) = outcome.floor
-                    && from_id + 1 < floor
+                if let Some(missed) = retention_gap_missed_count(from_id, outcome.floor)
+                    && !emit_retention_gap(&out_tx, missed).await
                 {
-                    let missed = floor - from_id - 1;
-                    if !emit_retention_gap(&out_tx, missed).await {
-                        return;
-                    }
+                    return;
                 }
                 outcome.rows
             } else {
@@ -418,6 +415,11 @@ async fn run_subscription(
     );
 }
 
+fn retention_gap_missed_count(from_id: u64, floor: Option<u64>) -> Option<u64> {
+    let next_id = from_id.saturating_add(1);
+    floor.and_then(|floor| (next_id < floor).then(|| floor.saturating_sub(next_id)))
+}
+
 async fn emit_event(
     out_tx: &mpsc::Sender<EventSubscriptionItem>,
     committed: CommittedEvent,
@@ -500,6 +502,13 @@ mod tests {
         };
         assert!(f.matches(&make_committed(1, Category::Route)));
         assert!(!f.matches(&make_committed(2, Category::Session)));
+    }
+
+    #[test]
+    fn retention_gap_count_uses_saturating_cursor_edge() {
+        assert_eq!(retention_gap_missed_count(5, Some(9)), Some(3));
+        assert_eq!(retention_gap_missed_count(8, Some(9)), None);
+        assert_eq!(retention_gap_missed_count(u64::MAX, Some(u64::MAX)), None);
     }
 
     #[test]

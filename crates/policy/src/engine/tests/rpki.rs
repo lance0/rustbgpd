@@ -8,7 +8,7 @@ fn evaluate_policy_with_validation_states(
     aspa_state: AspaValidation,
 ) -> PolicyResult {
     let context = RouteContext {
-        prefix: v4_prefix([10, 0, 0, 0], 8),
+        prefix: Some(v4_prefix([10, 0, 0, 0], 8)),
         next_hop: None,
         extended_communities: &[],
         communities: &[],

@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audit-tail hardening for BGP-LS, durable cursors, and GR/LLGR intern GC.**
+  BGP-LS known-NLRI descriptor TLV ordering errors now discard only the
+  affected NLRI instead of resetting the session; durable event-history replay
+  cursor-gap math uses saturating arithmetic for `from_event_id = u64::MAX`;
+  BGP-LS policy contexts no longer fabricate a `0.0.0.0/0` prefix; and GR/LLGR
+  stale sweeps run the intern-table GC after Loc-RIB recompute so selected-route
+  clones cannot leave one-cycle attribute-set orphans.
+
 ## [0.45.0] — 2026-06-30
 
 ### Added

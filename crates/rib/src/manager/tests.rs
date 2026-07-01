@@ -26,6 +26,33 @@ fn bgpls_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::BgpLs, Safi::BgpLs)]
 }
 
+fn deny_default_prefix_chain() -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications::default(),
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
 fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
     let route = EvpnRoute::Imet(EvpnImet {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -495,6 +522,57 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let withdraw = out_rx.recv().await.unwrap();
     assert!(withdraw.bgpls_announce.is_empty());
     assert_eq!(withdraw.bgpls_withdraw, vec![key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(deny_default_prefix_chain()),
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 36, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(
+        update.bgpls_announce.len(),
+        1,
+        "BGP-LS topology NLRIs are prefixless and must not match 0.0.0.0/0 policy"
+    );
+    assert_eq!(update.bgpls_announce[0].key(), key);
 
     drop(tx);
     handle.await.unwrap();
@@ -15254,8 +15332,8 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     );
     assert_eq!(
         manager.ribs[&peer].intern_len(),
-        1,
-        "the pre-promotion interned set is retained until EoR recomputes the Loc-RIB"
+        0,
+        "GR expiry must reclaim the pre-promotion interned set after Loc-RIB recompute"
     );
 
     manager.handle_update(RibUpdate::EndOfRib {
@@ -15277,6 +15355,52 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         manager.ribs[&peer].intern_len(),
         0,
         "LLGR EoR stale-clear must reclaim the orphaned pre-promotion interned set"
+    );
+}
+
+#[test]
+fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
+    // Plain GR expiry removes the route from Adj-RIB-In while the selected
+    // Loc-RIB clone still holds the interned attribute Arc. The second GC must
+    // run after recompute drops that clone; otherwise one set survives per
+    // expired selected route.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    manager.process_announce_chunk(peer, vec![route]);
+    assert_eq!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
+        Some(peer)
+    );
+    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    manager.outbound_peers.insert(peer, outbound_tx);
+    manager.sweep_gr_stale(peer);
+
+    assert!(
+        manager.loc_rib.get(&Prefix::V4(prefix)).is_none(),
+        "GR expiry should remove the stale route from the Loc-RIB"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        0,
+        "GR expiry must reclaim the selected route's interned attrs after recompute"
     );
 }
 
