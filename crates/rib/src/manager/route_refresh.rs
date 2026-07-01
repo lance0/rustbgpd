@@ -282,6 +282,17 @@ impl RibManager {
                         stale_count += 1;
                     }
                 }
+            } else if safi == Safi::MplsVpn {
+                let stale = self.refresh_stale_vpn.entry(peer).or_default();
+                stale.retain(|key| key.afi_safi() != (afi, safi));
+                for route in rib
+                    .iter_vpn()
+                    .filter(|route| route.afi_safi() == (afi, safi))
+                {
+                    if stale.insert(route.key()) {
+                        stale_count += 1;
+                    }
+                }
             } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 let stale = self.refresh_stale_evpn.entry(peer).or_default();
                 stale.clear();
@@ -769,11 +780,26 @@ impl RibManager {
             } else {
                 Vec::new()
             };
+        let stale_l3vpn_keys: Vec<crate::route::VpnRibRouteKey> = if safi == Safi::MplsVpn {
+            self.refresh_stale_vpn
+                .get(&peer)
+                .map(|stale| {
+                    stale
+                        .iter()
+                        .filter(|key| key.afi_safi() == family)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
+        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for (prefix, path_id) in &stale_route_keys {
                 if rib.withdraw(prefix, *path_id) {
@@ -795,6 +821,11 @@ impl RibManager {
                     bgpls_affected.insert(key.clone());
                 }
             }
+            for key in &stale_l3vpn_keys {
+                if rib.withdraw_vpn(key) {
+                    vpn_affected.insert(key.clone());
+                }
+            }
             // Reclaim attribute interns dropped by the bulk withdraw —
             // each withdraw above can leave a `strong_count==1` Arc in
             // the intern table that wouldn't otherwise be GC'd until
@@ -803,6 +834,7 @@ impl RibManager {
                 || !fs_affected.is_empty()
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
+                || !vpn_affected.is_empty()
             {
                 rib.gc_intern_table();
             }
@@ -854,6 +886,17 @@ impl RibManager {
                 self.refresh_stale_bgpls.remove(&peer);
             }
         }
+        if safi == Safi::MplsVpn {
+            let clear_vpn_stale_entry = if let Some(stale) = self.refresh_stale_vpn.get_mut(&peer) {
+                stale.retain(|key| key.afi_safi() != family);
+                stale.is_empty()
+            } else {
+                false
+            };
+            if clear_vpn_stale_entry {
+                self.refresh_stale_vpn.remove(&peer);
+            }
+        }
         self.refresh_stale_counts.remove(&(peer, afi, safi));
 
         let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
@@ -884,6 +927,15 @@ impl RibManager {
             // holder is the intern table). Now that recompute_bgpls_keys has
             // dropped the Loc-RIB clones, gc reclaims them — mirroring the
             // receive path's recompute-then-gc ordering.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+        }
+        if !vpn_affected.is_empty() {
+            self.recompute_vpn_keys(&vpn_affected);
+            // Same gc-after-recompute ordering as BGP-LS above: the swept VPN
+            // routes' interned attribute sets stay alive in the Loc-RIB clone
+            // until recompute_vpn_keys drops it, so gc must run after it.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
             }

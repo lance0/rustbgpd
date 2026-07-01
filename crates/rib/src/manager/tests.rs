@@ -237,6 +237,14 @@ async fn query_bgpls_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<BgpLsRibRoute> 
     reply_rx.await.unwrap()
 }
 
+async fn query_vpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<VpnRibRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
 async fn query_explain_advertised_route(
     tx: &mpsc::Sender<RibUpdate>,
     peer: IpAddr,
@@ -6691,6 +6699,212 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
     let after_refresh = query_bgpls_routes(&tx).await;
     assert!(after_refresh.is_empty());
     assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 0.0, 0.0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn enhanced_route_refresh_vpn_eorr_sweeps_unreplaced_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route1 = make_vpn_rib_route(peer_addr, 21, 100, 100);
+    let route2 = make_vpn_rib_route(peer_addr, 22, 100, 100);
+    let key1 = route1.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route1.clone(), route2],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+    let before_refresh = query_vpn_routes(&tx).await;
+    assert_eq!(before_refresh.len(), 2);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 1.0, 2.0);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route1],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let during_refresh = query_vpn_routes(&tx).await;
+    assert_eq!(during_refresh.len(), 2);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 1.0, 1.0);
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+
+    let after_refresh = query_vpn_routes(&tx).await;
+    assert_eq!(after_refresh.len(), 1);
+    assert_eq!(after_refresh[0].key(), key1);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 0.0, 0.0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn enhanced_route_refresh_vpn_withdraw_clears_stale_marker() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route = make_vpn_rib_route(peer_addr, 23, 100, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+    let before_withdraw = query_vpn_routes(&tx).await;
+    assert_eq!(before_withdraw.len(), 1);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 1.0, 1.0);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: vec![key],
+    })
+    .await
+    .unwrap();
+    let after_withdraw = query_vpn_routes(&tx).await;
+    assert!(after_withdraw.is_empty());
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 1.0, 0.0);
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+
+    let after_refresh = query_vpn_routes(&tx).await;
+    assert!(after_refresh.is_empty());
+    assert_refresh_metrics(&metrics, "10.0.0.1", "l3vpn_ipv4_unicast", 0.0, 0.0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The `EoRR` sweep of an unrefreshed VPN route must flow through the Loc-RIB
+/// recompute and surface as a reflected withdrawal to other eligible peers,
+/// not just vanish from the sweeping peer's Adj-RIB-In.
+#[tokio::test]
+async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let source = IpAddr::V4(source_addr);
+    let survivor = make_vpn_rib_route(source_addr, 24, 100, 100);
+    let omitted = make_vpn_rib_route(source_addr, 25, 100, 100);
+    let omitted_key = omitted.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![survivor.clone(), omitted],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announce = out_rx.recv().await.unwrap();
+    assert_eq!(announce.vpn_announce.len(), 2);
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+    // Reannounce only the survivor; the omitted route stays stale.
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![survivor],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+
+    let swept = out_rx.recv().await.unwrap();
+    assert!(swept.vpn_announce.is_empty());
+    assert_eq!(swept.vpn_withdraw, vec![omitted_key]);
 
     drop(tx);
     handle.await.unwrap();
@@ -16072,5 +16286,95 @@ fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
         1,
         "EoRR sweep must reclaim the swept route's interned attribute set \
          (gc must run after finish_route_refresh's Loc-RIB recompute)"
+    );
+}
+
+#[test]
+fn enhanced_route_refresh_vpn_eorr_gcs_attr_intern_for_swept_route() {
+    // Same ordering hazard as the BGP-LS test above, for SAFI 128: the swept
+    // VPN route was selected into the Loc-RIB, so its interned attribute set
+    // has a second Arc clone until finish_route_refresh's Loc-RIB recompute
+    // drops it. GC must run after that recompute. Distinct LOCAL_PREF values
+    // give each route its own interned set so the leak can't be masked.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let survivor = make_vpn_rib_route(peer_addr, 21, 100, 100);
+    let omitted = make_vpn_rib_route(peer_addr, 22, 100, 200);
+    manager.handle_vpn_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
+    assert_eq!(manager.ribs[&peer].intern_len(), 2);
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    });
+    // Reannounce only the survivor; the omitted route stays stale and is swept.
+    manager.handle_vpn_routes_received(peer, vec![survivor], vec![]);
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    });
+
+    assert_eq!(
+        manager.loc_rib.iter_vpn().count(),
+        1,
+        "EoRR sweeps the omitted VPN route, leaving only the survivor"
+    );
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        1,
+        "EoRR sweep must reclaim the swept VPN route's interned attribute set \
+         (gc must run after finish_route_refresh's Loc-RIB recompute)"
+    );
+}
+
+#[test]
+fn vpn_peer_down_during_refresh_clears_stale_state() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+
+    manager.handle_vpn_routes_received(
+        peer,
+        vec![make_vpn_rib_route(peer_addr, 26, 100, 100)],
+        vec![],
+    );
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    });
+    assert!(
+        manager
+            .refresh_stale_vpn
+            .get(&peer)
+            .is_some_and(|stale| stale.len() == 1),
+        "BoRR must snapshot the peer's Adj-RIB-In VPN keys as stale"
+    );
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
+    assert!(
+        !manager.refresh_stale_vpn.contains_key(&peer),
+        "peer-down during an active refresh must clear the VPN stale snapshot"
+    );
+    assert!(!manager.refresh_in_progress.contains_key(&peer));
+    assert!(
+        manager
+            .refresh_stale_counts
+            .keys()
+            .all(|(stale_peer, _, _)| *stale_peer != peer),
+        "peer-down must drop the peer's refresh-stale counters"
     );
 }
