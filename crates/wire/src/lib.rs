@@ -85,8 +85,9 @@ pub use route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
 pub use vpn::{
     LABELED_UNICAST_SAFI, MPLS_VPN_SAFI, MplsLabelEntry, VPNV4_AFI, VPNV6_AFI, VpnAddressFamily,
-    VpnNlri, VpnPrefix, VpnRouteKey, decode_vpn_nlri, decode_vpnv4_nlri, decode_vpnv6_nlri,
-    encode_vpn_nlri, encode_vpnv4_nlri, encode_vpnv6_nlri,
+    VpnNlri, VpnPrefix, VpnRouteKey, decode_vpn_nlri, decode_vpn_withdraw_nlri, decode_vpnv4_nlri,
+    decode_vpnv6_nlri, encode_vpn_nlri, encode_vpn_withdraw_nlri, encode_vpnv4_nlri,
+    encode_vpnv6_nlri,
 };
 
 // ── Routing-domain result enums ──────────────────────────────────────

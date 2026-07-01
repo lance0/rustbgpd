@@ -246,6 +246,8 @@ impl RibManager {
             evpn_withdraw: vec![],
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
+            vpn_announce: vec![],
+            vpn_withdraw: vec![],
             request_refresh_all_negotiated: true,
         };
         if record.outbound_tx.try_send(update).is_err() {
@@ -328,6 +330,8 @@ impl RibManager {
             .iter_bgpls()
             .map(crate::route::BgpLsRibRoute::key)
             .collect();
+        let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
+            rib.iter_vpn().map(crate::route::VpnRibRoute::key).collect();
         debug!(%peer, cleared = count, "peer adj-rib-in cleared");
         self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
         self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
@@ -346,6 +350,13 @@ impl RibManager {
         // surface through `ListBgpLsRoutes` as if still live.
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
+        }
+        // VPN is receive/API-only for now (reflection is a later PR), so a
+        // departed peer's routes must fall back to the next-best remaining
+        // candidate or be removed from the Loc-RIB — same stranding hazard
+        // as BGP-LS above.
+        if !vpn_affected.is_empty() {
+            self.recompute_vpn_keys(&vpn_affected);
         }
     }
 
@@ -898,6 +909,8 @@ impl RibManager {
                 evpn_withdraw: vec![],
                 bgpls_announce: vec![],
                 bgpls_withdraw: vec![],
+                vpn_announce: vec![],
+                vpn_withdraw: vec![],
                 request_refresh_all_negotiated: false,
             };
             if tx.try_send(eor).is_err() {

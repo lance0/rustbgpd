@@ -343,6 +343,8 @@ impl RibManager {
             evpn_withdraw,
             bgpls_announce,
             bgpls_withdraw,
+            vpn_announce: vec![],
+            vpn_withdraw: vec![],
             request_refresh_all_negotiated: false,
         });
         true

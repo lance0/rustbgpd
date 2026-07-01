@@ -123,7 +123,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (16 RPCs)
+### RibService (17 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -143,6 +143,7 @@ shape itself does not raise the tier.
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
+| `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
 
 ### BfdService (1 RPC)
 
@@ -209,13 +210,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 48 | 53.3% |
-| `mutating` | 19 | 21.1% |
-| `operator_only` | 23 | 25.6% |
-| **Total** | **90** | **100%** |
+| `sensitive_read` | 49 | 53.8% |
+| `mutating` | 19 | 20.9% |
+| `operator_only` | 23 | 25.3% |
+| **Total** | **91** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 90
-total is 86 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 91
+total is 87 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

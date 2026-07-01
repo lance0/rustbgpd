@@ -13,7 +13,7 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType,
+    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -1515,6 +1515,51 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListBgpLsResponse { routes }))
     }
 
+    async fn list_vpn_routes(
+        &self,
+        request: Request<proto::ListVpnRoutesRequest>,
+    ) -> Result<Response<proto::ListVpnRoutesResponse>, Status> {
+        let req = request.into_inner();
+
+        if !req.afi_safi.is_empty()
+            && req.afi_safi != "l3vpn_ipv4_unicast"
+            && req.afi_safi != "l3vpn_ipv6_unicast"
+        {
+            return Err(Status::invalid_argument(format!(
+                "unknown VPN family {:?}, expected \"l3vpn_ipv4_unicast\" or \"l3vpn_ipv6_unicast\"",
+                req.afi_safi
+            )));
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let peer_filter = req.peer_filter;
+        let family_filter = req.afi_safi;
+        let routes = all_routes
+            .iter()
+            .filter(|route| {
+                if !family_filter.is_empty() && vpn_family_label(route) != family_filter {
+                    return false;
+                }
+                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                    return false;
+                }
+                true
+            })
+            .map(vpn_route_to_proto)
+            .collect();
+
+        Ok(Response::new(proto::ListVpnRoutesResponse { routes }))
+    }
+
     async fn set_fib_table(
         &self,
         request: Request<proto::SetFibTableRequest>,
@@ -1843,6 +1888,55 @@ pub(crate) fn bgpls_route_to_proto(route: &BgpLsRibRoute) -> proto::BgpLsRouteEn
     }
 }
 
+fn vpn_family_label(route: &VpnRibRoute) -> &'static str {
+    match route.family() {
+        rustbgpd_wire::VpnAddressFamily::V4 => "l3vpn_ipv4_unicast",
+        rustbgpd_wire::VpnAddressFamily::V6 => "l3vpn_ipv6_unicast",
+    }
+}
+
+pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+
+    for attr in route.attributes.iter() {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => {
+                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            }
+            PathAttribute::ExtendedCommunities(ecs) => {
+                extended_communities.extend(ecs.iter().map(ToString::to_string));
+            }
+            _ => {}
+        }
+    }
+
+    proto::VpnRouteEntry {
+        afi_safi: vpn_family_label(route).to_string(),
+        route_distinguisher: route.nlri.route_distinguisher.0.to_vec(),
+        route_distinguisher_str: route.nlri.route_distinguisher.to_string(),
+        prefix: route.nlri.prefix.to_string(),
+        labels: route.nlri.labels.iter().map(|l| l.label).collect(),
+        next_hop: route.next_hop.to_string(),
+        peer_address: route.peer.to_string(),
+        as_path,
+        communities,
+        extended_communities,
+        stale: route.is_stale,
+        llgr_stale: route.is_llgr_stale,
+        path_id: route.path_id,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "EVPN route conversion keeps per-route-type field mapping in one audited place"
@@ -2111,6 +2205,57 @@ mod tests {
         assert_eq!(entry.bgp_ls_attribute, [0xba, 0xdc, 0x0d, 0xe0]);
         assert!(entry.stale);
         assert_eq!(entry.path_id, 9);
+    }
+
+    #[test]
+    fn vpn_route_to_proto_preserves_rd_prefix_labels_and_route_targets() {
+        use rustbgpd_wire::{ExtendedCommunity, MplsLabelEntry, VpnNlri, VpnPrefix};
+
+        let route = VpnRibRoute {
+            nlri: VpnNlri {
+                labels: vec![
+                    MplsLabelEntry::try_new(16_000, 0, false).unwrap(),
+                    MplsLabelEntry::try_new(24_017, 0, true).unwrap(),
+                ],
+                route_distinguisher: rustbgpd_wire::RouteDistinguisher([
+                    0, 0, 0xFD, 0xE8, 0, 0, 0, 1,
+                ]),
+                prefix: VpnPrefix::v4(Ipv4Addr::new(10, 1, 0, 0), 24).unwrap(),
+            },
+            next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
+            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            attributes: Arc::new(vec![
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
+                }),
+                PathAttribute::Communities(vec![0x0001_0002]),
+                // 2-octet AS Route Target: RT:65000:1
+                PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(
+                    0x0002_FDE8_0000_0001,
+                )]),
+            ]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: true,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+
+        let entry = vpn_route_to_proto(&route);
+        assert_eq!(entry.afi_safi, "l3vpn_ipv4_unicast");
+        assert_eq!(entry.route_distinguisher, [0, 0, 0xFD, 0xE8, 0, 0, 0, 1]);
+        assert_eq!(entry.route_distinguisher_str, "65000:1");
+        assert_eq!(entry.prefix, "10.1.0.0/24");
+        assert_eq!(entry.labels, [16_000, 24_017]);
+        assert_eq!(entry.next_hop, "192.0.2.1");
+        assert_eq!(entry.peer_address, "192.0.2.2");
+        assert_eq!(entry.as_path, [64512, 64513]);
+        assert_eq!(entry.communities, ["1:2"]);
+        assert_eq!(entry.extended_communities, ["RT:65000:1"]);
+        assert!(entry.stale);
+        assert!(!entry.llgr_stale);
+        assert_eq!(entry.path_id, 0);
     }
 
     #[tokio::test]

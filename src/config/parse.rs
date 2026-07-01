@@ -550,13 +550,16 @@ pub(super) fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, Co
             "l2vpn_evpn" => (Afi::L2Vpn, Safi::Evpn),
             "linkstate" => (Afi::BgpLs, Safi::BgpLs),
             "linkstate_vpn" => (Afi::BgpLs, Safi::BgpLsVpn),
+            "l3vpn_ipv4_unicast" => (Afi::Ipv4, Safi::MplsVpn),
+            "l3vpn_ipv6_unicast" => (Afi::Ipv6, Safi::MplsVpn),
             other => {
                 return Err(ConfigError::InvalidPolicyEntry {
                     reason: format!(
                         "unknown address family {other:?}, expected one of: \
                          \"ipv4_unicast\", \"ipv6_unicast\", \"ipv4_flowspec\", \
                          \"ipv6_flowspec\", \"l2vpn_evpn\", \"linkstate\", \
-                         \"linkstate_vpn\""
+                         \"linkstate_vpn\", \"l3vpn_ipv4_unicast\", \
+                         \"l3vpn_ipv6_unicast\""
                     ),
                 });
             }

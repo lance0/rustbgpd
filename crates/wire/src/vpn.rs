@@ -395,6 +395,158 @@ pub fn encode_vpn_nlri(
     Ok(())
 }
 
+/// 3-octet compatibility value transmitted in the label position of a
+/// withdrawn VPN NLRI (RFC 8277 §2.4): SHOULD be 0x800000 on transmission;
+/// receivers MUST ignore whatever value arrives.
+pub const VPN_WITHDRAW_COMPATIBILITY: [u8; MPLS_LABEL_ENTRY_LEN] = [0x80, 0x00, 0x00];
+
+/// Decode withdraw-mode `VPNv4`/`VPNv6` NLRI bytes (`MP_UNREACH_NLRI`).
+///
+/// Per RFC 8277 §2.4 a withdrawn VPN NLRI carries a single 3-octet
+/// compatibility field in the label position, not a BOS-terminated label
+/// stack. The field's value is ignored entirely (it need not be 0x800000 and
+/// its S bit need not be set), so announce-mode label-stack parsing must not
+/// be used here. Decoded entries have an empty `labels` vec.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for malformed length, RD, or prefix encodings.
+pub fn decode_vpn_withdraw_nlri(
+    mut buf: &[u8],
+    family: VpnAddressFamily,
+) -> Result<Vec<VpnNlri>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        let field_start = buf;
+        let total_len_bits = buf[0];
+        buf = &buf[1..];
+        let value_len = usize::from(total_len_bits.div_ceil(8));
+
+        if buf.len() < value_len {
+            return invalid_vpn_nlri(
+                format!(
+                    "{family} withdraw NLRI truncated: length {total_len_bits} bits requires {value_len} bytes, have {}",
+                    buf.len()
+                ),
+                field_start,
+                1 + buf.len(),
+            );
+        }
+
+        let value = &buf[..value_len];
+        buf = &buf[value_len..];
+
+        entries.push(decode_one_vpn_withdraw_nlri(
+            value,
+            total_len_bits,
+            family,
+            field_start,
+        )?);
+    }
+
+    Ok(entries)
+}
+
+fn decode_one_vpn_withdraw_nlri(
+    value: &[u8],
+    total_len_bits: u8,
+    family: VpnAddressFamily,
+    field_start: &[u8],
+) -> Result<VpnNlri, DecodeError> {
+    let min_bits = u16::from(MPLS_LABEL_ENTRY_BITS) + u16::from(ROUTE_DISTINGUISHER_BITS);
+    if u16::from(total_len_bits) < min_bits {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} withdraw NLRI length {total_len_bits} bits is shorter than compatibility field+RD"
+            ),
+            field_start,
+            1 + value.len(),
+        );
+    }
+
+    // Exactly one 3-octet compatibility field; its value is ignored.
+    let rd_offset = MPLS_LABEL_ENTRY_LEN;
+    let rd_end = rd_offset + ROUTE_DISTINGUISHER_LEN;
+    if value.len() < rd_end {
+        return invalid_vpn_nlri(
+            format!("{family} withdraw NLRI truncated before Route Distinguisher"),
+            field_start,
+            1 + value.len(),
+        );
+    }
+    let mut rd = [0u8; ROUTE_DISTINGUISHER_LEN];
+    rd.copy_from_slice(&value[rd_offset..rd_end]);
+
+    // min_bits was checked above, so this cannot underflow.
+    let prefix_len = total_len_bits - MPLS_LABEL_ENTRY_BITS - ROUTE_DISTINGUISHER_BITS;
+    if prefix_len > family.max_prefix_len() {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} prefix length {prefix_len} exceeds {}",
+                family.max_prefix_len()
+            ),
+            field_start,
+            1 + value.len(),
+        );
+    }
+
+    let prefix_octets = usize::from(prefix_len.div_ceil(8));
+    let prefix_end = rd_end + prefix_octets;
+    if value.len() < prefix_end {
+        return invalid_vpn_nlri(
+            format!("{family} withdraw NLRI truncated before prefix"),
+            field_start,
+            1 + value.len(),
+        );
+    }
+
+    let prefix = decode_vpn_prefix(family, prefix_len, &value[rd_end..prefix_end])?;
+    Ok(VpnNlri {
+        labels: vec![],
+        route_distinguisher: RouteDistinguisher(rd),
+        prefix,
+    })
+}
+
+/// Encode withdraw-mode `VPNv4`/`VPNv6` NLRI bytes (`MP_UNREACH_NLRI`).
+///
+/// Writes the RFC 8277 §2.4 3-octet compatibility value 0x800000 in the label
+/// position and ignores each entry's `labels`. On error, `buf` is restored to
+/// its original length.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if an entry belongs to the wrong family.
+pub fn encode_vpn_withdraw_nlri(
+    entries: &[VpnNlri],
+    family: VpnAddressFamily,
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
+
+    for entry in entries {
+        if entry.prefix.family() != family {
+            buf.truncate(start_len);
+            return Err(EncodeError::ValueOutOfRange {
+                field: "VPN NLRI family",
+                value: entry.prefix.family().to_string(),
+            });
+        }
+        // One compatibility field + RD + prefix always fits in u8:
+        // 24 + 64 + at most 128 = 216 bits.
+        let total_bits = MPLS_LABEL_ENTRY_BITS + ROUTE_DISTINGUISHER_BITS + entry.prefix.len();
+        buf.push(total_bits);
+        buf.extend_from_slice(&VPN_WITHDRAW_COMPATIBILITY);
+        buf.extend_from_slice(&entry.route_distinguisher.0);
+        let prefix_octets = entry.prefix.wire_octets();
+        let prefix_byte_count = usize::from(entry.prefix.len().div_ceil(8));
+        buf.extend_from_slice(&prefix_octets[..prefix_byte_count]);
+    }
+
+    Ok(())
+}
+
 fn decode_one_vpn_nlri(
     value: &[u8],
     total_len_bits: u8,
@@ -758,6 +910,54 @@ mod tests {
 
         assert_eq!(a.key(), b.key());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn withdraw_encode_emits_compatibility_value_and_ignores_labels() {
+        let entry = VpnNlri {
+            labels: vec![label(200, true)], // ignored on withdraw encode
+            route_distinguisher: rd(),
+            prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+        };
+        let mut buf = Vec::new();
+        encode_vpn_withdraw_nlri(std::slice::from_ref(&entry), VpnAddressFamily::V4, &mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 24 + 64 + 24);
+        assert_eq!(&buf[1..4], &VPN_WITHDRAW_COMPATIBILITY);
+
+        let decoded = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].route_distinguisher, rd());
+        assert_eq!(decoded[0].prefix, entry.prefix);
+    }
+
+    #[test]
+    fn withdraw_decode_ignores_arbitrary_compatibility_value() {
+        // RFC 8277 §2.4: receiver MUST ignore the field — even a value with
+        // no BOS bit set, which announce-mode parsing would reject or overrun.
+        let mut buf = vec![24 + 64, 0x0C, 0x35, 0x00]; // label 50000, S=0
+        buf.extend_from_slice(&rd().0);
+        let decoded = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].route_distinguisher, rd());
+        assert_eq!(
+            decoded[0].prefix,
+            VpnPrefix::v4(Ipv4Addr::UNSPECIFIED, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn withdraw_encode_rejects_wrong_family_and_restores_buffer() {
+        let entry = VpnNlri {
+            labels: vec![],
+            route_distinguisher: rd(),
+            prefix: VpnPrefix::v6(Ipv6Addr::LOCALHOST, 128).unwrap(),
+        };
+        let mut buf = vec![0xAA];
+        let err = encode_vpn_withdraw_nlri(&[entry], VpnAddressFamily::V4, &mut buf).unwrap_err();
+        assert!(matches!(err, EncodeError::ValueOutOfRange { .. }));
+        assert_eq!(buf, vec![0xAA]);
     }
 
     #[test]

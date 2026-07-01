@@ -1,9 +1,5 @@
+use super::*;
 use bytes::Bytes;
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
     AsPathRegex, CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement,
@@ -15,12 +11,13 @@ use rustbgpd_wire::{
     OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute, WhenToRefresh,
     bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
 };
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-
-use super::*;
-
 fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
@@ -30,12 +27,10 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-
     PeerSession::new(
         config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     )
 }
-
 fn make_test_session_with_rib(
     local_asn: u32,
     remote_asn: u32,
@@ -48,7 +43,6 @@ fn make_test_session_with_rib(
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, rib_rx) = mpsc::channel(64);
-
     (
         PeerSession::new(
             config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
@@ -56,7 +50,6 @@ fn make_test_session_with_rib(
         rib_rx,
     )
 }
-
 fn make_test_session_with_rib_and_bmp(
     local_asn: u32,
     remote_asn: u32,
@@ -74,7 +67,6 @@ fn make_test_session_with_rib_and_bmp(
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let (bmp_tx, bmp_rx) = mpsc::channel(16);
-
     (
         PeerSession::new(
             config,
@@ -92,7 +84,6 @@ fn make_test_session_with_rib_and_bmp(
         bmp_rx,
     )
 }
-
 fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSession {
     let mut extended_nexthop_families = HashMap::new();
     if extended_nexthop {
@@ -108,7 +99,6 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     negotiated.extended_nexthop_families = extended_nexthop_families;
     negotiated
 }
-
 fn install_test_negotiated_session(session: &mut PeerSession, negotiated: NegotiatedSession) {
     session
         .negotiated_families
@@ -126,13 +116,11 @@ fn install_test_negotiated_session(session: &mut PeerSession, negotiated: Negoti
         .collect();
     session.negotiated = Some(negotiated);
 }
-
 fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
     let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_tag])
         .expect("fixture BGP-LS NLRI decodes")
         .pop()
         .expect("fixture contains one NLRI");
-
     rustbgpd_rib::BgpLsRibRoute {
         family: rustbgpd_rib::BgpLsFamily::LinkState,
         nlri,
@@ -152,15 +140,12 @@ fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
         path_id: 0,
     }
 }
-
 #[test]
 fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
     let mut session = make_test_session(65001, 65002);
     session.config.peer.local_role = Some(rustbgpd_wire::BgpRole::RouteServerClient);
     session.negotiated = Some(negotiated_session(65099, false));
-
     let context = session.aspa_validation_context();
-
     assert_eq!(context.neighbor_asn, Some(65099));
     assert_eq!(
         context.local_role,
@@ -168,19 +153,15 @@ fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
     );
     assert!(context.first_as_check_exempt);
 }
-
 #[test]
 fn aspa_validation_context_preserves_roleless_legacy_behavior() {
     let mut session = make_test_session(65001, 65002);
     session.negotiated = Some(negotiated_session(65099, false));
-
     let context = session.aspa_validation_context();
-
     assert_eq!(context.neighbor_asn, None);
     assert_eq!(context.local_role, None);
     assert!(!context.first_as_check_exempt);
 }
-
 fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.peer_ip = IpAddr::V6("fe80::2".parse().unwrap());
     session.config.peer_interface = Some("eth1".to_string());
@@ -188,7 +169,6 @@ fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.link_local_next_hop_scope =
         PeerSession::link_local_next_hop_scope_from_config(&session.config);
 }
-
 fn make_route(local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -215,14 +195,12 @@ fn make_route(local_pref: u32) -> Route {
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
-
 fn replace_route_attrs(route: &Route, attrs: Vec<PathAttribute>) -> Route {
     Route {
         attributes: Arc::new(attrs),
         ..route.clone()
     }
 }
-
 fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
     Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
@@ -247,7 +225,6 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
-
 fn make_flowspec_route() -> FlowSpecRoute {
     FlowSpecRoute {
         rule: FlowSpecRule {
@@ -266,14 +243,12 @@ fn make_flowspec_route() -> FlowSpecRoute {
         path_id: 0,
     }
 }
-
 async fn connected_stream_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
     (client.unwrap(), server.unwrap().0)
 }
-
 async fn establish_test_session(session: &mut PeerSession, remote_asn: u32) {
     session.drive_fsm(Event::ManualStart).await;
     session
@@ -294,20 +269,17 @@ async fn establish_test_session(session: &mut PeerSession, remote_asn: u32) {
     session.drive_fsm(Event::KeepaliveReceived).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
-
 async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
     let mut header = [0_u8; 19];
     stream.read_exact(&mut header).await.unwrap();
     let msg_len = usize::from(u16::from_be_bytes([header[16], header[17]]));
     let mut body = vec![0_u8; msg_len - header.len()];
     stream.read_exact(&mut body).await.unwrap();
-
     let mut raw = header.to_vec();
     raw.extend_from_slice(&body);
     let mut buf = Bytes::from(raw);
     rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
 }
-
 #[tokio::test]
 async fn shutdown_aborts_inflight_connect_task() {
     let mut session = make_test_session(65001, 65002);
@@ -315,14 +287,12 @@ async fn shutdown_aborts_inflight_connect_task() {
         tokio::time::sleep(Duration::from_mins(1)).await;
         unreachable!("connect task should have been aborted by shutdown");
     }));
-
     assert_eq!(
         session.handle_command(PeerCommand::Shutdown).await,
         ControlFlow::Break(())
     );
     assert!(session.connect_task.is_none());
 }
-
 #[tokio::test]
 async fn session_established_emits_bmp_peer_up() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
@@ -330,13 +300,11 @@ async fn session_established_emits_bmp_peer_up() {
     session.test_install_stream(client);
     session.local_open_pdu = Some(Bytes::from_static(&[1, 2, 3]));
     session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
-
     session
         .execute_actions(vec![Action::SessionEstablished(Box::new(
             negotiated_session(65002, false),
         ))])
         .await;
-
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::PeerUp {
             peer_info,
@@ -352,26 +320,22 @@ async fn session_established_emits_bmp_peer_up() {
         other => panic!("expected BMP PeerUp, got {other:?}"),
     }
 }
-
 #[tokio::test]
 async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
     let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 0);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     session
         .execute_actions(vec![Action::SessionEstablished(Box::new(
             negotiated_session(65099, false),
         ))])
         .await;
-
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::PeerUp { peer_info, .. } => {
             assert_eq!(peer_info.peer_asn, 65099);
         }
         other => panic!("expected BMP PeerUp, got {other:?}"),
     }
-
     match rib_rx.recv().await.unwrap() {
         RibUpdate::PeerUp { peer_asn, .. } => {
             assert_eq!(peer_asn, 65099);
@@ -379,16 +343,13 @@ async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
         _ => panic!("expected RIB PeerUp"),
     }
 }
-
 #[tokio::test]
 async fn session_down_emits_bmp_peer_down() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
     session.established_at = Some(Instant::now());
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
-
     session.execute_actions(vec![Action::SessionDown]).await;
-
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::PeerDown { peer_info, reason } => {
             assert_eq!(peer_info.peer_addr, session.peer_ip);
@@ -397,13 +358,11 @@ async fn session_down_emits_bmp_peer_down() {
         other => panic!("expected BMP PeerDown, got {other:?}"),
     }
 }
-
 #[tokio::test]
 async fn inbound_update_emits_bmp_route_monitoring() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
     session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
-
     let update = rustbgpd_wire::UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -423,9 +382,7 @@ async fn inbound_update_emits_bmp_route_monitoring() {
     );
     let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
     session.read_buf.buf.extend_from_slice(&encoded);
-
     session.process_read_buffer().await;
-
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::RouteMonitoring {
             peer_info,
@@ -437,7 +394,6 @@ async fn inbound_update_emits_bmp_route_monitoring() {
         other => panic!("expected BMP RouteMonitoring, got {other:?}"),
     }
 }
-
 /// Inbound EVPN UPDATE → BMP `RouteMonitoring` with byte-equal `update_pdu`.
 ///
 /// The BMP emit site at `crates/transport/src/session/io.rs` has no AFI/SAFI
@@ -454,11 +410,9 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
         RouteDistinguisher,
     };
-
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
     session.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-
     let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
         esi: EthernetSegmentIdentifier::ZERO,
@@ -468,7 +422,6 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
         label1: MplsLabel::new(100),
         label2: None,
     });
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -483,9 +436,9 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
             flowspec_announced: vec![],
             evpn_announced: vec![evpn_route],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
-
     let update = rustbgpd_wire::UpdateMessage::build(
         &[],
         &[],
@@ -496,9 +449,7 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
     );
     let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
     session.read_buf.buf.extend_from_slice(&encoded);
-
     session.process_read_buffer().await;
-
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::RouteMonitoring {
             peer_info,
@@ -516,13 +467,11 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
         other => panic!("expected BMP RouteMonitoring, got {other:?}"),
     }
 }
-
 #[test]
 fn ebgp_prepends_asn() {
     let session = make_test_session(65001, 65002);
     let route = make_route(100);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
     let as_path = attrs
         .iter()
         .find_map(|a| match a {
@@ -530,7 +479,6 @@ fn ebgp_prepends_asn() {
             _ => None,
         })
         .unwrap();
-
     // Should have our ASN prepended
     if let AsPathSegment::AsSequence(asns) = &as_path.segments[0] {
         assert_eq!(asns[0], 65001);
@@ -539,14 +487,12 @@ fn ebgp_prepends_asn() {
         panic!("expected AS_SEQUENCE");
     }
 }
-
 #[test]
 fn route_server_client_ebgp_does_not_prepend_asn() {
     let mut session = make_test_session(65001, 65002);
     session.config.route_server_client = true;
     let route = make_route(100);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
     let as_path = attrs
         .iter()
         .find_map(|a| match a {
@@ -554,13 +500,11 @@ fn route_server_client_ebgp_does_not_prepend_asn() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(
         as_path.segments,
         vec![AsPathSegment::AsSequence(vec![65002])],
     );
 }
-
 #[test]
 fn route_server_client_ebgp_does_not_synthesize_as_path() {
     let mut session = make_test_session(65001, 65002);
@@ -586,24 +530,20 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(!attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))));
     assert!(attrs.iter().any(|a| matches!(
         a,
         PathAttribute::NextHop(nh) if *nh == Ipv4Addr::new(10, 0, 0, 2)
     )));
 }
-
 #[test]
 fn otc_egress_adds_local_asn_for_provider_peer_and_route_server() {
     for role in [BgpRole::Provider, BgpRole::Peer, BgpRole::RouteServer] {
         let mut session = make_test_session(65001, 65002);
         session.config.peer.local_role = Some(role);
         let route = make_route(100);
-
         let attrs =
             session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
         assert!(
             attrs
                 .iter()
@@ -612,7 +552,6 @@ fn otc_egress_adds_local_asn_for_provider_peer_and_route_server() {
         );
     }
 }
-
 #[test]
 fn otc_egress_preserves_existing_otc() {
     let mut session = make_test_session(65001, 65002);
@@ -628,7 +567,6 @@ fn otc_egress_preserves_existing_otc() {
             PathAttribute::OnlyToCustomer(64512),
         ],
     );
-
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     let otcs: Vec<u32> = attrs
         .iter()
@@ -637,14 +575,12 @@ fn otc_egress_preserves_existing_otc() {
             _ => None,
         })
         .collect();
-
     assert_eq!(
         otcs,
         vec![64512],
         "E1 must not overwrite or duplicate an existing OTC attribute"
     );
 }
-
 #[test]
 fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
@@ -661,51 +597,42 @@ fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
                 PathAttribute::OnlyToCustomer(65002),
             ],
         );
-
         assert!(
             session.otc_egress_blocks_unicast(&route),
             "role {role:?} must not propagate an OTC-tagged unicast route"
         );
     }
 }
-
 #[test]
 fn known_prefix_count_deduplicates_multiple_paths() {
     let mut session = make_test_session(65001, 65002);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-
     assert!(session.remember_known_path(prefix, 1));
     assert!(session.remember_known_path(prefix, 2));
     assert!(
         !session.remember_known_path(prefix, 2),
         "duplicate path announcements must not bump the refcount"
     );
-
     assert_eq!(session.known_prefix_count(), 1);
 }
-
 #[test]
 fn known_prefix_refcount_tracks_add_path_withdrawals() {
     let mut session = make_test_session(65001, 65002);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-
     session.remember_known_path(prefix, 1);
     session.remember_known_path(prefix, 2);
     assert_eq!(session.known_prefix_count(), 1);
-
     assert!(session.forget_known_path(prefix, 1));
     assert_eq!(
         session.known_prefix_count(),
         1,
         "withdrawing one Add-Path path keeps the prefix counted"
     );
-
     assert!(
         !session.forget_known_path(prefix, 1),
         "duplicate withdrawals must not decrement the refcount"
     );
     assert_eq!(session.known_prefix_count(), 1);
-
     assert!(session.forget_known_path(prefix, 2));
     assert_eq!(
         session.known_prefix_count(),
@@ -713,7 +640,6 @@ fn known_prefix_refcount_tracks_add_path_withdrawals() {
         "the last path withdrawal removes the unique prefix"
     );
 }
-
 /// Regression: `Action::SessionDown` must clear `known_flowspec` and
 /// `known_evpn` alongside unicast path accounting. Reconnects previously inherited
 /// stale accounting, which could trip false max-prefix violations on the
@@ -723,7 +649,6 @@ async fn session_down_clears_all_known_sets() {
     let mut session = make_test_session(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
     session.established_at = Some(Instant::now());
-
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
     session.remember_known_path(prefix, 1);
     let fs_prefix =
@@ -740,9 +665,7 @@ async fn session_down_clears_all_known_sets() {
     };
     session.known_evpn.insert(evpn_key);
     assert!(session.known_prefix_count() >= 3);
-
     session.execute_actions(vec![Action::SessionDown]).await;
-
     assert!(session.known_paths.is_empty(), "known_paths must clear");
     assert!(
         session.known_prefix_refcounts.is_empty(),
@@ -755,20 +678,17 @@ async fn session_down_clears_all_known_sets() {
     assert!(session.known_evpn.is_empty(), "known_evpn must clear");
     assert_eq!(session.known_prefix_count(), 0);
 }
-
 #[test]
 fn ebgp_strips_local_pref() {
     let session = make_test_session(65001, 65002);
     let route = make_route(200);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(
         !attrs
             .iter()
             .any(|a| matches!(a, PathAttribute::LocalPref(_)))
     );
 }
-
 #[test]
 fn ibgp_preserves_local_pref() {
     let session = make_test_session(65001, 65001);
@@ -781,7 +701,6 @@ fn ibgp_preserves_local_pref() {
     });
     assert_eq!(lp, Some(200));
 }
-
 #[test]
 fn ebgp_sets_next_hop() {
     let session = make_test_session(65001, 65002);
@@ -791,7 +710,6 @@ fn ebgp_sets_next_hop() {
     // the address directly. Here we simulate a real local address.
     let local_ipv4 = Ipv4Addr::new(172, 16, 0, 1);
     let attrs = session.prepare_outbound_attributes(&route, true, local_ipv4, None);
-
     let nh = attrs
         .iter()
         .find_map(|a| match a {
@@ -799,10 +717,8 @@ fn ebgp_sets_next_hop() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(nh, local_ipv4);
 }
-
 #[test]
 fn route_server_client_ebgp_preserves_next_hop() {
     let mut session = make_test_session(65001, 65002);
@@ -810,7 +726,6 @@ fn route_server_client_ebgp_preserves_next_hop() {
     let route = make_route(100);
     let attrs =
         session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(172, 16, 0, 1), None);
-
     let nh = attrs
         .iter()
         .find_map(|a| match a {
@@ -818,10 +733,8 @@ fn route_server_client_ebgp_preserves_next_hop() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(nh, Ipv4Addr::new(10, 0, 0, 2));
 }
-
 #[test]
 fn route_server_client_force_next_hop_self_still_wins() {
     let mut session = make_test_session(65001, 65002);
@@ -834,7 +747,6 @@ fn route_server_client_force_next_hop_self_still_wins() {
         local_ipv4,
         Some(&rustbgpd_policy::NextHopAction::Self_),
     );
-
     let nh = attrs
         .iter()
         .find_map(|a| match a {
@@ -842,10 +754,8 @@ fn route_server_client_force_next_hop_self_still_wins() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(nh, local_ipv4);
 }
-
 #[tokio::test]
 async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -856,7 +766,6 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -885,7 +794,6 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
         ..route1.clone()
     };
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![route1, route2],
         withdraw: vec![],
@@ -898,16 +806,16 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
     let parsed = msg.parse(true, false, &[]).unwrap();
     assert_eq!(parsed.announced.len(), 2);
 }
-
 #[tokio::test]
 async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -919,7 +827,6 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
@@ -934,9 +841,10 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![route.clone()],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_REACH UPDATE");
     };
@@ -953,7 +861,6 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.safi, Safi::BgpLs);
     assert_eq!(mp.next_hop, route.next_hop);
     assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![],
         withdraw: vec![],
@@ -966,9 +873,10 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![key],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_UNREACH UPDATE");
     };
@@ -985,11 +893,9 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.safi, Safi::BgpLs);
     assert_eq!(mp.bgpls_withdrawn, vec![route.nlri]);
 }
-
 #[tokio::test]
 async fn oversized_bgpls_output_tears_down_session() {
     use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
-
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -999,7 +905,6 @@ async fn oversized_bgpls_output_tears_down_session() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let mut route = make_bgpls_route(0xdd);
     route.nlri = BgpLsNlri::try_new(
         BgpLsNlriType::Unknown(65_000),
@@ -1007,7 +912,6 @@ async fn oversized_bgpls_output_tears_down_session() {
         Bytes::from(vec![0xab; usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)]),
     )
     .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![],
         withdraw: vec![],
@@ -1020,9 +924,10 @@ async fn oversized_bgpls_output_tears_down_session() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![route],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     assert!(
         session.read_half.is_none(),
         "structurally unsendable BGP-LS output must tear down the peer"
@@ -1036,14 +941,12 @@ async fn oversized_bgpls_output_tears_down_session() {
     };
     assert_eq!(notif.code, NotificationCode::Cease);
     assert_eq!(notif.subcode, cease_subcode::OUT_OF_RESOURCES);
-
     let result = tokio::time::timeout(Duration::from_secs(2), join)
         .await
         .expect("writer should exit after oversize-triggered teardown")
         .expect("writer join should not panic");
     assert!(result.is_ok());
 }
-
 /// `OutboundRouteUpdate::request_refresh_all_negotiated` (the RIB
 /// manager's failover-driven inbound recovery) emits a plain RFC 2918
 /// ROUTE-REFRESH request on the wire for EVERY negotiated family when
@@ -1064,7 +967,6 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![],
         withdraw: vec![],
@@ -1077,9 +979,10 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
-
     let mut refreshed = Vec::new();
     for _ in 0..2 {
         let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await else {
@@ -1101,7 +1004,6 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
          refreshed, got {refreshed:?}"
     );
 }
-
 /// Without the negotiated Route Refresh capability the request is
 /// skipped (warned, not sent) — the rest of the update still goes out.
 #[tokio::test]
@@ -1115,7 +1017,6 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![],
         withdraw: vec![],
@@ -1128,9 +1029,10 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
-
     // The first wire message must be the EoR UPDATE — no ROUTE-REFRESH
     // was emitted ahead of it.
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -1140,21 +1042,18 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     assert!(parsed.announced.is_empty());
     assert!(parsed.withdrawn.is_empty());
 }
-
 #[tokio::test]
 async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.config.route_server_client = true;
-
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1183,7 +1082,6 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
         ..route1.clone()
     };
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![route1, route2],
         withdraw: vec![],
@@ -1196,9 +1094,10 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     let Message::Update(first) = read_single_bgp_message(&mut server).await else {
         panic!("expected first UPDATE");
     };
@@ -1212,7 +1111,6 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         })
         .unwrap();
     assert_eq!(first_mp.announced.len(), 1);
-
     let Message::Update(second) = read_single_bgp_message(&mut server).await else {
         panic!("expected second UPDATE");
     };
@@ -1228,24 +1126,20 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     assert_eq!(second_mp.announced.len(), 1);
     assert_ne!(first_mp.next_hop, second_mp.next_hop);
 }
-
 #[tokio::test]
 async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let route = make_v6_unicast_route("2001:db8::1".parse().unwrap());
     let override_nh =
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
-
     session.send_route_update(OutboundRouteUpdate {
         announce: vec![route],
         withdraw: vec![],
@@ -1258,9 +1152,10 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -1275,7 +1170,6 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         .unwrap();
     assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::42".parse().unwrap()));
 }
-
 #[test]
 fn non_llgr_peer_strips_llgr_stale_community() {
     let session = make_test_session(65001, 65002);
@@ -1290,7 +1184,6 @@ fn non_llgr_peer_strips_llgr_stale_community() {
         ]),
         ..make_route(100)
     };
-
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     assert!(!attrs.iter().any(|a| {
         matches!(
@@ -1300,7 +1193,6 @@ fn non_llgr_peer_strips_llgr_stale_community() {
         )
     }));
 }
-
 #[test]
 fn llgr_peer_keeps_llgr_stale_community() {
     let mut session = make_test_session(65001, 65002);
@@ -1313,7 +1205,6 @@ fn llgr_peer_keeps_llgr_stale_community() {
         forwarding_preserved: false,
     }];
     session.negotiated = Some(negotiated);
-
     let route = Route {
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1325,7 +1216,6 @@ fn llgr_peer_keeps_llgr_stale_community() {
         ]),
         ..make_route(100)
     };
-
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     assert!(attrs.iter().any(|a| {
         matches!(
@@ -1335,21 +1225,18 @@ fn llgr_peer_keeps_llgr_stale_community() {
         )
     }));
 }
-
 #[test]
 fn route_server_client_still_strips_local_pref() {
     let mut session = make_test_session(65001, 65002);
     session.config.route_server_client = true;
     let route = make_route(200);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(
         !attrs
             .iter()
             .any(|a| matches!(a, PathAttribute::LocalPref(_)))
     );
 }
-
 #[test]
 fn ibgp_default_local_pref_when_missing() {
     let session = make_test_session(65001, 65001);
@@ -1378,19 +1265,16 @@ fn ibgp_default_local_pref_when_missing() {
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
-
     let lp = attrs.iter().find_map(|a| match a {
         PathAttribute::LocalPref(lp) => Some(*lp),
         _ => None,
     });
     assert_eq!(lp, Some(100));
 }
-
 #[test]
 fn rr_does_not_add_originator_or_cluster_for_local_route() {
     let mut session = make_test_session(65001, 65001);
     session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
-
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -1408,38 +1292,31 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
-
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(!attrs.iter().any(|a| matches!(
         a,
         PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
     )));
 }
-
 #[test]
 fn rr_does_not_add_originator_or_cluster_for_ebgp_route() {
     let mut session = make_test_session(65001, 65001);
     session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
-
     let route = make_route(100);
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(!attrs.iter().any(|a| matches!(
         a,
         PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
     )));
 }
-
 #[test]
 fn rr_adds_originator_and_cluster_for_ibgp_route() {
     let mut session = make_test_session(65001, 65001);
     let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
     let source_id = Ipv4Addr::new(10, 0, 0, 42);
     session.config.cluster_id = Some(cluster_id);
-
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1460,10 +1337,8 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
-
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
-
     assert!(
         attrs
             .iter()
@@ -1475,7 +1350,6 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         )
     );
 }
-
 #[tokio::test]
 async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -1484,7 +1358,6 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1502,15 +1375,13 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     assert!(rib_rx.try_recv().is_err());
 }
-
 #[tokio::test]
 async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -1519,7 +1390,6 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1537,12 +1407,11 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -1556,7 +1425,6 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
         IpAddr::V6("2001:db8::1".parse().unwrap())
     );
 }
-
 #[tokio::test]
 async fn no_modification_update_shares_attribute_arc_across_nlri() {
     // Two IPv4 NLRI in one UPDATE, no import policy → both permitted with
@@ -1564,7 +1432,6 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
     // win), not deep-clone per route.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1589,9 +1456,7 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -1601,7 +1466,6 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
         "two NLRI from one no-modification UPDATE must share one attribute Arc"
     );
 }
-
 #[tokio::test]
 async fn modified_policy_update_owns_distinct_arc_per_nlri() {
     // Two IPv4 NLRI in one UPDATE, import policy adds a community → both
@@ -1637,7 +1501,6 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
         }],
         default_action: PolicyAction::Permit,
     }]));
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1662,9 +1525,7 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -1683,14 +1544,12 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
         );
     }
 }
-
 #[tokio::test]
 async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
         session.config.peer.local_role = Some(role);
         session.negotiated = Some(negotiated_session(65002, false));
-
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1707,9 +1566,7 @@ async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
             false,
             Ipv4UnicastMode::Body,
         );
-
         session.process_update(update).await;
-
         let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
             panic!("expected RoutesReceived");
         };
@@ -1723,14 +1580,12 @@ async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
         );
     }
 }
-
 #[tokio::test]
 async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withdrawals() {
     for role in [BgpRole::Provider, BgpRole::RouteServer] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
         session.config.peer.local_role = Some(role);
         session.negotiated = Some(negotiated_session(65002, false));
-
         let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
         let attrs = vec![
@@ -1755,9 +1610,7 @@ async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withd
             false,
             Ipv4UnicastMode::Body,
         );
-
         session.process_update(update).await;
-
         let RibUpdate::RoutesReceived {
             announced,
             withdrawn,
@@ -1777,13 +1630,11 @@ async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withd
         );
     }
 }
-
 #[tokio::test]
 async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Peer);
     session.negotiated = Some(negotiated_session(65002, false));
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1801,21 +1652,17 @@ async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     assert!(
         rib_rx.try_recv().is_err(),
         "I2 must drop tagged unicast announces whose OTC ASN is not the peer AS"
     );
 }
-
 #[tokio::test]
 async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdrawals() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
     session.negotiated = Some(negotiated_session(65002, false));
-
     let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let attrs = vec![
@@ -1845,9 +1692,7 @@ async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdraw
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived {
         announced,
         withdrawn,
@@ -1862,34 +1707,28 @@ async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdraw
     );
     assert_eq!(withdrawn, vec![(Prefix::V4(withdrawn_prefix), 0)]);
 }
-
 // ---------------------------------------------------------------------
 // ADR-0072 follow-up — structured OTC route-leak event publishing
 // ---------------------------------------------------------------------
-
 #[derive(Default)]
 struct RecordingTransportSink {
     events: std::sync::Mutex<Vec<crate::event_sink::OtcRouteBlockedEvent>>,
 }
-
 impl RecordingTransportSink {
     fn snapshot(&self) -> Vec<crate::event_sink::OtcRouteBlockedEvent> {
         self.events.lock().unwrap().clone()
     }
 }
-
 impl crate::event_sink::TransportEventSink for RecordingTransportSink {
     fn publish_otc_route_blocked(&self, event: &crate::event_sink::OtcRouteBlockedEvent) {
         self.events.lock().unwrap().push(event.clone());
     }
 }
-
 fn install_recording_sink(session: &mut PeerSession) -> Arc<RecordingTransportSink> {
     let sink = Arc::new(RecordingTransportSink::default());
     session.set_event_sink(sink.clone());
     sink
 }
-
 #[tokio::test]
 async fn otc_ingress_provider_publishes_structured_event() {
     // I1: Provider/RouteServer receives OTC-tagged unicast from a
@@ -1901,7 +1740,6 @@ async fn otc_ingress_provider_publishes_structured_event() {
     session.config.peer.local_role = Some(BgpRole::Provider);
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1919,9 +1757,7 @@ async fn otc_ingress_provider_publishes_structured_event() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let events = sink.snapshot();
     assert_eq!(events.len(), 1, "exactly one event per blocked UPDATE");
     let event = &events[0];
@@ -1933,7 +1769,6 @@ async fn otc_ingress_provider_publishes_structured_event() {
     // AS_PATH stays lossless via `to_aspath_string`.
     assert_eq!(event.as_path, "65002 64999");
 }
-
 #[tokio::test]
 async fn otc_ingress_peer_mismatch_publishes_structured_event() {
     // I2: Peer role with OTC ASN != peer ASN.
@@ -1941,7 +1776,6 @@ async fn otc_ingress_peer_mismatch_publishes_structured_event() {
     session.config.peer.local_role = Some(BgpRole::Peer);
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1961,9 +1795,7 @@ async fn otc_ingress_peer_mismatch_publishes_structured_event() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
     let event = &events[0];
@@ -1971,7 +1803,6 @@ async fn otc_ingress_peer_mismatch_publishes_structured_event() {
     assert_eq!(event.otc_value, Some(64512));
     assert_eq!(event.local_role, Some(BgpRole::Peer));
 }
-
 #[tokio::test]
 async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
     // Malformed OTC length: the codec cannot decode an ASN, so the
@@ -1980,7 +1811,6 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
     session.config.peer.local_role = Some(BgpRole::Provider);
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
-
     let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2006,9 +1836,7 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
     let event = &events[0];
@@ -2018,7 +1846,6 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
         "malformed_length must not surface a decoded OTC value"
     );
 }
-
 #[tokio::test]
 async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     // Regression: the event's prefix list must include IPv6 unicast
@@ -2029,7 +1856,6 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     session.config.peer.local_role = Some(BgpRole::Provider);
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
-
     let v6_prefix = Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
     let mp_reach = rustbgpd_wire::MpReachNlri {
         afi: Afi::Ipv6,
@@ -2043,6 +1869,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         flowspec_announced: vec![],
         evpn_announced: vec![],
         bgpls_announced: vec![],
+        vpn_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2054,9 +1881,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         PathAttribute::MpReachNlri(mp_reach),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
-
     session.process_update(update).await;
-
     let events = sink.snapshot();
     assert_eq!(events.len(), 1);
     assert!(
@@ -2067,7 +1892,6 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         "OtcRouteBlockedEvent must surface MP_REACH IPv6 announcements"
     );
 }
-
 #[tokio::test]
 async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
     // Regression: a malformed-length OTC UPDATE that carries only
@@ -2081,7 +1905,6 @@ async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
     let baseline_blocked = session.otc_routes_blocked;
-
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2108,9 +1931,7 @@ async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     assert!(
         sink.snapshot().is_empty(),
         "no announced unicast → no structured OtcRouteBlockedEvent"
@@ -2119,14 +1940,12 @@ async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
         session.otc_routes_blocked, baseline_blocked,
         "rejected=0 must not bump the per-peer counter"
     );
-
     // Withdrawal still surfaces through the RIB path.
     let RibUpdate::RoutesReceived { withdrawn, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
     assert_eq!(withdrawn, vec![(Prefix::V4(withdrawn_prefix), 0)]);
 }
-
 #[tokio::test]
 async fn otc_ingress_no_event_when_no_decision() {
     // Untagged UPDATE from a customer arrives at a Customer-role
@@ -2135,7 +1954,6 @@ async fn otc_ingress_no_event_when_no_decision() {
     session.config.peer.local_role = Some(BgpRole::Customer);
     session.negotiated = Some(negotiated_session(65002, false));
     let sink = install_recording_sink(&mut session);
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2152,15 +1970,12 @@ async fn otc_ingress_no_event_when_no_decision() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     assert!(
         sink.snapshot().is_empty(),
         "OTC sink must stay silent when no decision fired"
     );
 }
-
 #[tokio::test]
 async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2170,7 +1985,6 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2189,12 +2003,11 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -2208,7 +2021,6 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
     assert_eq!(scope.interface.as_ref(), "eth1");
     assert_eq!(scope.ifindex, 7);
 }
-
 #[tokio::test]
 async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2218,7 +2030,6 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let replacement_next_hop: IpAddr = "2001:db8::99".parse().unwrap();
     session.import_policy = Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -2249,7 +2060,6 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
         }],
         default_action: PolicyAction::Deny,
     }]));
-
     let received_next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2268,12 +2078,11 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -2282,7 +2091,6 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
     assert_eq!(announced[0].link_local_next_hop, None);
     assert_eq!(announced[0].next_hop_scope, None);
 }
-
 #[tokio::test]
 async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2292,7 +2100,6 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2311,12 +2118,11 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     // Fail closed on the route, gracefully: a scoped link-local peer that did
     // not negotiate Extended Next Hop must not import an IPv4-over-IPv6
     // link-local MP_REACH (no route reaches the RIB), but the route is dropped
@@ -2331,7 +2137,6 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
         "the route is dropped at the Extended-Next-Hop gate, not via NOTIFICATION"
     );
 }
-
 #[tokio::test]
 async fn process_update_ignores_ipv4_body_nlri_for_scoped_unnumbered_peer() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2341,7 +2146,6 @@ async fn process_update_ignores_ipv4_body_nlri_for_scoped_unnumbered_peer() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -2360,28 +2164,23 @@ async fn process_update_ignores_ipv4_body_nlri_for_scoped_unnumbered_peer() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     assert!(
         rib_rx.try_recv().is_err(),
         "scoped link-local peers must not import IPv4 body NLRI"
     );
 }
-
 #[tokio::test]
 async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.config.route_server_client = true;
-
     let negotiated = negotiated_session(65002, true);
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let update = OutboundRouteUpdate {
         announce: vec![Route {
@@ -2416,11 +2215,11 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2433,12 +2232,10 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(mp.afi, Afi::Ipv4);
     assert_eq!(mp.safi, Safi::Unicast);
     assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
 }
-
 #[tokio::test]
 async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2446,13 +2243,11 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let negotiated = negotiated_session(65002, true);
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let update = OutboundRouteUpdate {
         announce: vec![make_route(100)],
         withdraw: vec![],
@@ -2465,11 +2260,11 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2482,14 +2277,12 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
             _ => None,
         })
         .expect("IPv4 unnumbered must use MP_REACH");
-
     let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
     assert_eq!(mp.afi, Afi::Ipv4);
     assert_eq!(mp.safi, Safi::Unicast);
     assert_eq!(mp.next_hop, IpAddr::V6(link_local));
     assert_eq!(mp.link_local_next_hop, Some(link_local));
 }
-
 #[tokio::test]
 async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2497,18 +2290,15 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let negotiated = negotiated_session(65002, true);
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let remote_ll: Ipv6Addr = "fe80::2".parse().unwrap();
     let mut route = make_route(100);
     route.next_hop = IpAddr::V6(remote_ll);
     route.link_local_next_hop = Some(remote_ll);
-
     let update = OutboundRouteUpdate {
         announce: vec![route],
         withdraw: vec![],
@@ -2521,11 +2311,11 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2538,7 +2328,6 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
             _ => None,
         })
         .expect("IPv4 unnumbered must use MP_REACH");
-
     let local_ll: Ipv6Addr = "fe80::1".parse().unwrap();
     assert_eq!(mp.next_hop, IpAddr::V6(local_ll));
     assert_eq!(
@@ -2547,24 +2336,20 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         "next-hop-self must not preserve the original remote link-local companion"
     );
 }
-
 #[tokio::test]
 async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let negotiated = negotiated_session(65002, true);
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let mut route = make_route(100);
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
-
     let update = OutboundRouteUpdate {
         announce: vec![route],
         withdraw: vec![],
@@ -2577,11 +2362,11 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2594,27 +2379,23 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
             _ => None,
         })
         .expect("IPv4 extended next-hop must use MP_REACH");
-
     assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::1".parse().unwrap()));
     assert_eq!(
         mp.link_local_next_hop, None,
         "stale link-local companion must be cleared when the primary next-hop changes"
     );
 }
-
 #[tokio::test]
 async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let negotiated = negotiated_session(65002, false);
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let update = OutboundRouteUpdate {
         announce: vec![make_route(100)],
         withdraw: vec![],
@@ -2627,11 +2408,11 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let mut header = [0_u8; 19];
     let result =
         tokio::time::timeout(Duration::from_millis(100), server.read_exact(&mut header)).await;
@@ -2640,21 +2421,18 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         "scoped link-local peer must fail closed instead of sending IPv4 body NLRI"
     );
 }
-
 #[tokio::test]
 async fn route_server_client_ipv6_preserves_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.config.route_server_client = true;
-
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         announce: vec![Route {
@@ -2689,11 +2467,11 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2706,31 +2484,26 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(mp.afi, Afi::Ipv6);
     assert_eq!(mp.safi, Safi::Unicast);
     assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
     assert_eq!(mp.link_local_next_hop, None);
 }
-
 #[tokio::test]
 async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
-
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let remote_global: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let mut route = make_v6_unicast_route(remote_global);
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
-
     let update = OutboundRouteUpdate {
         announce: vec![route],
         withdraw: vec![],
@@ -2743,11 +2516,11 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2760,7 +2533,6 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(mp.afi, Afi::Ipv6);
     assert_eq!(mp.safi, Safi::Unicast);
     assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::1".parse().unwrap()));
@@ -2769,7 +2541,6 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         "IPv6 next-hop-self must not preserve an upstream link-local companion"
     );
 }
-
 #[tokio::test]
 async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
@@ -2777,14 +2548,12 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     let mut negotiated = negotiated_session(65001, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         announce: vec![make_v6_unicast_route(route_next_hop)],
@@ -2798,11 +2567,11 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
-
     session.send_route_update(update);
-
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
     };
@@ -2815,14 +2584,12 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
             _ => None,
         })
         .unwrap();
-
     assert_eq!(mp.next_hop, IpAddr::V6(route_next_hop));
     assert_eq!(
         mp.link_local_next_hop, None,
         "IPv6 unicast must not reuse the IPv4 ENHE scoped link-local relaxation"
     );
 }
-
 /// Import policy is applied before `RoutesReceived` reaches the RIB.
 /// Denied routes are filtered locally in transport and never forwarded.
 #[tokio::test]
@@ -2836,7 +2603,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     let deny_policy = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(Ipv4Prefix::new(
@@ -2864,7 +2630,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -2883,11 +2648,9 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     // Send an UPDATE with 198.51.100.0/24 — should be denied by import policy
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -2895,7 +2658,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
     ];
-
     // Both prefixes in one UPDATE: one permitted, one denied
     let denied_nlri = Ipv4NlriEntry {
         path_id: 0,
@@ -2916,7 +2678,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     session.process_update(update).await;
     assert_eq!(session.import_policy_routes_permitted, 1);
     assert_eq!(session.import_policy_routes_denied, 1);
-
     // Drain any messages — there may be zero or one RoutesReceived
     let mut all_announced = vec![];
     while let Ok(msg) = rib_rx.try_recv() {
@@ -2933,7 +2694,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     );
     assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
 }
-
 /// ADR-0073 end-to-end pins 1 + 2: after `process_update`, the
 /// per-session import-decision cache holds an explainable `Deny` entry
 /// for the denied prefix (which never reached RIB) and a `Permit` entry
@@ -2945,7 +2705,6 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
 #[tokio::test]
 async fn import_decision_cache_records_deny_and_permit_for_explain() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -2954,10 +2713,8 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-
     // One chain, two statements: deny the first prefix, permit + set
     // LOCAL_PREF=200 on the second.
     let deny_stmt = PolicyStatement {
@@ -3009,7 +2766,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         entries: vec![deny_stmt, permit_stmt],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -3028,7 +2784,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3054,7 +2809,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     let generation = session.import_policy_generation;
     let key = |p: Ipv4Prefix| ImportDecisionKey {
         afi: Afi::Ipv4,
@@ -3062,7 +2816,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         prefix: Prefix::V4(p),
         path_id: 0,
     };
-
     // Pin 1: the denied prefix is explainable even though it never
     // reached RIB.
     match session
@@ -3085,7 +2838,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         other => panic!("expected Hit(Permit) for permitted prefix, got {other:?}"),
     }
 }
-
 /// ADR-0073 contract: the per-session import-decision cache must be
 /// flushed on `Action::SessionDown`. A reconnecting `PeerSession` is not
 /// reconstructed, so without the flush an explain query on the new
@@ -3095,7 +2847,6 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
 #[tokio::test]
 async fn session_down_flushes_import_decision_cache() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -3104,7 +2855,6 @@ async fn session_down_flushes_import_decision_cache() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let chain = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -3130,7 +2880,6 @@ async fn session_down_flushes_import_decision_cache() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -3149,7 +2898,6 @@ async fn session_down_flushes_import_decision_cache() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3166,7 +2914,6 @@ async fn session_down_flushes_import_decision_cache() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     let generation = session.import_policy_generation;
     let key = ImportDecisionKey {
         afi: Afi::Ipv4,
@@ -3174,7 +2921,6 @@ async fn session_down_flushes_import_decision_cache() {
         prefix: Prefix::V4(prefix),
         path_id: 0,
     };
-
     // Precondition: the decision is cached and explainable on this session.
     assert!(
         matches!(
@@ -3183,10 +2929,8 @@ async fn session_down_flushes_import_decision_cache() {
         ),
         "expected the permitted prefix to be cached before SessionDown",
     );
-
     // Flap: SessionDown must flush the per-session cache.
     session.execute_actions(vec![Action::SessionDown]).await;
-
     // Postcondition: the prior session's decision is gone — explain
     // reports NotSeen rather than a stale Hit from the dead session.
     assert!(
@@ -3197,13 +2941,11 @@ async fn session_down_flushes_import_decision_cache() {
         "import-decision cache must be flushed on SessionDown (ADR-0073)",
     );
 }
-
 /// ADR-0073 pin 3: an `ExplainImportPolicy` command is a read — it must
 /// not move the import-policy permit/deny counters.
 #[tokio::test]
 async fn explain_import_policy_command_does_not_touch_counters() {
     use super::import_decision_cache::{LookupResult, ResolvedMatch};
-
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
@@ -3211,7 +2953,6 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     // Populate the cache with one permitted prefix (permit-all default).
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let attrs = vec![
@@ -3230,10 +2971,8 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     let permitted_before = session.import_policy_routes_permitted;
     let denied_before = session.import_policy_routes_denied;
-
     // Issue the explain command through the real dispatch path.
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
@@ -3246,7 +2985,6 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         })
         .await;
     assert_eq!(flow, ControlFlow::Continue(()));
-
     let reply = reply_rx.await.expect("session replied");
     assert!(
         matches!(
@@ -3259,12 +2997,10 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         "expected a single Hit match, got {:?}",
         reply.matches
     );
-
     // The read must not have moved either counter.
     assert_eq!(session.import_policy_routes_permitted, permitted_before);
     assert_eq!(session.import_policy_routes_denied, denied_before);
 }
-
 /// Statement-level explain (the ADR-0073 deferred enrichment): a
 /// current-generation Hit re-derives WHICH statement inside the matched
 /// chain decided, through the real command dispatch path. A
@@ -3280,7 +3016,6 @@ async fn explain_import_policy_command_does_not_touch_counters() {
 async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     use super::import_decision_cache::LookupResult;
     use rustbgpd_policy::NamedPolicy;
-
     async fn explain_for(
         session: &mut PeerSession,
         prefix: Ipv4Prefix,
@@ -3297,7 +3032,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
             .await;
         reply_rx.await.expect("session replied")
     }
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -3306,10 +3040,8 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-
     let deny_stmt = PolicyStatement {
         prefix: Some(Prefix::V4(denied_prefix)),
         ge: None,
@@ -3354,7 +3086,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
             default_action: PolicyAction::Permit,
         },
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -3373,7 +3104,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3402,7 +3132,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     // Permit: attributed to statement 1 of "edge-import", with the
     // prefix condition and the local_pref transition rendered.
     let reply = explain_for(&mut session, permitted_prefix).await;
@@ -3427,7 +3156,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         ]
     );
     assert_eq!(steps[0].modifications, vec!["local_pref 150 -> 200"]);
-
     // Deny: attributed to statement 0 — the reject fast-path is
     // explainable even though the route never reached RIB.
     let reply = explain_for(&mut session, denied_prefix).await;
@@ -3436,7 +3164,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     assert_eq!(steps[0].statement_index, Some(0));
     assert_eq!(steps[0].action, PolicyAction::Deny);
     assert!(steps[0].modifications.is_empty());
-
     // Hot-apply the (same) chain: the generation bump makes the cached
     // entries Stale, and a stale match must carry no statement trace.
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3447,7 +3174,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         })
         .await;
     reply_rx.await.expect("policy update acked").unwrap();
-
     let reply = explain_for(&mut session, permitted_prefix).await;
     assert!(
         matches!(reply.matches[0].result, LookupResult::Stale(_)),
@@ -3458,7 +3184,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
         "stale entries must not carry a statement trace"
     );
 }
-
 /// ADR-0073 pin 4 (reset semantics): a freshly constructed session — the
 /// state every peer reconnect / daemon restart starts from — has an
 /// empty import-decision cache, so an explain query returns `NOT_SEEN`.
@@ -3468,7 +3193,6 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
 #[test]
 fn fresh_session_import_decision_cache_is_empty() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
-
     let (session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let key = ImportDecisionKey {
         afi: Afi::Ipv4,
@@ -3481,7 +3205,6 @@ fn fresh_session_import_decision_cache_is_empty() {
         LookupResult::NotSeen
     ));
 }
-
 /// ADR-0073 IPv6 scope: an `MP_REACH` IPv6-unicast announcement is
 /// recorded in the explain cache keyed by `(Ipv6, Unicast, prefix,
 /// path_id)`, proving the `MP_REACH` write path mirrors the IPv4 body
@@ -3489,7 +3212,6 @@ fn fresh_session_import_decision_cache_is_empty() {
 #[tokio::test]
 async fn import_decision_cache_records_ipv6_mp_reach() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
-
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
@@ -3497,7 +3219,6 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let v6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
     let mp_reach = rustbgpd_wire::MpReachNlri {
         afi: Afi::Ipv6,
@@ -3511,6 +3232,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         flowspec_announced: vec![],
         evpn_announced: vec![],
         bgpls_announced: vec![],
+        vpn_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -3521,7 +3243,6 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
-
     let key = ImportDecisionKey {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
@@ -3533,7 +3254,6 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         other => panic!("expected Hit(Permit) for IPv6 MP_REACH prefix, got {other:?}"),
     }
 }
-
 /// ADR-0073 write-gating: with `[policy.explain].enabled = false`,
 /// processing an UPDATE stores **no** decision — the eval-site clone is
 /// skipped entirely. The empty cache after a *permitted* UPDATE is the
@@ -3542,7 +3262,6 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
 #[tokio::test]
 async fn explain_disabled_stores_no_decisions() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -3552,7 +3271,6 @@ async fn explain_disabled_stores_no_decisions() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-
     // Permit-all (no import policy) so the route is accepted; only the
     // explain cache should differ from the enabled case.
     let mut session = PeerSession::new(
@@ -3564,7 +3282,6 @@ async fn explain_disabled_stores_no_decisions() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -3582,7 +3299,6 @@ async fn explain_disabled_stores_no_decisions() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     // The route was permitted (counter moved) but nothing was cached.
     assert_eq!(session.import_policy_routes_permitted, 1);
     let key = ImportDecisionKey {
@@ -3599,7 +3315,6 @@ async fn explain_disabled_stores_no_decisions() {
         "explain disabled must store no decision"
     );
 }
-
 /// Import policy chains accumulate modifications across matching permit
 /// policies before the route reaches the RIB.
 #[expect(
@@ -3616,7 +3331,6 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     let chain = PolicyChain::new(vec![
         Policy {
             entries: vec![PolicyStatement {
@@ -3697,7 +3411,6 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
             default_action: PolicyAction::Permit,
         },
     ]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -3711,7 +3424,6 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 10, 0, 0), 16);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -3728,9 +3440,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -3740,7 +3450,6 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
     assert_eq!(route.local_pref(), 200);
     assert_eq!(route.communities(), &[0xFDE9_0064]);
 }
-
 #[tokio::test]
 async fn update_import_policy_applies_to_future_updates() {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
@@ -3751,12 +3460,10 @@ async fn update_import_policy_applies_to_future_updates() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     let mut session = PeerSession::new(
         config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
-
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -3773,13 +3480,11 @@ async fn update_import_policy_applies_to_future_updates() {
         false,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update.clone()).await;
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected first RoutesReceived");
     };
     assert_eq!(announced.len(), 1);
-
     let deny_chain = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(prefix)),
@@ -3804,7 +3509,6 @@ async fn update_import_policy_applies_to_future_updates() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
         .handle_command(PeerCommand::UpdateImportPolicy {
@@ -3812,14 +3516,11 @@ async fn update_import_policy_applies_to_future_updates() {
             reply: reply_tx,
         })
         .await;
-
     assert_eq!(flow, ControlFlow::Continue(()));
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
-
     session.process_update(update).await;
     assert!(rib_rx.try_recv().is_err());
 }
-
 /// End-to-end ERR + import policy interaction:
 /// a stale route that is "replaced" by an inbound UPDATE denied by import
 /// policy is not reinstalled, so the stale entry is swept at `EoRR`.
@@ -3834,10 +3535,8 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     let (_, query_rx) = mpsc::channel(1);
     let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
     let manager_handle = tokio::spawn(manager.run());
-
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-
     // Seed the RIB with an existing route that will become refresh-stale.
     rib_tx
         .send(RibUpdate::RoutesReceived {
@@ -3874,7 +3573,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         })
         .await
         .unwrap();
-
     // Start the ERR refresh window for IPv4 unicast.
     rib_tx
         .send(RibUpdate::BeginRouteRefresh {
@@ -3885,7 +3583,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         })
         .await
         .unwrap();
-
     // Session import policy denies the stale prefix, but permits the new one.
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
@@ -3894,7 +3591,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
-
     let deny_policy = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(denied_prefix)),
@@ -3919,7 +3615,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -3938,7 +3633,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3946,7 +3640,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
     ];
-
     // The denied prefix is filtered by import policy, so only the permitted
     // replacement reaches the RIB during the refresh window.
     let update = UpdateMessage::build(
@@ -3967,7 +3660,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     // Close the refresh window; the unreplaced stale route should be swept.
     rib_tx
         .send(RibUpdate::EndRouteRefresh {
@@ -3978,7 +3670,6 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         })
         .await
         .unwrap();
-
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
         .send(RibUpdate::QueryReceivedRoutes {
@@ -3988,15 +3679,12 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         .await
         .unwrap();
     let received = reply_rx.await.unwrap();
-
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].prefix, Prefix::V4(permitted_prefix));
-
     drop(session);
     drop(rib_tx);
     manager_handle.await.unwrap();
 }
-
 #[tokio::test]
 async fn import_policy_match_next_hop_filters_route() {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
@@ -4007,7 +3695,6 @@ async fn import_policy_match_next_hop_filters_route() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     let deny_policy = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,
@@ -4032,7 +3719,6 @@ async fn import_policy_match_next_hop_filters_route() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -4046,7 +3732,6 @@ async fn import_policy_match_next_hop_filters_route() {
         false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -4059,15 +3744,12 @@ async fn import_policy_match_next_hop_filters_route() {
         prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
     }];
     let update = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
-
     session.process_update(update).await;
-
     assert!(
         rib_rx.try_recv().is_err(),
         "route should be filtered by next-hop"
     );
 }
-
 #[tokio::test]
 async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -4077,7 +3759,6 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
     install_test_negotiated_session(&mut session, negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -4095,13 +3776,12 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
     ];
     // Build with Add-Path enabled and MP encoding
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected RoutesReceived");
     };
@@ -4116,7 +3796,6 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
     );
     assert_eq!(announced[0].path_id, 42);
 }
-
 #[tokio::test]
 async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -4130,7 +3809,6 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
     install_test_negotiated_session(&mut session, negotiated);
-
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -4150,9 +3828,7 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         true,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("expected same-prefix Add-Path routes to pass max-prefix");
     };
@@ -4162,7 +3838,6 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         1,
         "two Add-Path IDs for one prefix count as one unique prefix"
     );
-
     assert!(
         session.read_half.is_some(),
         "fixture must be connected before the over-limit update"
@@ -4179,9 +3854,7 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         true,
         Ipv4UnicastMode::Body,
     );
-
     session.process_update(update).await;
-
     assert!(
         session.read_half.is_none(),
         "max-prefix overflow must drive the FSM teardown path"
@@ -4192,7 +3865,6 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         "teardown must clear max-prefix accounting"
     );
 }
-
 #[test]
 fn notification_teardown_detects_inbound_notification() {
     let event = Event::NotificationReceived(NotificationMessage::new(
@@ -4203,7 +3875,6 @@ fn notification_teardown_detects_inbound_notification() {
     let actions = vec![Action::SessionDown];
     assert!(notification_teardown_event(&event, &actions));
 }
-
 #[test]
 fn notification_teardown_detects_local_notification_path() {
     let event = Event::ManualStop { reason: None };
@@ -4217,7 +3888,6 @@ fn notification_teardown_detects_local_notification_path() {
     ];
     assert!(notification_teardown_event(&event, &actions));
 }
-
 #[test]
 fn hard_reset_detected_in_actions() {
     let actions = vec![Action::SendNotification(NotificationMessage::new(
@@ -4227,7 +3897,6 @@ fn hard_reset_detected_in_actions() {
     ))];
     assert!(hard_reset_notification_in_actions(&actions));
 }
-
 #[tokio::test]
 async fn notification_teardown_without_n_bit_uses_peer_down() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -4243,15 +3912,12 @@ async fn notification_teardown_without_n_bit_uses_peer_down() {
     session.config.peer.graceful_restart = true;
     session.negotiated = Some(neg);
     session.notification_teardown = true;
-
     session.execute_actions(vec![Action::SessionDown]).await;
-
     match rib_rx.try_recv().unwrap() {
         RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
         _ => panic!("expected PeerDown"),
     }
 }
-
 #[tokio::test]
 async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -4267,15 +3933,12 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     session.config.peer.graceful_restart = true;
     session.negotiated = Some(neg);
     session.notification_teardown = true;
-
     session.execute_actions(vec![Action::SessionDown]).await;
-
     match rib_rx.try_recv().unwrap() {
         RibUpdate::PeerGracefulRestart { peer, .. } => assert_eq!(peer, session.peer_ip),
         _ => panic!("expected PeerGracefulRestart"),
     }
 }
-
 #[tokio::test]
 async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -4292,17 +3955,13 @@ async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     session.negotiated = Some(neg);
     session.notification_teardown = true;
     session.received_hard_reset = true;
-
     session.execute_actions(vec![Action::SessionDown]).await;
-
     match rib_rx.try_recv().unwrap() {
         RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
         _ => panic!("expected PeerDown"),
     }
 }
-
 // --- Private AS removal tests ---
-
 #[test]
 fn all_private_path_mode_remove() {
     let path = AsPath {
@@ -4311,7 +3970,6 @@ fn all_private_path_mode_remove() {
     let result = remove_private_asns(&path, RemovePrivateAs::Remove, 100);
     assert!(result.segments.is_empty());
 }
-
 #[test]
 fn mixed_path_mode_remove_unchanged() {
     // 100 is public, 64512 is private — not all private, so unchanged
@@ -4321,7 +3979,6 @@ fn mixed_path_mode_remove_unchanged() {
     let result = remove_private_asns(&path, RemovePrivateAs::Remove, 300);
     assert_eq!(result, path);
 }
-
 #[test]
 fn mixed_path_mode_all() {
     // 100 and 200 are public, 64512 is private
@@ -4334,7 +3991,6 @@ fn mixed_path_mode_all() {
         vec![AsPathSegment::AsSequence(vec![100, 200])]
     );
 }
-
 #[test]
 fn replace_mode() {
     // 100 is public, 64512 is private
@@ -4347,7 +4003,6 @@ fn replace_mode() {
         vec![AsPathSegment::AsSequence(vec![100, 300])]
     );
 }
-
 #[test]
 fn four_byte_private_range() {
     let path = AsPath {
@@ -4357,7 +4012,6 @@ fn four_byte_private_range() {
     let result = remove_private_asns(&path, RemovePrivateAs::All, 100);
     assert!(result.segments.is_empty());
 }
-
 #[test]
 fn as_set_filtering() {
     // 64512 is private, 100 is public
@@ -4367,7 +4021,6 @@ fn as_set_filtering() {
     let result = remove_private_asns(&path, RemovePrivateAs::All, 300);
     assert_eq!(result.segments, vec![AsPathSegment::AsSet(vec![100])]);
 }
-
 #[test]
 fn empty_segment_dropped() {
     // First segment all-private → dropped; second segment has public ASN 100
@@ -4380,7 +4033,6 @@ fn empty_segment_dropped() {
     let result = remove_private_asns(&path, RemovePrivateAs::All, 300);
     assert_eq!(result.segments, vec![AsPathSegment::AsSequence(vec![100])]);
 }
-
 #[test]
 fn disabled_noop() {
     let path = AsPath {
@@ -4389,7 +4041,6 @@ fn disabled_noop() {
     let result = remove_private_asns(&path, RemovePrivateAs::Disabled, 100);
     assert_eq!(result, path);
 }
-
 #[test]
 fn ibgp_unaffected() {
     let mut session = make_test_session(65001, 65001);
@@ -4418,7 +4069,6 @@ fn ibgp_unaffected() {
         vec![AsPathSegment::AsSequence(vec![64512])]
     );
 }
-
 #[test]
 fn route_server_skipped() {
     let mut session = make_test_session(65001, 65002);
@@ -4446,7 +4096,6 @@ fn route_server_skipped() {
         vec![AsPathSegment::AsSequence(vec![64512])]
     );
 }
-
 #[test]
 fn flowspec_route_server_client_does_not_prepend_asn() {
     let mut session = make_test_session(65001, 65002);
@@ -4455,7 +4104,6 @@ fn flowspec_route_server_client_does_not_prepend_asn() {
     route.attributes.push(PathAttribute::AsPath(AsPath {
         segments: vec![AsPathSegment::AsSequence(vec![64512])],
     }));
-
     let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
     let as_path = attrs
         .iter()
@@ -4464,24 +4112,19 @@ fn flowspec_route_server_client_does_not_prepend_asn() {
             _ => None,
         })
         .unwrap();
-
     assert_eq!(
         as_path.segments,
         vec![AsPathSegment::AsSequence(vec![64512])]
     );
 }
-
 #[test]
 fn flowspec_route_server_client_does_not_synthesize_as_path() {
     let mut session = make_test_session(65001, 65002);
     session.config.route_server_client = true;
     let route = make_flowspec_route();
-
     let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
-
     assert!(!attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))));
 }
-
 #[test]
 fn ebgp_remove_private_as_all_prepends_after_removal() {
     let mut session = make_test_session(100, 200);
@@ -4509,7 +4152,6 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
         vec![AsPathSegment::AsSequence(vec![100, 65535])]
     );
 }
-
 /// Verify that import policy `match_rpki_validation = "invalid"` + `action = "deny"`
 /// actually drops RPKI-invalid routes when a `ValidationSnapshot` with a VRP table
 /// is provided to the session.
@@ -4521,7 +4163,6 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
 async fn import_policy_filters_rpki_invalid_with_snapshot() {
     use rustbgpd_rpki::{ValidationSnapshot, VrpEntry, VrpTable};
     use tokio::sync::watch;
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -4530,7 +4171,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     // Build a VRP table: only 192.0.2.0/24 from AS 65002 is valid.
     // 198.51.100.0/24 from AS 65002 is invalid (VRP says AS 65099).
     let vrp_table = VrpTable::new(vec![
@@ -4552,7 +4192,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         aspa_table: None,
     };
     let (_watch_tx, watch_rx) = watch::channel(snapshot);
-
     // Import policy: deny RPKI-invalid routes
     let deny_invalid = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -4578,7 +4217,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -4596,7 +4234,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     // UPDATE with two prefixes from AS 65002:
     //   192.0.2.0/24   → RPKI Valid  (VRP: AS 65002 covers it)   → permitted
     //   198.51.100.0/24 → RPKI Invalid (VRP says AS 65099)        → denied
@@ -4625,7 +4262,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-
     // Check what reached the RIB: only the valid prefix should be present
     let msg = rib_rx.try_recv().expect("expected RoutesReceived");
     match msg {
@@ -4643,7 +4279,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         _ => panic!("expected RoutesReceived"),
     }
 }
-
 /// Verify that import policy `match_aspa_validation = "invalid"` + `action = "deny"`
 /// drops ASPA-invalid routes when a `ValidationSnapshot` with an ASPA table is provided.
 #[tokio::test]
@@ -4654,7 +4289,6 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
 async fn import_policy_filters_aspa_invalid_with_snapshot() {
     use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot};
     use tokio::sync::watch;
-
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -4663,7 +4297,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-
     // ASPA table: AS 65003 authorizes AS 65002 as a provider.
     // AS 65004 authorizes only AS 65099 — not AS 65002.
     let aspa_table = AspaTable::new(vec![
@@ -4681,7 +4314,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         aspa_table: Some(Arc::new(aspa_table)),
     };
     let (_watch_tx, watch_rx) = watch::channel(snapshot);
-
     // Import policy: deny ASPA-invalid routes
     let deny_invalid = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -4707,7 +4339,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         }],
         default_action: PolicyAction::Permit,
     }]);
-
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -4725,7 +4356,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     // UPDATE with AS_PATH [65002, 65003] — ASPA Valid (65003 authorizes 65002).
     // Two prefixes: both should be permitted (same AS_PATH, same ASPA state).
     let valid_attrs = vec![
@@ -4747,7 +4377,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(valid_update).await;
-
     // UPDATE with AS_PATH [65002, 65004] — ASPA Invalid (65004 does NOT authorize 65002).
     let invalid_attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -4768,7 +4397,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(invalid_update).await;
-
     // First UPDATE (valid path) should produce a RoutesReceived with 1 route
     let msg = rib_rx
         .try_recv()
@@ -4787,7 +4415,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         }
         _ => panic!("expected RoutesReceived"),
     }
-
     // Second UPDATE (invalid path) should produce RoutesReceived with 0 announced
     // (the route was denied by import policy, but withdrawn list may still be sent)
     match rib_rx.try_recv() {
@@ -4804,7 +4431,6 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         _ => panic!("unexpected RibUpdate variant"),
     }
 }
-
 /// Regression: when an inbound UPDATE is discarded due to RFC 4456
 /// loop detection (our cluster-id present in `CLUSTER_LIST`), any EVPN
 /// withdrawals carried on that same UPDATE must still be applied.
@@ -4818,11 +4444,9 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
         MpUnreachNlri, MplsLabel, RouteDistinguisher,
     };
-
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
     let local_cluster_id = Ipv4Addr::new(10, 0, 0, 9);
     session.config.cluster_id = Some(local_cluster_id);
-
     // Negotiate L2VPN/EVPN so the withdrawal isn't family-filtered.
     let mut negotiated = NegotiatedSession::default();
     negotiated.peer_asn = 65001;
@@ -4835,7 +4459,6 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     // Build the withdrawn EVPN Type 2 key.
     let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -4847,7 +4470,6 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         label2: None,
     });
     let expected_key = withdrawn_route.key();
-
     // Craft the UPDATE: loop-triggering CLUSTER_LIST + MP_UNREACH with
     // the EVPN withdrawal. Also include an MP_REACH with a bogus announce
     // so the loop-detect branch has something to discard.
@@ -4865,6 +4487,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -4873,12 +4496,11 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![withdrawn_route],
             bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     // The session must still emit a RoutesReceived carrying the EVPN
     // withdrawal, even though the announce side was discarded.
     let msg = rib_rx
@@ -4904,7 +4526,6 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         _ => panic!("expected RoutesReceived from the loop-detect path"),
     }
 }
-
 /// Regression: max-prefix enforcement must count EVPN keys (and `FlowSpec`
 /// rules) alongside unicast prefixes. Prior to the fix, `known_prefix_count`
 /// only counted unique unicast prefixes, so a peer could flood arbitrary
@@ -4915,7 +4536,6 @@ async fn evpn_routes_counted_toward_max_prefix() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
         MplsLabel, RouteDistinguisher,
     };
-
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
@@ -4932,7 +4552,6 @@ async fn evpn_routes_counted_toward_max_prefix() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let make_route = |mac_lo: u8| -> EvpnRoute {
         EvpnRoute::MacIp(EvpnMacIp {
             rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -4944,7 +4563,6 @@ async fn evpn_routes_counted_toward_max_prefix() {
             label2: None,
         })
     };
-
     let send_announces = |routes: Vec<EvpnRoute>| {
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -4958,22 +4576,20 @@ async fn evpn_routes_counted_toward_max_prefix() {
                 flowspec_announced: vec![],
                 evpn_announced: routes,
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
     };
-
     // Push 2 EVPN routes — at the limit, should not trip.
     session
         .process_update(send_announces(vec![make_route(0x01), make_route(0x02)]))
         .await;
-
     assert_eq!(
         session.known_prefix_count(),
         2,
         "EVPN routes must contribute to the prefix count"
     );
-
     assert!(
         session.read_half.is_some(),
         "fixture must be connected before the over-limit update"
@@ -4982,7 +4598,6 @@ async fn evpn_routes_counted_toward_max_prefix() {
     session
         .process_update(send_announces(vec![make_route(0x03)]))
         .await;
-
     assert!(
         session.read_half.is_none(),
         "max-prefix overflow must drive the FSM teardown path"
@@ -4993,7 +4608,6 @@ async fn evpn_routes_counted_toward_max_prefix() {
         "teardown must clear max-prefix accounting"
     );
 }
-
 /// Regression: the AS_PATH-loop branch and the RR-loop branch share the
 /// same withdrawal-recovery shape — both must propagate EVPN withdrawals.
 /// The RR-loop fix landed earlier; this test covers the parallel
@@ -5005,7 +4619,6 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
         MpUnreachNlri, MplsLabel, RouteDistinguisher,
     };
-
     // eBGP session — AS_PATH loop only triggers when the peer's UPDATE
     // contains our local ASN, which only happens across an eBGP boundary.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -5020,7 +4633,6 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         .negotiated_families
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
-
     let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
         esi: EthernetSegmentIdentifier::ZERO,
@@ -5031,7 +4643,6 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         label2: None,
     });
     let expected_key = withdrawn_route.key();
-
     // AS_PATH that contains our local ASN (65001) → loop trigger.
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -5047,6 +4658,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -5055,12 +4667,11 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![withdrawn_route],
             bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-
     session.process_update(update).await;
-
     let msg = rib_rx
         .try_recv()
         .expect("AS_PATH-loop branch must still dispatch withdrawals");
@@ -5084,7 +4695,6 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         _ => panic!("expected RoutesReceived from the AS_PATH-loop path"),
     }
 }
-
 /// ADR-0051: when the writer's bulk channel saturates, the session must
 /// emit a `Cease` / `Out of Resources` (RFC 4486 §4 subcode 8)
 /// NOTIFICATION on the priority channel and tear the session down,
@@ -5095,19 +4705,15 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
 #[tokio::test]
 async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
-
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-
     // Sanity: writer is up before the trigger.
     assert!(session.read_half.is_some());
     assert!(session.writer_bulk_tx.is_some());
     assert!(session.writer_priority_tx.is_some());
     assert!(session.writer_join.is_some());
-
     session.trigger_outbound_saturation_teardown();
-
     // Post-trigger invariants: read half + writer senders dropped, but
     // the JoinHandle stays in place so the run loop's writer-exit arm
     // can still observe the writer's natural exit.
@@ -5127,7 +4733,6 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         .writer_join
         .take()
         .expect("writer_join should outlive the trigger so the run loop observes exit");
-
     // The writer pulled the Cease/8 from the priority channel before
     // seeing both senders dropped, so it should be on the wire now.
     let msg = read_single_bgp_message(&mut server).await;
@@ -5140,7 +4745,6 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         cease_subcode::OUT_OF_RESOURCES,
         "saturation must surface as Cease/Out-of-Resources, not silent drop"
     );
-
     // After the priority message drains and both senders are gone, the
     // biased select's `else` arm fires and the writer exits Ok.
     let result = tokio::time::timeout(Duration::from_secs(2), join)
@@ -5152,9 +4756,7 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         "writer should exit Ok after clean shutdown, got: {result:?}"
     );
 }
-
 // ── Inbound ORF ROUTE-REFRESH handling (RFC 5291/5292) ──────────────────
-
 fn orf_rr_with_when(
     when_to_refresh: WhenToRefresh,
     orf_type: OrfType,
@@ -5169,11 +4771,9 @@ fn orf_rr_with_when(
         },
     )
 }
-
 fn orf_rr(orf_type: OrfType, entries: OrfEntries) -> RouteRefreshMessage {
     orf_rr_with_when(WhenToRefresh::Immediate, orf_type, entries)
 }
-
 fn orf_rr_with_groups(groups: Vec<OrfEntryGroup>) -> RouteRefreshMessage {
     RouteRefreshMessage::new_with_orf(
         Afi::Ipv4,
@@ -5184,7 +4784,6 @@ fn orf_rr_with_groups(groups: Vec<OrfEntryGroup>) -> RouteRefreshMessage {
         },
     )
 }
-
 fn one_permit_entry() -> OrfEntries {
     OrfEntries::AddressPrefix(vec![AddressPrefixOrf {
         action: OrfAction::Add,
@@ -5195,7 +4794,6 @@ fn one_permit_entry() -> OrfEntries {
         prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
     }])
 }
-
 #[derive(Debug)]
 struct CapturedOrfUpdate {
     afi: Afi,
@@ -5203,7 +4801,6 @@ struct CapturedOrfUpdate {
     when: WhenToRefresh,
     entries: Vec<AddressPrefixOrf>,
 }
-
 async fn drive_inbound_orf_with_reply(
     session: &mut PeerSession,
     rib_rx: &mut mpsc::Receiver<RibUpdate>,
@@ -5212,12 +4809,10 @@ async fn drive_inbound_orf_with_reply(
 ) -> (bool, CapturedOrfUpdate) {
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, rr);
     tokio::pin!(process);
-
     let msg = tokio::select! {
         msg = rib_rx.recv() => msg.expect("PeerOrfUpdate should be emitted"),
         handled = &mut process => panic!("process_inbound_orf returned before RIB reply: {handled}"),
     };
-
     let RibUpdate::PeerOrfUpdate {
         afi,
         safi,
@@ -5229,7 +4824,6 @@ async fn drive_inbound_orf_with_reply(
     else {
         panic!("expected RibUpdate::PeerOrfUpdate");
     };
-
     reply
         .send(reply_result)
         .expect("process_inbound_orf should still be awaiting RIB reply");
@@ -5244,14 +4838,12 @@ async fn drive_inbound_orf_with_reply(
         },
     )
 }
-
 #[tokio::test]
 async fn inbound_orf_emits_peer_orf_update_when_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let (handled, update) =
         drive_inbound_orf_with_reply(&mut session, &mut rib_rx, &rr, Ok(())).await;
@@ -5260,14 +4852,12 @@ async fn inbound_orf_emits_peer_orf_update_when_negotiated() {
     assert_eq!(update.when, WhenToRefresh::Immediate);
     assert_eq!(update.entries.len(), 1);
 }
-
 #[tokio::test]
 async fn inbound_orf_preserves_defer_when_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr_with_when(
         WhenToRefresh::Defer,
         OrfType::AddressPrefix,
@@ -5279,13 +4869,11 @@ async fn inbound_orf_preserves_defer_when_negotiated() {
     assert_eq!(update.when, WhenToRefresh::Defer);
     assert_eq!(update.entries.len(), 1);
 }
-
 #[tokio::test]
 async fn inbound_orf_ignored_when_family_not_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     // negotiated_session() leaves negotiated_orf_recv empty.
     session.negotiated = Some(negotiated_session(65002, false));
-
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let handled = session
         .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
@@ -5296,14 +4884,12 @@ async fn inbound_orf_ignored_when_family_not_negotiated() {
         "no PeerOrfUpdate should be emitted"
     );
 }
-
 #[tokio::test]
 async fn inbound_orf_ignores_legacy_type_128() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     // Family negotiated, but the legacy type 128 is never negotiated by us.
     let rr = orf_rr(OrfType::AddressPrefixLegacy, one_permit_entry());
     let handled = session
@@ -5312,14 +4898,12 @@ async fn inbound_orf_ignores_legacy_type_128() {
     assert!(!handled, "legacy type 128 is not a negotiated type");
     assert!(rib_rx.try_recv().is_err());
 }
-
 #[tokio::test]
 async fn inbound_orf_malformed_group_resets_via_remove_all() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     // A malformed Address-Prefix group → RFC 5291 §5.2 reset (REMOVE-ALL).
     let rr = orf_rr(
         OrfType::AddressPrefix,
@@ -5331,14 +4915,12 @@ async fn inbound_orf_malformed_group_resets_via_remove_all() {
     assert_eq!(update.entries.len(), 1);
     assert_eq!(update.entries[0].action, OrfAction::RemoveAll);
 }
-
 #[tokio::test]
 async fn inbound_orf_rejected_by_rib_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let (handled, update) = drive_inbound_orf_with_reply(
         &mut session,
@@ -5353,14 +4935,12 @@ async fn inbound_orf_rejected_by_rib_falls_through_to_plain_refresh() {
     );
     assert_eq!((update.afi, update.safi), (Afi::Ipv4, Safi::Unicast));
 }
-
 #[tokio::test]
 async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr_with_groups(vec![
         OrfEntryGroup {
             orf_type: OrfType::AddressPrefix,
@@ -5373,7 +4953,6 @@ async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
     ]);
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
     tokio::pin!(process);
-
     let first = tokio::select! {
         msg = rib_rx.recv() => msg.expect("first PeerOrfUpdate should be emitted"),
         handled = &mut process => panic!("process_inbound_orf returned before first RIB reply: {handled}"),
@@ -5384,7 +4963,6 @@ async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
     reply
         .send(Ok(()))
         .expect("process_inbound_orf should await first RIB reply");
-
     let second = tokio::select! {
         msg = rib_rx.recv() => msg.expect("second PeerOrfUpdate should be emitted"),
         handled = &mut process => panic!("process_inbound_orf returned before second RIB reply: {handled}"),
@@ -5395,25 +4973,21 @@ async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
     reply
         .send(Err("peer no longer registered".to_string()))
         .expect("process_inbound_orf should await second RIB reply");
-
     let handled = process.await;
     assert!(
         !handled,
         "any RIB rejection must fall through to the plain Route Refresh path"
     );
 }
-
 #[tokio::test]
 async fn inbound_orf_dropped_rib_reply_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
     tokio::pin!(process);
-
     let msg = tokio::select! {
         msg = rib_rx.recv() => msg.expect("PeerOrfUpdate should be emitted"),
         handled = &mut process => panic!("process_inbound_orf returned before RIB reply: {handled}"),
@@ -5422,25 +4996,21 @@ async fn inbound_orf_dropped_rib_reply_falls_through_to_plain_refresh() {
         panic!("expected RibUpdate::PeerOrfUpdate");
     };
     drop(reply);
-
     let handled = process.await;
     assert!(
         !handled,
         "dropped RIB reply must not silently suppress plain Route Refresh fallback"
     );
 }
-
 #[tokio::test]
 async fn inbound_orf_rib_reply_timeout_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
     tokio::pin!(process);
-
     let msg = tokio::select! {
         msg = rib_rx.recv() => msg.expect("PeerOrfUpdate should be emitted"),
         handled = &mut process => panic!("process_inbound_orf returned before RIB reply: {handled}"),
@@ -5449,7 +5019,6 @@ async fn inbound_orf_rib_reply_timeout_falls_through_to_plain_refresh() {
         panic!("expected RibUpdate::PeerOrfUpdate");
     };
     let _keep_reply_open = reply;
-
     let handled = tokio::time::timeout(Duration::from_secs(1), process)
         .await
         .expect("ORF reply wait should be bounded");
@@ -5458,11 +5027,9 @@ async fn inbound_orf_rib_reply_timeout_falls_through_to_plain_refresh() {
         "RIB reply timeout must not silently suppress plain Route Refresh fallback"
     );
 }
-
 // ---------------------------------------------------------------------------
 // ADR-0078: inbound transport→RIB backpressure — block, never drop
 // ---------------------------------------------------------------------------
-
 fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str) -> f64 {
     metrics
         .registry()
@@ -5485,7 +5052,6 @@ fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str) -> f64 {
         })
         .unwrap_or(0.0)
 }
-
 fn backpressure_test_session(
     rib_capacity: usize,
 ) -> (PeerSession, mpsc::Receiver<RibUpdate>, BgpMetrics) {
@@ -5511,7 +5077,6 @@ fn backpressure_test_session(
     );
     (session, rib_rx, metrics)
 }
-
 fn sample_update_message() -> bytes::BytesMut {
     let update = rustbgpd_wire::UpdateMessage::build(
         &[Ipv4NlriEntry {
@@ -5532,7 +5097,6 @@ fn sample_update_message() -> bytes::BytesMut {
     );
     rustbgpd_wire::encode_message(&Message::Update(update)).unwrap()
 }
-
 fn placeholder_routes_received() -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: 0,
@@ -5545,7 +5109,6 @@ fn placeholder_routes_received() -> RibUpdate {
         evpn_withdrawn: vec![],
     }
 }
-
 /// ADR-0078 rule 1: a full RIB channel parks the session task instead of
 /// dropping the batch — the routes arrive once the channel drains, and
 /// the saturation counter records the blocked send.
@@ -5559,7 +5122,6 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
         .rib_tx
         .try_send(placeholder_routes_received())
         .unwrap();
-
     session
         .read_buf
         .buf
@@ -5567,14 +5129,12 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
     let peer_label = session.peer_label.clone();
     let process = session.process_read_buffer();
     tokio::pin!(process);
-
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut process)
             .await
             .is_err(),
         "processing must park on the full RIB channel, not drop the batch"
     );
-
     // Drain the pre-fill; the parked delivery completes.
     let placeholder = rib_rx.recv().await.expect("pre-filled update");
     assert!(matches!(
@@ -5584,7 +5144,6 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
     tokio::time::timeout(Duration::from_secs(5), &mut process)
         .await
         .expect("processing must complete once the RIB drains");
-
     match rib_rx.recv().await.expect("delivered batch") {
         RibUpdate::RoutesReceived { announced, .. } => {
             assert_eq!(announced.len(), 1);
@@ -5595,11 +5154,9 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
         }
         _ => panic!("expected RoutesReceived"),
     }
-
     let blocked = counter_value(&metrics, "bgp_inbound_rib_backpressure_total", &peer_label);
     assert!((blocked - 1.0).abs() < f64::EPSILON, "got {blocked}");
 }
-
 /// ADR-0078 rule 3: a hold-timer expiry with an unprocessed COMPLETE
 /// frame already in the read buffer re-arms instead of expiring — we
 /// were the bottleneck, not the peer. The buffered bytes are a full
@@ -5613,13 +5170,10 @@ async fn hold_expiry_with_buffered_input_rearms_instead_of_expiring() {
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
-
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
     session.read_buf.buf.extend_from_slice(&keepalive);
     session.timers.hold = None; // the expiry the select loop observed
-
     session.handle_hold_timer_expiry().await;
-
     assert_eq!(
         session.fsm.state(),
         SessionState::Established,
@@ -5636,7 +5190,6 @@ async fn hold_expiry_with_buffered_input_rearms_instead_of_expiring() {
     );
     assert!((rearmed - 1.0).abs() < f64::EPSILON, "got {rearmed}");
 }
-
 /// ADR-0078 rule 3, socket flavor: a complete frame sitting unread in
 /// the kernel receive buffer also counts as liveness at hold expiry.
 /// As above, the peer writes a full encoded KEEPALIVE — completeness
@@ -5648,20 +5201,16 @@ async fn hold_expiry_with_unread_socket_data_rearms() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
     server.write_all(&keepalive).await.unwrap();
     server.flush().await.unwrap();
     // Let the bytes land in the local receive buffer.
     tokio::time::sleep(Duration::from_millis(50)).await;
     session.timers.hold = None;
-
     session.handle_hold_timer_expiry().await;
-
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert!(session.timers.hold.is_some());
 }
-
 /// A partial frame in the read buffer is NOT liveness: a peer whose
 /// application hangs mid-frame while its kernel keeps acknowledging must not
 /// re-arm the hold timer forever (zombie session). RFC 4271 resets the
@@ -5673,13 +5222,10 @@ async fn hold_expiry_with_partial_frame_expires() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
     session.read_buf.buf.extend_from_slice(&keepalive[..10]);
     session.timers.hold = None;
-
     session.handle_hold_timer_expiry().await;
-
     assert_ne!(
         session.fsm.state(),
         SessionState::Established,
@@ -5690,7 +5236,6 @@ async fn hold_expiry_with_partial_frame_expires() {
         "partial input must not re-arm the hold timer"
     );
 }
-
 /// Partial frame, socket flavor: the peer wrote ten bytes of a frame
 /// and then hung. The socket probe drains them into the read buffer,
 /// but without a complete frame there is no liveness — the session
@@ -5702,23 +5247,19 @@ async fn hold_expiry_with_partial_socket_frame_expires() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
     server.write_all(&keepalive[..10]).await.unwrap();
     server.flush().await.unwrap();
     // Let the bytes land in the local receive buffer.
     tokio::time::sleep(Duration::from_millis(50)).await;
     session.timers.hold = None;
-
     session.handle_hold_timer_expiry().await;
-
     assert_ne!(
         session.fsm.state(),
         SessionState::Established,
         "a peer hung mid-frame must still expire the hold timer"
     );
 }
-
 /// Boundary: one complete frame followed by a partial second frame
 /// re-arms — the complete frame is liveness, and the trailing partial
 /// simply waits in the buffer for the rest of its bytes.
@@ -5728,14 +5269,11 @@ async fn hold_expiry_with_complete_frame_then_partial_rearms() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
     session.read_buf.buf.extend_from_slice(&keepalive);
     session.read_buf.buf.extend_from_slice(&keepalive[..10]);
     session.timers.hold = None;
-
     session.handle_hold_timer_expiry().await;
-
     assert_eq!(
         session.fsm.state(),
         SessionState::Established,
@@ -5751,7 +5289,6 @@ async fn hold_expiry_with_complete_frame_then_partial_rearms() {
         "the partial second frame stays buffered for the normal read path"
     );
 }
-
 /// When the pending input itself tears the session down (here: a
 /// NOTIFICATION), the manual re-arm after processing must be skipped.
 /// The FSM stopped the hold timer and closed the connection during
@@ -5764,7 +5301,6 @@ async fn hold_expiry_teardown_during_processing_does_not_rearm() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     let notification =
         rustbgpd_wire::encode_message(&Message::Notification(NotificationMessage::new(
             NotificationCode::Cease,
@@ -5774,9 +5310,7 @@ async fn hold_expiry_teardown_during_processing_does_not_rearm() {
         .unwrap();
     session.read_buf.buf.extend_from_slice(&notification);
     session.timers.hold = None;
-
     session.handle_hold_timer_expiry().await;
-
     assert_ne!(
         session.fsm.state(),
         SessionState::Established,
@@ -5791,7 +5325,6 @@ async fn hold_expiry_teardown_during_processing_does_not_rearm() {
         "a torn-down session must not get its hold timer re-armed"
     );
 }
-
 /// A genuinely silent peer still expires: no buffered or readable input
 /// means the hold expiry stands and the session leaves Established.
 #[tokio::test]
@@ -5800,17 +5333,14 @@ async fn hold_expiry_without_pending_input_expires() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     session.timers.hold = None;
     session.handle_hold_timer_expiry().await;
-
     assert_ne!(
         session.fsm.state(),
         SessionState::Established,
         "a silent peer must still expire the hold timer"
     );
 }
-
 /// ADR-0078 rule 2: negotiating a session routes the KEEPALIVE cadence
 /// to the writer task (watch holds the negotiated interval) instead of
 /// arming the session-loop keepalive timer.
@@ -5820,7 +5350,6 @@ async fn established_session_routes_keepalive_cadence_to_writer() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-
     assert!(
         session.timers.keepalive.is_none(),
         "the session loop must not own the keepalive cadence"

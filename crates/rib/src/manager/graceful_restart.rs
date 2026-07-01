@@ -71,11 +71,28 @@ impl RibManager {
             .into_iter()
             .filter(|(afi, safi)| BgpLsFamily::from_afi_safi(*afi, *safi).is_none())
             .collect();
+        let vpn_gr_families: Vec<(Afi, Safi)> = gr_families
+            .iter()
+            .copied()
+            .filter(|&(afi, safi)| matches!(afi, Afi::Ipv4 | Afi::Ipv6) && safi == Safi::MplsVpn)
+            .collect();
+        if !vpn_gr_families.is_empty() {
+            info!(
+                %peer,
+                families = ?vpn_gr_families,
+                "excluding VPN from GR stale preservation; typed stale lifecycle is not implemented"
+            );
+        }
+        let gr_families: Vec<(Afi, Safi)> = gr_families
+            .into_iter()
+            .filter(|&(_, safi)| safi != Safi::MplsVpn)
+            .collect();
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
+        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // EVPN has a single family tuple, so the inner mark_stale_evpn
@@ -105,6 +122,15 @@ impl RibManager {
                 );
             }
             bgpls_affected.extend(withdrawn_bgpls);
+            let withdrawn_l3vpn = rib.withdraw_all_vpn();
+            if !withdrawn_l3vpn.is_empty() {
+                info!(
+                    %peer,
+                    count = withdrawn_l3vpn.len(),
+                    "withdrew VPN routes on GR entry; stale preservation is not implemented for VPN"
+                );
+            }
+            vpn_affected.extend(withdrawn_l3vpn);
             // EVPN has a single family tuple; sweep all EVPN routes if
             // the peer didn't advertise GR for (L2Vpn, Evpn).
             if !gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
@@ -168,6 +194,13 @@ impl RibManager {
             // remaining holder is the intern table). Now that recompute_bgpls_keys
             // has dropped the Loc-RIB clones, gc reclaims them — mirroring the
             // receive path's recompute-then-gc ordering.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+        }
+        if !vpn_affected.is_empty() {
+            self.recompute_vpn_keys(&vpn_affected);
+            // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
             }

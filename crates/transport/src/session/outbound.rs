@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use super::{
     Afi, AsPath, AsPathSegment, BgpLsRibRoute, BgpLsRouteKey, BgpRole, EvpnRibRoute, EvpnRoute,
     EvpnRouteKey, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
@@ -8,7 +5,8 @@ use super::{
     PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi,
     UpdateMessage, debug, info, is_ipv6_link_local, is_private_asn, warn,
 };
-
+use std::collections::HashMap;
+use std::sync::Arc;
 fn has_otc(attrs: &[PathAttribute]) -> bool {
     attrs.iter().any(|attr| match attr {
         PathAttribute::OnlyToCustomer(_) => true,
@@ -18,14 +16,12 @@ fn has_otc(attrs: &[PathAttribute]) -> bool {
         _ => false,
     })
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NextHopOverrideKey {
     None,
     Self_,
     Specific(IpAddr),
 }
-
 impl From<Option<&rustbgpd_policy::NextHopAction>> for NextHopOverrideKey {
     fn from(value: Option<&rustbgpd_policy::NextHopAction>) -> Self {
         match value {
@@ -35,7 +31,6 @@ impl From<Option<&rustbgpd_policy::NextHopAction>> for NextHopOverrideKey {
         }
     }
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PreparedAttrCacheKey {
     attrs_ptr: usize,
@@ -47,32 +42,27 @@ struct PreparedAttrCacheKey {
     local_ipv4: Ipv4Addr,
     nh_override: NextHopOverrideKey,
 }
-
 #[derive(Clone)]
 struct PreparedAttrCacheValue {
     with_next_hop: Arc<Vec<PathAttribute>>,
     without_next_hop: Arc<Vec<PathAttribute>>,
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct AttrGroupKey {
     attrs_ptr: usize,
     next_hop: Option<IpAddr>,
     link_local_next_hop: Option<Ipv6Addr>,
 }
-
 struct V4BodyGroup {
     attrs: Arc<Vec<PathAttribute>>,
     prefixes: Vec<Ipv4NlriEntry>,
 }
-
 struct MpGroup {
     attrs: Arc<Vec<PathAttribute>>,
     next_hop: IpAddr,
     link_local_next_hop: Option<Ipv6Addr>,
     prefixes: Vec<NlriEntry>,
 }
-
 impl PeerSession {
     fn usable_ipv4_extended_nexthop_ipv6(&self, candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
         // The link-local relaxation is only valid for IPv4-over-IPv6 ENHE on a
@@ -83,11 +73,9 @@ impl PeerSession {
                 || (self.is_scoped_link_local_peer() && is_ipv6_link_local(addr))
         })
     }
-
     fn usable_ipv6_unicast_next_hop(candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
         candidate.filter(rustbgpd_wire::is_valid_ipv6_nexthop)
     }
-
     fn ipv4_mp_reach_link_local_next_hop(
         &self,
         next_hop: IpAddr,
@@ -101,7 +89,6 @@ impl PeerSession {
             _ => None,
         }
     }
-
     fn route_link_local_next_hop_for_selected_primary(
         next_hop: IpAddr,
         route: &Route,
@@ -112,7 +99,6 @@ impl PeerSession {
             None
         }
     }
-
     fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
         self.negotiated.as_ref().is_some_and(|neg| {
             neg.peer_llgr_capable
@@ -122,7 +108,6 @@ impl PeerSession {
                     .any(|f| (f.afi, f.safi) == family)
         })
     }
-
     fn strip_llgr_stale_if_needed(&self, attrs: &mut Vec<PathAttribute>, family: (Afi, Safi)) {
         if self.peer_accepts_llgr_stale(family) {
             return;
@@ -135,7 +120,6 @@ impl PeerSession {
             _ => true,
         });
     }
-
     /// RFC 8326 initiator: when `advertise_graceful_shutdown` is set
     /// (via gRPC `SetGracefulShutdown`), ensure every outbound update
     /// carries the `GRACEFUL_SHUTDOWN` community. If the route already
@@ -158,7 +142,6 @@ impl PeerSession {
             rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
         ]));
     }
-
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
         match origin {
             rustbgpd_rib::RouteOrigin::Ebgp => 0,
@@ -166,7 +149,6 @@ impl PeerSession {
             rustbgpd_rib::RouteOrigin::Local => 2,
         }
     }
-
     fn prepared_attr_cache_key(
         route: &Route,
         is_ebgp: bool,
@@ -184,7 +166,6 @@ impl PeerSession {
             nh_override: nh_override.into(),
         }
     }
-
     fn prepared_outbound_attributes_cached<'a>(
         &'a self,
         cache: &'a mut HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue>,
@@ -210,7 +191,6 @@ impl PeerSession {
             }
         })
     }
-
     pub(super) fn otc_egress_blocks_unicast(&self, route: &Route) -> bool {
         has_otc(&route.attributes)
             && matches!(
@@ -218,7 +198,6 @@ impl PeerSession {
                 Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
             )
     }
-
     /// Send an outbound route update as wire UPDATE messages.
     ///
     /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
@@ -241,7 +220,6 @@ impl PeerSession {
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_enhanced_route_refresh);
-
         // Check if Add-Path send is negotiated (we can send path IDs to this peer)
         let add_path_ipv4_send = self.negotiated.as_ref().is_some_and(|n| {
             n.add_path_families
@@ -263,7 +241,6 @@ impl PeerSession {
                     )
                 })
         });
-
         // ROUTE-REFRESH *requests* toward the peer (RFC 2918), asked for by
         // the RIB manager (outbound-registration failover: the survivor's
         // Adj-RIB-In must be re-learned from the peer). The manager only
@@ -308,7 +285,6 @@ impl PeerSession {
                 );
             }
         }
-
         if peer_err {
             for (afi, safi, subtype) in update
                 .refresh_markers
@@ -332,7 +308,6 @@ impl PeerSession {
             }
         }
         let use_extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
-
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
             .read_half
@@ -351,7 +326,6 @@ impl PeerSession {
         });
         let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue> =
             HashMap::new();
-
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
@@ -370,7 +344,6 @@ impl PeerSession {
                 }),
             }
         }
-
         // Send IPv4 withdrawals via body NLRI or IPv4 MP_UNREACH_NLRI,
         // depending on Extended Next Hop negotiation.
         if !v4_withdraw.is_empty() {
@@ -394,6 +367,7 @@ impl PeerSession {
                         flowspec_withdrawn: vec![],
                         evpn_withdrawn: vec![],
                         bgpls_withdrawn: vec![],
+                        vpn_withdrawn: vec![],
                     })];
                     UpdateMessage::build(
                         &[],
@@ -422,7 +396,6 @@ impl PeerSession {
                 self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
-
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`
         if !v6_withdraw.is_empty() {
             let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -432,6 +405,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
+                vpn_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -449,7 +423,6 @@ impl PeerSession {
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
-
         // Split announcements by address family, filtering by negotiated families
         let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
         let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
@@ -467,7 +440,6 @@ impl PeerSession {
                     rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
                     1,
                 );
-
                 if self.event_sink().wants_otc_route_blocked() {
                     // ADR-0072 follow-up: structured event surface. Emit
                     // after the legacy counter so the counter-vs-event-stream
@@ -510,7 +482,6 @@ impl PeerSession {
                     };
                     self.event_sink().publish_otc_route_blocked(&otc_event);
                 }
-
                 continue;
             }
             let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());
@@ -519,7 +490,6 @@ impl PeerSession {
                 Prefix::V6(_) => v6_routes.push((route, nh_override)),
             }
         }
-
         // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI,
         // depending on Extended Next Hop negotiation.
         if use_extended_nexthop_ipv4 {
@@ -580,7 +550,6 @@ impl PeerSession {
                     });
                 }
             }
-
             for group in v4_groups {
                 let mut attrs = group.attrs.as_ref().clone();
                 attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
@@ -592,6 +561,7 @@ impl PeerSession {
                     flowspec_announced: vec![],
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
+                    vpn_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -652,7 +622,6 @@ impl PeerSession {
                     }
                 }
             }
-
             for group in &v4_groups {
                 let msg = UpdateMessage::build(
                     &group.prefixes,
@@ -671,14 +640,12 @@ impl PeerSession {
                 self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
-
         // Resolve IPv6 eBGP next-hop: config override > socket address > suppress.
         // The RIB already filters unsendable families via sendable_families, so
         // v6_routes should be empty here for eBGP peers without a valid IPv6 NH.
         // The is_family_negotiated filter above is retained as a safety net.
         let ebgp_ipv6_nh: Option<Ipv6Addr> =
             Self::usable_ipv6_unicast_next_hop(self.config.local_ipv6_nexthop.or(local_ipv6));
-
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
@@ -754,7 +721,6 @@ impl PeerSession {
                 });
             }
         }
-
         for group in v6_groups {
             let mut attrs = group.attrs.as_ref().clone();
             attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
@@ -766,6 +732,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -783,7 +750,6 @@ impl PeerSession {
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
-
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
         if !update.flowspec_withdraw.is_empty() {
             let mut v4_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
@@ -818,6 +784,7 @@ impl PeerSession {
                     flowspec_withdrawn: rules,
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
+                    vpn_withdrawn: vec![],
                 })];
                 let msg = UpdateMessage::build(
                     &[],
@@ -836,7 +803,6 @@ impl PeerSession {
                 self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
-
         // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE
         // fits the negotiated maximum message length (4096 / 65535 with
         // RFC 8654 Extended Messages). A bulk withdrawal of an entire fabric
@@ -853,7 +819,6 @@ impl PeerSession {
                 return;
             }
         }
-
         // Send BGP-LS withdrawals via MP_UNREACH_NLRI, grouped by SAFI and
         // chunked so the RIB never commits a route that transport could not
         // enqueue.
@@ -902,7 +867,6 @@ impl PeerSession {
                 return;
             }
         }
-
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
         // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
@@ -934,7 +898,6 @@ impl PeerSession {
                 }
             }
         }
-
         // Send BGP-LS announcements via MP_REACH_NLRI, grouped by
         // (family, next-hop, attributes) and chunked.
         if !update.bgpls_announce.is_empty() {
@@ -982,7 +945,6 @@ impl PeerSession {
                 }
             }
         }
-
         // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (AFI, attributes)
         if !update.flowspec_announce.is_empty() {
             let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
@@ -1007,6 +969,7 @@ impl PeerSession {
                     flowspec_announced: rules,
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
+                    vpn_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -1025,7 +988,6 @@ impl PeerSession {
                 self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
-
         if peer_err {
             for (afi, safi, subtype) in update
                 .refresh_markers
@@ -1048,7 +1010,6 @@ impl PeerSession {
                     .record_message_sent(&self.peer_label, "route_refresh");
             }
         }
-
         // Send End-of-RIB markers
         for (afi, safi) in &update.end_of_rib {
             if peer_err
@@ -1078,6 +1039,7 @@ impl PeerSession {
                     flowspec_withdrawn: vec![],
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
+                    vpn_withdrawn: vec![],
                 })];
                 UpdateMessage::build(
                     &[],
@@ -1098,7 +1060,6 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
     }
-
     /// Send a batch of EVPN announcements as one or more `MP_REACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     /// Starts with a generous chunk size and halves on `MessageTooLong`,
@@ -1129,6 +1090,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: routes[idx..end].to_vec(),
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1172,7 +1134,6 @@ impl PeerSession {
         }
         true
     }
-
     /// Send a batch of EVPN withdrawals as one or more `MP_UNREACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_evpn_unreach_chunked(
@@ -1192,6 +1153,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: routes[idx..end].to_vec(),
                 bgpls_withdrawn: vec![],
+                vpn_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -1225,7 +1187,6 @@ impl PeerSession {
         }
         true
     }
-
     /// Send a batch of BGP-LS announcements as one or more `MP_REACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_bgpls_reach_chunked(
@@ -1251,6 +1212,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: routes[idx..end].to_vec(),
+                vpn_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1285,7 +1247,6 @@ impl PeerSession {
         }
         true
     }
-
     /// Send a batch of BGP-LS withdrawals as one or more `MP_UNREACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_bgpls_unreach_chunked(
@@ -1306,6 +1267,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: routes[idx..end].to_vec(),
+                vpn_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -1340,7 +1302,6 @@ impl PeerSession {
         }
         true
     }
-
     /// Prepare path attributes for outbound advertisement.
     ///
     /// For standard eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip
@@ -1366,7 +1327,6 @@ impl PeerSession {
         );
         let route_server_client = self.config.route_server_client;
         let mut attrs = Vec::new();
-
         for attr in route.attributes.iter() {
             match attr {
                 PathAttribute::AsPath(as_path) if is_ebgp && !route_server_client => {
@@ -1424,7 +1384,6 @@ impl PeerSession {
                 }
             }
         }
-
         // For iBGP, ensure LOCAL_PREF is present (default 100)
         if !is_ebgp
             && !attrs
@@ -1433,7 +1392,6 @@ impl PeerSession {
         {
             attrs.push(PathAttribute::LocalPref(100));
         }
-
         if is_ebgp
             && matches!(
                 self.config.peer.local_role,
@@ -1443,7 +1401,6 @@ impl PeerSession {
         {
             attrs.push(PathAttribute::OnlyToCustomer(self.config.peer.local_asn));
         }
-
         // Ensure classic IPv4 body-NLRI exports carry a NEXT_HOP. This also
         // preserves the route's original next hop for transparent route-server
         // clients when the attribute was absent on the stored route.
@@ -1481,7 +1438,6 @@ impl PeerSession {
                 attrs.push(PathAttribute::NextHop(next_hop));
             }
         }
-
         // For standard eBGP, ensure AS_PATH is present (even if empty).
         if is_ebgp
             && !route_server_client
@@ -1491,7 +1447,6 @@ impl PeerSession {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
         }
-
         // Route reflector attribute manipulation (RFC 4456 §8):
         // Only when reflecting an iBGP-learned route to an iBGP target do we
         // set ORIGINATOR_ID and prepend CLUSTER_LIST. Locally originated and
@@ -1508,7 +1463,6 @@ impl PeerSession {
             {
                 attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
             }
-
             // CLUSTER_LIST: prepend our cluster_id
             let mut found = false;
             for attr in &mut attrs {
@@ -1522,17 +1476,14 @@ impl PeerSession {
                 attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
             }
         }
-
         let family = match route.prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
             Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
         };
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, family);
-
         attrs
     }
-
     /// Prepare path attributes for outbound `FlowSpec` advertisement.
     ///
     /// `FlowSpec` has no `NEXT_HOP`. For eBGP: prepend ASN, strip `LOCAL_PREF`.
@@ -1545,7 +1496,6 @@ impl PeerSession {
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();
-
         for attr in &route.attributes {
             match attr {
                 PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
@@ -1590,7 +1540,6 @@ impl PeerSession {
                 }
             }
         }
-
         if !is_ebgp
             && !attrs
                 .iter()
@@ -1598,7 +1547,6 @@ impl PeerSession {
         {
             attrs.push(PathAttribute::LocalPref(100));
         }
-
         if is_ebgp
             && !self.config.route_server_client
             && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
@@ -1607,7 +1555,6 @@ impl PeerSession {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
         }
-
         // Route reflector attribute manipulation for FlowSpec (same as unicast)
         if !is_ebgp
             && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
@@ -1631,13 +1578,10 @@ impl PeerSession {
                 attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
             }
         }
-
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, (route.afi, Safi::FlowSpec));
-
         attrs
     }
-
     /// Prepare outbound attributes for a reflected EVPN route. Mirrors
     /// [`Self::prepare_outbound_attributes_flowspec`] — route reflectors
     /// don't rewrite the `NEXT_HOP` (that's what preserves the VTEP loopback
@@ -1649,7 +1593,6 @@ impl PeerSession {
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();
-
         for attr in route.attributes.iter() {
             match attr {
                 PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
@@ -1694,7 +1637,6 @@ impl PeerSession {
                 }
             }
         }
-
         if !is_ebgp
             && !attrs
                 .iter()
@@ -1702,7 +1644,6 @@ impl PeerSession {
         {
             attrs.push(PathAttribute::LocalPref(100));
         }
-
         if is_ebgp
             && !self.config.route_server_client
             && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
@@ -1711,7 +1652,6 @@ impl PeerSession {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
         }
-
         // RFC 4456 RR attribute manipulation — ORIGINATOR_ID + CLUSTER_LIST
         // when reflecting iBGP routes.
         if !is_ebgp
@@ -1736,13 +1676,10 @@ impl PeerSession {
                 attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
             }
         }
-
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, (Afi::L2Vpn, Safi::Evpn));
-
         attrs
     }
-
     /// Prepare outbound attributes for a reflected BGP-LS route. Mirrors
     /// EVPN/FlowSpec: `NEXT_HOP` and MP framing live in `MP_REACH_NLRI`, not in
     /// the attribute set, while RR attributes are added for iBGP reflection.
@@ -1752,7 +1689,6 @@ impl PeerSession {
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();
-
         for attr in route.attributes.iter() {
             match attr {
                 PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
@@ -1795,7 +1731,6 @@ impl PeerSession {
                 }
             }
         }
-
         if !is_ebgp
             && !attrs
                 .iter()
@@ -1803,7 +1738,6 @@ impl PeerSession {
         {
             attrs.push(PathAttribute::LocalPref(100));
         }
-
         if is_ebgp
             && !self.config.route_server_client
             && !attrs
@@ -1814,7 +1748,6 @@ impl PeerSession {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
         }
-
         if !is_ebgp
             && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
             && let Some(cluster_id) = self.config.cluster_id
@@ -1837,14 +1770,11 @@ impl PeerSession {
                 attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
             }
         }
-
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, route.family.to_afi_safi());
-
         attrs
     }
 }
-
 /// Build a BGP-LS NLRI from an Adj-RIB-Out key, used when emitting
 /// `MP_UNREACH_NLRI` withdrawals. The key stores the opaque bytes required by
 /// RFC 9552, including the optional VPN Route Distinguisher.
@@ -1855,7 +1785,6 @@ fn bgpls_nlri_from_key(key: &BgpLsRouteKey) -> rustbgpd_wire::bgpls::BgpLsNlri {
         payload: key.nlri.payload.clone(),
     }
 }
-
 /// Build a minimal `EvpnRoute` from a key, used when emitting `MP_UNREACH_NLRI`
 /// withdrawals. The receiver identifies the route by its key fields; any
 /// labels / optional fields the key doesn't capture are zeroed.
@@ -1937,7 +1866,6 @@ fn evpn_route_from_key(key: EvpnRouteKey) -> EvpnRoute {
         }
     }
 }
-
 /// Remove private ASNs from an `AS_PATH` according to the given mode.
 ///
 /// - `Remove` — strip all ASNs only if every ASN in the path is private.

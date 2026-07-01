@@ -1,19 +1,18 @@
-use std::sync::Arc;
-use std::time::SystemTime;
-
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
     EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope,
     NotificationCode, NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route,
-    Safi, cease_subcode, debug, info, is_ipv6_link_local, resolve_import_nexthop, warn,
+    Safi, VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info, is_ipv6_link_local,
+    resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{OtcBlockReason, RrLoopReason};
 use rustbgpd_wire::AspaValidationContext;
-
+use std::sync::Arc;
+use std::time::SystemTime;
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
 /// action}` for one import-side chain evaluation. Policy falls back to
 /// `"inline"` for anonymous / inline policies; cardinality stays
@@ -38,21 +37,18 @@ fn record_import_policy_eval(
     };
     metrics.record_policy_routes(peer_label, policy, "import", action);
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtcState {
     Absent,
     Present(u32),
     MalformedLength,
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtcIngressAction {
     None,
     Add(u32),
     DropUnicastAnnouncements(OtcBlockReason),
 }
-
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
@@ -76,7 +72,6 @@ fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     }
     found
 }
-
 fn bgpls_family_from_safi(safi: Safi) -> Option<BgpLsFamily> {
     match safi {
         Safi::BgpLs => Some(BgpLsFamily::LinkState),
@@ -84,7 +79,19 @@ fn bgpls_family_from_safi(safi: Safi) -> Option<BgpLsFamily> {
         _ => None,
     }
 }
-
+/// The inner IP prefix of a VPN NLRI as an ordinary [`Prefix`], for honest
+/// import-policy prefix matching (ADR-0077) — unlike BGP-LS, a VPN route has
+/// a real prefix.
+fn vpn_inner_prefix(prefix: &rustbgpd_wire::VpnPrefix) -> Prefix {
+    match *prefix {
+        rustbgpd_wire::VpnPrefix::V4 { addr, len } => {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len))
+        }
+        rustbgpd_wire::VpnPrefix::V6 { addr, len } => {
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len))
+        }
+    }
+}
 /// Build the `(otc_value, as_path_string)` pair attached to an
 /// [`OtcRouteBlockedEvent`] for the ingress decision sites.
 ///
@@ -116,7 +123,6 @@ fn otc_event_context(attrs: &[PathAttribute], reason: OtcBlockReason) -> (Option
         .unwrap_or_default();
     (otc_value, as_path_string)
 }
-
 fn otc_ingress_action(
     local_role: Option<BgpRole>,
     remote_asn: Option<u32>,
@@ -148,7 +154,6 @@ fn otc_ingress_action(
         _ => OtcIngressAction::None,
     }
 }
-
 /// Policy-context fields extracted from a route's path attributes in a
 /// single pass over the attribute vector. This replaces what used to be
 /// eight independent `find_map` / `iter` scans of the same vector on the
@@ -178,7 +183,6 @@ pub(super) struct PolicyAttrSummary<'a> {
     pub(super) local_pref: Option<u32>,
     pub(super) med: Option<u32>,
 }
-
 impl<'a> PolicyAttrSummary<'a> {
     pub(super) fn from_route_attrs(attrs: &'a [PathAttribute]) -> Self {
         let mut extended_communities: Option<&'a [rustbgpd_wire::ExtendedCommunity]> = None;
@@ -187,7 +191,6 @@ impl<'a> PolicyAttrSummary<'a> {
         let mut as_path: Option<&'a AsPath> = None;
         let mut local_pref: Option<u32> = None;
         let mut med: Option<u32> = None;
-
         // First-match-wins guards preserve the prior `find_map` behavior:
         // once a field is set, a later attribute of the same type fails
         // its guard and falls through to `_` rather than overwriting it.
@@ -211,7 +214,6 @@ impl<'a> PolicyAttrSummary<'a> {
                 _ => {}
             }
         }
-
         Self {
             extended_communities: extended_communities.unwrap_or_default(),
             communities: communities.unwrap_or_default(),
@@ -224,7 +226,6 @@ impl<'a> PolicyAttrSummary<'a> {
             med,
         }
     }
-
     pub(super) fn to_cached_context(&self) -> CachedPolicyContext {
         CachedPolicyContext {
             extended_communities: self.extended_communities.to_vec(),
@@ -237,7 +238,6 @@ impl<'a> PolicyAttrSummary<'a> {
         }
     }
 }
-
 /// The canonical per-family attribute sets for one inbound UPDATE, each
 /// behind an `Arc` so the accepted-route loops can SHARE them instead of
 /// deep-cloning the attribute vector per NLRI.
@@ -257,7 +257,6 @@ pub struct RouteAttrBundle {
     pub mp: Arc<Vec<PathAttribute>>,
     pub mp_unicast: Arc<Vec<PathAttribute>>,
 }
-
 impl RouteAttrBundle {
     /// Build the three variants from the MP-filtered base attributes.
     /// `otc_add` is `Some(asn)` when ingress OTC handling appends an
@@ -275,16 +274,13 @@ impl RouteAttrBundle {
                 .cloned()
                 .collect()
         };
-
         // `mp` derives from `base` (no OTC). Build it before injecting OTC.
         let mp = strip_next_hop(base);
-
         let mut unicast = base.to_vec();
         if let Some(asn) = otc_add {
             unicast.push(PathAttribute::OnlyToCustomer(asn));
         }
         let mp_unicast = strip_next_hop(&unicast);
-
         Self {
             unicast: Arc::new(unicast),
             mp: Arc::new(mp),
@@ -292,7 +288,6 @@ impl RouteAttrBundle {
         }
     }
 }
-
 /// Produce the stored attribute set for one accepted route, sharing the
 /// canonical `Arc` when policy made no modifications (the common case)
 /// and deep-cloning + applying only when it did. Mirrors the outbound
@@ -318,7 +313,6 @@ pub fn materialize_attrs(
         (Arc::new(owned), nh)
     }
 }
-
 impl PeerSession {
     /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
     /// drop (ADR-0078). The fast path is a `try_send`; when the channel
@@ -348,7 +342,6 @@ impl PeerSession {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
         }
     }
-
     /// Check whether a prefix's address family is among the negotiated families.
     /// Negotiated maximum message length: 65535 if Extended Messages was
     /// negotiated, otherwise 4096.
@@ -363,7 +356,6 @@ impl PeerSession {
             rustbgpd_wire::MAX_MESSAGE_LEN
         }
     }
-
     pub(super) fn is_family_negotiated(&self, prefix: &Prefix) -> bool {
         let family = match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
@@ -371,7 +363,6 @@ impl PeerSession {
         };
         self.negotiated_families.contains(&family)
     }
-
     pub(super) fn use_extended_nexthop_ipv4(&self) -> bool {
         self.negotiated.as_ref().is_some_and(|n| {
             n.extended_nexthop_families
@@ -379,13 +370,11 @@ impl PeerSession {
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
     }
-
     pub(super) fn is_scoped_link_local_peer(&self) -> bool {
         matches!(self.peer_ip, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
             && self.config.peer_interface.is_some()
             && self.config.peer_scope_id.is_some()
     }
-
     fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<Box<NextHopScope>> {
         match next_hop {
             IpAddr::V6(v6) if is_ipv6_link_local(&v6) => {
@@ -394,7 +383,6 @@ impl PeerSession {
             _ => None,
         }
     }
-
     pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
         let local_role = self.config.peer.local_role;
         AspaValidationContext {
@@ -407,7 +395,6 @@ impl PeerSession {
             first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
-
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
@@ -419,12 +406,10 @@ impl PeerSession {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let mut import_policy_routes_permitted = 0_u64;
         let mut import_policy_routes_denied = 0_u64;
-
         // Check if Add-Path receive is negotiated for IPv4 unicast (body NLRI)
         let add_path_ipv4 = self
             .add_path_receive_families
             .contains(&(Afi::Ipv4, Safi::Unicast));
-
         // 1. Structural decode
         let parsed = match update.parse(
             four_octet_as,
@@ -438,7 +423,6 @@ impl PeerSession {
                 return;
             }
         };
-
         // 2. Semantic validation
         let has_mp_nlri = parsed
             .attributes
@@ -450,7 +434,6 @@ impl PeerSession {
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
-
         let validation_options = rustbgpd_wire::UpdateValidationOptions {
             allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
                 && self.use_extended_nexthop_ipv4(),
@@ -475,7 +458,6 @@ impl PeerSession {
             self.drive_fsm(Event::UpdateValidationError(notif)).await;
             return;
         }
-
         // 3. End-of-RIB detection (RFC 4724 §2)
         if parsed.announced.is_empty() && parsed.withdrawn.is_empty() {
             // IPv4 EoR: empty UPDATE (no NLRI, no withdrawn, no attributes)
@@ -500,6 +482,7 @@ impl PeerSession {
                 && mp.flowspec_withdrawn.is_empty()
                 && mp.evpn_withdrawn.is_empty()
                 && mp.bgpls_withdrawn.is_empty()
+                && mp.vpn_withdrawn.is_empty()
             {
                 info!(
                     peer = %self.peer_label,
@@ -520,7 +503,6 @@ impl PeerSession {
                 return;
             }
         }
-
         // 4. Build routes from body NLRI (IPv4) and MP-BGP NLRI
         let body_next_hop: IpAddr = parsed
             .attributes
@@ -536,7 +518,6 @@ impl PeerSession {
                 IpAddr::V4(v4) => IpAddr::V4(v4),
                 IpAddr::V6(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             });
-
         let now = Instant::now();
         let route_origin = if is_ebgp {
             rustbgpd_rib::RouteOrigin::Ebgp
@@ -575,7 +556,6 @@ impl PeerSession {
                         }
                     })
                     .sum::<usize>();
-
             // An OTC-tagged UPDATE with no announced unicast routes —
             // e.g. malformed-length on a body-NLRI withdrawals-only
             // UPDATE, or any tagged UPDATE that carries only
@@ -593,7 +573,6 @@ impl PeerSession {
                     "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
                 );
                 self.record_otc_routes_blocked(reason, rejected as u64);
-
                 if self.event_sink().wants_otc_route_blocked() {
                     // The prefix strings are event-only payload. Build them
                     // only for sinks that retain structured events; the
@@ -632,7 +611,6 @@ impl PeerSession {
                 }
             }
         }
-
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
         // announcements if our local ASN appears in the AS_PATH.
         // Withdrawals are still processed normally.
@@ -650,9 +628,9 @@ impl PeerSession {
                     .attributes
                     .iter()
                     .filter_map(|a| match a {
-                        PathAttribute::MpReachNlri(mp) => {
-                            Some(mp.announced.len() + mp.bgpls_announced.len())
-                        }
+                        PathAttribute::MpReachNlri(mp) => Some(
+                            mp.announced.len() + mp.bgpls_announced.len() + mp.vpn_announced.len(),
+                        ),
                         _ => None,
                     })
                     .sum::<usize>();
@@ -664,7 +642,6 @@ impl PeerSession {
             );
             self.metrics
                 .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
-
             // Still process withdrawals (body + MP_UNREACH with negotiated-family check).
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the AS_PATH-loop branch must
             // not silently drop withdrawals for any family, or stale non-unicast state
@@ -677,6 +654,7 @@ impl PeerSession {
             let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+            let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -693,7 +671,30 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::MplsVpn {
+                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| {
+                                VpnRibRouteKey {
+                                    nlri_key: nlri.key(),
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
+                }
+                // VPN announcements in a loop-detected UPDATE are treated as
+                // withdrawals of any previously accepted version of the same
+                // RD+prefix, so a looped re-announcement can't strand a stale
+                // route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::MplsVpn
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|nlri| {
+                        VpnRibRouteKey {
+                            nlri_key: nlri.key(),
+                            path_id: 0,
+                        }
+                    }));
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
@@ -707,6 +708,9 @@ impl PeerSession {
             }
             for key in &loop_bgpls_withdrawn {
                 self.known_bgpls.remove(key);
+            }
+            for key in &loop_l3vpn_withdrawn {
+                self.known_vpn.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -740,10 +744,22 @@ impl PeerSession {
             {
                 return;
             }
+            if !loop_l3vpn_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
         }
-
         // Route reflector loop detection (RFC 4456 §8):
         // - ORIGINATOR_ID matching our own router-id → loop
         // - Our cluster_id already in CLUSTER_LIST → loop
@@ -772,7 +788,6 @@ impl PeerSession {
                 "Route reflector loop detected — discarding announcements"
             );
             self.metrics.record_rr_loop_detected(&self.peer_label);
-
             // Still process withdrawals (same pattern as AS_PATH loop).
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the reflected-loop
             // detection must not silently drop withdrawals for any family,
@@ -785,6 +800,7 @@ impl PeerSession {
             let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+            let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -801,7 +817,30 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::MplsVpn {
+                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| {
+                                VpnRibRouteKey {
+                                    nlri_key: nlri.key(),
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
+                }
+                // VPN announcements in a loop-detected UPDATE are treated as
+                // withdrawals of any previously accepted version of the same
+                // RD+prefix, so a looped re-announcement can't strand a stale
+                // route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::MplsVpn
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|nlri| {
+                        VpnRibRouteKey {
+                            nlri_key: nlri.key(),
+                            path_id: 0,
+                        }
+                    }));
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
@@ -815,6 +854,9 @@ impl PeerSession {
             }
             for key in &loop_bgpls_withdrawn {
                 self.known_bgpls.remove(key);
+            }
+            for key in &loop_l3vpn_withdrawn {
+                self.known_vpn.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -848,10 +890,22 @@ impl PeerSession {
             {
                 return;
             }
+            if !loop_l3vpn_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
         }
-
         // Filter attributes: strip MP_REACH/MP_UNREACH before storing on routes
         // (they are per-UPDATE framing, not per-route attributes)
         let route_attrs: Vec<PathAttribute> = parsed
@@ -874,7 +928,6 @@ impl PeerSession {
             _ => None,
         };
         let attr_bundle = RouteAttrBundle::new(&route_attrs, otc_add);
-
         // Single pass over the (MP-filtered) attribute vector pulls every
         // policy-context field the RouteContext sites read — replacing
         // what used to be eight independent attribute scans. Built from
@@ -897,12 +950,10 @@ impl PeerSession {
             local_pref: policy_local_pref,
             med: policy_med,
         } = policy_summary;
-
         // Borrow the current RPKI/ASPA validation snapshot for import policy.
         // Cloning is cheap (two Arc::clone). Falls back to NotFound/Unknown
         // when no RPKI is configured.
         let validation = self.validation_rx.as_ref().map(|rx| rx.borrow().clone());
-
         // Compute ASPA state once per UPDATE for the IPv4-unicast body NLRI
         // surface. Other families compute their own state inside the
         // MP_REACH_NLRI handling below — draft-ietf-sidrops-aspa-
@@ -922,7 +973,6 @@ impl PeerSession {
             .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
                 v.validate_aspa(parsed_as_path, (Afi::Ipv4, Safi::Unicast), aspa_context)
             });
-
         let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
         if unnumbered_ipv4_body_forbidden
             && (!parsed.announced.is_empty() || !parsed.withdrawn.is_empty())
@@ -932,7 +982,6 @@ impl PeerSession {
                 "Ignoring IPv4 body NLRI from scoped link-local peer; RFC 8950 requires MP_REACH_NLRI"
             );
         }
-
         // Body NLRI routes (IPv4). `import_decisions` collects every
         // evaluation — permit and deny — for the ADR-0073 explain cache.
         // The closure only borrows `self` immutably, so we accumulate
@@ -1050,7 +1099,6 @@ impl PeerSession {
                     })
                     .collect()
             };
-
         // Drain the collected import decisions into the per-session
         // explain cache (ADR-0073). Now that the `.collect()` above has
         // released its immutable borrow of `self`, the `&mut
@@ -1058,7 +1106,6 @@ impl PeerSession {
         for (key, decision) in import_decisions {
             self.import_decision_cache.insert(key, decision);
         }
-
         // Body withdrawn routes (IPv4) — carry path_id for Add-Path peers
         let mut withdrawn: Vec<(Prefix, u32)> = if unnumbered_ipv4_body_forbidden {
             Vec::new()
@@ -1069,7 +1116,6 @@ impl PeerSession {
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect()
         };
-
         // MP-BGP NLRI from attributes. The MP families read the
         // body-NEXT_HOP-stripped variants from `attr_bundle` (`mp` for
         // FlowSpec / EVPN, `mp_unicast` for unicast) — the stripping
@@ -1080,7 +1126,8 @@ impl PeerSession {
         let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
         let mut bgpls_announced: Vec<BgpLsRibRoute> = Vec::new();
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
-
+        let mut vpn_announced: Vec<VpnRibRoute> = Vec::new();
+        let mut vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
         for attr in &parsed.attributes {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
@@ -1094,7 +1141,6 @@ impl PeerSession {
                         );
                         continue;
                     }
-
                     if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {
                         warn!(
                             peer = %self.peer_label,
@@ -1102,7 +1148,6 @@ impl PeerSession {
                         );
                         continue;
                     }
-
                     // ASPA state for this MP_REACH family. Per draft v25 §6.2,
                     // `ValidationSnapshot::validate_aspa` returns `Unknown` for
                     // anything outside IPv4/IPv6 unicast — so FlowSpec and
@@ -1113,7 +1158,6 @@ impl PeerSession {
                         .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
                             v.validate_aspa(parsed_as_path, family, aspa_context)
                         });
-
                     if mp.safi == Safi::FlowSpec {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {
@@ -1186,7 +1230,6 @@ impl PeerSession {
                         }
                         continue;
                     }
-
                     if mp.safi == Safi::Evpn {
                         // EVPN Types 1-4 are prefixless for policy purposes;
                         // Type 5 carries a real IP prefix (RFC 9136).
@@ -1251,7 +1294,6 @@ impl PeerSession {
                         }
                         continue;
                     }
-
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         // BGP-LS announced routes — opaque topology objects,
                         // not unicast prefixes. Prefix predicates therefore do
@@ -1311,11 +1353,66 @@ impl PeerSession {
                         }
                         continue;
                     }
-
+                    if mp.safi == Safi::MplsVpn {
+                        // VPNv4/VPNv6 announced routes (RFC 4364 / RFC 4659).
+                        // Unlike BGP-LS, the policy context carries the real
+                        // inner prefix (ADR-0077 honest policy context).
+                        for nlri in &mp.vpn_announced {
+                            let ctx = RouteContext {
+                                prefix: Some(vpn_inner_prefix(&nlri.prefix)),
+                                next_hop: Some(mp.next_hop),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: mp_aspa_state,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                evpn_route_type: None,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
+                            };
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let (attrs, _) =
+                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                vpn_announced.push(VpnRibRoute {
+                                    nlri: nlri.clone(),
+                                    next_hop: mp.next_hop,
+                                    peer: self.peer_ip,
+                                    attributes: attrs,
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    is_llgr_stale: false,
+                                    path_id: 0,
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if otc_drop_unicast_announcements {
                         continue;
                     }
-
                     // Unicast routes
                     for entry in &mp.announced {
                         let mp_rpki_state = validation
@@ -1440,11 +1537,16 @@ impl PeerSession {
                             }
                         }));
                     }
+                    if mp.safi == Safi::MplsVpn {
+                        vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| VpnRibRouteKey {
+                            nlri_key: nlri.key(),
+                            path_id: 0,
+                        }));
+                    }
                 }
                 _ => {}
             }
         }
-
         // ADR-0073: tombstone any cached decision for a withdrawn prefix
         // as WITHDRAWN, so the explain surface distinguishes "seen then
         // withdrawn" from "never seen". Runs here — after the attribute
@@ -1467,7 +1569,6 @@ impl PeerSession {
                     });
             }
         }
-
         // 4. Max-prefix enforcement — maintain the per-prefix refcount
         //    (`known_prefix_refcounts`) alongside the Add-Path identity set.
         //    Counts unicast unique prefixes + FlowSpec rules + EVPN keys
@@ -1497,13 +1598,18 @@ impl PeerSession {
         for route in &bgpls_announced {
             self.known_bgpls.insert(route.key());
         }
+        for key in &vpn_withdrawn {
+            self.known_vpn.remove(key);
+        }
+        for route in &vpn_announced {
+            self.known_vpn.insert(route.key());
+        }
         self.import_policy_routes_permitted = self
             .import_policy_routes_permitted
             .saturating_add(import_policy_routes_permitted);
         self.import_policy_routes_denied = self
             .import_policy_routes_denied
             .saturating_add(import_policy_routes_denied);
-
         let prefix_count = self.known_prefix_count();
         if let Some(max) = self.config.max_prefixes
             && prefix_count > max as usize
@@ -1523,7 +1629,6 @@ impl PeerSession {
             self.drive_fsm(Event::UpdateValidationError(notif)).await;
             return;
         }
-
         if (!announced.is_empty()
             || !withdrawn.is_empty()
             || !flowspec_announced.is_empty()
@@ -1546,7 +1651,6 @@ impl PeerSession {
         {
             return;
         }
-
         if (!bgpls_announced.is_empty() || !bgpls_withdrawn.is_empty())
             && self
                 .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
@@ -1560,23 +1664,32 @@ impl PeerSession {
         {
             return;
         }
-
+        if (!vpn_announced.is_empty() || !vpn_withdrawn.is_empty())
+            && self
+                .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vpn_announced,
+                    withdrawn: vpn_withdrawn,
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
         // 5. Tell FSM about the update (restarts hold timer)
         self.drive_fsm(Event::UpdateReceived).await;
     }
 }
-
 #[cfg(test)]
 mod policy_attr_summary_tests {
     use super::*;
     use rustbgpd_wire::{AsPathSegment, ExtendedCommunity, LargeCommunity};
-
     fn as_path(asns: Vec<u32>) -> AsPath {
         AsPath {
             segments: vec![AsPathSegment::AsSequence(asns)],
         }
     }
-
     #[test]
     fn empty_attrs_use_defaults() {
         let attrs: Vec<PathAttribute> = Vec::new();
@@ -1591,7 +1704,6 @@ mod policy_attr_summary_tests {
         assert_eq!(s.local_pref, None);
         assert_eq!(s.med, None);
     }
-
     #[test]
     fn extracts_each_field_in_one_pass() {
         let attrs = vec![
@@ -1615,7 +1727,6 @@ mod policy_attr_summary_tests {
         assert_eq!(s.local_pref, Some(150));
         assert_eq!(s.med, Some(42));
     }
-
     /// The load-bearing guard for the `find_map` → single-pass change:
     /// first match wins for every attribute type, and a *later empty*
     /// community attribute must not blank out an earlier populated one
@@ -1645,12 +1756,10 @@ mod policy_attr_summary_tests {
         assert_eq!(s.med, Some(5), "first MED wins");
     }
 }
-
 #[cfg(test)]
 mod route_attr_bundle_tests {
     use super::*;
     use rustbgpd_wire::{AsPath, AsPathSegment, Origin};
-
     fn base_attrs() -> Vec<PathAttribute> {
         vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1661,17 +1770,14 @@ mod route_attr_bundle_tests {
             PathAttribute::Communities(vec![100]),
         ]
     }
-
     fn has_next_hop(attrs: &[PathAttribute]) -> bool {
         attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
     }
-
     fn has_otc(attrs: &[PathAttribute]) -> bool {
         attrs
             .iter()
             .any(|a| matches!(a, PathAttribute::OnlyToCustomer(_)))
     }
-
     #[test]
     fn bundle_variant_shapes_with_otc() {
         let bundle = RouteAttrBundle::new(&base_attrs(), Some(65002));
@@ -1685,7 +1791,6 @@ mod route_attr_bundle_tests {
         assert!(!has_next_hop(&bundle.mp_unicast));
         assert!(has_otc(&bundle.mp_unicast));
     }
-
     #[test]
     fn bundle_variant_shapes_without_otc() {
         let bundle = RouteAttrBundle::new(&base_attrs(), None);
@@ -1693,7 +1798,6 @@ mod route_attr_bundle_tests {
         assert!(!has_next_hop(&bundle.mp) && !has_otc(&bundle.mp));
         assert!(!has_next_hop(&bundle.mp_unicast) && !has_otc(&bundle.mp_unicast));
     }
-
     #[test]
     fn materialize_shares_arc_when_no_modifications() {
         let bundle = RouteAttrBundle::new(&base_attrs(), None);
@@ -1705,7 +1809,6 @@ mod route_attr_bundle_tests {
         );
         assert!(nh.is_none(), "nh_action derives from set_next_hop only");
     }
-
     #[test]
     fn materialize_clones_and_applies_when_modified() {
         let bundle = RouteAttrBundle::new(&base_attrs(), None);
