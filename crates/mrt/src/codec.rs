@@ -1,18 +1,14 @@
 //! Pure encoding functions for MRT `TABLE_DUMP_V2` records (RFC 6396).
-
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
-
 use rustbgpd_rib::route::{EvpnRibRoute, Route};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::error::EncodeError as WireEncodeError;
 use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
-
 /// MRT message type for `TABLE_DUMP_V2`.
 const TABLE_DUMP_V2: u16 = 13;
-
 /// `TABLE_DUMP_V2` subtypes.
 const PEER_INDEX_TABLE: u16 = 1;
 const RIB_IPV4_UNICAST: u16 = 2;
@@ -22,7 +18,6 @@ const RIB_IPV6_UNICAST: u16 = 4;
 const RIB_GENERIC: u16 = 6;
 const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
 const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
-
 /// An individual RIB entry within a RIB_* record.
 pub struct RibEntry {
     /// Index into the `PEER_INDEX_TABLE`.
@@ -34,7 +29,6 @@ pub struct RibEntry {
     /// BGP path attributes for this RIB entry.
     pub attributes: Vec<PathAttribute>,
 }
-
 /// MRT encoding errors.
 #[derive(Debug, Error)]
 pub enum EncodeError {
@@ -50,7 +44,6 @@ pub enum EncodeError {
     #[error("path attribute encode failed: {0}")]
     AttributeEncode(#[from] WireEncodeError),
 }
-
 /// Encode the 12-byte MRT common header.
 fn encode_mrt_header(buf: &mut Vec<u8>, timestamp: u32, mrt_type: u16, subtype: u16, length: u32) {
     buf.extend_from_slice(&timestamp.to_be_bytes());
@@ -58,7 +51,6 @@ fn encode_mrt_header(buf: &mut Vec<u8>, timestamp: u32, mrt_type: u16, subtype: 
     buf.extend_from_slice(&subtype.to_be_bytes());
     buf.extend_from_slice(&length.to_be_bytes());
 }
-
 /// Encode a complete MRT record: header + payload.
 fn encode_mrt_record(
     buf: &mut Vec<u8>,
@@ -74,7 +66,6 @@ fn encode_mrt_record(
     buf.extend_from_slice(payload);
     Ok(())
 }
-
 /// Encode the `PEER_INDEX_TABLE` record (subtype 1).
 ///
 /// Always uses AS4 (type bit 1 set) and includes IPv6 peers (type bit 0).
@@ -91,10 +82,8 @@ pub fn encode_peer_index_table(
     peers: &[MrtPeerEntry],
 ) -> Result<(), EncodeError> {
     let mut payload = Vec::new();
-
     // Collector BGP ID
     payload.extend_from_slice(&collector_bgp_id.octets());
-
     // View name
     let name_bytes = view_name.as_bytes();
     let view_name_len =
@@ -104,14 +93,12 @@ pub fn encode_peer_index_table(
         })?;
     payload.extend_from_slice(&view_name_len.to_be_bytes());
     payload.extend_from_slice(name_bytes);
-
     // Peer count
     let peer_count = u16::try_from(peers.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "PEER_INDEX_TABLE.peer_count",
         value: peers.len(),
     })?;
     payload.extend_from_slice(&peer_count.to_be_bytes());
-
     for peer in peers {
         // Peer type: bit 0 = IPv6, bit 1 = AS4 (always set)
         let peer_type: u8 = match peer.peer_addr {
@@ -119,23 +106,18 @@ pub fn encode_peer_index_table(
             IpAddr::V4(_) => 0b10, // AS4 only
         };
         payload.push(peer_type);
-
         // Peer BGP ID
         payload.extend_from_slice(&peer.peer_bgp_id.octets());
-
         // Peer IP address
         match peer.peer_addr {
             IpAddr::V4(v4) => payload.extend_from_slice(&v4.octets()),
             IpAddr::V6(v6) => payload.extend_from_slice(&v6.octets()),
         }
-
         // Peer AS (always 4 bytes)
         payload.extend_from_slice(&peer.peer_asn.to_be_bytes());
     }
-
     encode_mrt_record(buf, timestamp, PEER_INDEX_TABLE, &payload)
 }
-
 /// Synthesize path attributes for MRT encoding from a `Route`.
 ///
 /// The route's `attributes` vec doesn't contain next-hop or `MP_REACH`
@@ -146,7 +128,6 @@ pub fn encode_peer_index_table(
 #[must_use]
 pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
     let mut attrs = (*route.attributes).clone();
-
     match route.prefix {
         Prefix::V4(_) => {
             match route.next_hop {
@@ -173,6 +154,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                         flowspec_announced: vec![],
                         evpn_announced: vec![],
                         bgpls_announced: vec![],
+                        vpn_announced: vec![],
                     }));
                 }
             }
@@ -190,14 +172,13 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             });
             attrs.push(mp_reach);
         }
     }
-
     attrs
 }
-
 /// Synthesize path attributes for an EVPN RIB entry.
 ///
 /// `EvpnRibRoute.attributes` was stripped of `MP_REACH_NLRI` at decode
@@ -220,10 +201,10 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
         flowspec_announced: vec![],
         evpn_announced: vec![],
         bgpls_announced: vec![],
+        vpn_announced: vec![],
     }));
     attrs
 }
-
 /// Encode a single EVPN route as a `RIB_GENERIC` (subtype 6) record.
 ///
 /// Layout per RFC 6396 §4.3.5:
@@ -251,14 +232,10 @@ fn encode_evpn_rib_generic(
 ) -> Result<(), EncodeError> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&seq_num.to_be_bytes());
-
     payload.extend_from_slice(&(Afi::L2Vpn as u16).to_be_bytes());
     payload.push(Safi::Evpn as u8);
-
     encode_evpn_nlri(std::slice::from_ref(&route.route), &mut payload);
-
     payload.extend_from_slice(&1u16.to_be_bytes());
-
     let entry = RibEntry {
         peer_index,
         originated_time,
@@ -266,10 +243,8 @@ fn encode_evpn_rib_generic(
         attributes: synthesize_evpn_attributes(route),
     };
     encode_rib_entry(&mut payload, &entry, false)?;
-
     encode_mrt_record(buf, timestamp, RIB_GENERIC, &payload)
 }
-
 /// Encode a single RIB entry (shared by all RIB_* subtypes).
 fn encode_rib_entry(
     buf: &mut Vec<u8>,
@@ -279,10 +254,8 @@ fn encode_rib_entry(
     if add_path {
         buf.extend_from_slice(&entry.path_id.to_be_bytes());
     }
-
     buf.extend_from_slice(&entry.peer_index.to_be_bytes());
     buf.extend_from_slice(&entry.originated_time.to_be_bytes());
-
     let mut attr_buf = Vec::new();
     encode_mrt_rib_attributes(&entry.attributes, &mut attr_buf)?;
     let attr_len = u16::try_from(attr_buf.len()).map_err(|_| EncodeError::FieldTooLarge {
@@ -293,7 +266,6 @@ fn encode_rib_entry(
     buf.extend_from_slice(&attr_buf);
     Ok(())
 }
-
 /// Encode path attributes for an MRT RIB entry per RFC 6396 §4.3.4.
 ///
 /// `MP_REACH_NLRI` is rewritten to the MRT-reduced form: only NH-Len
@@ -311,7 +283,6 @@ fn encode_mrt_rib_attributes(
         .cloned()
         .collect();
     encode_path_attributes(&others, buf, true, false)?;
-
     for attr in attrs {
         if let PathAttribute::MpReachNlri(mp) = attr {
             encode_mrt_mp_reach(mp.next_hop, mp.link_local_next_hop, buf);
@@ -319,7 +290,6 @@ fn encode_mrt_rib_attributes(
     }
     Ok(())
 }
-
 /// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.
 ///
 /// Wire layout per RFC 6396 §4.3.4 — TLV header followed by the
@@ -359,7 +329,6 @@ fn encode_mrt_mp_reach(
     buf.push(value.len() as u8);
     buf.extend_from_slice(&value);
 }
-
 /// Encode a prefix into MRT format: length byte then ceil(len/8) prefix bytes.
 fn encode_prefix_bytes(buf: &mut Vec<u8>, prefix: &Prefix) {
     match prefix {
@@ -375,7 +344,6 @@ fn encode_prefix_bytes(buf: &mut Vec<u8>, prefix: &Prefix) {
         }
     }
 }
-
 /// Encode a `RIB_IPV4_UNICAST` or `RIB_IPV6_UNICAST` record.
 ///
 /// If any entry has `path_id != 0`, the ADDPATH subtype is used instead.
@@ -392,32 +360,25 @@ pub fn encode_rib_entries(
     entries: &[RibEntry],
 ) -> Result<(), EncodeError> {
     let has_addpath = entries.iter().any(|e| e.path_id != 0);
-
     let subtype = match (prefix, has_addpath) {
         (Prefix::V4(_), false) => RIB_IPV4_UNICAST,
         (Prefix::V4(_), true) => RIB_IPV4_UNICAST_ADDPATH,
         (Prefix::V6(_), false) => RIB_IPV6_UNICAST,
         (Prefix::V6(_), true) => RIB_IPV6_UNICAST_ADDPATH,
     };
-
     let mut payload = Vec::new();
     payload.extend_from_slice(&seq_num.to_be_bytes());
-
     encode_prefix_bytes(&mut payload, prefix);
-
     let entry_count = u16::try_from(entries.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry count",
         value: entries.len(),
     })?;
     payload.extend_from_slice(&entry_count.to_be_bytes());
-
     for entry in entries {
         encode_rib_entry(&mut payload, entry, has_addpath)?;
     }
-
     encode_mrt_record(buf, timestamp, subtype, &payload)
 }
-
 /// Encode a full MRT `TABLE_DUMP_V2` dump from a snapshot.
 ///
 /// Returns the complete binary output suitable for writing to a file.
@@ -439,7 +400,6 @@ pub fn encode_snapshot(
     timestamp: u32,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
-
     // 1. Build effective peer list from explicit peers + any route-origin peers.
     let mut effective_peers: Vec<MrtPeerEntry> = peers.to_vec();
     let mut seen_peers: HashSet<IpAddr> = effective_peers.iter().map(|p| p.peer_addr).collect();
@@ -475,10 +435,8 @@ pub fn encode_snapshot(
             .then(a.peer_asn.cmp(&b.peer_asn))
             .then(a.peer_bgp_id.octets().cmp(&b.peer_bgp_id.octets()))
     });
-
     // 2. `PEER_INDEX_TABLE`
     encode_peer_index_table(&mut buf, timestamp, collector_bgp_id, "", &effective_peers)?;
-
     // 3. Build peer index lookup
     let peer_index: HashMap<IpAddr, u16> = effective_peers
         .iter()
@@ -492,13 +450,11 @@ pub fn encode_snapshot(
                 })
         })
         .collect::<Result<_, _>>()?;
-
     // 4. Group routes by prefix
     let mut by_prefix: HashMap<Prefix, Vec<&Route>> = HashMap::new();
     for route in routes {
         by_prefix.entry(route.prefix).or_default().push(route);
     }
-
     // 5. Encode each prefix group
     let mut seq_num: u32 = 0;
     // Sort prefixes for deterministic output
@@ -518,7 +474,6 @@ pub fn encode_snapshot(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
     for prefix in &prefixes {
         let mut prefix_routes = by_prefix[prefix].clone();
         prefix_routes.sort_by(|a, b| {
@@ -544,13 +499,11 @@ pub fn encode_snapshot(
                 attributes: synthesize_attributes(route),
             });
         }
-
         if !entries.is_empty() {
             encode_rib_entries(&mut buf, timestamp, seq_num, prefix, &entries)?;
             seq_num = seq_num.wrapping_add(1);
         }
     }
-
     // 6. Encode EVPN routes as RIB_GENERIC records (RFC 6396 §4.3.5).
     // EVPN does not use Add-Path in this codebase, and EVPN keys are
     // already per-route (RD + ESI + ETag + MAC + IP), so each route maps
@@ -583,30 +536,24 @@ pub fn encode_snapshot(
         encode_evpn_rib_generic(&mut buf, timestamp, seq_num, route, idx, originated)?;
         seq_num = seq_num.wrapping_add(1);
     }
-
     Ok(buf)
 }
-
 fn prefix_family_sort_key(prefix: Prefix) -> (u8, Vec<u8>, u8) {
     match prefix {
         Prefix::V4(v4) => (0u8, v4.addr.octets().to_vec(), v4.len),
         Prefix::V6(v6) => (1u8, v6.addr.octets().to_vec(), v6.len),
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
-    use std::time::Instant;
-
+    use super::*;
     use rustbgpd_rib::route::{Route, RouteOrigin};
     use rustbgpd_wire::{
         AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
     };
-
-    use super::*;
-
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
+    use std::time::Instant;
     fn make_peer(addr: IpAddr, asn: u32) -> MrtPeerEntry {
         let bgp_id = match addr {
             IpAddr::V4(v4) => v4,
@@ -618,7 +565,6 @@ mod tests {
             peer_asn: asn,
         }
     }
-
     fn make_route(prefix: Prefix, peer: IpAddr, next_hop: IpAddr) -> Route {
         Route {
             prefix,
@@ -644,7 +590,6 @@ mod tests {
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
     }
-
     #[test]
     fn mrt_header_encoding() {
         let mut buf = Vec::new();
@@ -662,7 +607,6 @@ mod tests {
         // length = 42
         assert_eq!(u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]), 42);
     }
-
     #[test]
     fn peer_index_table_encoding() {
         let peers = vec![
@@ -672,7 +616,6 @@ mod tests {
                 65002,
             ),
         ];
-
         let mut buf = Vec::new();
         encode_peer_index_table(
             &mut buf,
@@ -682,31 +625,24 @@ mod tests {
             &peers,
         )
         .unwrap();
-
         // Should have 12-byte header + payload
         assert!(buf.len() > 12);
         // MRT type = 13, subtype = 1
         assert_eq!(u16::from_be_bytes([buf[4], buf[5]]), 13);
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 1);
-
         // Collector BGP ID at offset 12
         assert_eq!(&buf[12..16], &[1, 2, 3, 4]);
-
         // View name length = 0
         assert_eq!(u16::from_be_bytes([buf[16], buf[17]]), 0);
-
         // Peer count = 2
         assert_eq!(u16::from_be_bytes([buf[18], buf[19]]), 2);
-
         // First peer: type = 0b10 (AS4, IPv4)
         assert_eq!(buf[20], 0b10);
-
         // Second peer: type = 0b11 (AS4, IPv6)
         // After first peer: 1 (type) + 4 (bgp_id) + 4 (ipv4) + 4 (asn) = 13
         let second_peer_offset = 20 + 13;
         assert_eq!(buf[second_peer_offset], 0b11);
     }
-
     #[test]
     fn rib_ipv4_unicast_encoding() {
         let entry = RibEntry {
@@ -718,32 +654,24 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
         };
-
         let prefix = Prefix::V4(Ipv4Prefix {
             addr: Ipv4Addr::new(192, 168, 1, 0),
             len: 24,
         });
-
         let mut buf = Vec::new();
         encode_rib_entries(&mut buf, 1_700_000_000, 0, &prefix, &[entry]).unwrap();
-
         assert!(buf.len() > 12);
         // subtype = 2 (RIB_IPV4_UNICAST)
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 2);
-
         // seq_num at offset 12 = 0
         assert_eq!(u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]), 0);
-
         // prefix_len at offset 16 = 24
         assert_eq!(buf[16], 24);
-
         // prefix bytes: 3 bytes for /24
         assert_eq!(&buf[17..20], &[192, 168, 1]);
-
         // entry_count at offset 20 = 1
         assert_eq!(u16::from_be_bytes([buf[20], buf[21]]), 1);
     }
-
     #[test]
     fn rib_ipv6_unicast_encoding() {
         let entry = RibEntry {
@@ -752,25 +680,19 @@ mod tests {
             path_id: 0,
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
         };
-
         let prefix = Prefix::V6(Ipv6Prefix {
             addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
             len: 32,
         });
-
         let mut buf = Vec::new();
         encode_rib_entries(&mut buf, 1_700_000_000, 1, &prefix, &[entry]).unwrap();
-
         // subtype = 4 (RIB_IPV6_UNICAST)
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 4);
-
         // prefix_len = 32
         assert_eq!(buf[16], 32);
-
         // 4 bytes for /32 prefix
         assert_eq!(&buf[17..21], &[0x20, 0x01, 0x0d, 0xb8]);
     }
-
     #[test]
     fn addpath_subtype_used_when_path_id_nonzero() {
         let entry = RibEntry {
@@ -779,19 +701,15 @@ mod tests {
             path_id: 42,
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
         };
-
         let prefix = Prefix::V4(Ipv4Prefix {
             addr: Ipv4Addr::new(10, 0, 0, 0),
             len: 8,
         });
-
         let mut buf = Vec::new();
         encode_rib_entries(&mut buf, 1_700_000_000, 0, &prefix, &[entry]).unwrap();
-
         // subtype = 8 (RIB_IPV4_UNICAST_ADDPATH)
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 8);
     }
-
     #[test]
     fn synthesize_ipv4_next_hop() {
         let route = make_route(
@@ -802,12 +720,10 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
         );
-
         let attrs = synthesize_attributes(&route);
         let has_nh = attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)));
         assert!(has_nh, "IPv4 route should have synthesized NextHop");
     }
-
     #[test]
     fn synthesize_ipv6_mp_reach() {
         let route = make_route(
@@ -818,14 +734,12 @@ mod tests {
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         );
-
         let attrs = synthesize_attributes(&route);
         let has_mp = attrs
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
         assert!(has_mp, "IPv6 route should have synthesized MpReachNlri");
     }
-
     #[test]
     fn synthesize_ipv4_mp_reach_for_ipv6_next_hop() {
         let route = make_route(
@@ -836,7 +750,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         );
-
         let attrs = synthesize_attributes(&route);
         assert!(
             attrs
@@ -849,7 +762,6 @@ mod tests {
             "RFC 8950 IPv4 route with IPv6 NH must not synthesize IPv4 NextHop"
         );
     }
-
     #[test]
     fn full_snapshot_encoding() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
@@ -861,7 +773,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         );
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -870,14 +781,11 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         // Should have at least two MRT records (peer index + one RIB entry)
         assert!(data.len() > 24);
-
         // First record: `PEER_INDEX_TABLE`
         assert_eq!(u16::from_be_bytes([data[4], data[5]]), 13);
         assert_eq!(u16::from_be_bytes([data[6], data[7]]), 1);
-
         // Find second record
         let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let second_offset = 12 + first_len;
@@ -891,7 +799,6 @@ mod tests {
             2
         );
     }
-
     #[test]
     fn empty_snapshot_encoding() {
         let data =
@@ -900,7 +807,6 @@ mod tests {
         assert!(data.len() > 12);
         assert_eq!(u16::from_be_bytes([data[6], data[7]]), 1);
     }
-
     fn make_evpn_macip(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
         use rustbgpd_wire::{
             EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
@@ -937,7 +843,6 @@ mod tests {
             is_llgr_stale: false,
         }
     }
-
     fn make_evpn_ipprefix(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
         use rustbgpd_wire::{
             EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue,
@@ -975,7 +880,6 @@ mod tests {
             is_llgr_stale: false,
         }
     }
-
     /// Locate an `RIB_GENERIC` (subtype 6) record in `data` after the
     /// `PEER_INDEX_TABLE`. Returns the offset of its MRT header.
     fn find_rib_generic(data: &[u8]) -> Option<usize> {
@@ -996,7 +900,6 @@ mod tests {
         }
         None
     }
-
     /// EVPN Type 2 (MAC/IP Advertisement) → MRT `RIB_GENERIC`. Asserts the
     /// record carries AFI 25 / SAFI 70 and the encoded EVPN NLRI bytes
     /// match `encode_evpn_nlri` for the same route.
@@ -1005,7 +908,6 @@ mod tests {
         let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let peer = make_peer(peer_addr, 65002);
         let route = make_evpn_macip(peer_addr, peer_addr);
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1014,10 +916,8 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         let rib_offset =
             find_rib_generic(&data).expect("RIB_GENERIC record must be present for EVPN route");
-
         // Payload starts after 12-byte MRT header.
         let payload = &data[rib_offset + 12..];
         // Sequence Number (4 bytes), then AFI (2), SAFI (1).
@@ -1025,7 +925,6 @@ mod tests {
         let safi = payload[6];
         assert_eq!(afi, 25, "RIB_GENERIC AFI must be 25 (L2VPN) for EVPN");
         assert_eq!(safi, 70, "RIB_GENERIC SAFI must be 70 (EVPN)");
-
         // NLRI bytes follow. Compare against an independent encode of the
         // same EvpnRoute — proves the record header carries the canonical
         // EVPN NLRI TLV (route_type + length + body).
@@ -1038,7 +937,6 @@ mod tests {
             expected_nlri.as_slice(),
             "encoded NLRI bytes must match encode_evpn_nlri output"
         );
-
         // Entry Count (2 bytes) immediately after NLRI = 1.
         let entry_count = u16::from_be_bytes([payload[nlri_end], payload[nlri_end + 1]]);
         assert_eq!(
@@ -1046,7 +944,6 @@ mod tests {
             "EVPN does not use Add-Path; entry count must be 1"
         );
     }
-
     /// EVPN Type 5 (IP Prefix) → MRT `RIB_GENERIC`. Same shape as the Type 2
     /// test but exercises the longer IP-Prefix NLRI encoding.
     #[test]
@@ -1054,7 +951,6 @@ mod tests {
         let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let peer = make_peer(peer_addr, 65002);
         let route = make_evpn_ipprefix(peer_addr, peer_addr);
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1063,13 +959,11 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         let rib_offset =
             find_rib_generic(&data).expect("RIB_GENERIC record must be present for EVPN Type 5");
         let payload = &data[rib_offset + 12..];
         assert_eq!(u16::from_be_bytes([payload[4], payload[5]]), 25);
         assert_eq!(payload[6], 70);
-
         let mut expected_nlri = Vec::new();
         encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri);
         assert_eq!(
@@ -1077,7 +971,6 @@ mod tests {
             expected_nlri.as_slice()
         );
     }
-
     /// Walk a serialized BGP attribute block and return the value bytes
     /// of the first attribute matching `type_code`. Used by the
     /// MRT-reduced-form regression tests below.
@@ -1113,7 +1006,6 @@ mod tests {
         }
         None
     }
-
     /// Locate the encoded `MP_REACH_NLRI` (type 14) value bytes inside
     /// the single RIB entry of an EVPN `RIB_GENERIC` record.
     fn evpn_rib_generic_mp_reach_value(data: &[u8]) -> Vec<u8> {
@@ -1136,7 +1028,6 @@ mod tests {
             .expect("MP_REACH_NLRI must be present in EVPN RIB entry")
             .to_vec()
     }
-
     /// RFC 6396 §4.3.4: `MP_REACH_NLRI` inside an MRT RIB entry must
     /// carry only NH-Len + NH bytes. AFI/SAFI/Reserved/NLRI must be
     /// omitted because the RIB entry header already encodes them.
@@ -1147,7 +1038,6 @@ mod tests {
         let next_hop = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
         let peer = make_peer(peer_addr, 65002);
         let route = make_evpn_macip(peer_addr, next_hop);
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1156,7 +1046,6 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         let mp_value = evpn_rib_generic_mp_reach_value(&data);
         // Reduced form: 1-byte NH-Len + NH octets, nothing else.
         assert_eq!(
@@ -1172,7 +1061,6 @@ mod tests {
             "NH bytes must equal the route's next-hop"
         );
     }
-
     /// Same regression for IPv6 unicast — `MP_REACH` in MRT RIB entries
     /// must be reduced form, not the BGP UPDATE form. Pre-existing
     /// codepath but never byte-level asserted before.
@@ -1189,7 +1077,6 @@ mod tests {
             peer_addr,
             IpAddr::V6(nh),
         );
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1198,7 +1085,6 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         // Walk past PEER_INDEX_TABLE to the RIB_IPV6_UNICAST record.
         let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let rib_offset = 12 + first_len;
@@ -1211,7 +1097,6 @@ mod tests {
             u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
         let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
         let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
-
         assert_eq!(
             mp_value.len(),
             17,
@@ -1225,7 +1110,6 @@ mod tests {
             "NH bytes must equal the route's IPv6 next-hop"
         );
     }
-
     /// RFC 4760 §3 / RFC 2545: IPv6 next-hop can carry global +
     /// link-local (32 bytes total). When `Route.link_local_next_hop`
     /// is `Some`, the MRT-reduced `MP_REACH_NLRI` value must be 33
@@ -1238,7 +1122,6 @@ mod tests {
         let peer = make_peer(peer_addr, 65001);
         let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
         let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-
         let mut route = make_route(
             Prefix::V6(Ipv6Prefix {
                 addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
@@ -1248,7 +1131,6 @@ mod tests {
             IpAddr::V6(global),
         );
         route.link_local_next_hop = Some(link_local);
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1257,7 +1139,6 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let rib_offset = 12 + first_len;
         let payload = &data[rib_offset + 12..];
@@ -1267,7 +1148,6 @@ mod tests {
             u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
         let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
         let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
-
         assert_eq!(
             mp_value.len(),
             33,
@@ -1286,7 +1166,6 @@ mod tests {
             "link-local NH bytes mismatch"
         );
     }
-
     /// RFC 8950: IPv4 NLRI carried in an `MP_REACH_NLRI` with an IPv6
     /// next-hop. The MRT encoding still uses the reduced form — the
     /// `RIB_IPV4_UNICAST` record header carries the prefix, the
@@ -1304,7 +1183,6 @@ mod tests {
             peer_addr,
             IpAddr::V6(nh),
         );
-
         let data = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
             &[peer],
@@ -1313,7 +1191,6 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-
         let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let rib_offset = 12 + first_len;
         let payload = &data[rib_offset + 12..];
@@ -1325,7 +1202,6 @@ mod tests {
             u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
         let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
         let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
-
         assert_eq!(
             mp_value.len(),
             17,
@@ -1335,7 +1211,6 @@ mod tests {
         assert_eq!(mp_value[0], 16);
         assert_eq!(&mp_value[1..17], &nh.octets());
     }
-
     #[test]
     fn snapshot_includes_routes_for_missing_peer_metadata() {
         let route = make_route(
@@ -1346,7 +1221,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
         );
-
         let data =
             encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[], &[route], &[], 1_700_000_000).unwrap();
         // Must include a peer index table plus at least one RIB record.

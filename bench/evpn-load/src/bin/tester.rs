@@ -275,6 +275,7 @@ fn build_update(
             flowspec_announced: vec![],
             evpn_announced: routes,
             bgpls_announced: vec![],
+            vpn_announced: vec![],
         }));
     }
     if !withdraws.is_empty() {
@@ -285,6 +286,7 @@ fn build_update(
             flowspec_withdrawn: vec![],
             evpn_withdrawn: withdraws,
             bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![],
         }));
     }
     let _ = local_as; // 4-octet AS negotiated via capability; empty AS_PATH for iBGP

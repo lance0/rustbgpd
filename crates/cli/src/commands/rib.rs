@@ -9,7 +9,8 @@ use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
     ExplainDecision, FibRouteState, ListBgpLsRequest, ListBlackholeDiscardsRequest,
-    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, Route,
+    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, ListVpnRoutesRequest, Route,
+    VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -150,6 +151,32 @@ fn make_bgpls_request(
     })
 }
 
+fn parse_vpn_family(family: Option<&str>) -> Result<String, CliError> {
+    match family {
+        None => Ok(String::new()),
+        Some("l3vpn_ipv4_unicast" | "vpnv4" | "vpn-ipv4" | "vpn_ipv4") => {
+            Ok("l3vpn_ipv4_unicast".to_string())
+        }
+        Some("l3vpn_ipv6_unicast" | "vpnv6" | "vpn-ipv6" | "vpn_ipv6") => {
+            Ok("l3vpn_ipv6_unicast".to_string())
+        }
+        Some(other) => Err(CliError::Argument(format!(
+            "unsupported VPN family {other:?}; expected l3vpn_ipv4_unicast \
+             (alias: vpnv4) or l3vpn_ipv6_unicast (alias: vpnv6)"
+        ))),
+    }
+}
+
+fn make_vpn_request(
+    family: Option<&str>,
+    peer: Option<String>,
+) -> Result<ListVpnRoutesRequest, CliError> {
+    Ok(ListVpnRoutesRequest {
+        afi_safi: parse_vpn_family(family)?,
+        peer_filter: peer.unwrap_or_default(),
+    })
+}
+
 fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
     if json {
         output::print_json_pretty(&JsonRoutes(routes))?;
@@ -190,6 +217,108 @@ fn print_bgpls_routes(routes: &[BgpLsRouteEntry], json: bool) -> Result<(), CliE
         }
     }
     Ok(())
+}
+
+fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&JsonVpnRoutes(routes))?;
+    } else if routes.is_empty() {
+        println!("No VPN routes");
+    } else {
+        println!(
+            "{:<16} {:<24} {:<14} {:<18} {:<18} Route Targets",
+            "RD", "Prefix", "Labels", "Next Hop", "Peer"
+        );
+        println!("{}", "-".repeat(110));
+        for route in routes {
+            let labels = route
+                .labels
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "{:<16} {:<24} {:<14} {:<18} {:<18} {}",
+                route.route_distinguisher_str,
+                route.prefix,
+                labels,
+                route.next_hop,
+                route.peer_address,
+                vpn_route_targets(route).join(" ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn vpn_route_targets(route: &VpnRouteEntry) -> Vec<&str> {
+    route
+        .extended_communities
+        .iter()
+        .filter(|ec| ec.starts_with("RT:"))
+        .map(String::as_str)
+        .collect()
+}
+
+struct JsonVpnRoutes<'a>(&'a [VpnRouteEntry]);
+
+impl Serialize for JsonVpnRoutes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for route in self.0 {
+            seq.serialize_element(&JsonVpnRouteRef(route))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonVpnRouteRef<'a>(&'a VpnRouteEntry);
+
+impl Serialize for JsonVpnRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut len = 10;
+        if route.path_id != 0 {
+            len += 1;
+        }
+        if route.stale {
+            len += 1;
+        }
+        if route.llgr_stale {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("afi_safi", &route.afi_safi)?;
+        map.serialize_entry("route_distinguisher", &route.route_distinguisher_str)?;
+        map.serialize_entry(
+            "route_distinguisher_bytes",
+            &hex_lower(&route.route_distinguisher),
+        )?;
+        map.serialize_entry("prefix", &route.prefix)?;
+        map.serialize_entry("labels", &route.labels)?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("peer_address", &route.peer_address)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("communities", &route.communities)?;
+        map.serialize_entry("extended_communities", &route.extended_communities)?;
+        if route.path_id != 0 {
+            map.serialize_entry("path_id", &route.path_id)?;
+        }
+        if route.stale {
+            map.serialize_entry("stale", &route.stale)?;
+        }
+        if route.llgr_stale {
+            map.serialize_entry("llgr_stale", &route.llgr_stale)?;
+        }
+        map.end()
+    }
 }
 
 struct JsonRoutes<'a>(&'a [Route]);
@@ -1082,6 +1211,21 @@ pub async fn bgpls(
     print_bgpls_routes(&resp.routes, json)
 }
 
+pub async fn vpn(
+    connection: Connection,
+    family: Option<&str>,
+    peer: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_vpn_routes(make_vpn_request(family, peer)?)
+        .await?
+        .into_inner();
+    print_vpn_routes(&resp.routes, json)
+}
+
 pub async fn received(
     connection: Connection,
     address: &str,
@@ -1359,6 +1503,45 @@ mod tests {
         assert_eq!(req.afi_safi, AddressFamily::BgpLs as i32);
         assert_eq!(req.peer_filter, "198.51.100.1");
         assert_eq!(req.nlri_type_filter, 1);
+    }
+
+    #[tokio::test]
+    async fn vpn_sends_filters_and_accepts_shorthand_family() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        vpn(
+            connection,
+            Some("vpnv4"),
+            Some("198.51.100.1".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let req = server
+            .state
+            .last_list_vpn
+            .lock()
+            .await
+            .clone()
+            .expect("VPN request captured");
+        assert_eq!(req.afi_safi, "l3vpn_ipv4_unicast");
+        assert_eq!(req.peer_filter, "198.51.100.1");
+    }
+
+    #[test]
+    fn vpn_family_parse_rejects_unknown_and_maps_aliases() {
+        assert_eq!(parse_vpn_family(None).unwrap(), "");
+        assert_eq!(
+            parse_vpn_family(Some("vpnv6")).unwrap(),
+            "l3vpn_ipv6_unicast"
+        );
+        assert_eq!(
+            parse_vpn_family(Some("l3vpn_ipv4_unicast")).unwrap(),
+            "l3vpn_ipv4_unicast"
+        );
+        assert!(parse_vpn_family(Some("evpn")).is_err());
     }
 
     #[tokio::test]

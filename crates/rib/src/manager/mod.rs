@@ -699,6 +699,16 @@ impl RibManager {
                     self.handle_bgpls_routes_received(peer, announced, withdrawn);
                 }
             }
+            RibUpdate::VpnRoutesReceived {
+                peer,
+                session_id,
+                announced,
+                withdrawn,
+            } => {
+                if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", "vpn") {
+                    self.handle_vpn_routes_received(peer, announced, withdrawn);
+                }
+            }
             RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
@@ -918,6 +928,11 @@ impl RibManager {
             RibUpdate::QueryBgpLsRoutes { reply } => {
                 let routes: Vec<crate::route::BgpLsRibRoute> =
                     self.loc_rib.iter_bgpls().cloned().collect();
+                let _ = reply.send(routes);
+            }
+            RibUpdate::QueryVpnRoutes { reply } => {
+                let routes: Vec<crate::route::VpnRibRoute> =
+                    self.loc_rib.iter_vpn().cloned().collect();
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
@@ -1630,6 +1645,53 @@ impl RibManager {
         self.recompute_bgpls_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+        }
+    }
+
+    fn handle_vpn_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::VpnRibRoute>,
+        withdrawn: Vec<crate::route::VpnRibRouteKey>,
+    ) {
+        // ponytail: no refresh-stale bookkeeping yet — route-refresh replay
+        // for SAFI 128 is a later PR in the ADR-0077 arc.
+        let mut affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut needs_intern_gc = false;
+
+        {
+            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            for key in withdrawn {
+                if rib.withdraw_vpn(&key) {
+                    needs_intern_gc = true;
+                    affected.insert(key);
+                }
+            }
+
+            for route in announced {
+                let key = route.key();
+                needs_intern_gc |= rib.insert_vpn(route);
+                affected.insert(key);
+            }
+        }
+
+        self.recompute_vpn_keys(&affected);
+        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
+            rib.gc_intern_table();
+        }
+    }
+
+    /// Recompute the Loc-RIB VPN selection for each affected key across the
+    /// current set of peer Adj-RIB-Ins. Recompute-only: VPN reflection
+    /// (outbound distribution) is a later PR in the ADR-0077 arc.
+    fn recompute_vpn_keys(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
+        for key in affected {
+            let candidates: Vec<crate::route::VpnRibRoute> = self
+                .ribs
+                .values()
+                .filter_map(|rib| rib.get_vpn(key).cloned())
+                .collect();
+            self.loc_rib.recompute_vpn(key.clone(), candidates.iter());
         }
     }
 

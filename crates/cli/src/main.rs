@@ -650,6 +650,17 @@ enum RibAction {
         #[arg(long)]
         nlri_type: Option<u32>,
     },
+    /// Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)
+    #[command(name = "vpn")]
+    Vpn {
+        /// VPN family filter: l3vpn_ipv4_unicast (alias vpnv4) or
+        /// l3vpn_ipv6_unicast (alias vpnv6)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+        /// Peer IP address filter
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -1333,6 +1344,27 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     )
                     .await;
                 }
+                Some(RibAction::Vpn {
+                    family: vpn_family,
+                    peer,
+                }) => {
+                    reject_rib_status_filters(
+                        binary_name,
+                        "vpn",
+                        RibStatusFilterArgs {
+                            family: &None,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    let family = vpn_family.or(family);
+                    return commands::rib::vpn(connection, family.as_deref(), peer, json).await;
+                }
                 _ => {}
             }
 
@@ -1430,7 +1462,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
                 }
-                Some(RibAction::Blackholes | RibAction::Fib { .. } | RibAction::BgpLs { .. }) => {
+                Some(
+                    RibAction::Blackholes
+                    | RibAction::Fib { .. }
+                    | RibAction::BgpLs { .. }
+                    | RibAction::Vpn { .. },
+                ) => {
                     unreachable!("RIB status subcommands return before route filter handling")
                 }
                 Some(RibAction::Add {

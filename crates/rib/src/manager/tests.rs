@@ -3966,6 +3966,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
             evpn_withdraw: vec![],
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
+            vpn_announce: vec![],
+            vpn_withdraw: vec![],
             request_refresh_all_negotiated: false,
         })
         .await

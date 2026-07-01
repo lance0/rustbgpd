@@ -49,6 +49,7 @@ pub(crate) struct MockState {
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
+    pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -1041,6 +1042,30 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 llgr_stale: false,
                 path_id: 0,
                 bgp_ls_attribute: vec![0xaa, 0xbb],
+            }],
+        }))
+    }
+
+    async fn list_vpn_routes(
+        &self,
+        request: Request<server_proto::ListVpnRoutesRequest>,
+    ) -> Result<Response<server_proto::ListVpnRoutesResponse>, Status> {
+        *self.state.last_list_vpn.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListVpnRoutesResponse {
+            routes: vec![server_proto::VpnRouteEntry {
+                afi_safi: "l3vpn_ipv4_unicast".to_string(),
+                route_distinguisher: vec![0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+                route_distinguisher_str: "65000:1".to_string(),
+                prefix: "10.1.0.0/24".to_string(),
+                labels: vec![24017],
+                next_hop: "192.0.2.1".to_string(),
+                peer_address: "198.51.100.1".to_string(),
+                as_path: vec![64512],
+                communities: vec![],
+                extended_communities: vec!["RT:65000:1".to_string()],
+                stale: false,
+                llgr_stale: false,
+                path_id: 0,
             }],
         }))
     }

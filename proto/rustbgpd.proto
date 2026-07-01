@@ -952,6 +952,7 @@ service RibService {
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
+  rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,6 +2079,44 @@ message ListBgpLsRequest {
 
 message ListBgpLsResponse {
   repeated BgpLsRouteEntry routes = 1;
+}
+
+// VPNv4/VPNv6 route entry in the RIB (RFC 4364 / RFC 4659, SAFI 128).
+// Reflected route-reflector state: the Route Distinguisher, MPLS label
+// stack, and next-hop are preserved verbatim (ADR-0077) — no VRF import.
+message VpnRouteEntry {
+  // "l3vpn_ipv4_unicast" or "l3vpn_ipv6_unicast".
+  string afi_safi = 1;
+  // Raw 8-byte Route Distinguisher.
+  bytes route_distinguisher = 2;
+  // Human-readable RD per RFC 4364 §4.2, e.g. "65000:1".
+  string route_distinguisher_str = 3;
+  // Inner IP prefix, e.g. "10.1.0.0/24".
+  string prefix = 4;
+  // MPLS label values (20-bit), outermost first.
+  repeated uint32 labels = 5;
+  string next_hop = 6;
+  string peer_address = 7;
+  repeated uint32 as_path = 8;
+  // Standard communities as "high:low" strings.
+  repeated string communities = 9;
+  // Extended communities; Route Targets render as "RT:65000:1".
+  repeated string extended_communities = 10;
+  bool stale = 11;
+  bool llgr_stale = 12;
+  uint32 path_id = 13;
+}
+
+// Filter VPN route listings. All filters are optional.
+message ListVpnRoutesRequest {
+  // "l3vpn_ipv4_unicast" or "l3vpn_ipv6_unicast"; empty = both.
+  string afi_safi = 1;
+  // Only routes from this peer, empty = any.
+  string peer_filter = 2;
+}
+
+message ListVpnRoutesResponse {
+  repeated VpnRouteEntry routes = 1;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3

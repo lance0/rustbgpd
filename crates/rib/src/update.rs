@@ -14,6 +14,7 @@ use crate::best_path::BestPathReason;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate, FlowSpecRoute, Route,
+    VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Routes to be sent outbound to a peer.
@@ -43,6 +44,10 @@ pub struct OutboundRouteUpdate {
     pub bgpls_announce: Vec<BgpLsRibRoute>,
     /// BGP-LS route keys to withdraw.
     pub bgpls_withdraw: Vec<BgpLsRouteKey>,
+    /// VPNv4/VPNv6 routes to announce (RFC 4364 / RFC 4659).
+    pub vpn_announce: Vec<VpnRibRoute>,
+    /// VPNv4/VPNv6 route keys to withdraw.
+    pub vpn_withdraw: Vec<VpnRibRouteKey>,
     /// Ask the session task to send a ROUTE-REFRESH *request* toward the
     /// peer (RFC 2918) for **every negotiated family**, so the peer
     /// re-advertises its routes. Used by the RIB manager's
@@ -243,6 +248,17 @@ pub enum RibUpdate {
         announced: Vec<BgpLsRibRoute>,
         /// Withdrawn BGP-LS route keys.
         withdrawn: Vec<BgpLsRouteKey>,
+    },
+    /// Peer session sent us VPNv4/VPNv6 routes (RFC 4364 / RFC 4659).
+    VpnRoutesReceived {
+        /// Source peer address.
+        peer: IpAddr,
+        /// Transport session identity of the session that received these routes.
+        session_id: u64,
+        /// Newly announced VPN routes.
+        announced: Vec<VpnRibRoute>,
+        /// Withdrawn VPN route keys.
+        withdrawn: Vec<VpnRibRouteKey>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown {
@@ -651,6 +667,11 @@ pub enum RibUpdate {
     QueryBgpLsRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<BgpLsRibRoute>>,
+    },
+    /// Query VPNv4/VPNv6 routes from the Loc-RIB (RFC 4364 / RFC 4659).
+    QueryVpnRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<VpnRibRoute>>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {

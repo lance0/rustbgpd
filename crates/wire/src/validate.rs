@@ -1,11 +1,9 @@
-use std::collections::HashSet;
-use std::net::IpAddr;
-
 use crate::attribute::{AsPath, AsPathSegment, PathAttribute, attr_error_data};
 use crate::capability::Safi;
 use crate::constants::{attr_flags, attr_type};
 use crate::notification::update_subcode;
-
+use std::collections::HashSet;
+use std::net::IpAddr;
 /// Error produced by UPDATE attribute validation.
 ///
 /// Contains the NOTIFICATION subcode and data bytes per RFC 4271 §6.3.
@@ -16,7 +14,6 @@ pub struct UpdateError {
     /// Raw bytes for the NOTIFICATION data field.
     pub data: Vec<u8>,
 }
-
 /// Context-dependent UPDATE validation knobs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UpdateValidationOptions {
@@ -26,10 +23,8 @@ pub struct UpdateValidationOptions {
     /// session scope/interface needed to resolve the link-local address.
     pub allow_ipv4_link_local_mp_reach_next_hop: bool,
 }
-
 /// Well-known attribute type codes that MUST be present when NLRI is advertised.
 const MANDATORY_ATTRS: &[u8] = &[attr_type::ORIGIN, attr_type::AS_PATH];
-
 /// Validate the semantic correctness of a set of path attributes.
 ///
 /// This is separate from decode (which is structural — "can I read these bytes?").
@@ -56,7 +51,6 @@ pub fn validate_update_attributes(
         UpdateValidationOptions::default(),
     )
 }
-
 /// Validate UPDATE attributes with context-dependent validation options.
 ///
 /// Use [`validate_update_attributes`] unless the caller has session context
@@ -74,11 +68,9 @@ pub fn validate_update_attributes_with_options(
 ) -> Result<(), UpdateError> {
     check_duplicate_types(attrs)?;
     check_unrecognized_wellknown(attrs)?;
-
     if has_nlri {
         check_mandatory_present(attrs, has_body_nlri, is_ebgp)?;
     }
-
     for attr in attrs {
         match attr {
             PathAttribute::NextHop(addr) => check_next_hop(*addr)?,
@@ -106,10 +98,8 @@ pub fn validate_update_attributes_with_options(
             _ => {}
         }
     }
-
     Ok(())
 }
-
 /// (3,1) Duplicate attribute type codes.
 fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
     let mut seen = HashSet::new();
@@ -124,7 +114,6 @@ fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
     }
     Ok(())
 }
-
 /// (3,2) Unrecognized well-known attribute: Optional=0 and type code unknown.
 fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
     for attr in attrs {
@@ -140,7 +129,6 @@ fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateErr
     }
     Ok(())
 }
-
 /// (3,3) Missing mandatory well-known attributes.
 ///
 /// `has_body_nlri` — true if the UPDATE carries IPv4 NLRI in the body fields.
@@ -153,7 +141,6 @@ fn check_mandatory_present(
     is_ebgp: bool,
 ) -> Result<(), UpdateError> {
     let present: HashSet<u8> = attrs.iter().map(PathAttribute::type_code).collect();
-
     for &tc in MANDATORY_ATTRS {
         if !present.contains(&tc) {
             return Err(UpdateError {
@@ -162,7 +149,6 @@ fn check_mandatory_present(
             });
         }
     }
-
     // NEXT_HOP mandatory for eBGP when body NLRI is present. When only MP_REACH
     // carries NLRI, the next-hop is inside the MP attribute (RFC 4760 §3).
     if is_ebgp && has_body_nlri && !present.contains(&attr_type::NEXT_HOP) {
@@ -171,14 +157,11 @@ fn check_mandatory_present(
             data: vec![attr_type::NEXT_HOP],
         });
     }
-
     Ok(())
 }
-
 /// (3,8) Invalid `NEXT_HOP` address.
 fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
     let octets = addr.octets();
-
     // 0.0.0.0
     if addr.is_unspecified() {
         return Err(UpdateError {
@@ -186,7 +169,6 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
             data: octets.to_vec(),
         });
     }
-
     // 127.0.0.0/8
     if addr.is_loopback() {
         return Err(UpdateError {
@@ -194,7 +176,6 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
             data: octets.to_vec(),
         });
     }
-
     // 224.0.0.0/4 (multicast)
     if addr.is_multicast() {
         return Err(UpdateError {
@@ -202,7 +183,6 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
             data: octets.to_vec(),
         });
     }
-
     // 255.255.255.255
     if addr.is_broadcast() {
         return Err(UpdateError {
@@ -210,10 +190,8 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
             data: octets.to_vec(),
         });
     }
-
     Ok(())
 }
-
 /// Validate `MP_REACH_NLRI` next-hop address(es).
 ///
 /// `addr` is the global next-hop (always present in any non-FlowSpec
@@ -256,12 +234,10 @@ fn check_mp_reach_next_hop(
     }
     Ok(())
 }
-
 /// Check if an IPv6 address is link-local (`fe80::/10`).
 fn is_ipv6_link_local(addr: &std::net::Ipv6Addr) -> bool {
     (addr.segments()[0] & 0xffc0) == 0xfe80
 }
-
 /// Returns `true` if `addr` is a valid IPv6 next-hop for BGP advertisements.
 ///
 /// Rejects unspecified (`::`), loopback (`::1`), multicast (`ff00::/8`),
@@ -273,7 +249,6 @@ pub fn is_valid_ipv6_nexthop(addr: &std::net::Ipv6Addr) -> bool {
         && !addr.is_multicast()
         && !is_ipv6_link_local(addr)
 }
-
 /// (3,11) Malformed `AS_PATH`.
 fn check_as_path(path: &AsPath) -> Result<(), UpdateError> {
     for segment in &path.segments {
@@ -289,16 +264,12 @@ fn check_as_path(path: &AsPath) -> Result<(), UpdateError> {
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
-    use bytes::Bytes;
-
     use super::*;
     use crate::attribute::{Origin, RawAttribute};
-
+    use bytes::Bytes;
+    use std::net::Ipv4Addr;
     fn basic_attrs(next_hop: Ipv4Addr) -> Vec<PathAttribute> {
         vec![
             PathAttribute::Origin(Origin::Igp),
@@ -308,13 +279,11 @@ mod tests {
             PathAttribute::NextHop(next_hop),
         ]
     }
-
     #[test]
     fn valid_ebgp_update() {
         let attrs = basic_attrs(Ipv4Addr::new(10, 0, 0, 1));
         assert!(validate_update_attributes(&attrs, true, true, true).is_ok());
     }
-
     #[test]
     fn valid_ibgp_update_no_next_hop() {
         // iBGP doesn't require NEXT_HOP (it's optional based on the peer)
@@ -326,13 +295,11 @@ mod tests {
         ];
         assert!(validate_update_attributes(&attrs, true, true, false).is_ok());
     }
-
     #[test]
     fn withdrawal_only_no_attrs_ok() {
         // No NLRI → no mandatory attributes required
         assert!(validate_update_attributes(&[], false, false, true).is_ok());
     }
-
     #[test]
     fn reject_duplicate_type() {
         let attrs = vec![
@@ -342,7 +309,6 @@ mod tests {
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
     }
-
     #[test]
     fn reject_missing_origin() {
         let attrs = vec![
@@ -354,7 +320,6 @@ mod tests {
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MISSING_WELLKNOWN);
     }
-
     #[test]
     fn reject_missing_as_path() {
         let attrs = vec![
@@ -364,7 +329,6 @@ mod tests {
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MISSING_WELLKNOWN);
     }
-
     #[test]
     fn reject_missing_next_hop_ebgp() {
         let attrs = vec![
@@ -377,35 +341,30 @@ mod tests {
         assert_eq!(err.subcode, update_subcode::MISSING_WELLKNOWN);
         assert_eq!(err.data, vec![attr_type::NEXT_HOP]);
     }
-
     #[test]
     fn reject_next_hop_unspecified() {
         let attrs = basic_attrs(Ipv4Addr::UNSPECIFIED);
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn reject_next_hop_loopback() {
         let attrs = basic_attrs(Ipv4Addr::LOCALHOST);
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn reject_next_hop_multicast() {
         let attrs = basic_attrs(Ipv4Addr::new(224, 0, 0, 1));
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn reject_next_hop_broadcast() {
         let attrs = basic_attrs(Ipv4Addr::BROADCAST);
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn reject_empty_as_path_segment() {
         let attrs = vec![
@@ -418,7 +377,6 @@ mod tests {
         let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MALFORMED_AS_PATH);
     }
-
     #[test]
     fn reject_unrecognized_wellknown() {
         let attrs = vec![PathAttribute::Unknown(RawAttribute {
@@ -429,7 +387,6 @@ mod tests {
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::UNRECOGNIZED_WELLKNOWN);
     }
-
     #[test]
     fn optional_unknown_attribute_ok() {
         let attrs = vec![PathAttribute::Unknown(RawAttribute {
@@ -439,15 +396,12 @@ mod tests {
         })];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());
     }
-
     // --- MP_REACH_NLRI validation tests ---
-
     #[test]
     fn mp_reach_nlri_no_body_next_hop_required_for_ebgp() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
         use crate::nlri::{Ipv6Prefix, NlriEntry, Prefix};
-
         // eBGP UPDATE with MP_REACH_NLRI only (no body NLRI): NEXT_HOP not required
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -466,18 +420,17 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
         assert!(validate_update_attributes(&attrs, true, false, true).is_ok());
     }
-
     #[test]
     fn mixed_update_requires_body_next_hop_for_ebgp() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
         use crate::nlri::{Ipv6Prefix, NlriEntry, Prefix};
-
         // eBGP UPDATE with BOTH body NLRI and MP_REACH_NLRI but no NEXT_HOP attr
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -496,6 +449,7 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true
@@ -504,12 +458,10 @@ mod tests {
         assert_eq!(err.subcode, update_subcode::MISSING_WELLKNOWN);
         assert_eq!(err.data, vec![attr_type::NEXT_HOP]);
     }
-
     #[test]
     fn mp_reach_nlri_reject_unspecified_v6_next_hop() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -524,17 +476,16 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn mp_reach_nlri_reject_link_local_v6_next_hop() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -549,17 +500,16 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn mp_reach_nlri_allows_link_local_primary_only_for_opted_in_ipv4() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -574,9 +524,9 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
-
         assert!(validate_update_attributes(&attrs, true, false, true).is_err());
         assert!(
             validate_update_attributes_with_options(
@@ -590,7 +540,6 @@ mod tests {
             )
             .is_ok()
         );
-
         let mut attrs_without_companion = attrs.clone();
         if let PathAttribute::MpReachNlri(mp) = &mut attrs_without_companion[2] {
             mp.link_local_next_hop = None;
@@ -608,12 +557,10 @@ mod tests {
             .is_err()
         );
     }
-
     #[test]
     fn mp_reach_nlri_reject_loopback_v6_next_hop() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -628,48 +575,42 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     #[test]
     fn is_valid_ipv6_nexthop_accepts_global() {
         assert!(super::is_valid_ipv6_nexthop(
             &"2001:db8::1".parse().unwrap()
         ));
     }
-
     #[test]
     fn is_valid_ipv6_nexthop_rejects_unspecified() {
         assert!(!super::is_valid_ipv6_nexthop(
             &std::net::Ipv6Addr::UNSPECIFIED
         ));
     }
-
     #[test]
     fn is_valid_ipv6_nexthop_rejects_loopback() {
         assert!(!super::is_valid_ipv6_nexthop(
             &std::net::Ipv6Addr::LOCALHOST
         ));
     }
-
     #[test]
     fn is_valid_ipv6_nexthop_rejects_link_local() {
         assert!(!super::is_valid_ipv6_nexthop(&"fe80::1".parse().unwrap()));
     }
-
     #[test]
     fn is_valid_ipv6_nexthop_rejects_multicast() {
         assert!(!super::is_valid_ipv6_nexthop(&"ff02::1".parse().unwrap()));
     }
-
     #[test]
     fn mp_reach_nlri_reject_multicast_v6_next_hop() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -685,12 +626,12 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     /// Regression: an `MP_REACH` for `FlowSpec` (SAFI 133) with
     /// the recommended-by-RFC-8955-§6.1 next-hop value of 0.0.0.0
     /// must NOT trip `NEXT_HOP` validation. Before the `FlowSpec`
@@ -705,7 +646,6 @@ mod tests {
     fn mp_reach_flowspec_unspecified_next_hop_is_valid() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -723,6 +663,7 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         // Empty announced + empty body — FlowSpec EoR-equivalent
@@ -735,7 +676,6 @@ mod tests {
              RFC-compliant FlowSpec peer."
         );
     }
-
     /// Audit follow-up: an IPv6 `MP_REACH` with NH-Len=32 (the
     /// global-and-link-local form, RFC 4760 §3 / RFC 2545 §3)
     /// where the second 16 bytes are NOT in `fe80::/10` is a
@@ -749,7 +689,6 @@ mod tests {
     fn mp_reach_ipv6_invalid_link_local_segment_rejected() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -766,12 +705,12 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
-
     /// Audit follow-up complement to the above: a properly-formed
     /// 32-byte next-hop (global + actual link-local) must pass.
     /// Pins that the new validation didn't over-reject the legal form.
@@ -779,7 +718,6 @@ mod tests {
     fn mp_reach_ipv6_global_plus_link_local_accepted() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -794,6 +732,7 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                vpn_announced: vec![],
             }),
         ];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());
