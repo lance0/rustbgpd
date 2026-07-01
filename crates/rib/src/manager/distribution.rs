@@ -172,6 +172,7 @@ impl RibManager {
                         Safi::Evpn => "evpn",
                         Safi::BgpLs => "bgpls",
                         Safi::BgpLsVpn => "bgpls_vpn",
+                        Safi::MplsVpn => "mpls_vpn",
                     }
                 ),
             });

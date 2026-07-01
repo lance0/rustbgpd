@@ -45,7 +45,8 @@ pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
-    FibInstallNextHop, FlowSpecRoute, NextHopScope, Route, RouteOrigin,
+    FibInstallNextHop, FlowSpecRoute, NextHopScope, Route, RouteOrigin, VpnRibRoute,
+    VpnRibRouteKey,
 };
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,

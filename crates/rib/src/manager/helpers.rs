@@ -98,9 +98,9 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
         | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
-        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec) => {
-            "unsupported"
-        }
+        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
+        // VPNv4/VPNv6 (SAFI 128) is unreachable until the receive slice.
+        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn) => "unsupported",
     }
 }
 

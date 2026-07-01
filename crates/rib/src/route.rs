@@ -5,6 +5,7 @@ use std::time::Instant;
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
     FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
+    VpnAddressFamily, VpnNlri, VpnRouteKey,
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
@@ -456,6 +457,150 @@ impl BgpLsRibRoute {
     }
 }
 
+/// VPNv4/VPNv6 (RFC 4364 / RFC 4659) route identity for the RIB.
+///
+/// The wire [`VpnRouteKey`] carries the AFI-scoped Route Distinguisher plus IP
+/// prefix (the family is implicit in the prefix). The MPLS label stack is route
+/// *data*, not identity, so it is not part of the key. `path_id` is reserved for
+/// a future Add-Path-enabled slice and is always zero until negotiation grows
+/// that capability — kept as a RIB-layer wrapper so the wire route identity stays
+/// a pure RD + prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VpnRibRouteKey {
+    /// Wire route identity: Route Distinguisher + VPN IP prefix (V4/V6).
+    pub nlri_key: VpnRouteKey,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+/// A single VPNv4/VPNv6 route stored by the ADR-0077 route-reflector slice.
+///
+/// rustbgpd reflects VPN routes as a route reflector / controller feed: it
+/// preserves the Route Distinguisher, MPLS label stack, and next-hop unchanged
+/// and never installs an MPLS FIB entry or imports into a VRF (ADR-0077 §6).
+#[derive(Debug, Clone)]
+pub struct VpnRibRoute {
+    /// Full NLRI: RD + prefix + MPLS label stack (preserved verbatim).
+    pub nlri: VpnNlri,
+    /// VPN next-hop from `MP_REACH_NLRI` (Route-Distinguisher-stripped).
+    pub next_hop: IpAddr,
+    /// The peer that advertised this route.
+    pub peer: IpAddr,
+    /// BGP path attributes. Route Targets ride here as extended communities.
+    pub attributes: Arc<Vec<PathAttribute>>,
+    /// When this route was received (monotonic clock).
+    pub received_at: Instant,
+    /// How this route was learned (eBGP, iBGP, or local).
+    pub origin_type: RouteOrigin,
+    /// BGP router-id of the advertising peer.
+    pub peer_router_id: Ipv4Addr,
+    /// Whether this route is stale due to graceful restart.
+    pub is_stale: bool,
+    /// Whether this route is in LLGR stale phase (RFC 9494).
+    pub is_llgr_stale: bool,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl VpnRibRoute {
+    /// The VPN address family (V4/V6), derived from the NLRI prefix.
+    #[must_use]
+    pub fn family(&self) -> VpnAddressFamily {
+        self.nlri.prefix.family()
+    }
+
+    /// The wire AFI/SAFI pair for this route (`Ipv4`/`Ipv6` + `MplsVpn`).
+    #[must_use]
+    pub fn afi_safi(&self) -> (Afi, Safi) {
+        let afi = match self.family() {
+            VpnAddressFamily::V4 => Afi::Ipv4,
+            VpnAddressFamily::V6 => Afi::Ipv6,
+        };
+        (afi, Safi::MplsVpn)
+    }
+
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
+    }
+
+    /// Identity key suitable for VPN Adj-RIB-In, Loc-RIB, and Adj-RIB-Out maps.
+    #[must_use]
+    pub fn key(&self) -> VpnRibRouteKey {
+        VpnRibRouteKey {
+            nlri_key: self.nlri.key(),
+            path_id: self.path_id,
+        }
+    }
+
+    /// Extract the `AS_PATH`, returning `None` if absent.
+    #[must_use]
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit `LOCAL_PREF`, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit MED, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::Communities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract EXTENDED COMMUNITIES values, returning an empty slice if absent.
+    ///
+    /// Route Targets (RFC 4360) are the load-bearing members here; they are
+    /// preserved verbatim through reflection.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+}
+
 impl FlowSpecRoute {
     /// Extract the ORIGIN attribute value, defaulting to `Incomplete`.
     #[must_use]
@@ -770,8 +915,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    use std::collections::HashMap;
+
     use rustbgpd_wire::{
-        PathAttribute,
+        Afi, MplsLabelEntry, PathAttribute, RouteDistinguisher, Safi, VpnAddressFamily, VpnNlri,
+        VpnPrefix,
         bgpls::{BgpLsNlri, decode_bgpls_nlri, decode_bgpls_vpn_nlri},
     };
 
@@ -820,5 +968,115 @@ mod tests {
     #[should_panic(expected = "BGP-LS family and NLRI Route Distinguisher disagree")]
     fn bgpls_key_rejects_vpn_family_without_rd_in_debug_builds() {
         let _ = bgpls_route(BgpLsFamily::LinkStateVpn, base_bgpls_nlri()).key();
+    }
+
+    fn vpn_v4_nlri(addr: [u8; 4], len: u8, label: u32) -> VpnNlri {
+        VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher::new([0, 0, 0, 0, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v4(Ipv4Addr::from(addr), len).unwrap(),
+        }
+    }
+
+    fn vpn_v6_nlri(addr: [u8; 16], len: u8, label: u32) -> VpnNlri {
+        VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher::new([0, 0, 0, 0, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v6(std::net::Ipv6Addr::from(addr), len).unwrap(),
+        }
+    }
+
+    fn make_vpn_route(nlri: VpnNlri, path_id: u32) -> VpnRibRoute {
+        VpnRibRoute {
+            nlri,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id,
+        }
+    }
+
+    #[test]
+    fn vpn_route_key_round_trips_through_map() {
+        let route = make_vpn_route(vpn_v4_nlri([10, 0, 1, 0], 24, 100), 0);
+        let key = route.key();
+
+        let mut map: HashMap<VpnRibRouteKey, VpnRibRoute> = HashMap::new();
+        map.insert(key.clone(), route.clone());
+
+        let stored = map.get(&key).expect("route retrievable by its own key");
+        assert_eq!(stored.nlri, route.nlri);
+        assert_eq!(key.nlri_key, route.nlri.key());
+        assert_eq!(key.path_id, 0);
+    }
+
+    #[test]
+    fn vpn_same_rd_prefix_different_path_id_are_distinct_keys() {
+        let nlri = vpn_v4_nlri([203, 0, 113, 0], 24, 100);
+        let a = make_vpn_route(nlri.clone(), 1);
+        let b = make_vpn_route(nlri, 2);
+
+        assert_eq!(
+            a.key().nlri_key,
+            b.key().nlri_key,
+            "same RD + prefix means identical wire NLRI key"
+        );
+        assert_ne!(
+            a.key(),
+            b.key(),
+            "differing path_id makes the RIB key distinct"
+        );
+
+        let mut map: HashMap<VpnRibRouteKey, VpnRibRoute> = HashMap::new();
+        map.insert(a.key(), a);
+        map.insert(b.key(), b);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn vpn_label_stack_is_not_part_of_the_key() {
+        // Labels are route data, not identity: relabel keeps the same key.
+        let a = make_vpn_route(vpn_v4_nlri([198, 51, 100, 0], 24, 100), 0);
+        let b = make_vpn_route(vpn_v4_nlri([198, 51, 100, 0], 24, 200), 0);
+
+        assert_eq!(a.key(), b.key());
+        assert_ne!(a.nlri, b.nlri);
+    }
+
+    #[test]
+    fn vpn_family_matches_prefix() {
+        let v4 = make_vpn_route(vpn_v4_nlri([10, 0, 0, 0], 8, 100), 0);
+        let v6 = make_vpn_route(
+            vpn_v6_nlri(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                48,
+                100,
+            ),
+            0,
+        );
+
+        assert_eq!(v4.family(), VpnAddressFamily::V4);
+        assert_eq!(v6.family(), VpnAddressFamily::V6);
+    }
+
+    #[test]
+    fn vpn_afi_safi_maps_family_to_wire_pair() {
+        let v4 = make_vpn_route(vpn_v4_nlri([10, 0, 0, 0], 8, 100), 0);
+        let v6 = make_vpn_route(
+            vpn_v6_nlri(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                48,
+                100,
+            ),
+            0,
+        );
+
+        assert_eq!(v4.afi_safi(), (Afi::Ipv4, Safi::MplsVpn));
+        assert_eq!(v6.afi_safi(), (Afi::Ipv6, Safi::MplsVpn));
     }
 }
