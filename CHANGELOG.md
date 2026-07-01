@@ -9,6 +9,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **VPNv4/VPNv6 L3VPN route-reflection (RFC 4364 / RFC 4659, SAFI 128).**
+  rustbgpd now negotiates, receives, stores, reflects, and withdraws
+  VPN-IPv4/VPN-IPv6 routes as a route reflector / controller feed
+  (ADR-0077): configure with the `l3vpn_ipv4_unicast` /
+  `l3vpn_ipv6_unicast` families, inspect with `RibService.ListVpnRoutes`
+  (SensitiveRead) or `rbgp rib vpn`. Route identity is Route
+  Distinguisher + prefix; the MPLS label stack is route data — a
+  same-peer relabel re-advertises — and RD, label stack, next-hop, and
+  Route Target extended communities are preserved verbatim through
+  reflection (no VRF import, no MPLS FIB install, next-hop rewriting is
+  inert for SAFI 128). Wire codec implements the RFC 4364 §4.3.2 /
+  RFC 4659 §3.2.1.1 RD-prefixed next-hop forms (12/24/48 bytes) and the
+  RFC 8277 §2.4 withdraw-mode compatibility field (0x800000 on transmit,
+  ignored on receive). Includes the RFC 4456 reflection pipeline
+  (ORIGINATOR_ID / CLUSTER_LIST, initial table dump, EoR, plain
+  route-refresh replay, dirty Adj-RIB-Out resync), the RFC 7313 Enhanced
+  Route Refresh stale lifecycle (BoRR/EoRR sweep, family-isolated), and
+  conservative GR-entry withdraw (SAFI-128 routes are not preserved as
+  stale). Add-Path, labeled-unicast (SAFI 4), and RT-Constrain remain
+  deferred. M74 proves reflection, field preservation, withdrawal, and
+  no-dataplane-install against a GoBGP source and sink.
+
 ### Fixed
 
 - **Audit-tail hardening for BGP-LS, durable cursors, and GR/LLGR intern GC.**

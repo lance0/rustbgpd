@@ -148,7 +148,8 @@ has it, no broad performance sprints without profile evidence.
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
 - **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive + reflection +
-  API-export slice shipped; VPNv4/v6, labeled-unicast, RTC deferred).*
+  API-export and VPNv4/v6 route-reflection shipped; labeled-unicast, RTC
+  deferred).*
   ADR-0077 draws the address-family-expansion boundaries while the
   substrate is still small: a control-plane AFI/SAFI route-key model for
   VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
@@ -168,6 +169,20 @@ has it, no broad performance sprints without profile evidence.
   sweeps omitted BGP-LS objects instead of reporting stale controller-feed data
   as live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, BGP-LS VPN
   interop, and local topology production remain deferred.
+  **Done:** the VPNv4/VPNv6 (AFI 1/2, SAFI 128) route-reflector slice shipped
+  end-to-end as four stacked tranches: typed RIB substrate (RD + prefix route
+  key with the MPLS label stack as route data, Add-Path path-id reserved),
+  receive + read-only API (`l3vpn_ipv4_unicast` / `l3vpn_ipv6_unicast`
+  families, `RibService.ListVpnRoutes`, `rbgp rib vpn`, RFC 8277 §2.4
+  withdraw-mode compatibility-field codec, RFC 4364/4659 RD-prefixed
+  next-hops incl. the 48-byte link-local form), RFC 4456 reflection with RD /
+  label-stack / next-hop / Route-Target preservation (same-peer relabels
+  re-advertise; every ineligibility branch withdraws), and the Enhanced Route
+  Refresh stale lifecycle (BoRR/EoRR sweep, family-isolated, intern-GC-safe).
+  GR entry conservatively withdraws SAFI-128 routes (no stale preservation);
+  Add-Path and next-hop rewriting stay rejected/inert per ADR-0077 §6. M74
+  proves the VPNv4 reflection, preservation, withdrawal, and
+  no-dataplane-install path with a GoBGP source and sink.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix

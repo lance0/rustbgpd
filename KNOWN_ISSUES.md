@@ -223,11 +223,15 @@ resolved.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), L2VPN/EVPN (AFI 25, SAFI
-  70) RR-mode forwarding (ADR-0050, RFC 7432), and BGP-LS / BGP-LS VPN
+  70) RR-mode forwarding (ADR-0050, RFC 7432), BGP-LS / BGP-LS VPN
   (AFI 16388, SAFI 71/72) receive + reflection + API export (ADR-0077,
-  RFC 9552; local topology production remains deferred). Other families
-  such as VPNv4/VPNv6 (AFI 1/2, SAFI 128) and VPN FlowSpec (AFI 1/2, SAFI
-  134) are not implemented.
+  RFC 9552; local topology production remains deferred), and VPNv4/VPNv6
+  (AFI 1/2, SAFI 128) route-reflection (RFC 4364 / RFC 4659 —
+  RR/controller-feed only: RD, MPLS label stack, next-hop, and Route
+  Targets are preserved verbatim; no VRF import, no MPLS FIB install,
+  no Add-Path, GR does not preserve SAFI-128 routes as stale). Other
+  families such as labeled-unicast (SAFI 4), RT-Constrain (SAFI 132),
+  and VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,
