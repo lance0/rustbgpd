@@ -1,0 +1,36 @@
+{
+  "verdict": "clean",
+  "failures": [],
+  "soak_hours": 10.0,
+  "warmup_sec": 600,
+  "samples_total": 600,
+  "samples_steady": 590,
+  "memory": {
+    "slope_mb_per_hour": 0.03263545535115407,
+    "intercept_mb": 82.03098636129926,
+    "first_mb": 82.87,
+    "last_mb": 82.88,
+    "max_mb": 84.14,
+    "p50_mb": 82.16,
+    "p99_mb": 83.79010000000001
+  },
+  "session_flap_delta": 0,
+  "outbound_drop_delta": 0,
+  "messages": {
+    "sent_first": 2856,
+    "sent_last": 3483327,
+    "sent_delta": 3480471,
+    "recv_first": 1428,
+    "recv_last": 1742577,
+    "recv_delta": 1741149
+  },
+  "grpc_health_failures": 0,
+  "daemon_unhealthy_at_end": false,
+  "restart_detected": false,
+  "thresholds": {
+    "slope_fail_mb_per_hour": 1.0,
+    "slope_clean_mb_per_hour": 0.5,
+    "mem_max_fail_mb": 512.0
+  },
+  "monitor": null
+}

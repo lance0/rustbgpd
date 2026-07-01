@@ -1,0 +1,12 @@
+{
+  "run_id": "20260701T014045Z",
+  "soak_hours": 24,
+  "warmup_sec": 600,
+  "sample_interval_sec": 60,
+  "churn_rate_rps": 1000,
+  "advertise_rate": 5000,
+  "count_per_tester": 25000,
+  "git_rev": "c273118e49dcbac46d174c869dcf9626dbacca76",
+  "image_sha": "sha256:dbb19308f8b736bfe1b7e5b19b717f49a4ef5ef2dd1fb8a2bc042935069057c3",
+  "started_at": "2026-07-01T01:40:45Z"
+}

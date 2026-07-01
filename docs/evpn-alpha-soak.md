@@ -58,6 +58,26 @@ none of them block the current release on their own.
   Gate 8b MAC-churn soak (2026-05-16), this clears the gating
   evidence for flipping `apply_bum_enforcement` and
   `apply_aliasing_ecmp` defaults to `true` (ROADMAP P1).
+- [x] **~10 h EVPN attribute-intern leak-confirmation soaks on
+  v0.45.0 HEAD (`c273118e`)** — **PASS, 2026-07-01**. Two parallel
+  runs confirming the
+  [#590](https://github.com/lance0/rustbgpd/pull/590) /
+  [#592](https://github.com/lance0/rustbgpd/pull/592) intern-GC fix
+  stays bounded on the two axes the M67 link-drain soak (2026-06-28)
+  did not cover:
+  - **M33 50k-route scale** — run `20260701T014045Z`, postmortem
+    `docs/soak-m33-evpn-scale-10h-leak.md`. 600 samples, Loc-RIB held
+    50 000, RSS 82.87 → 82.88 MB (slope 0.033 MB/h), 0 flaps / 0
+    drops; `analyze-soak.py` verdict `clean`.
+  - **Gate 8b MAC-mobility churn + DF flips** — run
+    `gate8b-mac-churn-20260701T014434Z`, postmortem
+    `docs/soak-gate8b-mac-churn-10h-leak.md`. 591 samples, ~59 DF
+    flips all re-established, `pe1` RSS slope 0.125 MB/h (peak
+    34.9 MB), 26 560 deletes + 26 048 MAC moves, drift-repair 0;
+    `analyze-gate8b-soak.py` verdict `pass`.
+  Both stopped at ~10 h on a conclusive-flat signal (a pre-fix
+  ~279 MB/h leak would be +2.8 GB by 10 h; measured +0.01 / +1 MB).
+  Leak-confirmation receipts, not default-flip gates.
 
 ## Convergence + correctness slices
 

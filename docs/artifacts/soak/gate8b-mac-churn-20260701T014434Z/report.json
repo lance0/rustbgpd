@@ -1,0 +1,53 @@
+{
+  "samples_csv": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z/samples.csv",
+  "row_count": 591,
+  "runtime_hours": 10.088888888888889,
+  "pe1_memory_slope_mb_per_h": 0.12462185291014867,
+  "pe2_memory_slope_mb_per_h": 0.1478862716325848,
+  "pe1_peak_rss_mb": 34.9102,
+  "pe2_peak_rss_mb": 33.457,
+  "pe1_total_df_role_changes": null,
+  "pe1_observed_flag_states": [
+    "df"
+  ],
+  "pe2_running_samples": 299,
+  "pe2_stopped_samples": 292,
+  "gates": [
+    {
+      "name": "pe1_memory_slope",
+      "pass": true,
+      "detail": "0.125 MB/h vs cap 1.5"
+    },
+    {
+      "name": "pe2_memory_slope",
+      "pass": true,
+      "detail": "0.148 MB/h vs cap 1.5"
+    },
+    {
+      "name": "pe1_peak_memory",
+      "pass": true,
+      "detail": "34.9 MB vs cap 512.0"
+    },
+    {
+      "name": "pe2_peak_memory",
+      "pass": true,
+      "detail": "33.5 MB vs cap 512.0"
+    },
+    {
+      "name": "pe1_df_changes_monotone",
+      "pass": true,
+      "detail": "no counter reset = no daemon restart"
+    },
+    {
+      "name": "pe2_df_changes_monotone",
+      "pass": true,
+      "detail": "no counter reset = no daemon restart"
+    },
+    {
+      "name": "ran_through_at_least_one_full_flip_cycle",
+      "pass": true,
+      "detail": "pe2 running=299 stopped=292"
+    }
+  ],
+  "verdict": "pass"
+}

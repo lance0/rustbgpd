@@ -1,0 +1,100 @@
+acquired host lock: /home/lance/.local/state/rustbgpd-host.lock
+[2026-07-01T01:44:34Z] Gate 8b MAC-churn soak starting
+[2026-07-01T01:44:34Z]   duration=24h  sample=60s  flip=600s
+[2026-07-01T01:44:34Z]   churn_interval=5s  batch=16  pool=512 (target=256)
+[2026-07-01T01:44:34Z]   mobility=25%  ce_port=ce100a  vni=100
+[2026-07-01T01:44:34Z]   run_dir=/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z
+[2026-07-01T01:44:34Z]   git_rev=c273118e49dcbac46d174c869dcf9626dbacca76 dirty=true kernel=6.8.0-117-generic
+[2026-07-01T01:44:34Z] warmup: waiting 120s for initial dataplane discovery
+[2026-07-01T01:46:34Z] waiting up to 300s for both PEs to reach BGP Established
+[2026-07-01T01:46:34Z] BGP Established gate passed (pe1_established_total=2 pe2_established_total=1)
+[2026-07-01T01:46:34Z] churn loop started pid=2160857
+[2026-07-01T01:54:43Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T02:05:04Z] flip: starting PE2 daemon
+[2026-07-01T02:05:05Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T02:15:14Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T02:25:35Z] flip: starting PE2 daemon
+[2026-07-01T02:25:36Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T02:35:45Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T02:46:06Z] flip: starting PE2 daemon
+[2026-07-01T02:46:07Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T02:56:17Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T03:06:37Z] flip: starting PE2 daemon
+[2026-07-01T03:06:38Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T03:16:48Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T03:27:08Z] flip: starting PE2 daemon
+[2026-07-01T03:27:10Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T03:37:19Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T03:47:40Z] flip: starting PE2 daemon
+[2026-07-01T03:47:41Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T03:57:51Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T04:08:12Z] flip: starting PE2 daemon
+[2026-07-01T04:08:13Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T04:18:22Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T04:28:43Z] flip: starting PE2 daemon
+[2026-07-01T04:28:44Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T04:38:54Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T04:49:15Z] flip: starting PE2 daemon
+[2026-07-01T04:49:16Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T04:59:26Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T05:09:47Z] flip: starting PE2 daemon
+[2026-07-01T05:09:48Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T05:19:58Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T05:30:19Z] flip: starting PE2 daemon
+[2026-07-01T05:30:20Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T05:40:29Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T05:50:50Z] flip: starting PE2 daemon
+[2026-07-01T05:50:51Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T06:01:01Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T06:11:21Z] flip: starting PE2 daemon
+[2026-07-01T06:11:23Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T06:21:32Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T06:31:52Z] flip: starting PE2 daemon
+[2026-07-01T06:31:53Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T06:42:02Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T06:52:23Z] flip: starting PE2 daemon
+[2026-07-01T06:52:24Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T07:02:33Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T07:12:54Z] flip: starting PE2 daemon
+[2026-07-01T07:12:55Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T07:23:05Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T07:33:25Z] flip: starting PE2 daemon
+[2026-07-01T07:33:27Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T07:43:36Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T07:53:57Z] flip: starting PE2 daemon
+[2026-07-01T07:53:58Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T08:04:08Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T08:14:28Z] flip: starting PE2 daemon
+[2026-07-01T08:14:29Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T08:24:38Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T08:34:59Z] flip: starting PE2 daemon
+[2026-07-01T08:35:00Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T08:45:09Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T08:55:30Z] flip: starting PE2 daemon
+[2026-07-01T08:55:31Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T09:05:40Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T09:16:01Z] flip: starting PE2 daemon
+[2026-07-01T09:16:02Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T09:26:12Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T09:36:33Z] flip: starting PE2 daemon
+[2026-07-01T09:36:34Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T09:46:44Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T09:57:04Z] flip: starting PE2 daemon
+[2026-07-01T09:57:05Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T10:07:15Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T10:17:36Z] flip: starting PE2 daemon
+[2026-07-01T10:17:37Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T10:27:47Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T10:38:06Z] flip: starting PE2 daemon
+[2026-07-01T10:38:07Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T10:48:17Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T10:58:38Z] flip: starting PE2 daemon
+[2026-07-01T10:58:39Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T11:08:48Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T11:19:09Z] flip: starting PE2 daemon
+[2026-07-01T11:19:10Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T11:29:20Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T11:39:40Z] flip: starting PE2 daemon
+[2026-07-01T11:39:41Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
+[2026-07-01T11:49:51Z] flip: stopping PE2 daemon (mode=term)
+[2026-07-01T11:50:52Z] soak loop exiting; cleaning up background tasks
