@@ -473,6 +473,19 @@ pub struct VpnRibRouteKey {
     pub path_id: u32,
 }
 
+impl VpnRibRouteKey {
+    /// The wire AFI/SAFI pair for this key (`Ipv4`/`Ipv6` + `MplsVpn`),
+    /// derived from the RD-scoped prefix family.
+    #[must_use]
+    pub fn afi_safi(&self) -> (Afi, Safi) {
+        let afi = match self.nlri_key.prefix.family() {
+            VpnAddressFamily::V4 => Afi::Ipv4,
+            VpnAddressFamily::V6 => Afi::Ipv6,
+        };
+        (afi, Safi::MplsVpn)
+    }
+}
+
 /// A single VPNv4/VPNv6 route stored by the ADR-0077 route-reflector slice.
 ///
 /// rustbgpd reflects VPN routes as a route reflector / controller feed: it
@@ -531,6 +544,21 @@ impl VpnRibRoute {
         VpnRibRouteKey {
             nlri_key: self.nlri.key(),
             path_id: self.path_id,
+        }
+    }
+
+    /// The inner IP prefix as an ordinary [`Prefix`], for honest export-policy
+    /// prefix matching (ADR-0077) — unlike BGP-LS, a VPN route has a real
+    /// prefix.
+    #[must_use]
+    pub fn inner_prefix(&self) -> Prefix {
+        match self.nlri.prefix {
+            rustbgpd_wire::VpnPrefix::V4 { addr, len } => {
+                Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len))
+            }
+            rustbgpd_wire::VpnPrefix::V6 { addr, len } => {
+                Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len))
+            }
         }
     }
 

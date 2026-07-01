@@ -343,18 +343,16 @@ impl RibManager {
         if !evpn_affected.is_empty() {
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
-        // BGP-LS is receive/API-only (no outbound distribution yet), so a
-        // departed peer's routes must fall back to the next-best remaining
-        // candidate or be removed from the Loc-RIB. Without this the entries
+        // A departed peer's BGP-LS routes must fall back to the next-best
+        // remaining candidate or be removed from the Loc-RIB (and withdrawn
+        // downstream by the distribution step). Without this the entries
         // would strand in `loc_rib.bgpls_routes` until process restart and
         // surface through `ListBgpLsRoutes` as if still live.
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
         }
-        // VPN is receive/API-only for now (reflection is a later PR), so a
-        // departed peer's routes must fall back to the next-best remaining
-        // candidate or be removed from the Loc-RIB — same stranding hazard
-        // as BGP-LS above.
+        // Same fallback/withdraw obligation for the departed peer's
+        // VPNv4/VPNv6 routes — same stranding hazard as BGP-LS above.
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
         }
@@ -627,6 +625,8 @@ impl RibManager {
         let mut evpn_withdraw = Vec::new();
         let mut bgpls_announce = Vec::new();
         let mut bgpls_withdraw = Vec::new();
+        let mut vpn_announce = Vec::new();
+        let mut vpn_withdraw = Vec::new();
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
@@ -824,6 +824,37 @@ impl RibManager {
             );
         }
 
+        // VPNv4/VPNv6 initial dump — a peer that joins after the VPN table
+        // has converged must still receive it before EoR. Mirrors the BGP-LS
+        // staging block.
+        let all_l3vpn_keys: HashSet<crate::route::VpnRibRouteKey> = self
+            .loc_rib
+            .iter_vpn()
+            .map(crate::route::VpnRibRoute::key)
+            .collect();
+        if !all_l3vpn_keys.is_empty() {
+            Self::stage_vpn_routes(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_l3vpn_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
+                &mut vpn_announce,
+                &mut vpn_withdraw,
+                false, // initial dump — equality check is correct
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let mut eor_families = self
             .peer_sendable_families
@@ -862,7 +893,9 @@ impl RibManager {
             || !evpn_announce.is_empty()
             || !evpn_withdraw.is_empty()
             || !bgpls_announce.is_empty()
-            || !bgpls_withdraw.is_empty();
+            || !bgpls_withdraw.is_empty()
+            || !vpn_announce.is_empty()
+            || !vpn_withdraw.is_empty();
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update(
                 peer,
@@ -877,6 +910,8 @@ impl RibManager {
                 evpn_withdraw,
                 bgpls_announce,
                 bgpls_withdraw,
+                vpn_announce,
+                vpn_withdraw,
             );
         if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
