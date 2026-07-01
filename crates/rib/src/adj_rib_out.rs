@@ -8,7 +8,9 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
-use crate::route::{BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route};
+use crate::route::{
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, VpnRibRoute, VpnRibRouteKey,
+};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -28,6 +30,8 @@ pub struct AdjRibOut {
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
+    /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
+    vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
 }
 
 impl AdjRibOut {
@@ -50,6 +54,7 @@ impl AdjRibOut {
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
+            vpn_routes: HashMap::default(),
         }
     }
 
@@ -116,14 +121,15 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
-    /// Remove every advertised route — unicast, `FlowSpec`, EVPN, and BGP-LS —
-    /// and the secondary prefix index.
+    /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS, and
+    /// VPN — and the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
+        self.vpn_routes.clear();
     }
 
     /// Return the number of advertised routes.
@@ -254,6 +260,35 @@ impl AdjRibOut {
     pub fn bgpls_len(&self) -> usize {
         self.bgpls_routes.len()
     }
+
+    // --- VPNv4/VPNv6 methods (ADR-0077 outbound reflection substrate) ---
+
+    /// Insert or replace an advertised VPN route.
+    pub fn insert_vpn(&mut self, route: VpnRibRoute) {
+        self.vpn_routes.insert(route.key(), route);
+    }
+
+    /// Remove an advertised VPN route by key. Returns `true` if it existed.
+    pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
+        self.vpn_routes.remove(key).is_some()
+    }
+
+    /// Look up an advertised VPN route by key.
+    #[must_use]
+    pub fn get_vpn(&self, key: &VpnRibRouteKey) -> Option<&VpnRibRoute> {
+        self.vpn_routes.get(key)
+    }
+
+    /// Iterate over all advertised VPN routes.
+    pub fn iter_vpn(&self) -> impl Iterator<Item = &VpnRibRoute> {
+        self.vpn_routes.values()
+    }
+
+    /// Return the number of advertised VPN routes.
+    #[must_use]
+    pub fn vpn_len(&self) -> usize {
+        self.vpn_routes.len()
+    }
 }
 
 #[cfg(test)]
@@ -263,7 +298,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_wire::{Ipv4Prefix, Origin, PathAttribute, Prefix};
+    use rustbgpd_wire::{
+        Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, Prefix, RouteDistinguisher, VpnNlri,
+        VpnPrefix,
+    };
 
     use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
@@ -303,6 +341,58 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    fn vpn_nlri(addr: [u8; 4], len: u8, label: u32) -> VpnNlri {
+        VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher::new([0, 0, 0, 0, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v4(Ipv4Addr::from(addr), len).unwrap(),
+        }
+    }
+
+    fn make_vpn_route(nlri: VpnNlri, peer_oct: u8) -> VpnRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        VpnRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn vpn_insert_remove_iter_isolated_from_unicast_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 0,
+        };
+
+        rib.insert_vpn(make_vpn_route(nlri.clone(), 1));
+        assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.iter_vpn().count(), 1);
+        assert_eq!(rib.len(), 0);
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+
+        // Same RD + prefix + path_id replaces in place.
+        rib.insert_vpn(make_vpn_route(nlri, 2));
+        assert_eq!(rib.vpn_len(), 1, "same key should replace");
+        assert_eq!(
+            rib.get_vpn(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.remove_vpn(&key));
+        assert_eq!(rib.vpn_len(), 0);
+        assert!(!rib.remove_vpn(&key));
     }
 
     #[test]

@@ -234,7 +234,10 @@ fn classify_mp_nlri_family(
         (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::Multicast | Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec)
-        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec) => {
+        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
+        // VPNv4/VPNv6 (SAFI 128) stays unreachable in the ADR-0077 §3a substrate
+        // slice; the receive slice promotes (IPv4/IPv6, MplsVpn) to an accept arm.
+        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn) => {
             Err(unsupported_mp_nlri_family(attribute, afi, safi))
         }
     }

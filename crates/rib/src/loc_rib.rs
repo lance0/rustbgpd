@@ -12,7 +12,9 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Origin, PathAttribute, P
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::best_path_cmp;
-use crate::route::{BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route};
+use crate::route::{
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, VpnRibRoute, VpnRibRouteKey,
+};
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
@@ -23,6 +25,8 @@ pub struct LocRib {
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS Loc-RIB: best route per opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
+    /// VPNv4/VPNv6 Loc-RIB: best route per RFC 4364 RD + prefix identity.
+    vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
 }
 
 impl LocRib {
@@ -40,6 +44,7 @@ impl LocRib {
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
+            vpn_routes: HashMap::default(),
         }
     }
 
@@ -300,6 +305,67 @@ impl LocRib {
     /// Remove the selected BGP-LS route for a key. Returns `true` if it existed.
     pub fn remove_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
         self.bgpls_routes.remove(key).is_some()
+    }
+
+    /// Recompute the best VPNv4/VPNv6 route for `key` from the candidates.
+    ///
+    /// Uses the same family-agnostic BGP preference chain as BGP-LS: stale rank,
+    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
+    /// originator ID, then peer address. The MPLS label stack is route data, not
+    /// a selection input; a same-peer relabel is caught by the `nlri` change
+    /// check so the reflected label stays current.
+    pub fn recompute_vpn<'a>(
+        &mut self,
+        key: VpnRibRouteKey,
+        candidates: impl Iterator<Item = &'a VpnRibRoute>,
+    ) -> bool {
+        let best = candidates.min_by(|a, b| vpn_tiebreak(a, b)).cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self.vpn_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.path_id != new_best.path_id
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.nlri != new_best.nlri
+                        || old.attributes != new_best.attributes
+                });
+                if changed {
+                    self.vpn_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.vpn_routes.remove(&key).is_some(),
+        }
+    }
+
+    /// Insert or replace the selected VPN route for a key.
+    pub fn insert_vpn(&mut self, route: VpnRibRoute) {
+        self.vpn_routes.insert(route.key(), route);
+    }
+
+    /// Look up the selected VPN route for a key.
+    #[must_use]
+    pub fn get_vpn(&self, key: &VpnRibRouteKey) -> Option<&VpnRibRoute> {
+        self.vpn_routes.get(key)
+    }
+
+    /// Iterate over all selected VPN routes.
+    pub fn iter_vpn(&self) -> impl Iterator<Item = &VpnRibRoute> {
+        self.vpn_routes.values()
+    }
+
+    /// Return the number of selected VPN routes.
+    #[must_use]
+    pub fn vpn_len(&self) -> usize {
+        self.vpn_routes.len()
+    }
+
+    /// Remove the selected VPN route for a key. Returns `true` if it existed.
+    pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
+        self.vpn_routes.remove(key).is_some()
     }
 }
 
@@ -604,6 +670,120 @@ fn bgpls_originator_id(route: &BgpLsRibRoute) -> Option<std::net::Ipv4Addr> {
     })
 }
 
+fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
+    let cmp = vpn_stale_rank(a).cmp(&vpn_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = vpn_local_pref(b).cmp(&vpn_local_pref(a));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let a_len = vpn_as_path(a).map_or(0, AsPath::len);
+    let b_len = vpn_as_path(b).map_or(0, AsPath::len);
+    let cmp = a_len.cmp(&b_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = vpn_origin(a).cmp(&vpn_origin(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = vpn_med(a).cmp(&vpn_med(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = vpn_cluster_list_len(a).cmp(&vpn_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    if let (Some(a_oid), Some(b_oid)) = (vpn_originator_id(a), vpn_originator_id(b)) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    cmp_ipaddr(&a.peer, &b.peer)
+}
+
+fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
+fn vpn_local_pref(route: &VpnRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(100)
+}
+
+fn vpn_as_path(route: &VpnRibRoute) -> Option<&AsPath> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::AsPath(path) => Some(path),
+        _ => None,
+    })
+}
+
+fn vpn_origin(route: &VpnRibRoute) -> Origin {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Origin(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(Origin::Incomplete)
+}
+
+fn vpn_med(route: &VpnRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn vpn_cluster_list_len(route: &VpnRibRoute) -> usize {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::ClusterList(ids) => Some(ids.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn vpn_originator_id(route: &VpnRibRoute) -> Option<std::net::Ipv4Addr> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::OriginatorId(id) => Some(*id),
+        _ => None,
+    })
+}
+
 /// Compare two `IpAddr` values, treating V4 < V6.
 fn cmp_ipaddr(a: &IpAddr, b: &IpAddr) -> std::cmp::Ordering {
     match (a, b) {
@@ -628,7 +808,8 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
-        NumericMatch, Origin, PathAttribute,
+        MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher, VpnNlri,
+        VpnPrefix,
     };
 
     use super::*;
@@ -669,6 +850,111 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    fn vpn_nlri(addr: [u8; 4], len: u8, label: u32) -> VpnNlri {
+        VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher::new([0, 0, 0, 0, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v4(Ipv4Addr::from(addr), len).unwrap(),
+        }
+    }
+
+    fn make_vpn_route(nlri: VpnNlri, peer_oct: u8, local_pref: u32) -> VpnRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        VpnRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::LocalPref(local_pref),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn recompute_vpn_higher_local_pref_wins() {
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 0,
+        };
+        let r1 = make_vpn_route(nlri.clone(), 1, 100);
+        let r2 = make_vpn_route(nlri, 2, 200);
+        let mut loc = LocRib::new();
+
+        assert!(loc.recompute_vpn(key.clone(), [&r1, &r2].into_iter()));
+        assert_eq!(loc.vpn_len(), 1);
+        assert_eq!(
+            loc.get_vpn(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "higher LOCAL_PREF candidate must win"
+        );
+    }
+
+    #[test]
+    fn recompute_vpn_stale_demoted_despite_higher_local_pref() {
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 0,
+        };
+        let mut r_stale = make_vpn_route(nlri.clone(), 1, 200);
+        r_stale.is_stale = true;
+        let r_fresh = make_vpn_route(nlri, 2, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_vpn(key.clone(), [&r_stale, &r_fresh].into_iter());
+        assert_eq!(
+            loc.get_vpn(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "fresh route wins over a stale route with higher LOCAL_PREF"
+        );
+    }
+
+    #[test]
+    fn recompute_vpn_empty_candidates_removes_existing_key() {
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 0,
+        };
+        let route = make_vpn_route(nlri, 1, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_vpn(key.clone(), [&route].into_iter());
+        assert_eq!(loc.vpn_len(), 1);
+
+        let empty: Vec<&VpnRibRoute> = vec![];
+        assert!(
+            loc.recompute_vpn(key.clone(), empty.into_iter()),
+            "removing an existing key returns true"
+        );
+        assert_eq!(loc.vpn_len(), 0);
+        assert!(loc.get_vpn(&key).is_none());
+
+        let empty: Vec<&VpnRibRoute> = vec![];
+        assert!(
+            !loc.recompute_vpn(key, empty.into_iter()),
+            "removing an absent key returns false"
+        );
+    }
+
+    #[test]
+    fn vpn_loc_rib_is_isolated_from_unicast_best_routes() {
+        let mut loc = LocRib::new();
+        loc.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 2, 0], 24, 100), 1, 100));
+
+        assert_eq!(loc.vpn_len(), 1);
+        assert_eq!(loc.len(), 0);
+        assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
     }
 
     #[test]

@@ -45,6 +45,9 @@ pub enum Safi {
     BgpLs = 71,
     /// RFC 9552 BGP-LS VPN — only valid with [`Afi::BgpLs`].
     BgpLsVpn = 72,
+    /// RFC 4364 / RFC 4659 MPLS L3VPN (VPNv4/VPNv6) — only valid with
+    /// [`Afi::Ipv4`] / [`Afi::Ipv6`].
+    MplsVpn = 128,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
 }
@@ -59,6 +62,7 @@ impl Safi {
             70 => Some(Self::Evpn),
             71 => Some(Self::BgpLs),
             72 => Some(Self::BgpLsVpn),
+            128 => Some(Self::MplsVpn),
             133 => Some(Self::FlowSpec),
             _ => None,
         }
