@@ -13,7 +13,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::best_path_cmp;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, VpnRibRoute, VpnRibRouteKey,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
+    VpnRibRoute, VpnRibRouteKey,
 };
 
 /// The local RIB storing the best route per prefix.
@@ -27,6 +28,8 @@ pub struct LocRib {
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 Loc-RIB: best route per RFC 4364 RD + prefix identity.
     vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// RT-Constrain Loc-RIB: best route per RFC 4684 RT membership identity.
+    rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
 
 impl LocRib {
@@ -45,6 +48,7 @@ impl LocRib {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            rtc_routes: HashMap::default(),
         }
     }
 
@@ -366,6 +370,65 @@ impl LocRib {
     /// Remove the selected VPN route for a key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
         self.vpn_routes.remove(key).is_some()
+    }
+
+    /// Recompute the best RT-Constrain route for `key` from the candidates.
+    ///
+    /// Uses the same family-agnostic BGP preference chain as VPN: stale rank,
+    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
+    /// originator ID, then peer address.
+    pub fn recompute_rtc<'a>(
+        &mut self,
+        key: RtcRibRouteKey,
+        candidates: impl Iterator<Item = &'a RtcRibRoute>,
+    ) -> bool {
+        let best = candidates.min_by(|a, b| rtc_tiebreak(a, b)).cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self.rtc_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.path_id != new_best.path_id
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.nlri != new_best.nlri
+                        || old.attributes != new_best.attributes
+                });
+                if changed {
+                    self.rtc_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.rtc_routes.remove(&key).is_some(),
+        }
+    }
+
+    /// Insert or replace the selected RTC route for a key.
+    pub fn insert_rtc(&mut self, route: RtcRibRoute) {
+        self.rtc_routes.insert(route.key(), route);
+    }
+
+    /// Look up the selected RTC route for a key.
+    #[must_use]
+    pub fn get_rtc(&self, key: &RtcRibRouteKey) -> Option<&RtcRibRoute> {
+        self.rtc_routes.get(key)
+    }
+
+    /// Iterate over all selected RTC routes.
+    pub fn iter_rtc(&self) -> impl Iterator<Item = &RtcRibRoute> {
+        self.rtc_routes.values()
+    }
+
+    /// Return the number of selected RTC routes.
+    #[must_use]
+    pub fn rtc_len(&self) -> usize {
+        self.rtc_routes.len()
+    }
+
+    /// Remove the selected RTC route for a key. Returns `true` if it existed.
+    pub fn remove_rtc(&mut self, key: &RtcRibRouteKey) -> bool {
+        self.rtc_routes.remove(key).is_some()
     }
 }
 
@@ -784,6 +847,120 @@ fn vpn_originator_id(route: &VpnRibRoute) -> Option<std::net::Ipv4Addr> {
     })
 }
 
+fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
+    let cmp = rtc_stale_rank(a).cmp(&rtc_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = rtc_local_pref(b).cmp(&rtc_local_pref(a));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let a_len = rtc_as_path(a).map_or(0, AsPath::len);
+    let b_len = rtc_as_path(b).map_or(0, AsPath::len);
+    let cmp = a_len.cmp(&b_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = rtc_origin(a).cmp(&rtc_origin(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = rtc_med(a).cmp(&rtc_med(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = rtc_cluster_list_len(a).cmp(&rtc_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    if let (Some(a_oid), Some(b_oid)) = (rtc_originator_id(a), rtc_originator_id(b)) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    cmp_ipaddr(&a.peer, &b.peer)
+}
+
+fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
+fn rtc_local_pref(route: &RtcRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(100)
+}
+
+fn rtc_as_path(route: &RtcRibRoute) -> Option<&AsPath> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::AsPath(path) => Some(path),
+        _ => None,
+    })
+}
+
+fn rtc_origin(route: &RtcRibRoute) -> Origin {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Origin(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(Origin::Incomplete)
+}
+
+fn rtc_med(route: &RtcRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn rtc_cluster_list_len(route: &RtcRibRoute) -> usize {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::ClusterList(ids) => Some(ids.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn rtc_originator_id(route: &RtcRibRoute) -> Option<std::net::Ipv4Addr> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::OriginatorId(id) => Some(*id),
+        _ => None,
+    })
+}
+
 /// Compare two `IpAddr` values, treating V4 < V6.
 fn cmp_ipaddr(a: &IpAddr, b: &IpAddr) -> std::cmp::Ordering {
     match (a, b) {
@@ -808,7 +985,7 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
-        MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher, VpnNlri,
+        MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher, RtcNlri, VpnNlri,
         VpnPrefix,
     };
 
@@ -954,6 +1131,101 @@ mod tests {
 
         assert_eq!(loc.vpn_len(), 1);
         assert_eq!(loc.len(), 0);
+        assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
+    }
+
+    fn rtc_test_nlri(local_admin: u32) -> RtcNlri {
+        // 2-octet-AS RT:65001:<local_admin>, origin AS 65001, full /96.
+        let rt = 0x0002_FDE9_0000_0000_u64 | u64::from(local_admin);
+        RtcNlri::new(65001, rt, 96).unwrap()
+    }
+
+    fn make_rtc_route(nlri: RtcNlri, peer_oct: u8, local_pref: u32) -> RtcRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        RtcRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::LocalPref(local_pref),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn recompute_rtc_higher_local_pref_wins() {
+        let nlri = rtc_test_nlri(100);
+        let key = RtcRibRouteKey { nlri, path_id: 0 };
+        let r1 = make_rtc_route(nlri, 1, 100);
+        let r2 = make_rtc_route(nlri, 2, 200);
+        let mut loc = LocRib::new();
+
+        assert!(loc.recompute_rtc(key.clone(), [&r1, &r2].into_iter()));
+        assert_eq!(loc.rtc_len(), 1);
+        assert_eq!(
+            loc.get_rtc(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "higher LOCAL_PREF candidate must win"
+        );
+    }
+
+    #[test]
+    fn recompute_rtc_stale_demoted_despite_higher_local_pref() {
+        let nlri = rtc_test_nlri(100);
+        let key = RtcRibRouteKey { nlri, path_id: 0 };
+        let mut r_stale = make_rtc_route(nlri, 1, 200);
+        r_stale.is_stale = true;
+        let r_fresh = make_rtc_route(nlri, 2, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_rtc(key.clone(), [&r_stale, &r_fresh].into_iter());
+        assert_eq!(
+            loc.get_rtc(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "fresh route wins over a stale route with higher LOCAL_PREF"
+        );
+    }
+
+    #[test]
+    fn recompute_rtc_empty_candidates_removes_existing_key() {
+        let nlri = rtc_test_nlri(100);
+        let key = RtcRibRouteKey { nlri, path_id: 0 };
+        let route = make_rtc_route(nlri, 1, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_rtc(key.clone(), [&route].into_iter());
+        assert_eq!(loc.rtc_len(), 1);
+
+        let empty: Vec<&RtcRibRoute> = vec![];
+        assert!(
+            loc.recompute_rtc(key.clone(), empty.into_iter()),
+            "removing an existing key returns true"
+        );
+        assert_eq!(loc.rtc_len(), 0);
+        assert!(loc.get_rtc(&key).is_none());
+
+        let empty: Vec<&RtcRibRoute> = vec![];
+        assert!(
+            !loc.recompute_rtc(key, empty.into_iter()),
+            "removing an absent key returns false"
+        );
+    }
+
+    #[test]
+    fn rtc_loc_rib_is_isolated_from_unicast_and_vpn_best_routes() {
+        let mut loc = LocRib::new();
+        loc.insert_rtc(make_rtc_route(rtc_test_nlri(100), 1, 100));
+
+        assert_eq!(loc.rtc_len(), 1);
+        assert_eq!(loc.len(), 0);
+        assert_eq!(loc.vpn_len(), 0);
         assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
     }
 

@@ -9,7 +9,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, VpnRibRoute, VpnRibRouteKey,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
+    VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
@@ -32,6 +33,8 @@ pub struct AdjRibOut {
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
     vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// RT-Constrain routes advertised to this peer, keyed by RFC 4684 identity.
+    rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
 
 impl AdjRibOut {
@@ -55,6 +58,7 @@ impl AdjRibOut {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            rtc_routes: HashMap::default(),
         }
     }
 
@@ -121,8 +125,8 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
-    /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS, and
-    /// VPN — and the secondary prefix index.
+    /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
+    /// VPN, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
@@ -130,6 +134,7 @@ impl AdjRibOut {
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
+        self.rtc_routes.clear();
     }
 
     /// Return the number of advertised routes.
@@ -289,6 +294,35 @@ impl AdjRibOut {
     pub fn vpn_len(&self) -> usize {
         self.vpn_routes.len()
     }
+
+    // --- RT-Constrain methods (RFC 4684 outbound reflection substrate) ---
+
+    /// Insert or replace an advertised RTC route.
+    pub fn insert_rtc(&mut self, route: RtcRibRoute) {
+        self.rtc_routes.insert(route.key(), route);
+    }
+
+    /// Remove an advertised RTC route by key. Returns `true` if it existed.
+    pub fn remove_rtc(&mut self, key: &RtcRibRouteKey) -> bool {
+        self.rtc_routes.remove(key).is_some()
+    }
+
+    /// Look up an advertised RTC route by key.
+    #[must_use]
+    pub fn get_rtc(&self, key: &RtcRibRouteKey) -> Option<&RtcRibRoute> {
+        self.rtc_routes.get(key)
+    }
+
+    /// Iterate over all advertised RTC routes.
+    pub fn iter_rtc(&self) -> impl Iterator<Item = &RtcRibRoute> {
+        self.rtc_routes.values()
+    }
+
+    /// Return the number of advertised RTC routes.
+    #[must_use]
+    pub fn rtc_len(&self) -> usize {
+        self.rtc_routes.len()
+    }
 }
 
 #[cfg(test)]
@@ -299,8 +333,8 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, Prefix, RouteDistinguisher, VpnNlri,
-        VpnPrefix,
+        Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, Prefix, RouteDistinguisher, RtcNlri,
+        VpnNlri, VpnPrefix,
     };
 
     use crate::route::BgpLsFamily;
@@ -393,6 +427,50 @@ mod tests {
         assert!(rib.remove_vpn(&key));
         assert_eq!(rib.vpn_len(), 0);
         assert!(!rib.remove_vpn(&key));
+    }
+
+    fn make_rtc_route(local_admin: u32, peer_oct: u8) -> RtcRibRoute {
+        // 2-octet-AS RT:65001:<local_admin>, origin AS 65001, full /96.
+        let rt = 0x0002_FDE9_0000_0000_u64 | u64::from(local_admin);
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        RtcRibRoute {
+            nlri: RtcNlri::new(65001, rt, 96).unwrap(),
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn rtc_insert_remove_iter_isolated_from_unicast_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let route = make_rtc_route(100, 1);
+        let key = route.key();
+
+        rib.insert_rtc(route);
+        assert_eq!(rib.rtc_len(), 1);
+        assert_eq!(rib.iter_rtc().count(), 1);
+        assert_eq!(rib.len(), 0);
+        assert_eq!(rib.vpn_len(), 0);
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+
+        // Same NLRI + path_id replaces in place.
+        rib.insert_rtc(make_rtc_route(100, 2));
+        assert_eq!(rib.rtc_len(), 1, "same key should replace");
+        assert_eq!(
+            rib.get_rtc(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.remove_rtc(&key));
+        assert_eq!(rib.rtc_len(), 0);
+        assert!(!rib.remove_rtc(&key));
     }
 
     #[test]

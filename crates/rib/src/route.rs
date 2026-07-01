@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
-    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
+    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation, RtcNlri, Safi,
     VpnAddressFamily, VpnNlri, VpnRouteKey,
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
@@ -629,6 +629,144 @@ impl VpnRibRoute {
     }
 }
 
+/// RT-Constrain (RFC 4684) route identity for the RIB.
+///
+/// The wire [`RtcNlri`] is the full route identity — a 0–96-bit prefix over
+/// origin AS + Route Target. `path_id` is reserved for a future
+/// Add-Path-enabled slice and is always zero until negotiation grows that
+/// capability, mirroring [`VpnRibRouteKey`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RtcRibRouteKey {
+    /// Wire route identity: the RT membership NLRI itself.
+    pub nlri: RtcNlri,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl RtcRibRouteKey {
+    /// The wire AFI/SAFI pair for RT-Constrain. RFC 4684 defines the family
+    /// only for AFI 1, so this is a constant.
+    #[must_use]
+    pub const fn afi_safi() -> (Afi, Safi) {
+        (Afi::Ipv4, Safi::RtConstrain)
+    }
+}
+
+/// A single RT-Constrain route stored by the RTC route-reflector slice.
+///
+/// RT membership NLRI reflect between clients like any other family
+/// (RFC 4684 §3.2); the membership information additionally drives the
+/// VPNv4/VPNv6 outbound filter in a later slice.
+#[derive(Debug, Clone)]
+pub struct RtcRibRoute {
+    /// The RT membership NLRI (full route identity).
+    pub nlri: RtcNlri,
+    /// Next-hop from `MP_REACH_NLRI`.
+    pub next_hop: IpAddr,
+    /// The peer that advertised this route.
+    pub peer: IpAddr,
+    /// BGP path attributes.
+    pub attributes: Arc<Vec<PathAttribute>>,
+    /// When this route was received (monotonic clock).
+    pub received_at: Instant,
+    /// How this route was learned (eBGP, iBGP, or local).
+    pub origin_type: RouteOrigin,
+    /// BGP router-id of the advertising peer.
+    pub peer_router_id: Ipv4Addr,
+    /// Whether this route is stale due to graceful restart.
+    pub is_stale: bool,
+    /// Whether this route is in LLGR stale phase (RFC 9494).
+    pub is_llgr_stale: bool,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl RtcRibRoute {
+    /// The wire AFI/SAFI pair for this route: always `(Ipv4, RtConstrain)`.
+    #[must_use]
+    pub const fn afi_safi(&self) -> (Afi, Safi) {
+        RtcRibRouteKey::afi_safi()
+    }
+
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
+    }
+
+    /// Identity key suitable for RTC Adj-RIB-In, Loc-RIB, and Adj-RIB-Out maps.
+    #[must_use]
+    pub fn key(&self) -> RtcRibRouteKey {
+        RtcRibRouteKey {
+            nlri: self.nlri,
+            path_id: self.path_id,
+        }
+    }
+
+    /// Extract the `AS_PATH`, returning `None` if absent.
+    #[must_use]
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit `LOCAL_PREF`, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit MED, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::Communities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract EXTENDED COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+}
+
 impl FlowSpecRoute {
     /// Extract the ORIGIN attribute value, defaulting to `Incomplete`.
     #[must_use]
@@ -1106,5 +1244,63 @@ mod tests {
 
         assert_eq!(v4.afi_safi(), (Afi::Ipv4, Safi::MplsVpn));
         assert_eq!(v6.afi_safi(), (Afi::Ipv6, Safi::MplsVpn));
+    }
+
+    fn make_rtc_route(local_admin: u32, path_id: u32) -> RtcRibRoute {
+        // 2-octet-AS RT:65001:<local_admin>, origin AS 65001, full /96.
+        let rt = 0x0002_FDE9_0000_0000_u64 | u64::from(local_admin);
+        RtcRibRoute {
+            nlri: RtcNlri::new(65001, rt, 96).unwrap(),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id,
+        }
+    }
+
+    #[test]
+    fn rtc_route_key_round_trips_through_map() {
+        let route = make_rtc_route(100, 0);
+        let key = route.key();
+
+        let mut map: HashMap<RtcRibRouteKey, RtcRibRoute> = HashMap::new();
+        map.insert(key.clone(), route.clone());
+
+        let stored = map.get(&key).expect("route retrievable by its own key");
+        assert_eq!(stored.nlri, route.nlri);
+        assert_eq!(key.nlri, route.nlri);
+        assert_eq!(key.path_id, 0);
+    }
+
+    #[test]
+    fn rtc_same_nlri_different_path_id_are_distinct_keys() {
+        let a = make_rtc_route(100, 1);
+        let b = make_rtc_route(100, 2);
+
+        assert_eq!(a.key().nlri, b.key().nlri, "same wire NLRI identity");
+        assert_ne!(
+            a.key(),
+            b.key(),
+            "differing path_id makes the RIB key distinct"
+        );
+
+        let mut map: HashMap<RtcRibRouteKey, RtcRibRoute> = HashMap::new();
+        map.insert(a.key(), a);
+        map.insert(b.key(), b);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn rtc_afi_safi_is_constant_ipv4_rt_constrain() {
+        assert_eq!(RtcRibRouteKey::afi_safi(), (Afi::Ipv4, Safi::RtConstrain));
+        assert_eq!(
+            make_rtc_route(100, 0).afi_safi(),
+            (Afi::Ipv4, Safi::RtConstrain)
+        );
     }
 }

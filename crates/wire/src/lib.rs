@@ -62,6 +62,8 @@ pub mod orf;
 pub mod pmsi;
 /// ROUTE-REFRESH message struct and codec (RFC 2918 / RFC 7313).
 pub mod route_refresh;
+/// RT-Constrain NLRI codec substrate (RFC 4684).
+pub mod rtc;
 /// UPDATE message struct, codec, and builder.
 pub mod update;
 /// UPDATE attribute semantic validation (RFC 4271 §6.3).
@@ -82,6 +84,10 @@ pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
 pub use route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
+pub use rtc::{
+    RTC_MAX_PREFIX_BITS, RTC_MIN_NON_DEFAULT_PREFIX_BITS, RTC_SAFI, RtcNlri, decode_rtc_nlri,
+    encode_rtc_nlri,
+};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
 pub use vpn::{
     LABELED_UNICAST_SAFI, MPLS_VPN_SAFI, MplsLabelEntry, VPNV4_AFI, VPNV6_AFI, VpnAddressFamily,
