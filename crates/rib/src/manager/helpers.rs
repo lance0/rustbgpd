@@ -75,6 +75,21 @@ pub(super) fn bgpls_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// VPNv4/VPNv6 counterpart of [`routes_equal`]. Unlike BGP-LS, the full NLRI
+/// must be compared: the MPLS label stack is route data excluded from the map
+/// key, so a same-peer relabel changes `nlri` while the key stays stable —
+/// and must still be re-advertised.
+pub(super) fn vpn_routes_equal(
+    a: &crate::route::VpnRibRoute,
+    b: &crate::route::VpnRibRoute,
+) -> bool {
+    a.nlri == b.nlri
+        && a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && a.path_id == b.path_id
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+}
+
 #[must_use]
 pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     match prefix {
@@ -93,14 +108,15 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn",
         (Afi::BgpLs, Safi::BgpLs) => "bgpls",
         (Afi::BgpLs, Safi::BgpLsVpn) => "bgpls_vpn",
+        (Afi::Ipv4, Safi::MplsVpn) => "l3vpn_ipv4_unicast",
+        (Afi::Ipv6, Safi::MplsVpn) => "l3vpn_ipv6_unicast",
         (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
         (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
         (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
         | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
         | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
-        // VPNv4/VPNv6 (SAFI 128) is unreachable until the receive slice.
-        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn) => "unsupported",
+        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn) => "unsupported",
     }
 }
 

@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use rustbgpd_wire::{
     AddressPrefixOrf, Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId,
     EvpnImet, EvpnMacIp, EvpnRoute, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, MacAddress,
-    MplsLabel, OrfAction, OrfMatch, Origin, PathAttribute, Prefix, RouteDistinguisher,
-    RpkiValidation, Safi, WhenToRefresh, bgpls::decode_bgpls_nlri,
+    MplsLabel, MplsLabelEntry, OrfAction, OrfMatch, Origin, PathAttribute, Prefix,
+    RouteDistinguisher, RpkiValidation, Safi, VpnNlri, VpnPrefix, WhenToRefresh,
+    bgpls::decode_bgpls_nlri,
 };
 use tokio::sync::oneshot;
 
@@ -15,6 +16,7 @@ use super::*;
 use crate::event::RouteEventType;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope, Route,
+    VpnRibRoute,
 };
 use crate::test_support::{make_flowspec_route, make_route, make_route_with_lp, make_v6_route};
 
@@ -80,6 +82,41 @@ fn make_bgpls_route(peer: Ipv4Addr, payload_suffix: u8, local_pref: u32) -> BgpL
         .expect("fixture contains one BGP-LS NLRI");
     BgpLsRibRoute {
         family: BgpLsFamily::LinkState,
+        nlri,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+
+fn vpn_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::Ipv4, Safi::MplsVpn)]
+}
+
+/// A `VPNv4` route from `peer` with a distinct prefix octet, MPLS label, and
+/// `LOCAL_PREF`. Same octet from two peers = same RIB key (labels are route
+/// data, not identity).
+fn make_vpn_rib_route(
+    peer: Ipv4Addr,
+    prefix_octet: u8,
+    label: u32,
+    local_pref: u32,
+) -> VpnRibRoute {
+    let nlri = VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+        route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+        prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, prefix_octet, 0), 24).unwrap(),
+    };
+    VpnRibRoute {
         nlri,
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
@@ -1003,6 +1040,413 @@ async fn bgpls_gr_entry_withdraws_or_falls_back_loc_rib() {
     assert!(
         after_last_gr.is_empty(),
         "BGP-LS GR entry should not retain the last peer's route as stale/live"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A received VPN route must be reflected to an eligible (eBGP-export) peer,
+/// and a withdrawal must be staged with the RD + prefix key.
+#[tokio::test]
+async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+    assert_eq!(
+        update.vpn_announce[0].nlri, route.nlri,
+        "RD + label stack must pass through reflection verbatim"
+    );
+    assert_eq!(update.vpn_announce[0].next_hop, route.next_hop);
+    assert!(update.vpn_withdraw.is_empty());
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![key.clone()],
+    })
+    .await
+    .unwrap();
+
+    let withdraw = out_rx.recv().await.unwrap();
+    assert!(withdraw.vpn_announce.is_empty());
+    assert_eq!(withdraw.vpn_withdraw, vec![key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 4456 eligibility on VPN reflection: a non-client iBGP route is
+/// reflected to RR clients, suppressed toward other non-clients, and never
+/// echoed back to the source.
+#[tokio::test]
+async fn vpn_rr_reflects_non_client_route_to_clients_only() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let non_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+    let mut rxs = Vec::new();
+    for (peer, is_client) in [(source, false), (client, true), (non_client, false)] {
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: vpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: is_client,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        rxs.push(out_rx);
+    }
+    let mut non_client_rx = rxs.pop().unwrap();
+    let mut client_rx = rxs.pop().unwrap();
+    let mut source_rx = rxs.pop().unwrap();
+
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 32, 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let reflected = client_rx.recv().await.unwrap();
+    assert_eq!(reflected.vpn_announce.len(), 1);
+    assert_eq!(reflected.vpn_announce[0].key(), key);
+
+    let non_client_echo =
+        tokio::time::timeout(Duration::from_millis(50), non_client_rx.recv()).await;
+    assert!(
+        non_client_echo.is_err(),
+        "non-client iBGP route must not be reflected to another non-client"
+    );
+    let source_echo = tokio::time::timeout(Duration::from_millis(50), source_rx.recv()).await;
+    assert!(
+        source_echo.is_err(),
+        "VPN routes must not be reflected back to the source peer"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A same-peer relabel (same RD + prefix key, new MPLS label stack) must be
+/// re-advertised: the label is route data with no analog in the BGP-LS
+/// template, and `vpn_routes_equal` must catch the `nlri` change.
+#[tokio::test]
+async fn vpn_same_peer_relabel_triggers_re_advertise() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 33, 100, 100);
+    let relabeled = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 33, 200, 100);
+    assert_eq!(
+        route.key(),
+        relabeled.key(),
+        "label must not change the key"
+    );
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let first = out_rx.recv().await.unwrap();
+    assert_eq!(first.vpn_announce.len(), 1);
+    assert_eq!(first.vpn_announce[0].nlri.labels[0].label, 100);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![relabeled],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let second = out_rx.recv().await.unwrap();
+    assert_eq!(
+        second.vpn_announce.len(),
+        1,
+        "same-peer relabel must re-advertise"
+    );
+    assert_eq!(second.vpn_announce[0].nlri.labels[0].label, 200);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A dirty-resync (here: an export-policy replace, which forces a full
+/// restage against the real Adj-RIB-Out) must not re-send a VPN route whose
+/// staged form is unchanged.
+#[tokio::test]
+async fn vpn_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100, 100);
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let first = out_rx.recv().await.unwrap();
+    assert_eq!(first.vpn_announce.len(), 1);
+
+    // Policy replace marks the peer dirty and runs a full resync; the staged
+    // route equals the committed Adj-RIB-Out entry, so nothing is re-sent.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap();
+
+    let resend = tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await;
+    assert!(
+        resend.is_err(),
+        "unchanged VPN route must be skipped by the dirty-resync equality check"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer that comes up after the VPN table converged must receive the full
+/// table in its initial dump, followed by the SAFI-128 `EoR`.
+#[tokio::test]
+async fn send_initial_table_includes_vpn_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 35, 100, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+    assert!(update.vpn_withdraw.is_empty());
+
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, vpn_sendable());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A plain ROUTE-REFRESH request for (IPv4, `MplsVpn`) must replay the staged
+/// VPN routes between the BoRR/EoRR markers.
+#[tokio::test]
+async fn route_refresh_vpn_re_advertises_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 36, 100, 100);
+    let key = route.key();
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let _initial = out_rx.recv().await.unwrap();
+    let _eor = out_rx.recv().await.unwrap();
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+    assert!(update.vpn_withdraw.is_empty());
+    assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::MplsVpn)]);
+    assert_eq!(
+        update.refresh_markers,
+        vec![
+            (
+                Afi::Ipv4,
+                Safi::MplsVpn,
+                rustbgpd_wire::RouteRefreshSubtype::BoRR
+            ),
+            (
+                Afi::Ipv4,
+                Safi::MplsVpn,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR
+            ),
+        ]
     );
 
     drop(tx);

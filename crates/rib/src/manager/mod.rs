@@ -1654,8 +1654,9 @@ impl RibManager {
         announced: Vec<crate::route::VpnRibRoute>,
         withdrawn: Vec<crate::route::VpnRibRouteKey>,
     ) {
-        // ponytail: no refresh-stale bookkeeping yet — route-refresh replay
-        // for SAFI 128 is a later PR in the ADR-0077 arc.
+        // ponytail: no refresh-stale bookkeeping yet — the Enhanced
+        // route-refresh stale lifecycle for SAFI 128 is the next PR in the
+        // ADR-0077 arc (plain refresh replay is handled in route_refresh.rs).
         let mut affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
         let mut needs_intern_gc = false;
 
@@ -1682,17 +1683,13 @@ impl RibManager {
     }
 
     /// Recompute the Loc-RIB VPN selection for each affected key across the
-    /// current set of peer Adj-RIB-Ins. Recompute-only: VPN reflection
-    /// (outbound distribution) is a later PR in the ADR-0077 arc.
+    /// current set of peer Adj-RIB-Ins, then distribute the changes to
+    /// eligible peers. Shared by the receive path, peer teardown, and the
+    /// GR-entry conservative withdraw so a departed peer's routes fall back
+    /// to the next-best candidate (or are withdrawn downstream), mirroring
+    /// the unicast/FlowSpec/EVPN/BGP-LS recompute + distribution pattern.
     fn recompute_vpn_keys(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
-        for key in affected {
-            let candidates: Vec<crate::route::VpnRibRoute> = self
-                .ribs
-                .values()
-                .filter_map(|rib| rib.get_vpn(key).cloned())
-                .collect();
-            self.loc_rib.recompute_vpn(key.clone(), candidates.iter());
-        }
+        self.recompute_and_distribute_vpn(affected);
     }
 
     /// Recompute the Loc-RIB BGP-LS selection for each affected key across the

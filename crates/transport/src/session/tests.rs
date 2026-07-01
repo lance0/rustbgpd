@@ -7,8 +7,9 @@ use rustbgpd_policy::{
 };
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
-    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, OrfAction, OrfEntries,
-    OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute, WhenToRefresh,
+    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, MplsLabelEntry, OrfAction,
+    OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute,
+    RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
     bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
 };
 use std::collections::HashMap;
@@ -946,6 +947,196 @@ async fn oversized_bgpls_output_tears_down_session() {
         .expect("writer should exit after oversize-triggered teardown")
         .expect("writer join should not panic");
     assert!(result.is_ok());
+}
+fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
+    rustbgpd_rib::VpnRibRoute {
+        nlri: VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+        },
+        next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+/// VPN `MP_REACH` must carry the original label stack and the stored VPN
+/// next-hop verbatim — even on an eBGP session, where unicast would rewrite
+/// to next-hop-self (ADR-0077 §6: next-hop-self is inert for SAFI 128). The
+/// withdraw is emitted via `MP_UNREACH` with an empty (ignored) label stack.
+#[tokio::test]
+async fn send_route_update_emits_vpn_reach_and_unreach() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let route = make_vpn_rib_route(4093);
+    let key = route.key();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![route.clone()],
+        vpn_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected VPN MP_REACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN announcement must use MP_REACH");
+    assert_eq!(mp.afi, Afi::Ipv4);
+    assert_eq!(mp.safi, Safi::MplsVpn);
+    assert_eq!(
+        mp.next_hop, route.next_hop,
+        "VPN next-hop must pass through reflection unchanged"
+    );
+    assert_eq!(
+        mp.vpn_announced,
+        vec![route.nlri.clone()],
+        "RD + MPLS label stack must round-trip verbatim"
+    );
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![key],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected VPN MP_UNREACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN withdrawal must use MP_UNREACH");
+    assert_eq!(mp.afi, Afi::Ipv4);
+    assert_eq!(mp.safi, Safi::MplsVpn);
+    assert_eq!(
+        mp.vpn_withdrawn,
+        vec![VpnNlri {
+            labels: vec![],
+            route_distinguisher: route.nlri.route_distinguisher,
+            prefix: route.nlri.prefix,
+        }],
+        "withdraw-mode NLRI carries no label stack (RFC 8277 §2.4 compatibility field)"
+    );
+}
+/// iBGP reflection of a VPN route on an RR adds `ORIGINATOR_ID` and
+/// `CLUSTER_LIST`, keeps `LOCAL_PREF`, and never emits inline `NextHop`/MP attrs.
+#[test]
+fn prepare_outbound_attributes_vpn_adds_rr_attrs_for_ibgp_reflection() {
+    let mut session = make_test_session(65001, 65001);
+    let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+    let source_id = Ipv4Addr::new(10, 0, 0, 42);
+    session.config.cluster_id = Some(cluster_id);
+    let mut route = make_vpn_rib_route(100);
+    route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
+    route.peer_router_id = source_id;
+    route.attributes = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::LocalPref(200),
+    ]);
+    let attrs = session.prepare_outbound_attributes_vpn(&route, false);
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::OriginatorId(id) if *id == source_id))
+    );
+    assert!(
+        attrs.iter().any(
+            |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
+        )
+    );
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::LocalPref(200)))
+    );
+    assert!(!attrs.iter().any(|a| matches!(
+        a,
+        PathAttribute::NextHop(_) | PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+    )));
+}
+/// eBGP export of a VPN route strips `ORIGINATOR_ID`/`CLUSTER_LIST`/`LOCAL_PREF`
+/// and prepends the local ASN to `AS_PATH`.
+#[test]
+fn prepare_outbound_attributes_vpn_strips_rr_attrs_for_ebgp() {
+    let session = make_test_session(65001, 65002);
+    let mut route = make_vpn_rib_route(100);
+    route.attributes = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::LocalPref(200),
+        PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 42)),
+        PathAttribute::ClusterList(vec![Ipv4Addr::new(10, 0, 0, 9)]),
+    ]);
+    let attrs = session.prepare_outbound_attributes_vpn(&route, true);
+    assert!(!attrs.iter().any(|a| matches!(
+        a,
+        PathAttribute::OriginatorId(_)
+            | PathAttribute::ClusterList(_)
+            | PathAttribute::LocalPref(_)
+    )));
+    let as_path = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+        .expect("eBGP VPN export must carry AS_PATH");
+    assert_eq!(
+        as_path.segments,
+        vec![AsPathSegment::AsSequence(vec![65001, 65002])]
+    );
 }
 /// `OutboundRouteUpdate::request_refresh_all_negotiated` (the RIB
 /// manager's failover-driven inbound recovery) emits a plain RFC 2918

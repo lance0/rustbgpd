@@ -350,6 +350,8 @@ impl RibManager {
         let mut evpn_withdraw = Vec::new();
         let mut bgpls_announce = Vec::new();
         let mut bgpls_withdraw = Vec::new();
+        let mut vpn_announce = Vec::new();
+        let mut vpn_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -473,6 +475,35 @@ impl RibManager {
                     false, // route refresh re-emits via empty refresh_view
                 );
             }
+        } else if safi == Safi::MplsVpn {
+            let vpn_keys: HashSet<crate::route::VpnRibRouteKey> = self
+                .loc_rib
+                .iter_vpn()
+                .filter(|route| route.afi_safi() == family)
+                .map(crate::route::VpnRibRoute::key)
+                .collect();
+            if !vpn_keys.is_empty() {
+                Self::stage_vpn_routes(
+                    loc_rib,
+                    &refresh_view,
+                    &self.peer_is_rr_client,
+                    &vpn_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut vpn_announce,
+                    &mut vpn_withdraw,
+                    false, // route refresh re-emits via empty refresh_view
+                );
+            }
         } else {
             for prefix in &all_prefixes {
                 let prefix_send_max = if peer_add_path_send_max > 0
@@ -571,6 +602,8 @@ impl RibManager {
                 evpn_withdraw,
                 bgpls_announce,
                 bgpls_withdraw,
+                vpn_announce,
+                vpn_withdraw,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
