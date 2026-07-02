@@ -954,6 +954,13 @@ service RibService {
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
   rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
+  // RFC 9107 ORR topology graph, built on demand from every peer's BGP-LS
+  // Adj-RIB-In (the union view, not Loc-RIB best-only). Nodes are keyed by
+  // canonical descriptor bytes; links carry the IGP Metric (TLV 1095) that
+  // the SPF engine uses. Links without an IGP Metric are unusable and are
+  // not listed, but their endpoint nodes still appear.
+  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse);
+  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,6 +2160,50 @@ message ListRtcRoutesRequest {
 
 message ListRtcRoutesResponse {
   repeated RtcRouteEntry routes = 1;
+}
+
+message ListTopologyNodesRequest {}
+
+// One ORR topology node (RFC 9107 over RFC 9552 BGP-LS).
+message TopologyNodeEntry {
+  // Canonical node key: protocol-id + identifier + raw node-descriptor
+  // container bytes, lowercase hex. Byte equality is the identity contract.
+  string key = 1;
+  // Autonomous System node-descriptor sub-TLV 512; 0 when absent.
+  uint32 asn = 2;
+  // BGP-LS Identifier node-descriptor sub-TLV 513; 0 when absent.
+  uint32 bgp_ls_id = 3;
+  // IGP Router-ID node-descriptor sub-TLV 515 as lowercase hex; empty when
+  // absent. Display only — never used for graph identity.
+  string router_id = 4;
+  // Number of usable outgoing links (links carrying an IGP Metric).
+  uint32 link_count = 5;
+}
+
+message ListTopologyNodesResponse {
+  repeated TopologyNodeEntry nodes = 1;
+}
+
+message ListTopologyLinksRequest {}
+
+// One usable directed ORR topology link.
+message TopologyLinkEntry {
+  // Local endpoint canonical node key, lowercase hex.
+  string local_key = 1;
+  // Local endpoint IGP Router-ID, lowercase hex; empty when absent.
+  string local_router_id = 2;
+  // Remote endpoint canonical node key, lowercase hex.
+  string remote_key = 3;
+  // Remote endpoint IGP Router-ID, lowercase hex; empty when absent.
+  string remote_router_id = 4;
+  // IGP Metric (TLV 1095) — the SPF edge cost.
+  uint32 cost = 5;
+  // Link interface and neighbor addresses (TLVs 259-262).
+  repeated string addresses = 6;
+}
+
+message ListTopologyLinksResponse {
+  repeated TopologyLinkEntry links = 1;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3

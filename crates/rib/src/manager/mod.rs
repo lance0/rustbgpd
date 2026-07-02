@@ -993,6 +993,14 @@ impl RibManager {
                     self.loc_rib.iter_rtc().cloned().collect();
                 let _ = reply.send(routes);
             }
+            RibUpdate::QueryOrrTopology { reply } => {
+                let topology = crate::orr::OrrTopology::build(
+                    self.ribs
+                        .values()
+                        .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
+                );
+                let _ = reply.send(topology.snapshot());
+            }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
         }
     }

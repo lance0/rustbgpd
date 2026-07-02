@@ -268,6 +268,14 @@ async fn query_bgpls_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<BgpLsRibRoute> 
     reply_rx.await.unwrap()
 }
 
+async fn query_orr_topology(tx: &mpsc::Sender<RibUpdate>) -> crate::orr::OrrTopologySnapshot {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryOrrTopology { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
 async fn query_vpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<VpnRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
@@ -543,6 +551,53 @@ async fn bgpls_routes_received_recompute_and_withdraw() {
 
     let best_after_withdraw_a = query_bgpls_routes(&tx).await;
     assert!(best_after_withdraw_a.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The topology query builds from every peer's Adj-RIB-In union — NOT the
+/// Loc-RIB best-only view. Two peers advertise disjoint links; the
+/// snapshot must contain both.
+#[tokio::test]
+async fn query_topology_reflects_adj_rib_in_across_multiple_peers() {
+    use crate::orr::fixtures::{A, B, X, Y, link_route};
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer1 = Ipv4Addr::new(10, 0, 0, 1);
+    let peer2 = Ipv4Addr::new(10, 0, 0, 2);
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer1),
+        announced: vec![link_route(peer1, A, X, Some(1), &[])],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer2),
+        announced: vec![link_route(peer2, B, Y, Some(1), &[])],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let snapshot = query_orr_topology(&tx).await;
+    assert_eq!(
+        snapshot.nodes.len(),
+        4,
+        "endpoints from both peers interned"
+    );
+    assert_eq!(
+        snapshot.links.len(),
+        2,
+        "disjoint links from both peers kept"
+    );
+    assert!(snapshot.prefixes.is_empty());
 
     drop(tx);
     handle.await.unwrap();

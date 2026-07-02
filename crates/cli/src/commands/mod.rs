@@ -12,4 +12,5 @@ pub mod peer_group;
 pub mod policy;
 pub mod policy_input;
 pub mod rib;
+pub mod topology;
 pub mod watch;

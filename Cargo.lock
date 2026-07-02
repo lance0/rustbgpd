@@ -2842,8 +2842,10 @@ dependencies = [
 name = "rustbgpd-rib"
 version = "0.45.0"
 dependencies = [
+ "bytes",
  "criterion",
  "ipnet",
+ "lru",
  "prefix-trie",
  "proptest",
  "rustbgpd-policy",

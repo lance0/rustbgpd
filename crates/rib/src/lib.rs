@@ -25,6 +25,8 @@ pub mod loc_rib;
 pub mod manager;
 /// Per-peer Outbound Route Filtering (ORF) state (RFC 5291 + RFC 5292).
 mod orf;
+/// Optimal Route Reflection topology graph + SPF engine (RFC 9107).
+pub mod orr;
 /// Family-split prefix-trie map backing the compact prefix-keyed RIB indexes.
 mod prefix_map;
 /// Route and `FlowSpec` route data types.
@@ -43,6 +45,10 @@ pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
+pub use orr::{
+    NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
+    OrrTopology, OrrTopologySnapshot, SpfResult,
+};
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecRoute, NextHopScope, Route, RouteOrigin, RtcRibRoute,
