@@ -290,7 +290,10 @@ impl Checker<'_> {
 
     // ── expressions ─────────────────────────────────────────────────
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exhaustive per-field/type dispatch; splitting would scatter the match"
+    )]
     fn check_expr(&mut self, expr: &Expr, params: &[&str]) {
         match expr {
             Expr::Or(lhs, rhs) | Expr::And(lhs, rhs) => {
@@ -409,7 +412,6 @@ impl Checker<'_> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn check_cmp(&mut self, field: &FieldPath, op: CmpOp, rhs: &Rhs, params: &[&str]) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,

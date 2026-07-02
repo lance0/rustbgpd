@@ -362,7 +362,6 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn lower_cmp(
     field: &super::ast::FieldPath,
     op: CmpOp,
