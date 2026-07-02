@@ -13,9 +13,9 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot,
-    OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route, RouteEventType, RtcRibRoute,
-    VpnRibRoute,
+    ExplainDecision, FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot, OrrNodeSnapshot,
+    OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route, RouteEventType,
+    RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -1598,6 +1598,51 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListVpnRoutesResponse { routes }))
     }
 
+    async fn list_labeled_routes(
+        &self,
+        request: Request<proto::ListLabeledRoutesRequest>,
+    ) -> Result<Response<proto::ListLabeledRoutesResponse>, Status> {
+        let req = request.into_inner();
+
+        if !req.afi_safi.is_empty()
+            && req.afi_safi != "ipv4_labeled_unicast"
+            && req.afi_safi != "ipv6_labeled_unicast"
+        {
+            return Err(Status::invalid_argument(format!(
+                "unknown labeled family {:?}, expected \"ipv4_labeled_unicast\" or \"ipv6_labeled_unicast\"",
+                req.afi_safi
+            )));
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryLabeledRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let peer_filter = req.peer_filter;
+        let family_filter = req.afi_safi;
+        let routes = all_routes
+            .iter()
+            .filter(|route| {
+                if !family_filter.is_empty() && labeled_family_label(route) != family_filter {
+                    return false;
+                }
+                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                    return false;
+                }
+                true
+            })
+            .map(labeled_route_to_proto)
+            .collect();
+
+        Ok(Response::new(proto::ListLabeledRoutesResponse { routes }))
+    }
+
     async fn list_rtc_routes(
         &self,
         request: Request<proto::ListRtcRoutesRequest>,
@@ -2024,6 +2069,53 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
         afi_safi: vpn_family_label(route).to_string(),
         route_distinguisher: route.nlri.route_distinguisher.0.to_vec(),
         route_distinguisher_str: route.nlri.route_distinguisher.to_string(),
+        prefix: route.nlri.prefix.to_string(),
+        labels: route.nlri.labels.iter().map(|l| l.label).collect(),
+        next_hop: route.next_hop.to_string(),
+        peer_address: route.peer.to_string(),
+        as_path,
+        communities,
+        extended_communities,
+        stale: route.is_stale,
+        llgr_stale: route.is_llgr_stale,
+        path_id: route.path_id,
+    }
+}
+
+fn labeled_family_label(route: &LabeledRibRoute) -> &'static str {
+    match route.nlri.family() {
+        rustbgpd_wire::LabeledAddressFamily::V4 => "ipv4_labeled_unicast",
+        rustbgpd_wire::LabeledAddressFamily::V6 => "ipv6_labeled_unicast",
+    }
+}
+
+pub(crate) fn labeled_route_to_proto(route: &LabeledRibRoute) -> proto::LabeledRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+
+    for attr in route.attributes.iter() {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => {
+                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            }
+            PathAttribute::ExtendedCommunities(ecs) => {
+                extended_communities.extend(ecs.iter().map(ToString::to_string));
+            }
+            _ => {}
+        }
+    }
+
+    proto::LabeledRouteEntry {
+        afi_safi: labeled_family_label(route).to_string(),
         prefix: route.nlri.prefix.to_string(),
         labels: route.nlri.labels.iter().map(|l| l.label).collect(),
         next_hop: route.next_hop.to_string(),

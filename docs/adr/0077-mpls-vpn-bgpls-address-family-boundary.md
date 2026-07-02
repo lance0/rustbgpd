@@ -440,6 +440,26 @@ clients; the RFC 4684 RTC gate applies per staged candidate). Loc-RIB
 selection collapses per RD+prefix identity, so the `VpnRouteKey` +
 path-id substrate anticipated above is now live rather than always-zero.
 
-Still deferred from the SAFI-128 register: labeled-unicast (SAFI 4) and
-Add-Path for BGP-LS (SAFI 71/72, no demand) and RT-Constrain (SAFI 132,
-see the 2026-07-01 amendment).
+Still deferred from the SAFI-128 register: Add-Path for BGP-LS (SAFI
+71/72, no demand) and RT-Constrain (SAFI 132, see the 2026-07-01
+amendment).
+
+## Amendment (2026-07-02): labeled-unicast (SAFI 4) shipped — the quartet is complete
+
+IPv4/IPv6 labeled-unicast (RFC 8277, SAFI 4) is now a complete reachable
+family, closing the last open item of this ADR's scope: BGP-LS, VPNv4/v6,
+RT-Constrain, and labeled-unicast — the quartet — all negotiate, receive,
+reflect (RFC 4456 attributes; label stack and next-hop preserved verbatim
+per Decisions 4 and 6), and expose read-only API/CLI surfaces
+(`ListLabeledRoutes` / `rbgp rib labeled`). The family shipped with full
+parity from day one rather than the incremental slices the earlier
+families took: Add-Path (RFC 7911) announce/withdraw forms, RFC 7313
+BoRR/EoRR refresh-stale lifecycle, RFC 4724 GR helper retention +
+RFC 9494 two-phase LLGR with the §4.4/§4.6 export gate, RFC 9107 ORR
+per-vantage staging, and the `ipv4_labeled_unicast` /
+`ipv6_labeled_unicast` OpenConfig config names from §8. Route identity is
+the IP prefix + Add-Path path-id (`LabeledRibRouteKey`); the label stack
+is route data, so a same-peer relabel re-advertises. Withdraws use the
+RFC 8277 §2.4 3-octet compatibility field, never announce-mode label
+parsing. Still out of scope per Decision 6: label allocation, label
+rewrite, next-hop-self, and MPLS FIB install.

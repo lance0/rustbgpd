@@ -976,16 +976,6 @@ pub(crate) fn labeled_tiebreak(a: &LabeledRibRoute, b: &LabeledRibRoute) -> Orde
 /// interior (SPF) cost to each route's `NEXT_HOP`. Lower cost wins; a
 /// known cost beats an unknown one (RFC 9107 §3.1); equal or
 /// both-unknown falls through.
-// Tests exercise the ORR oracle today; the labeled receive/reflect slice
-// (mirroring `manager/distribution/vpn.rs` Add-Path staging) is the first
-// non-test consumer.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "inert ADR-0077 substrate until the labeled receive slice lands"
-    )
-)]
 pub(crate) fn labeled_tiebreak_orr(
     a: &LabeledRibRoute,
     b: &LabeledRibRoute,

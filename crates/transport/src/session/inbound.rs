@@ -1,10 +1,11 @@
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
-    EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope,
-    NotificationCode, NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route,
-    RtcRibRoute, RtcRibRouteKey, Safi, VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info,
-    is_ipv6_link_local, resolve_import_nexthop, warn,
+    EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr,
+    LabeledRibRoute, LabeledRibRouteKey, NextHopScope, NotificationCode, NotificationMessage,
+    PathAttribute, PeerSession, Prefix, RibUpdate, Route, RtcRibRoute, RtcRibRouteKey, Safi,
+    VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info, is_ipv6_link_local,
+    resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
@@ -483,6 +484,7 @@ impl PeerSession {
                 && mp.evpn_withdrawn.is_empty()
                 && mp.bgpls_withdrawn.is_empty()
                 && mp.vpn_withdrawn.is_empty()
+                && mp.labeled_withdrawn.is_empty()
                 && mp.rtc_withdrawn.is_empty()
             {
                 info!(
@@ -633,6 +635,7 @@ impl PeerSession {
                             mp.announced.len()
                                 + mp.bgpls_announced.len()
                                 + mp.vpn_announced.len()
+                                + mp.labeled_announced.len()
                                 + mp.rtc_announced.len(),
                         ),
                         _ => None,
@@ -659,6 +662,7 @@ impl PeerSession {
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
             let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
@@ -684,6 +688,14 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::LabeledUnicast {
+                            loop_labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(
+                                |entry| LabeledRibRouteKey {
+                                    prefix: entry.nlri.key(),
+                                    path_id: entry.path_id,
+                                },
+                            ));
+                        }
                         if mp.safi == Safi::RtConstrain {
                             loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
                                 RtcRibRouteKey {
@@ -705,6 +717,21 @@ impl PeerSession {
                     loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
                             nlri_key: entry.nlri.key(),
+                            path_id: entry.path_id,
+                        }
+                    }));
+                }
+                // Labeled announcements in a loop-detected UPDATE are
+                // likewise treated as withdrawals of any previously accepted
+                // version of the same prefix, so a looped re-announcement
+                // can't strand a stale route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::LabeledUnicast
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_labeled_withdrawn.extend(mp.labeled_announced.iter().map(|entry| {
+                        LabeledRibRouteKey {
+                            prefix: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
@@ -736,6 +763,9 @@ impl PeerSession {
             }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in &loop_labeled_withdrawn {
+                self.known_labeled.remove(key);
             }
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
@@ -779,6 +809,19 @@ impl PeerSession {
                         session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_labeled_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_labeled_withdrawn,
                     })
                     .await
                     .is_err()
@@ -842,6 +885,7 @@ impl PeerSession {
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
             let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
@@ -867,6 +911,14 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::LabeledUnicast {
+                            loop_labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(
+                                |entry| LabeledRibRouteKey {
+                                    prefix: entry.nlri.key(),
+                                    path_id: entry.path_id,
+                                },
+                            ));
+                        }
                         if mp.safi == Safi::RtConstrain {
                             loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
                                 RtcRibRouteKey {
@@ -888,6 +940,21 @@ impl PeerSession {
                     loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
                             nlri_key: entry.nlri.key(),
+                            path_id: entry.path_id,
+                        }
+                    }));
+                }
+                // Labeled announcements in a loop-detected UPDATE are
+                // likewise treated as withdrawals of any previously accepted
+                // version of the same prefix, so a looped re-announcement
+                // can't strand a stale route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::LabeledUnicast
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_labeled_withdrawn.extend(mp.labeled_announced.iter().map(|entry| {
+                        LabeledRibRouteKey {
+                            prefix: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
@@ -919,6 +986,9 @@ impl PeerSession {
             }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in &loop_labeled_withdrawn {
+                self.known_labeled.remove(key);
             }
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
@@ -962,6 +1032,19 @@ impl PeerSession {
                         session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_labeled_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_labeled_withdrawn,
                     })
                     .await
                     .is_err()
@@ -1206,6 +1289,8 @@ impl PeerSession {
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
         let mut vpn_announced: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+        let mut labeled_announced: Vec<LabeledRibRoute> = Vec::new();
+        let mut labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
         let mut rtc_announced: Vec<RtcRibRoute> = Vec::new();
         let mut rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
         for attr in &parsed.attributes {
@@ -1490,6 +1575,64 @@ impl PeerSession {
                         }
                         continue;
                     }
+                    if mp.safi == Safi::LabeledUnicast {
+                        // Labeled-unicast announced routes (RFC 8277). The
+                        // policy context carries the real prefix — a labeled
+                        // route IS an IP prefix (ADR-0077 honest policy
+                        // context).
+                        for entry in &mp.labeled_announced {
+                            let ctx = RouteContext {
+                                prefix: Some(entry.nlri.prefix),
+                                next_hop: Some(mp.next_hop),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: mp_aspa_state,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                evpn_route_type: None,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
+                            };
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let (attrs, _) =
+                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                labeled_announced.push(LabeledRibRoute {
+                                    nlri: entry.nlri.clone(),
+                                    next_hop: mp.next_hop,
+                                    peer: self.peer_ip,
+                                    attributes: attrs,
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    is_llgr_stale: false,
+                                    path_id: entry.path_id,
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if mp.safi == Safi::RtConstrain {
                         // RT-Constrain announced routes (RFC 4684). Like
                         // BGP-LS, the policy context carries no prefix — an
@@ -1680,6 +1823,14 @@ impl PeerSession {
                             path_id: entry.path_id,
                         }));
                     }
+                    if mp.safi == Safi::LabeledUnicast {
+                        labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(|entry| {
+                            LabeledRibRouteKey {
+                                prefix: entry.nlri.key(),
+                                path_id: entry.path_id,
+                            }
+                        }));
+                    }
                     if mp.safi == Safi::RtConstrain {
                         rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| RtcRibRouteKey {
                             nlri: *nlri,
@@ -1750,6 +1901,15 @@ impl PeerSession {
             // than unicast's unique-prefix refcount — over-counting tears the
             // session down earlier, never lets a peer bypass the cap.
             self.known_vpn.insert(route.key());
+        }
+        for key in &labeled_withdrawn {
+            self.known_labeled.remove(key);
+        }
+        for route in &labeled_announced {
+            // Keyed by (prefix, path_id): under labeled Add-Path each
+            // received path counts toward max-prefix separately — the same
+            // deliberately-strict accounting as the VPN sibling.
+            self.known_labeled.insert(route.key());
         }
         for key in &rtc_withdrawn {
             self.known_rtc.remove(key);
@@ -1824,6 +1984,19 @@ impl PeerSession {
                     session_id: self.session_identity.id,
                     announced: vpn_announced,
                     withdrawn: vpn_withdrawn,
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+        if (!labeled_announced.is_empty() || !labeled_withdrawn.is_empty())
+            && self
+                .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: labeled_announced,
+                    withdrawn: labeled_withdrawn,
                 })
                 .await
                 .is_err()

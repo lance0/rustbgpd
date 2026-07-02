@@ -50,6 +50,7 @@ pub(crate) struct MockState {
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
+    pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
@@ -1069,6 +1070,28 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 as_path: vec![64512],
                 communities: vec![],
                 extended_communities: vec!["RT:65000:1".to_string()],
+                stale: false,
+                llgr_stale: false,
+                path_id: 0,
+            }],
+        }))
+    }
+
+    async fn list_labeled_routes(
+        &self,
+        request: Request<server_proto::ListLabeledRoutesRequest>,
+    ) -> Result<Response<server_proto::ListLabeledRoutesResponse>, Status> {
+        *self.state.last_list_labeled.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListLabeledRoutesResponse {
+            routes: vec![server_proto::LabeledRouteEntry {
+                afi_safi: "ipv4_labeled_unicast".to_string(),
+                prefix: "10.1.0.0/24".to_string(),
+                labels: vec![100],
+                next_hop: "192.0.2.1".to_string(),
+                peer_address: "198.51.100.1".to_string(),
+                as_path: vec![64512],
+                communities: vec![],
+                extended_communities: vec![],
                 stale: false,
                 llgr_stale: false,
                 path_id: 0,

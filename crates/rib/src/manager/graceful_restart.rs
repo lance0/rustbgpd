@@ -61,6 +61,7 @@ impl RibManager {
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
         let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
         let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
@@ -77,6 +78,7 @@ impl RibManager {
                 affected.extend(rib.mark_stale(family));
                 fs_affected.extend(rib.mark_stale_flowspec(family));
                 vpn_affected.extend(rib.mark_stale_vpn(family));
+                labeled_affected.extend(rib.mark_stale_labeled(family));
                 bgpls_affected.extend(rib.mark_stale_bgpls(family));
                 rtc_affected.extend(rib.mark_stale_rtc(family));
             }
@@ -104,6 +106,22 @@ impl RibManager {
                     for key in keys {
                         rib.withdraw_vpn(&key);
                         vpn_affected.insert(key);
+                    }
+                }
+            }
+            for &family in &[
+                (Afi::Ipv4, Safi::LabeledUnicast),
+                (Afi::Ipv6, Safi::LabeledUnicast),
+            ] {
+                if !gr_families.contains(&family) {
+                    let keys: Vec<crate::route::LabeledRibRouteKey> = rib
+                        .iter_labeled()
+                        .filter(|r| r.afi_safi() == family)
+                        .map(crate::route::LabeledRibRoute::key)
+                        .collect();
+                    for key in keys {
+                        rib.withdraw_labeled(&key);
+                        labeled_affected.insert(key);
                     }
                 }
             }
@@ -177,6 +195,11 @@ impl RibManager {
                     vpn_affected.insert(route.key());
                 }
             }
+            for route in rib.iter_labeled() {
+                if gr_families.contains(&route.afi_safi()) {
+                    labeled_affected.insert(route.key());
+                }
+            }
             for route in rib.iter_bgpls() {
                 if gr_families.contains(&route.family.to_afi_safi()) {
                     bgpls_affected.insert(route.key());
@@ -216,6 +239,13 @@ impl RibManager {
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
+            // Same recompute-then-gc ordering rationale as BGP-LS above.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+        }
+        if !labeled_affected.is_empty() {
+            self.recompute_labeled_keys(&labeled_affected);
             // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
@@ -266,6 +296,7 @@ impl RibManager {
                 + rib.iter_flowspec().filter(|r| r.is_stale).count()
                 + rib.iter_evpn().filter(|r| r.is_stale).count()
                 + rib.iter_vpn().filter(|r| r.is_stale).count()
+                + rib.iter_labeled().filter(|r| r.is_stale).count()
                 + rib.iter_bgpls().filter(|r| r.is_stale).count()
                 + rib.iter_rtc().filter(|r| r.is_stale).count()
         });
@@ -407,6 +438,7 @@ impl RibManager {
             let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
             let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
             let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+            let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
             let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
             let mut rib_len = 0;
             let mut evpn_len = 0;
@@ -450,11 +482,13 @@ impl RibManager {
                 // tuples.
                 for &family in &llgr_families {
                     vpn_affected.extend(rib.promote_to_llgr_stale_vpn(family));
+                    labeled_affected.extend(rib.promote_to_llgr_stale_labeled(family));
                     bgpls_affected.extend(rib.promote_to_llgr_stale_bgpls(family));
                     rtc_affected.extend(rib.promote_to_llgr_stale_rtc(family));
                 }
                 for &family in &non_llgr_families {
                     vpn_affected.extend(rib.sweep_stale_family_vpn(family));
+                    labeled_affected.extend(rib.sweep_stale_family_labeled(family));
                     bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
                     rtc_affected.extend(rib.sweep_stale_family_rtc(family));
                 }
@@ -487,6 +521,9 @@ impl RibManager {
             if !vpn_affected.is_empty() {
                 self.recompute_vpn_keys(&vpn_affected);
             }
+            if !labeled_affected.is_empty() {
+                self.recompute_labeled_keys(&labeled_affected);
+            }
             let rtc_changed = !rtc_affected.is_empty();
             if rtc_changed {
                 self.recompute_rtc_keys(&rtc_affected);
@@ -496,6 +533,7 @@ impl RibManager {
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
                 || !vpn_affected.is_empty()
+                || !labeled_affected.is_empty()
                 || rtc_changed)
                 && let Some(rib) = self.ribs.get_mut(&peer)
             {
@@ -539,6 +577,7 @@ impl RibManager {
         let mut evpn_swept = Vec::new();
         let mut bgpls_swept = Vec::new();
         let mut l3vpn_swept = Vec::new();
+        let mut labeled_swept = Vec::new();
         let mut rtc_swept = Vec::new();
         let mut rib_len = 0;
         let mut evpn_len = 0;
@@ -548,6 +587,7 @@ impl RibManager {
             evpn_swept = rib.sweep_stale_evpn();
             bgpls_swept = rib.sweep_stale_bgpls();
             l3vpn_swept = rib.sweep_stale_vpn();
+            labeled_swept = rib.sweep_stale_labeled();
             rtc_swept = rib.sweep_stale_rtc();
             rib.gc_intern_table();
             rib_len = rib.len();
@@ -558,6 +598,7 @@ impl RibManager {
         let had_evpn_swept = !evpn_swept.is_empty();
         let had_bgpls_swept = !bgpls_swept.is_empty();
         let had_l3vpn_swept = !l3vpn_swept.is_empty();
+        let had_labeled_swept = !labeled_swept.is_empty();
         let had_rtc_swept = !rtc_swept.is_empty();
         if had_swept {
             info!(%peer, count = swept.len(), "swept stale routes");
@@ -589,6 +630,11 @@ impl RibManager {
                 l3vpn_swept.into_iter().collect();
             self.recompute_vpn_keys(&vpn_affected);
         }
+        if had_labeled_swept {
+            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+                labeled_swept.into_iter().collect();
+            self.recompute_labeled_keys(&labeled_affected);
+        }
         if had_rtc_swept {
             let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
                 rtc_swept.into_iter().collect();
@@ -599,6 +645,7 @@ impl RibManager {
             || had_evpn_swept
             || had_bgpls_swept
             || had_l3vpn_swept
+            || had_labeled_swept
             || had_rtc_swept)
             && let Some(rib) = self.ribs.get_mut(&peer)
         {
@@ -631,6 +678,7 @@ impl RibManager {
         let mut evpn_swept = Vec::new();
         let mut bgpls_swept = Vec::new();
         let mut l3vpn_swept = Vec::new();
+        let mut labeled_swept = Vec::new();
         let mut rtc_swept = Vec::new();
         let mut rib_len = 0;
         let mut evpn_len = 0;
@@ -640,6 +688,7 @@ impl RibManager {
             evpn_swept = rib.sweep_llgr_stale_evpn();
             bgpls_swept = rib.sweep_llgr_stale_bgpls();
             l3vpn_swept = rib.sweep_llgr_stale_vpn();
+            labeled_swept = rib.sweep_llgr_stale_labeled();
             rtc_swept = rib.sweep_llgr_stale_rtc();
             rib.gc_intern_table();
             rib_len = rib.len();
@@ -650,6 +699,7 @@ impl RibManager {
         let had_evpn_swept = !evpn_swept.is_empty();
         let had_bgpls_swept = !bgpls_swept.is_empty();
         let had_l3vpn_swept = !l3vpn_swept.is_empty();
+        let had_labeled_swept = !labeled_swept.is_empty();
         let had_rtc_swept = !rtc_swept.is_empty();
         if had_swept {
             info!(%peer, count = swept.len(), "swept LLGR-stale routes");
@@ -682,6 +732,11 @@ impl RibManager {
                 l3vpn_swept.into_iter().collect();
             self.recompute_vpn_keys(&vpn_affected);
         }
+        if had_labeled_swept {
+            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+                labeled_swept.into_iter().collect();
+            self.recompute_labeled_keys(&labeled_affected);
+        }
         if had_rtc_swept {
             let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
                 rtc_swept.into_iter().collect();
@@ -692,6 +747,7 @@ impl RibManager {
             || had_evpn_swept
             || had_bgpls_swept
             || had_l3vpn_swept
+            || had_labeled_swept
             || had_rtc_swept)
             && let Some(rib) = self.ribs.get_mut(&peer)
         {

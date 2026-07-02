@@ -154,6 +154,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                         flowspec_announced: vec![],
                         evpn_announced: vec![],
                         bgpls_announced: vec![],
+                        labeled_announced: vec![],
                         vpn_announced: vec![],
                         rtc_announced: vec![],
                     }));
@@ -173,6 +174,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
             });
@@ -203,6 +205,7 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
         flowspec_announced: vec![],
         evpn_announced: vec![],
         bgpls_announced: vec![],
+        labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
     }));

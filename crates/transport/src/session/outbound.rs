@@ -1,10 +1,10 @@
 use super::{
     Afi, AsPath, AsPathSegment, BgpLsRibRoute, BgpLsRouteKey, BgpRole, EvpnRibRoute, EvpnRoute,
     EvpnRouteKey, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
-    Ipv6Addr, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute,
-    PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype,
-    RtcRibRoute, Safi, UpdateMessage, VpnRibRoute, debug, info, is_ipv6_link_local, is_private_asn,
-    warn,
+    Ipv6Addr, LabeledRibRoute, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate,
+    PathAttribute, PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage,
+    RouteRefreshSubtype, RtcRibRoute, Safi, UpdateMessage, VpnRibRoute, debug, info,
+    is_ipv6_link_local, is_private_asn, warn,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -299,6 +299,29 @@ impl PeerSession {
                     )
                 })
         });
+        // Labeled-unicast (SAFI 4) negotiates Add-Path per family the same
+        // way; when send is negotiated, EVERY labeled NLRI to this peer
+        // carries the 4-octet path ID — announcements and withdrawals alike.
+        let add_path_labeled_v4_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv4, Safi::LabeledUnicast))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
+        let add_path_labeled_v6_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv6, Safi::LabeledUnicast))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
         // ROUTE-REFRESH *requests* toward the peer (RFC 2918), asked for by
         // the RIB manager (outbound-registration failover: the survivor's
         // Adj-RIB-In must be re-learned from the peer). The manager only
@@ -425,6 +448,7 @@ impl PeerSession {
                         flowspec_withdrawn: vec![],
                         evpn_withdrawn: vec![],
                         bgpls_withdrawn: vec![],
+                        labeled_withdrawn: vec![],
                         vpn_withdrawn: vec![],
                         rtc_withdrawn: vec![],
                     })];
@@ -464,6 +488,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
             })];
@@ -621,6 +646,7 @@ impl PeerSession {
                     flowspec_announced: vec![],
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
+                    labeled_announced: vec![],
                     vpn_announced: vec![],
                     rtc_announced: vec![],
                 }));
@@ -793,6 +819,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
             }));
@@ -846,6 +873,7 @@ impl PeerSession {
                     flowspec_withdrawn: rules,
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
+                    labeled_withdrawn: vec![],
                     vpn_withdrawn: vec![],
                     rtc_withdrawn: vec![],
                 })];
@@ -963,6 +991,50 @@ impl PeerSession {
             ] {
                 if !routes.is_empty()
                     && !self.send_vpn_unreach_chunked(
+                        afi,
+                        &routes,
+                        four_octet_as,
+                        add_path,
+                        max_len,
+                    )
+                {
+                    return;
+                }
+            }
+        }
+        // Send labeled-unicast withdrawals via MP_UNREACH_NLRI, grouped by
+        // AFI and chunked. RFC 8277 §2.4 withdraw-mode NLRI carries a
+        // 3-octet compatibility field instead of a label stack, so the
+        // rebuilt NLRI carries no labels (the withdraw encoder ignores
+        // them).
+        if !update.labeled_withdraw.is_empty() {
+            let mut v4_routes = Vec::new();
+            let mut v6_routes = Vec::new();
+            for key in &update.labeled_withdraw {
+                let entry = rustbgpd_wire::LabeledNlriEntry {
+                    path_id: key.path_id,
+                    nlri: rustbgpd_wire::LabeledNlri {
+                        labels: vec![],
+                        prefix: key.prefix,
+                    },
+                };
+                let family = key.afi_safi();
+                if !self.negotiated_families.contains(&family) {
+                    continue;
+                }
+                match family.0 {
+                    Afi::Ipv4 => v4_routes.push(entry),
+                    Afi::Ipv6 => v6_routes.push(entry),
+                    Afi::L2Vpn | Afi::BgpLs => {}
+                }
+            }
+            let max_len = usize::from(self.max_message_len());
+            for (afi, routes, add_path) in [
+                (Afi::Ipv4, v4_routes, add_path_labeled_v4_send),
+                (Afi::Ipv6, v6_routes, add_path_labeled_v6_send),
+            ] {
+                if !routes.is_empty()
+                    && !self.send_labeled_unreach_chunked(
                         afi,
                         &routes,
                         four_octet_as,
@@ -1120,6 +1192,63 @@ impl PeerSession {
                 }
             }
         }
+        // Send labeled-unicast announcements via MP_REACH_NLRI, grouped by
+        // (family, next-hop, attributes) and chunked. ADR-0077 §4/§6: the
+        // stored MPLS label stack and next-hop pass through reflection
+        // verbatim — transport never rewrites either.
+        if !update.labeled_announce.is_empty() {
+            #[allow(
+                clippy::type_complexity,
+                reason = "labeled UPDATE grouping keeps family, next-hop, attributes, and route batch identity explicit"
+            )]
+            let mut labeled_groups: Vec<(
+                (Afi, Safi),
+                IpAddr,
+                Vec<PathAttribute>,
+                Vec<rustbgpd_wire::LabeledNlriEntry>,
+            )> = Vec::new();
+            for labeled_route in &update.labeled_announce {
+                let family = labeled_route.afi_safi();
+                if !self.negotiated_families.contains(&family) {
+                    continue;
+                }
+                let attrs = self.prepare_outbound_attributes_labeled(labeled_route, is_ebgp);
+                let nh = labeled_route.next_hop;
+                let entry = rustbgpd_wire::LabeledNlriEntry {
+                    path_id: labeled_route.path_id,
+                    nlri: labeled_route.nlri.clone(),
+                };
+                if let Some(group) =
+                    labeled_groups
+                        .iter_mut()
+                        .find(|(g_family, g_nh, g_attrs, _)| {
+                            *g_family == family && *g_nh == nh && *g_attrs == attrs
+                        })
+                {
+                    group.3.push(entry);
+                } else {
+                    labeled_groups.push((family, nh, attrs, vec![entry]));
+                }
+            }
+            let max_len = usize::from(self.max_message_len());
+            for ((afi, _), next_hop, attrs, routes) in labeled_groups {
+                let add_path = match afi {
+                    Afi::Ipv4 => add_path_labeled_v4_send,
+                    _ => add_path_labeled_v6_send,
+                };
+                if !self.send_labeled_reach_chunked(
+                    afi,
+                    next_hop,
+                    &attrs,
+                    &routes,
+                    four_octet_as,
+                    add_path,
+                    max_len,
+                ) {
+                    return;
+                }
+            }
+        }
         // Send RT-Constrain announcements via MP_REACH_NLRI, grouped by
         // (next-hop, attributes) and chunked. The stored next-hop passes
         // through reflection unchanged; the one exception is the locally-
@@ -1179,6 +1308,7 @@ impl PeerSession {
                     flowspec_announced: rules,
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
+                    labeled_announced: vec![],
                     vpn_announced: vec![],
                     rtc_announced: vec![],
                 }));
@@ -1250,6 +1380,7 @@ impl PeerSession {
                     flowspec_withdrawn: vec![],
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
+                    labeled_withdrawn: vec![],
                     vpn_withdrawn: vec![],
                     rtc_withdrawn: vec![],
                 })];
@@ -1302,6 +1433,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: routes[idx..end].to_vec(),
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
             }));
@@ -1366,6 +1498,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: routes[idx..end].to_vec(),
                 bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
             })];
@@ -1426,6 +1559,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: routes[idx..end].to_vec(),
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
             }));
@@ -1482,6 +1616,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: routes[idx..end].to_vec(),
+                labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
             })];
@@ -1556,6 +1691,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: routes[idx..end].to_vec(),
                 rtc_announced: vec![],
             }));
@@ -1614,6 +1750,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
                 vpn_withdrawn: routes[idx..end].to_vec(),
                 rtc_withdrawn: vec![],
             })];
@@ -1650,6 +1787,135 @@ impl PeerSession {
         }
         true
     }
+    /// Send a batch of labeled-unicast announcements as one or more
+    /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
+    /// `max_len` bytes. Mirrors the VPN sender minus the RD-prefixed
+    /// next-hop (RFC 8277 uses the ordinary host next-hop forms).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "chunked family senders keep family, next-hop, attrs, and Add-Path mode explicit"
+    )]
+    fn send_labeled_reach_chunked(
+        &mut self,
+        afi: Afi,
+        next_hop: IpAddr,
+        base_attrs: &[PathAttribute],
+        routes: &[rustbgpd_wire::LabeledNlriEntry],
+        four_octet_as: bool,
+        add_path: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi,
+                safi: Safi::LabeledUnicast,
+                next_hop,
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                vpn_announced: vec![],
+                labeled_announced: routes[idx..end].to_vec(),
+                rtc_announced: vec![],
+            }));
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                add_path,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single labeled route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send labeled announce UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+    /// Send a batch of labeled-unicast withdrawals as one or more
+    /// `MP_UNREACH_NLRI` UPDATEs, splitting so each encoded message fits
+    /// `max_len` bytes. RFC 8277 §2.4: the withdraw encoder emits the
+    /// 3-octet compatibility field, never a label stack.
+    fn send_labeled_unreach_chunked(
+        &mut self,
+        afi: Afi,
+        routes: &[rustbgpd_wire::LabeledNlriEntry],
+        four_octet_as: bool,
+        add_path: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi,
+                safi: Safi::LabeledUnicast,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
+                vpn_withdrawn: vec![],
+                labeled_withdrawn: routes[idx..end].to_vec(),
+                rtc_withdrawn: vec![],
+            })];
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                add_path,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single labeled withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send labeled withdrawal UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
     /// Send a batch of RT-Constrain announcements as one or more
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
     /// `max_len` bytes. Mirrors the VPN sender minus label handling.
@@ -1675,6 +1941,7 @@ impl PeerSession {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: routes[idx..end].to_vec(),
             }));
@@ -1731,6 +1998,7 @@ impl PeerSession {
                 flowspec_withdrawn: vec![],
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: routes[idx..end].to_vec(),
             })];
@@ -2252,6 +2520,108 @@ impl PeerSession {
     pub(super) fn prepare_outbound_attributes_vpn(
         &self,
         route: &VpnRibRoute,
+        is_ebgp: bool,
+    ) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+        for attr in route.attributes.iter() {
+            match attr {
+                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
+                                }
+                            }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
+                        }
+                    }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
+                }
+                PathAttribute::NextHop(_)
+                | PathAttribute::MpReachNlri(_)
+                | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+        if is_ebgp
+            && !self.config.route_server_client
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
+        {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            if !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
+        }
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
+        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
+        attrs
+    }
+
+    /// Prepare outbound attributes for a reflected labeled-unicast route.
+    /// Mirrors the VPN version: RFC 4456 `ORIGINATOR_ID`/`CLUSTER_LIST`
+    /// reflection semantics are identical, and the next-hop lives in
+    /// `MP_REACH_NLRI` (chosen by the caller), never in the attribute set.
+    ///
+    /// ADR-0077 §4/§6: the labeled next-hop is never rewritten here — any
+    /// next-hop-self configuration is deliberately inert for SAFI 4, since
+    /// the reflected next-hop must stay the originating speaker for
+    /// transport-label resolution. The MPLS label stack rides in the NLRI
+    /// and passes through verbatim.
+    pub(super) fn prepare_outbound_attributes_labeled(
+        &self,
+        route: &LabeledRibRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();

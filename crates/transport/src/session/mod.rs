@@ -18,9 +18,9 @@ use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
-    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope,
-    OutboundRouteUpdate, RibUpdate, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
-    VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute,
+    LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, RibUpdate, Route, RtcRibRoute,
+    RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -209,6 +209,9 @@ pub(crate) struct PeerSession {
     /// Accepted VPNv4/VPNv6 routes from this peer (RFC 4364 / RFC 4659 keys).
     /// Counted toward max-prefix enforcement for the same reason.
     known_vpn: HashSet<VpnRibRouteKey>,
+    /// Labeled-unicast route keys received from this peer (max-prefix
+    /// accounting, keyed by prefix + `path_id` like the VPN sibling).
+    known_labeled: HashSet<LabeledRibRouteKey>,
     /// Accepted RT-Constrain routes from this peer (RFC 4684 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_rtc: HashSet<RtcRibRouteKey>,
@@ -321,6 +324,7 @@ impl PeerSession {
             + self.known_evpn.len()
             + self.known_bgpls.len()
             + self.known_vpn.len()
+            + self.known_labeled.len()
             + self.known_rtc.len()
     }
 
@@ -365,6 +369,7 @@ impl PeerSession {
         self.known_evpn.clear();
         self.known_bgpls.clear();
         self.known_vpn.clear();
+        self.known_labeled.clear();
         self.known_rtc.clear();
     }
 
@@ -477,6 +482,7 @@ impl PeerSession {
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
+            known_labeled: HashSet::new(),
             known_rtc: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
@@ -580,6 +586,7 @@ impl PeerSession {
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
+            known_labeled: HashSet::new(),
             known_rtc: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,

@@ -234,7 +234,12 @@ resolved.
   reflection filtering with self-originated default membership; §3.2(ii)
   non-client attribute-swap, the §6 60-second EoR delay, eBGP RTC
   subtleties, and Add-Path remain deferred — see the ADR-0077
-  amendment). GR/LLGR stale preservation now covers all of these RR
+  amendment). IPv4/IPv6 labeled-unicast (AFI 1/2, SAFI 4) per RFC 8277 is
+  implemented RR-only — the label stack and next-hop are preserved
+  verbatim, no label allocation, rewrite, or MPLS FIB install; Add-Path
+  per RFC 7911 is supported — completing the ADR-0077 quartet
+  (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast). GR/LLGR stale
+  preservation now covers all of these RR
   families (RFC 4724 helper retention + RFC 9494 two-phase LLGR, M77
   receipt), and the pre-existing unicast/FlowSpec/EVPN paths implement
   the same RFC-strict consecutive-restart deletion, End-of-RIB sweep
@@ -243,8 +248,7 @@ resolved.
   from eBGP peers that didn't advertise the LLGR capability; non-LLGR
   iBGP peers receive them per the §4.6 intra-AS exception with NO_EXPORT
   and LOCAL_PREF 0, LLGR_STALE community intact). Other families such
-  as labeled-unicast (SAFI 4)
-  and VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
+  as VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,

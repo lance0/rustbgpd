@@ -247,8 +247,10 @@ impl RibManager {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            labeled_announce: vec![],
             rtc_announce: vec![],
             vpn_withdraw: vec![],
+            labeled_withdraw: vec![],
             rtc_withdraw: vec![],
             request_refresh_all_negotiated: true,
         };
@@ -334,6 +336,10 @@ impl RibManager {
             .collect();
         let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
             rib.iter_vpn().map(crate::route::VpnRibRoute::key).collect();
+        let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = rib
+            .iter_labeled()
+            .map(crate::route::LabeledRibRoute::key)
+            .collect();
         let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
             rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect();
         debug!(%peer, cleared = count, "peer adj-rib-in cleared");
@@ -359,6 +365,11 @@ impl RibManager {
         // VPNv4/VPNv6 routes — same stranding hazard as BGP-LS above.
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
+        }
+        // Same fallback/withdraw obligation for the departed peer's
+        // labeled-unicast routes.
+        if !labeled_affected.is_empty() {
+            self.recompute_labeled_keys(&labeled_affected);
         }
         // And for the departed peer's RT-Constrain routes.
         if !rtc_affected.is_empty() {
@@ -759,6 +770,8 @@ impl RibManager {
         let mut bgpls_withdraw = Vec::new();
         let mut vpn_announce = Vec::new();
         let mut vpn_withdraw = Vec::new();
+        let mut labeled_announce = Vec::new();
+        let mut labeled_withdraw = Vec::new();
         let mut rtc_announce = Vec::new();
         let mut rtc_withdraw = Vec::new();
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
@@ -1054,6 +1067,52 @@ impl RibManager {
             );
         }
 
+        // Labeled-unicast initial dump — a peer that joins after the labeled
+        // table has converged must still receive it before EoR. Mirrors the
+        // VPN staging block. For an Add-Path-send peer the staged top-N
+        // draws from every Adj-RIB-In identity, not just the Loc-RIB bests.
+        let mut all_labeled_keys: HashSet<rustbgpd_wire::Prefix> = self
+            .loc_rib
+            .iter_labeled()
+            .map(|route| route.nlri.key())
+            .collect();
+        if peer_add_path_send_max > 0
+            && peer_add_path_send_families
+                .iter()
+                .any(|(_, safi)| *safi == Safi::LabeledUnicast)
+        {
+            for rib in self.ribs.values() {
+                all_labeled_keys.extend(rib.iter_labeled().map(|route| route.nlri.key()));
+            }
+        }
+        if !all_labeled_keys.is_empty() {
+            Self::stage_labeled_routes(
+                loc_rib,
+                &self.ribs,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_labeled_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                llgr.as_ref(),
+                orr_ctx,
+                peer_add_path_send_max,
+                &peer_add_path_send_families,
+                export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
+                &mut labeled_announce,
+                &mut labeled_withdraw,
+                false, // initial dump — equality check is correct
+            );
+        }
+
         // RT-Constrain initial dump — a peer that joins after RTC state has
         // converged (incl. the locally-originated default) must receive it
         // before EoR. Mirrors the VPN staging block.
@@ -1127,6 +1186,8 @@ impl RibManager {
             || !bgpls_withdraw.is_empty()
             || !vpn_announce.is_empty()
             || !vpn_withdraw.is_empty()
+            || !labeled_announce.is_empty()
+            || !labeled_withdraw.is_empty()
             || !rtc_announce.is_empty()
             || !rtc_withdraw.is_empty();
         let sent = !has_outbound_diff
@@ -1145,6 +1206,8 @@ impl RibManager {
                 bgpls_withdraw,
                 vpn_announce,
                 vpn_withdraw,
+                labeled_announce,
+                labeled_withdraw,
                 rtc_announce,
                 rtc_withdraw,
             );
@@ -1180,8 +1243,10 @@ impl RibManager {
                 bgpls_announce: vec![],
                 bgpls_withdraw: vec![],
                 vpn_announce: vec![],
+                labeled_announce: vec![],
                 rtc_announce: vec![],
                 vpn_withdraw: vec![],
+                labeled_withdraw: vec![],
                 rtc_withdraw: vec![],
                 request_refresh_all_negotiated: false,
             };

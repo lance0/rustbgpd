@@ -389,6 +389,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");

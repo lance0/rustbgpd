@@ -276,6 +276,7 @@ fn build_update(
             evpn_announced: routes,
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            labeled_announced: vec![],
             rtc_announced: vec![],
         }));
     }
@@ -288,6 +289,7 @@ fn build_update(
             evpn_withdrawn: withdraws,
             bgpls_withdrawn: vec![],
             vpn_withdrawn: vec![],
+            labeled_withdrawn: vec![],
             rtc_withdrawn: vec![],
         }));
     }

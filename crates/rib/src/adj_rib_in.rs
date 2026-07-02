@@ -1405,11 +1405,6 @@ impl AdjRibIn {
     }
 
     /// Withdraw all labeled-unicast routes from this Adj-RIB-In.
-    ///
-    /// Labeled GR/LLGR stale preservation is not wired into GR entry yet (the
-    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
-    /// helper to make the conservative exclusion explicit instead of
-    /// accidentally retaining stale labeled routes as live.
     pub fn withdraw_all_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
         let keys: Vec<_> = self.labeled_routes.keys().copied().collect();
         self.labeled_routes.clear();
@@ -1444,8 +1439,7 @@ impl AdjRibIn {
     // Like VPN, labeled-unicast spans two family tuples — (Ipv4,
     // LabeledUnicast) and (Ipv6, LabeledUnicast) — which the GR capability
     // lists separately, so every helper filters by the exact tuple via
-    // LabeledRibRoute::afi_safi(). All of this is inert substrate until the
-    // receive slice wires GR entry for SAFI 4.
+    // LabeledRibRoute::afi_safi().
 
     /// Mark labeled routes of the given family tuple as stale (RFC 4724 §4.1
     /// helper retention on session drop).

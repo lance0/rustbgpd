@@ -90,6 +90,21 @@ pub(super) fn vpn_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// Labeled-unicast counterpart of [`routes_equal`]. Like VPN, the full NLRI
+/// must be compared: the MPLS label stack is route data excluded from the map
+/// key, so a same-peer relabel changes `nlri` while the key stays stable —
+/// and must still be re-advertised.
+pub(super) fn labeled_routes_equal(
+    a: &crate::route::LabeledRibRoute,
+    b: &crate::route::LabeledRibRoute,
+) -> bool {
+    a.nlri == b.nlri
+        && a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && a.path_id == b.path_id
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+}
+
 /// RT-Constrain counterpart of [`routes_equal`]. Like VPN, the full NLRI is
 /// compared even though it is also the map key — cheap (12 bytes) and robust
 /// against a future key/data split.

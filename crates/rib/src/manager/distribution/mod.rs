@@ -15,9 +15,9 @@ use rustbgpd_wire::{
 use tracing::{debug, info, warn};
 
 use super::helpers::{
-    LOCAL_PEER, bgpls_routes_equal, evpn_routes_equal, gauge_val, prefix_family, routes_equal,
-    rtc_routes_equal, should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
-    vpn_routes_equal,
+    LOCAL_PEER, bgpls_routes_equal, evpn_routes_equal, gauge_val, labeled_routes_equal,
+    prefix_family, routes_equal, rtc_routes_equal, should_suppress_ibgp_inner, validate_route_aspa,
+    validate_route_rpki, vpn_routes_equal,
 };
 use super::{PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_in::AdjRibIn;
@@ -32,6 +32,7 @@ use crate::update::{
 mod bgpls;
 mod evpn;
 mod flowspec;
+mod labeled;
 mod rtc;
 mod unicast;
 mod vpn;
@@ -129,6 +130,8 @@ impl RibManager {
         bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
         vpn_announce: Vec<crate::route::VpnRibRoute>,
         vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
+        labeled_announce: Vec<crate::route::LabeledRibRoute>,
+        labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
         rtc_announce: Vec<crate::route::RtcRibRoute>,
         rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
     ) -> bool {
@@ -149,6 +152,8 @@ impl RibManager {
             || !bgpls_withdraw.is_empty()
             || !vpn_announce.is_empty()
             || !vpn_withdraw.is_empty()
+            || !labeled_announce.is_empty()
+            || !labeled_withdraw.is_empty()
             || !rtc_announce.is_empty()
             || !rtc_withdraw.is_empty()
         {
@@ -187,6 +192,12 @@ impl RibManager {
             for key in &vpn_withdraw {
                 rib_out.remove_vpn(key);
             }
+            for route in &labeled_announce {
+                rib_out.insert_labeled(route.clone());
+            }
+            for key in &labeled_withdraw {
+                rib_out.remove_labeled(key);
+            }
             for route in &rtc_announce {
                 rib_out.insert_rtc(route.clone());
             }
@@ -220,6 +231,11 @@ impl RibManager {
             );
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
+                "labeled",
+                gauge_val(rib_out.labeled_len()),
+            );
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
                 "rtc",
                 gauge_val(rib_out.rtc_len()),
             );
@@ -239,6 +255,8 @@ impl RibManager {
             bgpls_withdraw,
             vpn_announce,
             vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
             rtc_announce,
             rtc_withdraw,
             request_refresh_all_negotiated: false,
@@ -694,6 +712,27 @@ impl RibManager {
                 HashSet::new()
             };
 
+            let effective_labeled_keys: HashSet<Prefix> = if resync {
+                let mut all: HashSet<Prefix> = self
+                    .loc_rib
+                    .iter_labeled()
+                    .map(|route| route.nlri.key())
+                    .collect();
+                // For a labeled Add-Path-send resync, the staged top-N draws
+                // from every Adj-RIB-In identity, not just the Loc-RIB bests.
+                if self.peer_labeled_add_path_send(peer) {
+                    for rib in self.ribs.values() {
+                        all.extend(rib.iter_labeled().map(|route| route.nlri.key()));
+                    }
+                }
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    all.extend(rib_out.iter_labeled().map(|route| route.nlri.key()));
+                }
+                all
+            } else {
+                HashSet::new()
+            };
+
             let effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
                 let mut all: HashSet<crate::route::RtcRibRouteKey> = self
                     .loc_rib
@@ -713,6 +752,7 @@ impl RibManager {
                 && effective_evpn_keys.is_empty()
                 && effective_bgpls_keys.is_empty()
                 && effective_l3vpn_keys.is_empty()
+                && effective_labeled_keys.is_empty()
                 && effective_rtc_keys.is_empty()
             {
                 self.clear_policy_filtered_routes_for_peer(peer);
@@ -743,6 +783,8 @@ impl RibManager {
             let mut bgpls_withdraw = Vec::new();
             let mut vpn_announce = Vec::new();
             let mut vpn_withdraw = Vec::new();
+            let mut labeled_announce = Vec::new();
+            let mut labeled_withdraw = Vec::new();
             let mut rtc_announce = Vec::new();
             let mut rtc_withdraw = Vec::new();
             let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
@@ -1001,6 +1043,34 @@ impl RibManager {
                 );
             }
 
+            if resync && !effective_labeled_keys.is_empty() {
+                Self::stage_labeled_routes(
+                    loc_rib,
+                    &self.ribs,
+                    rib_out,
+                    &self.peer_is_rr_client,
+                    &effective_labeled_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    llgr.as_ref(),
+                    orr_ctx,
+                    peer_add_path_send_max,
+                    &peer_add_path_send_families,
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut labeled_announce,
+                    &mut labeled_withdraw,
+                    is_force,
+                );
+            }
+
             if resync && !effective_rtc_keys.is_empty() {
                 Self::stage_rtc_routes(
                     loc_rib,
@@ -1035,6 +1105,8 @@ impl RibManager {
                 || !bgpls_withdraw.is_empty()
                 || !vpn_announce.is_empty()
                 || !vpn_withdraw.is_empty()
+                || !labeled_announce.is_empty()
+                || !labeled_withdraw.is_empty()
                 || !rtc_announce.is_empty()
                 || !rtc_withdraw.is_empty()
             {
@@ -1070,6 +1142,8 @@ impl RibManager {
                     bgpls_withdraw,
                     vpn_announce,
                     vpn_withdraw,
+                    labeled_announce,
+                    labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
                 ) {

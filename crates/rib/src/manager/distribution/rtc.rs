@@ -281,6 +281,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    vec![],
+                    vec![],
                     rtc_announce,
                     rtc_withdraw,
                 )

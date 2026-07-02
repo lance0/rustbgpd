@@ -102,6 +102,40 @@ fn vpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::MplsVpn)]
 }
 
+fn labeled_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::Ipv4, Safi::LabeledUnicast)]
+}
+
+/// An IPv4 labeled-unicast route from `peer` with a distinct prefix octet,
+/// MPLS label, and `LOCAL_PREF`. Same octet from two peers = same RIB key
+/// (labels are route data, not identity).
+fn make_labeled_rib_route(
+    peer: Ipv4Addr,
+    prefix_octet: u8,
+    label: u32,
+    local_pref: u32,
+) -> crate::route::LabeledRibRoute {
+    let nlri = rustbgpd_wire::LabeledNlri {
+        labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, prefix_octet, 0), 24)),
+    };
+    crate::route::LabeledRibRoute {
+        nlri,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+
 fn rtc_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::RtConstrain)]
 }
@@ -284,6 +318,14 @@ async fn query_vpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<VpnRibRoute> {
     reply_rx.await.unwrap()
 }
 
+async fn query_labeled_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::LabeledRibRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLabeledRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
 async fn query_rtc_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::RtcRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRtcRoutes { reply: reply_tx })
@@ -458,6 +500,23 @@ fn drain_final_vpn(
             state.insert(route.key(), route.clone());
         }
         for key in &update.vpn_withdraw {
+            state.remove(key);
+        }
+    }
+    state
+}
+
+/// Drain every queued outbound update and fold to the final advertised
+/// labeled state: key → the last announced route.
+fn drain_final_labeled(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> HashMap<crate::route::LabeledRibRouteKey, crate::route::LabeledRibRoute> {
+    let mut state = HashMap::new();
+    while let Ok(update) = rx.try_recv() {
+        for route in &update.labeled_announce {
+            state.insert(route.key(), route.clone());
+        }
+        for key in &update.labeled_withdraw {
             state.remove(key);
         }
     }
@@ -766,6 +825,67 @@ fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
     ]
 }
 
+/// GR entry with LLGR negotiated for the given family tuples. The per-family
+/// LLGR stale time equals `llgr_stale_time`.
+fn gr_with_llgr(
+    peer: IpAddr,
+    restart_time: u16,
+    gr_families: Vec<(Afi, Safi)>,
+    llgr_families: Vec<(Afi, Safi)>,
+    llgr_stale_time: u32,
+) -> RibUpdate {
+    RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time,
+        stale_routes_time: 360,
+        gr_families,
+        peer_llgr_capable: true,
+        peer_llgr_families: llgr_families
+            .into_iter()
+            .map(|(afi, safi)| rustbgpd_wire::LlgrFamily {
+                afi,
+                safi,
+                forwarding_preserved: false,
+                stale_time: llgr_stale_time,
+            })
+            .collect(),
+        llgr_stale_time,
+    }
+}
+
+/// Bring up an outbound target with an explicit eBGP/LLGR shape (and
+/// optional Add-Path send) for the RFC 9494 export-gate tests.
+async fn llgr_gate_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    sendable: Vec<(Afi, Safi)>,
+    is_ebgp: bool,
+    llgr_families: Vec<(Afi, Safi)>,
+    add_path: Option<((Afi, Safi), u32)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: sendable,
+        is_ebgp,
+        route_reflector_client: !is_ebgp,
+        orr_vantage: None,
+        add_path_send_families: add_path.map(|(family, _)| vec![family]).unwrap_or_default(),
+        add_path_send_max: add_path.map_or(0, |(_, max)| max),
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: llgr_families,
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
 mod attr_intern;
 mod bgpls;
 mod events_metrics;
@@ -773,6 +893,7 @@ mod evpn;
 mod explain_mrt;
 mod flowspec;
 mod gr_llgr;
+mod labeled;
 mod lifecycle;
 mod llgr_families;
 mod multipath_fib;
