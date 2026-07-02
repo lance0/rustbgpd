@@ -176,8 +176,10 @@ pub struct MpReachNlri {
     pub evpn_announced: Vec<crate::evpn::EvpnRoute>,
     /// BGP-LS NLRI objects (RFC 9552). Populated only for SAFI 71/72.
     pub bgpls_announced: Vec<crate::bgpls::BgpLsNlri>,
-    /// VPNv4/VPNv6 NLRI entries (RFC 4364 / RFC 4659). Populated only for SAFI 128.
-    pub vpn_announced: Vec<crate::vpn::VpnNlri>,
+    /// VPNv4/VPNv6 NLRI entries (RFC 4364 / RFC 4659). Populated only for
+    /// SAFI 128. Carries an RFC 7911 Add-Path path ID per entry; for
+    /// non-Add-Path peers, `path_id` is always 0.
+    pub vpn_announced: Vec<crate::vpn::VpnNlriEntry>,
     /// RT-Constrain NLRI entries (RFC 4684). Populated only for SAFI 132.
     pub rtc_announced: Vec<crate::rtc::RtcNlri>,
 }
@@ -199,8 +201,10 @@ pub struct MpUnreachNlri {
     pub evpn_withdrawn: Vec<crate::evpn::EvpnRoute>,
     /// BGP-LS NLRI objects withdrawn (RFC 9552). Populated only for SAFI 71/72.
     pub bgpls_withdrawn: Vec<crate::bgpls::BgpLsNlri>,
-    /// VPNv4/VPNv6 NLRI entries withdrawn (RFC 4364 / RFC 4659). Populated only for SAFI 128.
-    pub vpn_withdrawn: Vec<crate::vpn::VpnNlri>,
+    /// VPNv4/VPNv6 NLRI entries withdrawn (RFC 4364 / RFC 4659). Populated
+    /// only for SAFI 128. Carries an RFC 7911 Add-Path path ID per entry;
+    /// for non-Add-Path peers, `path_id` is always 0.
+    pub vpn_withdrawn: Vec<crate::vpn::VpnNlriEntry>,
     /// RT-Constrain NLRI entries withdrawn (RFC 4684). Populated only for SAFI 132.
     pub rtc_withdrawn: Vec<crate::rtc::RtcNlri>,
 }
@@ -1163,6 +1167,9 @@ fn decode_mp_reach_nlri(
         }));
     }
     if family == MpNlriFamily::BgpLs {
+        // Deliberately kept even though VPN (SAFI 128) grew Add-Path: no
+        // demand for multi-path BGP-LS topology feeds, and negotiation never
+        // offers Add-Path for these families.
         if add_path_families.contains(&(afi, safi)) {
             return Err(DecodeError::MalformedField {
                 message_type: "UPDATE",
@@ -1188,16 +1195,18 @@ fn decode_mp_reach_nlri(
         }));
     }
     if family == MpNlriFamily::Vpn {
-        if add_path_families.contains(&(afi, safi)) {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: "MP_REACH_NLRI VPN Add-Path is not supported".to_string(),
-            });
-        }
-        let routes = if afi == Afi::Ipv4 {
-            crate::vpn::decode_vpnv4_nlri(nlri_bytes)?
+        let vpn_family = if afi == Afi::Ipv4 {
+            crate::vpn::VpnAddressFamily::V4
         } else {
-            crate::vpn::decode_vpnv6_nlri(nlri_bytes)?
+            crate::vpn::VpnAddressFamily::V6
+        };
+        let routes = if add_path_families.contains(&(afi, safi)) {
+            crate::vpn::decode_vpn_nlri_addpath(nlri_bytes, vpn_family)?
+        } else {
+            crate::vpn::decode_vpn_nlri(nlri_bytes, vpn_family)?
+                .into_iter()
+                .map(|nlri| crate::vpn::VpnNlriEntry { path_id: 0, nlri })
+                .collect()
         };
         return Ok(PathAttribute::MpReachNlri(MpReachNlri {
             afi,
@@ -1213,6 +1222,10 @@ fn decode_mp_reach_nlri(
         }));
     }
     if family == MpNlriFamily::Rtc {
+        // Deliberately kept even though VPN (SAFI 128) grew Add-Path:
+        // Add-Path semantics for RTC *membership* NLRI are undefined-ish
+        // (multiple paths for one RT membership have no useful meaning for
+        // the RFC 4684 outbound filter), and negotiation never offers it.
         if add_path_families.contains(&(afi, safi)) {
             return Err(DecodeError::MalformedField {
                 message_type: "UPDATE",
@@ -1383,6 +1396,8 @@ fn decode_bgpls_mp_unreach(
     withdrawn_bytes: &[u8],
     add_path_families: &[(Afi, Safi)],
 ) -> Result<PathAttribute, DecodeError> {
+    // Kept alongside the VPN Add-Path slice: no demand for multi-path
+    // BGP-LS feeds; negotiation never offers Add-Path for these families.
     if add_path_families.contains(&(afi, safi)) {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -1416,18 +1431,19 @@ fn decode_vpn_mp_unreach(
     withdrawn_bytes: &[u8],
     add_path_families: &[(Afi, Safi)],
 ) -> Result<PathAttribute, DecodeError> {
-    if add_path_families.contains(&(afi, safi)) {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: "MP_UNREACH_NLRI VPN Add-Path is not supported".to_string(),
-        });
-    }
     let vpn_family = if afi == Afi::Ipv4 {
         crate::vpn::VpnAddressFamily::V4
     } else {
         crate::vpn::VpnAddressFamily::V6
     };
-    let routes = crate::vpn::decode_vpn_withdraw_nlri(withdrawn_bytes, vpn_family)?;
+    let routes = if add_path_families.contains(&(afi, safi)) {
+        crate::vpn::decode_vpn_withdraw_nlri_addpath(withdrawn_bytes, vpn_family)?
+    } else {
+        crate::vpn::decode_vpn_withdraw_nlri(withdrawn_bytes, vpn_family)?
+            .into_iter()
+            .map(|nlri| crate::vpn::VpnNlriEntry { path_id: 0, nlri })
+            .collect()
+    };
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
         afi,
         safi,
@@ -1447,6 +1463,8 @@ fn decode_rtc_mp_unreach(
     withdrawn_bytes: &[u8],
     add_path_families: &[(Afi, Safi)],
 ) -> Result<PathAttribute, DecodeError> {
+    // Kept alongside the VPN Add-Path slice: Add-Path semantics for RTC
+    // membership NLRI are undefined-ish; negotiation never offers it.
     if add_path_families.contains(&(afi, safi)) {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -1928,7 +1946,13 @@ fn encode_mp_reach_nlri(
         } else {
             crate::vpn::VpnAddressFamily::V6
         };
-        crate::vpn::encode_vpn_nlri(&mp.vpn_announced, family, buf)?;
+        if add_path {
+            crate::vpn::encode_vpn_nlri_addpath(&mp.vpn_announced, family, buf)?;
+        } else {
+            for entry in &mp.vpn_announced {
+                crate::vpn::encode_vpn_nlri(std::slice::from_ref(&entry.nlri), family, buf)?;
+            }
+        }
         return Ok(());
     }
     // RTC (SAFI 132): ordinary host next-hop (same forms as unicast),
@@ -2018,8 +2042,19 @@ fn encode_mp_unreach_nlri(
             crate::vpn::VpnAddressFamily::V6
         };
         // RFC 8277 §2.4: withdraws carry the 3-octet compatibility value
-        // 0x800000 in the label position, never a real label stack.
-        crate::vpn::encode_vpn_withdraw_nlri(&mp.vpn_withdrawn, family, buf)?;
+        // 0x800000 in the label position, never a real label stack. Under
+        // Add-Path the 4-octet path ID is prepended to each entry.
+        if add_path {
+            crate::vpn::encode_vpn_withdraw_nlri_addpath(&mp.vpn_withdrawn, family, buf)?;
+        } else {
+            for entry in &mp.vpn_withdrawn {
+                crate::vpn::encode_vpn_withdraw_nlri(
+                    std::slice::from_ref(&entry.nlri),
+                    family,
+                    buf,
+                )?;
+            }
+        }
         return Ok(());
     }
     // RTC (SAFI 132): one codec for both directions (no withdraw split).
@@ -2398,6 +2433,9 @@ mod tests {
             prefix: crate::vpn::VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
         }
     }
+    fn vpn_entry(path_id: u32, nlri: crate::vpn::VpnNlri) -> crate::vpn::VpnNlriEntry {
+        crate::vpn::VpnNlriEntry { path_id, nlri }
+    }
     #[test]
     fn mp_reach_vpn_attribute_roundtrip() {
         let route = vpnv4_nlri(24_017);
@@ -2410,7 +2448,7 @@ mod tests {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
-            vpn_announced: vec![route.clone()],
+            vpn_announced: vec![vpn_entry(0, route.clone())],
             rtc_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(mp.clone());
@@ -2422,9 +2460,12 @@ mod tests {
             panic!("not MP_REACH after decode");
         };
         assert_eq!(decoded_mp.next_hop, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
-        assert_eq!(decoded_mp.vpn_announced, vec![route]);
-        assert_eq!(decoded_mp.vpn_announced[0].labels[0].label, 24_017);
-        assert_eq!(decoded_mp.vpn_announced[0].route_distinguisher, vpn_rd());
+        assert_eq!(decoded_mp.vpn_announced, vec![vpn_entry(0, route)]);
+        assert_eq!(decoded_mp.vpn_announced[0].nlri.labels[0].label, 24_017);
+        assert_eq!(
+            decoded_mp.vpn_announced[0].nlri.route_distinguisher,
+            vpn_rd()
+        );
         assert!(decoded_mp.announced.is_empty());
     }
     #[test]
@@ -2441,7 +2482,7 @@ mod tests {
             flowspec_withdrawn: vec![],
             evpn_withdrawn: vec![],
             bgpls_withdrawn: vec![],
-            vpn_withdrawn: vec![route.clone()],
+            vpn_withdrawn: vec![vpn_entry(0, route.clone())],
             rtc_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(mp.clone());
@@ -2456,8 +2497,8 @@ mod tests {
         let PathAttribute::MpUnreachNlri(decoded_mp) = &decoded[0] else {
             panic!("not MP_UNREACH after decode");
         };
-        assert_eq!(decoded_mp.vpn_withdrawn, vec![route]);
-        assert!(decoded_mp.vpn_withdrawn[0].labels.is_empty());
+        assert_eq!(decoded_mp.vpn_withdrawn, vec![vpn_entry(0, route)]);
+        assert!(decoded_mp.vpn_withdrawn[0].nlri.labels.is_empty());
     }
     #[test]
     fn mp_unreach_vpn_withdraw_ignores_label_position_value() {
@@ -2482,13 +2523,16 @@ mod tests {
             panic!("not MP_UNREACH after decode");
         };
         assert_eq!(mp.vpn_withdrawn.len(), 1);
-        assert_eq!(mp.vpn_withdrawn[0].route_distinguisher, vpn_rd());
-        assert_eq!(mp.vpn_withdrawn[0].prefix.to_string(), "10.1.0.0/24");
-        assert!(mp.vpn_withdrawn[0].labels.is_empty());
+        assert_eq!(mp.vpn_withdrawn[0].nlri.route_distinguisher, vpn_rd());
+        assert_eq!(mp.vpn_withdrawn[0].nlri.prefix.to_string(), "10.1.0.0/24");
+        assert!(mp.vpn_withdrawn[0].nlri.labels.is_empty());
     }
     #[test]
-    fn mp_reach_vpn_addpath_rejected() {
-        let attr = PathAttribute::MpReachNlri(MpReachNlri {
+    fn mp_reach_vpn_addpath_roundtrip() {
+        // RFC 7911 for SAFI 128: each NLRI carries a 4-octet path ID when
+        // the family is in the negotiated Add-Path set — both encode and
+        // decode dispatch on `add_path_families` / `add_path_mp`.
+        let mp = MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::MplsVpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -2497,22 +2541,42 @@ mod tests {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
-            vpn_announced: vec![vpnv4_nlri(100)],
+            vpn_announced: vec![vpn_entry(1, vpnv4_nlri(100)), vpn_entry(2, vpnv4_nlri(200))],
             rtc_announced: vec![],
-        });
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
         let mut buf = Vec::new();
-        encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
-        let err = decode_path_attributes(&buf, true, &[(Afi::Ipv4, Safi::MplsVpn)])
-            .expect_err("VPN Add-Path must fail closed");
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("VPN Add-Path is not supported"),
-                    "unexpected detail: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv4, Safi::MplsVpn)])
+            .expect("decode VPN Add-Path MP_REACH");
+        assert_eq!(decoded, vec![PathAttribute::MpReachNlri(mp)]);
+    }
+    #[test]
+    fn mp_unreach_vpn_addpath_roundtrip() {
+        // Withdraw-mode Add-Path: path_id(4) | len | compatibility field |
+        // RD | prefix per entry (RFC 7911 + RFC 8277 §2.4).
+        let mut route = vpnv6_nlri(0);
+        route.labels = vec![];
+        let mp = MpUnreachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::MplsVpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![vpn_entry(7, route)],
+            rtc_withdrawn: vec![],
+        };
+        let attr = PathAttribute::MpUnreachNlri(mp.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, true).unwrap();
+        // Wire layout: flags, type=15, len, AFI(2), SAFI(1), then path_id(4)
+        // and the compatibility field in the label position.
+        assert_eq!(&buf[6..10], &7u32.to_be_bytes(), "path_id");
+        assert_eq!(&buf[11..14], &[0x80, 0x00, 0x00], "compatibility field");
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv6, Safi::MplsVpn)])
+            .expect("decode VPN Add-Path MP_UNREACH");
+        assert_eq!(decoded, vec![PathAttribute::MpUnreachNlri(mp)]);
     }
     #[test]
     fn mp_reach_vpn_rejects_nonzero_next_hop_rd() {
@@ -2553,7 +2617,7 @@ mod tests {
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
-            vpn_announced: vec![route],
+            vpn_announced: vec![vpn_entry(0, route)],
             rtc_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(mp.clone());

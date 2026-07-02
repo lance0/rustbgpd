@@ -228,8 +228,8 @@ resolved.
   RFC 9552; local topology production remains deferred), and VPNv4/VPNv6
   (AFI 1/2, SAFI 128) route-reflection (RFC 4364 / RFC 4659 —
   RR/controller-feed only: RD, MPLS label stack, next-hop, and Route
-  Targets are preserved verbatim; no VRF import, no MPLS FIB install,
-  no Add-Path), and
+  Targets are preserved verbatim; no VRF import, no MPLS FIB install;
+  Add-Path per RFC 7911 is supported for SAFI 128), and
   RT-Constrain (AFI 1, SAFI 132) per RFC 4684 (strict per-peer VPN
   reflection filtering with self-originated default membership; §3.2(ii)
   non-client attribute-swap, the §6 60-second EoR delay, eBGP RTC

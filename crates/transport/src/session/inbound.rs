@@ -677,10 +677,10 @@ impl PeerSession {
                             }));
                         }
                         if mp.safi == Safi::MplsVpn {
-                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| {
+                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| {
                                 VpnRibRouteKey {
-                                    nlri_key: nlri.key(),
-                                    path_id: 0,
+                                    nlri_key: entry.nlri.key(),
+                                    path_id: entry.path_id,
                                 }
                             }));
                         }
@@ -702,10 +702,10 @@ impl PeerSession {
                     && mp.safi == Safi::MplsVpn
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|nlri| {
+                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
-                            nlri_key: nlri.key(),
-                            path_id: 0,
+                            nlri_key: entry.nlri.key(),
+                            path_id: entry.path_id,
                         }
                     }));
                 }
@@ -860,10 +860,10 @@ impl PeerSession {
                             }));
                         }
                         if mp.safi == Safi::MplsVpn {
-                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| {
+                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| {
                                 VpnRibRouteKey {
-                                    nlri_key: nlri.key(),
-                                    path_id: 0,
+                                    nlri_key: entry.nlri.key(),
+                                    path_id: entry.path_id,
                                 }
                             }));
                         }
@@ -885,10 +885,10 @@ impl PeerSession {
                     && mp.safi == Safi::MplsVpn
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|nlri| {
+                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
-                            nlri_key: nlri.key(),
-                            path_id: 0,
+                            nlri_key: entry.nlri.key(),
+                            path_id: entry.path_id,
                         }
                     }));
                 }
@@ -1437,9 +1437,9 @@ impl PeerSession {
                         // VPNv4/VPNv6 announced routes (RFC 4364 / RFC 4659).
                         // Unlike BGP-LS, the policy context carries the real
                         // inner prefix (ADR-0077 honest policy context).
-                        for nlri in &mp.vpn_announced {
+                        for entry in &mp.vpn_announced {
                             let ctx = RouteContext {
-                                prefix: Some(vpn_inner_prefix(&nlri.prefix)),
+                                prefix: Some(vpn_inner_prefix(&entry.nlri.prefix)),
                                 next_hop: Some(mp.next_hop),
                                 extended_communities: update_ecs,
                                 communities: update_communities,
@@ -1472,7 +1472,7 @@ impl PeerSession {
                                 let (attrs, _) =
                                     materialize_attrs(&attr_bundle.mp, &result.modifications);
                                 vpn_announced.push(VpnRibRoute {
-                                    nlri: nlri.clone(),
+                                    nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
                                     peer: self.peer_ip,
                                     attributes: attrs,
@@ -1484,7 +1484,7 @@ impl PeerSession {
                                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                     is_stale: false,
                                     is_llgr_stale: false,
-                                    path_id: 0,
+                                    path_id: entry.path_id,
                                 });
                             }
                         }
@@ -1675,9 +1675,9 @@ impl PeerSession {
                         }));
                     }
                     if mp.safi == Safi::MplsVpn {
-                        vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|nlri| VpnRibRouteKey {
-                            nlri_key: nlri.key(),
-                            path_id: 0,
+                        vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| VpnRibRouteKey {
+                            nlri_key: entry.nlri.key(),
+                            path_id: entry.path_id,
                         }));
                     }
                     if mp.safi == Safi::RtConstrain {
@@ -1745,6 +1745,10 @@ impl PeerSession {
             self.known_vpn.remove(key);
         }
         for route in &vpn_announced {
+            // Keyed by (RD+prefix, path_id): under VPN Add-Path each received
+            // path counts toward max-prefix separately. Deliberately stricter
+            // than unicast's unique-prefix refcount — over-counting tears the
+            // session down earlier, never lets a peer bypass the cap.
             self.known_vpn.insert(route.key());
         }
         for key in &rtc_withdrawn {

@@ -651,12 +651,27 @@ impl RibManager {
                 );
             }
         } else if safi == Safi::MplsVpn {
-            let vpn_keys: HashSet<crate::route::VpnRibRouteKey> = self
+            let mut vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
                 .loc_rib
                 .iter_vpn()
                 .filter(|route| route.afi_safi() == family)
-                .map(crate::route::VpnRibRoute::key)
+                .map(|route| route.nlri.key())
                 .collect();
+            // An Add-Path-send refresh re-emits the staged top-N, which
+            // draws from every Adj-RIB-In identity of the family.
+            if peer_add_path_send_max > 0
+                && peer_add_path_send_families
+                    .iter()
+                    .any(|(_, safi)| *safi == Safi::MplsVpn)
+            {
+                for rib in self.ribs.values() {
+                    vpn_keys.extend(
+                        rib.iter_vpn()
+                            .filter(|route| route.afi_safi() == family)
+                            .map(|route| route.nlri.key()),
+                    );
+                }
+            }
             if !vpn_keys.is_empty() {
                 Self::stage_vpn_routes(
                     loc_rib,
@@ -673,6 +688,8 @@ impl RibManager {
                     sendable.as_ref(),
                     rtc_filter.as_ref(),
                     orr_ctx,
+                    peer_add_path_send_max,
+                    &peer_add_path_send_families,
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,

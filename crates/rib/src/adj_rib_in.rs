@@ -65,6 +65,10 @@ pub struct AdjRibIn {
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes keyed by RFC 4364 RD + prefix identity.
     vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// Secondary index: VPN RD+prefix identity → Add-Path path IDs stored for
+    /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
+    /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
+    vpn_key_index: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
@@ -110,6 +114,7 @@ impl AdjRibIn {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            vpn_key_index: HashMap::default(),
             rtc_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             bgpls_llgr_stale_local_tags: HashSet::default(),
@@ -180,6 +185,7 @@ impl AdjRibIn {
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
+        self.vpn_key_index.clear();
         self.rtc_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
@@ -965,14 +971,52 @@ impl AdjRibIn {
         } else {
             self.attr_intern.insert(route.attributes.clone());
         }
+        let ids = self.vpn_key_index.entry(key.nlri_key).or_default();
+        if !ids.contains(&key.path_id) {
+            ids.push(key.path_id);
+        }
         self.vpn_routes.insert(key, route).is_some()
     }
 
     /// Withdraw a VPN route. Returns `true` if it existed.
     pub fn withdraw_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
-        // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
+        self.remove_vpn_entry(key)
+    }
+
+    /// Shared VPN removal: drops the route, its locally-injected LLGR tag,
+    /// and its `vpn_key_index` entry. Every VPN removal path (withdraw and
+    /// the GR/LLGR stale sweeps) must route through here so the secondary
+    /// index never dangles.
+    fn remove_vpn_entry(&mut self, key: &VpnRibRouteKey) -> bool {
+        // A removed key can no longer carry a locally-injected LLGR_STALE tag.
         self.vpn_llgr_stale_local_tags.remove(key);
-        self.vpn_routes.remove(key).is_some()
+        let removed = self.vpn_routes.remove(key).is_some();
+        if removed && let Some(ids) = self.vpn_key_index.get_mut(&key.nlri_key) {
+            ids.retain(|id| *id != key.path_id);
+            if ids.is_empty() {
+                self.vpn_key_index.remove(&key.nlri_key);
+            }
+        }
+        removed
+    }
+
+    /// Iterate the VPN routes stored for one RD+prefix identity across all
+    /// Add-Path path IDs (the SAFI 128 analog of `iter_prefix`).
+    pub fn iter_vpn_for_nlri<'a>(
+        &'a self,
+        nlri_key: &'a rustbgpd_wire::VpnRouteKey,
+    ) -> impl Iterator<Item = &'a VpnRibRoute> + 'a {
+        self.vpn_key_index
+            .get(nlri_key)
+            .into_iter()
+            .flat_map(move |ids| {
+                ids.iter().filter_map(move |path_id| {
+                    self.vpn_routes.get(&VpnRibRouteKey {
+                        nlri_key: *nlri_key,
+                        path_id: *path_id,
+                    })
+                })
+            })
     }
 
     /// Withdraw all VPN routes from this Adj-RIB-In.
@@ -984,6 +1028,7 @@ impl AdjRibIn {
     pub fn withdraw_all_vpn(&mut self) -> Vec<VpnRibRouteKey> {
         let keys: Vec<_> = self.vpn_routes.keys().cloned().collect();
         self.vpn_routes.clear();
+        self.vpn_key_index.clear();
         self.vpn_llgr_stale_local_tags.clear();
         keys
     }
@@ -1034,8 +1079,7 @@ impl AdjRibIn {
             .map(|(k, _)| k.clone())
             .collect();
         for key in &already_stale {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
         for route in self.vpn_routes.values_mut() {
             if route.afi_safi() == family {
@@ -1077,8 +1121,7 @@ impl AdjRibIn {
             .map(|(k, _)| k.clone())
             .collect();
         for key in &stale {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
         stale
     }
@@ -1097,8 +1140,7 @@ impl AdjRibIn {
             .map(|(k, _)| k.clone())
             .collect();
         for key in &stale {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
         stale
     }
@@ -1129,8 +1171,7 @@ impl AdjRibIn {
             .collect();
         let mut affected: Vec<VpnRibRouteKey> = no_llgr_keys.clone();
         for key in &no_llgr_keys {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
@@ -1168,8 +1209,7 @@ impl AdjRibIn {
             .map(|(k, _)| k.clone())
             .collect();
         for key in &stale {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
         stale
     }
@@ -1188,8 +1228,7 @@ impl AdjRibIn {
             .map(|(k, _)| k.clone())
             .collect();
         for key in &stale {
-            self.vpn_llgr_stale_local_tags.remove(key);
-            self.vpn_routes.remove(key);
+            self.remove_vpn_entry(key);
         }
         stale
     }
