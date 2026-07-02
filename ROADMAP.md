@@ -96,28 +96,89 @@ soak, or bench receipts), because credibility is a technical artifact, not
 marketing. Concretely: no speculative service-provider breadth just because FRR
 has it, no broad performance sprints without profile evidence.
 
-### Next
+### Next (research-shaped, July 2026)
 
-- **GR/LLGR stale preservation for the RR families (VPN, BGP-LS, RTC)** —
-  **SHIPPED 2026-07-02** (#636 Adj-RIB-In substrate, #637 RFC 4724 helper
-  preservation with the not-in-capability withdraw rule and RTC
-  membership-served re-establish, #638 RFC 9494 two-phase LLGR with
-  NO_LLGR + community-riding re-export; M77 live peer-restart receipt).
-  The RR role is restart-real: no table dump on a PE restart, no VPN
-  blackout at RR-client re-establish, ORR vantages survive a topology
-  source restart. The new families implement RFC-strict
-  consecutive-restart deletion and EoR sweeps; the pre-existing
-  unicast/FlowSpec/EVPN paths have since been brought in line, and the
-  RFC 9494 export restriction (gap 3) now gates LLGR-stale routes on the
-  receiver's LLGR capability repo-wide — the legacy tech-debt item below
-  is fully resolved.
-- **RR-composition follow-ons** *(queued behind the GR arc, in order)*:
-  `distribution.rs` module split (three arcs of growth; pure relocation);
-  ORR explainability (`rbgp explain` answering "why did client X get path
-  Y" with the per-vantage cost breakdown — the `OrrInteriorCost` reason
-  variant is the hook); VPN-ORR (vantage ranking for SAFI 128, ADR-0095
-  deferral); Add-Path for the new families (rejected at negotiation today;
-  RFC 9107 requires inter-RR Add-Path for multi-cluster ORR).
+This phase was shaped by a strategic pass over the competitive landscape
+(BIRD 2/3, FRR, GoBGP, OpenBGPd; IOS-XR/cRPD as the commercial reference),
+IETF GROW/IDR/SIDROPS activity, and documented operator-demand signals
+(top-voted feature requests, NANOG/RIPE/DENOG talks, the OpenBGPd
+route-server re-entry playbook, and the Route Server Support Foundation's
+software-diversity funding). Two findings converge:
+
+1. **BMP depth is the open, niche-defining gap.** No open-source daemon
+   ships the full monitoring trio — RFC 7854 (Adj-RIB-In), RFC 8671
+   (Adj-RIB-Out), RFC 9069 (Loc-RIB): FRR and GoBGP stop at Loc-RIB (and
+   FRR documents BMP+Add-Path as unreliable), BIRD's BMP is experimental,
+   OpenBGPd has none. Per-client Adj-RIB-Out monitoring is the
+   observability twin of ORR — proving *what the RR actually sent each
+   client*. On top of that, the BMPv4 TLV framework
+   (draft-ietf-grow-bmp-tlv) plus the path-marking
+   (draft-ietf-grow-bmp-path-marking-tlv) and route-event-logging
+   (draft-ietf-grow-bmp-rel) drafts have no router-side implementation
+   anywhere — and rustbgpd already computes per-path `BestPathReason` and
+   per-policy discard/validation reasons, making path-marking and REL
+   largely serialization work. pmacct (whose maintainers co-author the
+   drafts) is the live collector-side interop partner.
+2. **Explainability is the demand signal.** GoBGP's top-voted open
+   feature request is export-side "why is this route not advertised to
+   peer X" — rustbgpd is one slice from finishing a moat (import explain,
+   policy dry-run, ORR explain, per-term traces) no competitor has
+   started.
+
+**The BMP arc (next anchor)**: RFC 8671 Adj-RIB-Out + RFC 9069 Loc-RIB on
+the existing exporter → BMPv4 TLV framing → path-marking TLV (streaming
+"why this path won/lost" — the best-path/ORR reasons on the wire) → REL
+(policy-discard + validation-fail events from the policy/RPKI/ASPA
+engines) → pmacct interop receipt. One arc, three plausible
+first-implementations, and it makes the controller-feed story
+standards-shaped: BMP is how the monitoring ecosystem (pmacct, OpenBMP,
+gobmp→Kafka pipelines) already ingests.
+
+**Then, in rough order** (each research-backed, sized about one slice):
+
+- **Export-side explain completion** — the GoBGP-demand item; composes
+  with per-term policy traces and `BestPathReason`, and later exports on
+  the wire via the path-marking TLV.
+- **Secure-by-default route-server profile** — OTC/RFC 9234 + ASPA + ROV
+  + reject-AS_SET as one documented preset (the pieces are shipped; gaps
+  are OTC-on-dynamic-neighbors + a curated example). Deployed precedent:
+  YYCIX and FranceIX reject OTC-marked leaks at their route servers today.
+- **Trust/adoption hygiene sweep** (all small): cargo-fuzz targets on the
+  wire codecs + OSS-Fuzz enrollment (BGP parser CVEs are a live attack
+  class; FRR's fuzzing issue has been open since 2017 — "memory-safe and
+  continuously fuzzed" is the defensible trust artifact), RFC 9687 Send
+  Hold Timer (a conformance-table hole; BIRD/FRR/OpenBGPd all ship it), a
+  published Grafana dashboard, and a per-RFC receipts/conformance page
+  distilled from the M-series + soak history.
+- **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
+  RFC, no open-source implementation found, drops onto the existing
+  BGP-LS substrate; deepens the controller feed (TE controllers reading
+  SR policy state over gRPC).
+- **ASPA/RTRv2 conformance refresh** against the latest drafts — cheap
+  insurance for a day-one-RFC-compliant claim while BIRD's ASPA sits in a
+  side branch and FRR has none.
+- **Paths-Limit capability** (draft-abraitis-idr-addpath-paths-limit) —
+  small, RR-relevant (bounds Add-Path fanout), FRR 10.1 interop available.
+
+**The route-server (IXP) track** — larger, staged behind the above:
+RFC 7948 path-hiding mitigation (per-client best-path fallback; the
+load-bearing gap vs BIRD's multi-table/`secondary` and OpenBGPd), an
+Alice-LG gRPC source adapter (the looking glass every flagship IXP runs;
+its GoBGP-gRPC backend is the template), a 1000+-peer route-server scale
+receipt (BIRD 3 claims 5,000 peers but its 3.0.0 announcement concedes a
+memory regression — a direct opening for the dhat-hardened RIB), and
+shadow/canary RIB-diff tooling (`rbgp diff` against an incumbent's
+MRT/BMP feed — the documented lockstep-migration adoption path). An
+ARouteServer target is the final adoption gate but is deliberately
+deferred until the above make a pilot credible.
+
+**Researched and rejected** (recorded so they aren't re-litigated):
+confederations (RFC 5065 — no demand signal in two years of issues and
+talks; solves the problem RRs already solve), diverse-path RFC 6774 /
+advertise-best-external (commercial-only; superseded by Add-Path, which
+rustbgpd ships across families), Flowspec v2 (codepoint churn), BGP-CT/CAR
+(PE-scale, out of niche), custom Kafka/NATS bridges (BMP *is* the bridge;
+gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ### Recently shipped (2026-07-01/02, condensed — details in CHANGELOG/ADRs)
 
