@@ -11,7 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`.rpol` explain + live hit counters (ADR-0096 slice 4): the
+- **M80 interop receipt: `.rpol` policy parity against FRR route-maps —
+  the ADR-0096 arc closer.** New `interop` CI job (4-node containerlab):
+  rustbgpd runs its whole policy surface from an `.rpol` file
+  (`[policy] rpol_files`) while an FRR parity node expresses the SAME
+  intent as route-maps / prefix-lists / community-lists; both receive
+  one route matrix from a source FRR and export to a downstream FRR.
+  29/29 assertions: route-for-route import parity (prefix-set ge/le
+  boundary, community-set match, community add + remove, LOCAL_PREF
+  set, as-path regex reject, a modify-then-continue term, and the same
+  parameterized policy instantiated as `customer-in(200)` vs
+  `customer-in(300)` for two peers) and export parity (the downstream
+  compares MED/communities/deny on the rustbgpd path vs the FRR path,
+  prefix by prefix); `rbgp policy check` runs the file's in-language
+  tests (exit 0); `rbgp policy test` dry-runs a `customer-in(500)`
+  candidate over the live RIB (counts, per-term hits, before/after
+  diffs); `rbgp policy stats` shows nonzero live term hits; and an
+  `.rpol` edit under traffic (LP flip + SIGHUP, m34 pattern) hot-applies
+  with zero session flap, a wire-observed Route Refresh at exactly the
+  one peer whose resolved chain changed (the content-identical policies
+  on the other peer trigger nothing), and the new LP re-imported. No
+  dataplane writes. Implementation record appended to ADR-0096; docs
+  finalized (`docs/rpol-language.md` positioning vs BIRD/route-maps,
+  comparison tables, README, ROADMAP true-up).
   language is now fully explainable through the existing surfaces.**
   `ExplainImportPolicy` statement traces cover `.rpol` chain members at
   term granularity: the step names the deciding term and carries one

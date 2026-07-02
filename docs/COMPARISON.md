@@ -116,7 +116,11 @@ IPv4/IPv6 `Prefix` routes.
 | Named policy definitions | Yes | Yes | Yes | Yes | Yes |
 | Policy chaining | Yes | Yes | Yes | Yes | Yes |
 | Import-policy explain (per-prefix decision trace) | Yes | No | No | No | No |
-| Custom filter language | No | No | Yes | No | Yes |
+| Custom filter language | Yes | No | Yes | No | Yes |
+| Parameterized policies (templates) | Yes | No | Yes | No | Partial |
+| In-language policy unit tests | Yes | No | No | No | No |
+| Policy dry-run against the live RIB | Yes | No | No | No | No |
+| Live per-term policy hit counters | Yes | No | No | No | No |
 
 ## Security
 

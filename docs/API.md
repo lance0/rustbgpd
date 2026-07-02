@@ -155,7 +155,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
-| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
+| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
 | `EventService` | All RPCs | None |
@@ -617,7 +617,9 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `GetNeighborPolicyChains` | Return one neighbor's import/export chain assignments |
 | `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |
 | `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
-| `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
+| `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). For `.rpol` chain members the statement trace names the deciding term and carries per-term trace lines (ADR-0096). Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
+| `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled server-side) read-only over a live Adj-RIB-In / Loc-RIB snapshot: accepted/rejected/modified counts, per-term hit counters, before/after attribute diff samples. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
+| `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; export direction in V1 — import counters accumulate but have no read surface yet). CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,
