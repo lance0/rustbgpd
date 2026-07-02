@@ -1,0 +1,16 @@
+# sink2 deliberately negotiates ONLY l3vpn-ipv4-unicast (no rtc family):
+# it pins rustbgpd's SAFI-132-not-negotiated rule — no RTC session means
+# no filtering, the peer receives the full VPN table.
+[global.config]
+as = 65001
+router-id = "10.0.2.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.2.1"
+peer-as = 65001
+description = "rustbgpd-rtc-rr"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv4-unicast"
