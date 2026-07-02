@@ -1404,8 +1404,10 @@ branch is between features.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, and
   `crates/rib/src/manager/distribution.rs` (which had absorbed the BGP-LS/VPN/
   RTC/ORR arcs) is now a directory module with per-family concern submodules.
-  `crates/api/src/event_service.rs` remains borderline. Keep splitting only where
-  it reduces real conflict or review cost.
+  `crates/rib/src/manager/tests.rs` (the largest file in the repo) is now
+  `manager/tests/` — shared fixtures in `mod.rs` plus per-concern sibling test
+  modules. `crates/api/src/event_service.rs` remains borderline. Keep splitting
+  only where it reduces real conflict or review cost.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the actionable
   residue is documentation/policy drift, all low-risk:
