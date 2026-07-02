@@ -40,6 +40,12 @@ name: Interop
 #     receive only its member RT, a non-RTC sink that must receive
 #     everything, plus widen/narrow membership churn with zero
 #     session flaps and no UPDATE storm.
+#   - M76 (~60 s test): Optimal Route Reflection (RFC 9107) — GoBGP
+#     v4 source injects a 4-link BGP-LS square, two PEs announce the
+#     same prefix with different next-hops, and two clients pinned
+#     to different ORR vantages must receive DIVERGENT best paths,
+#     flip on a topology metric change (no churn to the unaffected
+#     client), and fall back to one standard best on withdrawal.
 #
 # Operational + security tier — BMP monitoring, transport security,
 # FlowSpec:
@@ -412,6 +418,44 @@ jobs:
           label: M75
           topology: tests/interop/m75-rtc-vpnv4-filter-gobgp.clab.yml
           script: tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh
+
+  m76:
+    name: M76 — ORR divergent-best (GoBGP 4.6.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build gobgp:bgpls
+        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+
+      - name: Run M76 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M76
+          topology: tests/interop/m76-orr-divergent-best-gobgp.clab.yml
+          script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
 
   m22:
     name: M22 — FlowSpec (FRR 10.3.1)
