@@ -363,6 +363,8 @@ impl RibManager {
         let mut bgpls_withdraw = Vec::new();
         let mut vpn_announce = Vec::new();
         let mut vpn_withdraw = Vec::new();
+        let mut rtc_announce = Vec::new();
+        let mut rtc_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -515,6 +517,34 @@ impl RibManager {
                     false, // route refresh re-emits via empty refresh_view
                 );
             }
+        } else if safi == Safi::RtConstrain {
+            let rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
+                .loc_rib
+                .iter_rtc()
+                .map(crate::route::RtcRibRoute::key)
+                .collect();
+            if !rtc_keys.is_empty() {
+                Self::stage_rtc_routes(
+                    loc_rib,
+                    &refresh_view,
+                    &self.peer_is_rr_client,
+                    &rtc_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut rtc_announce,
+                    &mut rtc_withdraw,
+                    false, // route refresh re-emits via empty refresh_view
+                );
+            }
         } else {
             for prefix in &all_prefixes {
                 let prefix_send_max = if peer_add_path_send_max > 0
@@ -615,6 +645,8 @@ impl RibManager {
                 bgpls_withdraw,
                 vpn_announce,
                 vpn_withdraw,
+                rtc_announce,
+                rtc_withdraw,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
@@ -679,7 +711,9 @@ impl RibManager {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            rtc_announce: vec![],
             vpn_withdraw: vec![],
+            rtc_withdraw: vec![],
             request_refresh_all_negotiated: false,
         };
         if tx.try_send(eor).is_err() {

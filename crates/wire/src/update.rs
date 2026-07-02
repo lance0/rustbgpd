@@ -412,6 +412,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let msg = UpdateMessage::build(

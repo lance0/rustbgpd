@@ -438,6 +438,7 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
             evpn_announced: vec![evpn_route],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = rustbgpd_wire::UpdateMessage::build(
@@ -808,7 +809,9 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -843,7 +846,9 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         bgpls_announce: vec![route.clone()],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -875,7 +880,9 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![key],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -926,7 +933,9 @@ async fn oversized_bgpls_output_tears_down_session() {
         bgpls_announce: vec![route],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     assert!(
@@ -1001,7 +1010,9 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![route.clone()],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -1040,7 +1051,9 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![key],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -1138,6 +1151,188 @@ fn prepare_outbound_attributes_vpn_strips_rr_attrs_for_ebgp() {
         vec![AsPathSegment::AsSequence(vec![65001, 65002])]
     );
 }
+fn make_rtc_rib_route(local_admin: u16) -> rustbgpd_rib::RtcRibRoute {
+    rustbgpd_rib::RtcRibRoute {
+        nlri: rustbgpd_wire::RtcNlri::new(
+            65002,
+            0x0002_FDEA_0000_0000 | u64::from(local_admin),
+            96,
+        )
+        .unwrap(),
+        next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+/// RTC `MP_REACH` carries the membership NLRI verbatim with the stored
+/// next-hop; the locally-originated default (stored with an unspecified
+/// next-hop) is emitted with the session-local address. The withdraw uses
+/// the same NLRI codec via `MP_UNREACH`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins announce grouping, both next-hop forms, and the withdraw in one wire sequence"
+)]
+#[tokio::test]
+async fn send_route_update_emits_rtc_reach_and_unreach() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    let session_local_ip = client.local_addr().unwrap().ip();
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let route = make_rtc_rib_route(100);
+    let key = route.key();
+    // A locally-originated default rides in the same update; its stored
+    // next-hop is unspecified and must be rewritten to the session-local
+    // address on the wire.
+    let local_default = rustbgpd_rib::RtcRibRoute {
+        nlri: rustbgpd_wire::RtcNlri::DEFAULT,
+        next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Local,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
+        rtc_announce: vec![route.clone(), local_default],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    // Distinct next-hops (stored vs session-local) split into two UPDATEs.
+    let mut seen_nlris = Vec::new();
+    let mut seen_next_hops = Vec::new();
+    for _ in 0..2 {
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected RTC MP_REACH UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("RTC announcement must use MP_REACH");
+        assert_eq!(mp.afi, Afi::Ipv4);
+        assert_eq!(mp.safi, Safi::RtConstrain);
+        seen_nlris.extend(mp.rtc_announced.iter().copied());
+        seen_next_hops.push(mp.next_hop);
+    }
+    assert!(
+        seen_nlris.contains(&route.nlri),
+        "membership NLRI must ride through verbatim"
+    );
+    assert!(
+        seen_nlris.contains(&rustbgpd_wire::RtcNlri::DEFAULT),
+        "default NLRI must be emitted"
+    );
+    assert!(
+        seen_next_hops.contains(&route.next_hop),
+        "stored RTC next-hop must pass through unchanged"
+    );
+    assert!(
+        seen_next_hops.contains(&session_local_ip),
+        "local default must be emitted with the session-local address, got {seen_next_hops:?}"
+    );
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
+        rtc_announce: vec![],
+        rtc_withdraw: vec![key],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected RTC MP_UNREACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("RTC withdrawal must use MP_UNREACH");
+    assert_eq!(mp.afi, Afi::Ipv4);
+    assert_eq!(mp.safi, Safi::RtConstrain);
+    assert_eq!(mp.rtc_withdrawn, vec![route.nlri]);
+}
+/// iBGP reflection of an RTC route on an RR adds `ORIGINATOR_ID` and
+/// `CLUSTER_LIST` — identical semantics to the VPN preparation.
+#[test]
+fn prepare_outbound_attributes_rtc_adds_rr_attrs_for_ibgp_reflection() {
+    let mut session = make_test_session(65001, 65001);
+    let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+    let source_id = Ipv4Addr::new(10, 0, 0, 42);
+    session.config.cluster_id = Some(cluster_id);
+    let mut route = make_rtc_rib_route(100);
+    route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
+    route.peer_router_id = source_id;
+    route.attributes = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::LocalPref(200),
+    ]);
+    let attrs = session.prepare_outbound_attributes_rtc(&route, false);
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::OriginatorId(id) if *id == source_id))
+    );
+    assert!(
+        attrs.iter().any(
+            |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
+        )
+    );
+    assert!(!attrs.iter().any(|a| matches!(
+        a,
+        PathAttribute::NextHop(_) | PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+    )));
+}
 /// `OutboundRouteUpdate::request_refresh_all_negotiated` (the RIB
 /// manager's failover-driven inbound recovery) emits a plain RFC 2918
 /// ROUTE-REFRESH request on the wire for EVERY negotiated family when
@@ -1171,7 +1366,9 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
     let mut refreshed = Vec::new();
@@ -1221,7 +1418,9 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: true,
     });
     // The first wire message must be the EoR UPDATE — no ROUTE-REFRESH
@@ -1286,7 +1485,9 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(first) = read_single_bgp_message(&mut server).await else {
@@ -1344,7 +1545,9 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -1567,6 +1770,7 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -1599,6 +1803,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2061,6 +2266,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         evpn_announced: vec![],
         bgpls_announced: vec![],
         vpn_announced: vec![],
+        rtc_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -2195,6 +2401,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2270,6 +2477,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2310,6 +2518,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -2407,7 +2616,9 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2452,7 +2663,9 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2503,7 +2716,9 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2554,7 +2769,9 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2600,7 +2817,9 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2659,7 +2878,9 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2708,7 +2929,9 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -2759,7 +2982,9 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
         vpn_announce: vec![],
+        rtc_announce: vec![],
         vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
     };
     session.send_route_update(update);
@@ -3424,6 +3649,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         evpn_announced: vec![],
         bgpls_announced: vec![],
         vpn_announced: vec![],
+        rtc_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -3968,6 +4194,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             evpn_announced: vec![],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
     ];
     // Build with Add-Path enabled and MP encoding
@@ -4679,6 +4906,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             evpn_announced: vec![withdrawn_route.clone()],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -4688,6 +4916,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             evpn_withdrawn: vec![withdrawn_route],
             bgpls_withdrawn: vec![],
             vpn_withdrawn: vec![],
+            rtc_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -4768,6 +4997,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
                 evpn_announced: routes,
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
@@ -4788,6 +5018,148 @@ async fn evpn_routes_counted_toward_max_prefix() {
     // Push a 3rd — must exceed max_prefixes = 2.
     session
         .process_update(send_announces(vec![make_route(0x03)]))
+        .await;
+    assert!(
+        session.read_half.is_none(),
+        "max-prefix overflow must drive the FSM teardown path"
+    );
+    assert_eq!(
+        session.known_prefix_count(),
+        0,
+        "teardown must clear max-prefix accounting"
+    );
+}
+/// A loop-detected UPDATE (RR cluster-list loop) must synthesize RTC
+/// withdrawals from both the `MP_UNREACH` withdrawals and the discarded
+/// `MP_REACH` announcements, so a looped re-announcement cannot strand a
+/// stale membership NLRI in the Adj-RIB-In.
+#[tokio::test]
+async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
+    use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, RtcNlri};
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let local_cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+    session.config.cluster_id = Some(local_cluster_id);
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = 65001;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let announced_nlri = RtcNlri::new(65001, 0x0002_FDE9_0000_0064, 96).unwrap();
+    let withdrawn_nlri = RtcNlri::new(65001, 0x0002_FDE9_0000_00C8, 96).unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        // Triggers the loop — local cluster-id present in the advertised list.
+        PathAttribute::ClusterList(vec![local_cluster_id]),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![announced_nlri],
+        }),
+        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![],
+            rtc_withdrawn: vec![withdrawn_nlri],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+    session.process_update(update).await;
+    let msg = rib_rx
+        .try_recv()
+        .expect("loop-path must still dispatch RTC withdrawals");
+    match msg {
+        RibUpdate::RtcRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } => {
+            assert!(
+                announced.is_empty(),
+                "announces in a loop-detected UPDATE must be discarded"
+            );
+            let withdrawn_nlris: Vec<_> = withdrawn.iter().map(|k| k.nlri).collect();
+            assert!(
+                withdrawn_nlris.contains(&withdrawn_nlri),
+                "MP_UNREACH RTC withdrawals must survive loop detection"
+            );
+            assert!(
+                withdrawn_nlris.contains(&announced_nlri),
+                "loop-detected RTC announces must be synthesized into withdrawals"
+            );
+        }
+        _ => panic!("expected RtcRoutesReceived from the loop-detect path"),
+    }
+}
+/// Max-prefix enforcement must count RTC membership NLRI alongside the
+/// other families.
+#[tokio::test]
+async fn rtc_routes_counted_toward_max_prefix() {
+    use rustbgpd_wire::{MpReachNlri, RtcNlri};
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65001).await;
+    session.config.max_prefixes = Some(2);
+    let mut negotiated = NegotiatedSession::default();
+    negotiated.peer_asn = 65001;
+    negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+    negotiated.hold_time = 90;
+    negotiated.keepalive_interval = 30;
+    negotiated.four_octet_as = true;
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let make_nlri = |admin: u64| RtcNlri::new(65001, 0x0002_FDE9_0000_0000 | admin, 96).unwrap();
+    let send_announces = |nlris: Vec<RtcNlri>| {
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::RtConstrain,
+                next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: nlris,
+            }),
+        ];
+        UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
+    };
+    session
+        .process_update(send_announces(vec![make_nlri(1), make_nlri(2)]))
+        .await;
+    assert_eq!(
+        session.known_prefix_count(),
+        2,
+        "RTC routes must contribute to the prefix count"
+    );
+    assert!(session.read_half.is_some());
+    session
+        .process_update(send_announces(vec![make_nlri(3)]))
         .await;
     assert!(
         session.read_half.is_none(),
@@ -4850,6 +5222,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             evpn_announced: vec![withdrawn_route.clone()],
             bgpls_announced: vec![],
             vpn_announced: vec![],
+            rtc_announced: vec![],
         }),
         PathAttribute::MpUnreachNlri(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -4859,6 +5232,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             evpn_withdrawn: vec![withdrawn_route],
             bgpls_withdrawn: vec![],
             vpn_withdrawn: vec![],
+            rtc_withdrawn: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);

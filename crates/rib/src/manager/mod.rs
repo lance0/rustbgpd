@@ -713,6 +713,16 @@ impl RibManager {
                     self.handle_vpn_routes_received(peer, announced, withdrawn);
                 }
             }
+            RibUpdate::RtcRoutesReceived {
+                peer,
+                session_id,
+                announced,
+                withdrawn,
+            } => {
+                if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", "rtc") {
+                    self.handle_rtc_routes_received(peer, announced, withdrawn);
+                }
+            }
             RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
@@ -937,6 +947,11 @@ impl RibManager {
             RibUpdate::QueryVpnRoutes { reply } => {
                 let routes: Vec<crate::route::VpnRibRoute> =
                     self.loc_rib.iter_vpn().cloned().collect();
+                let _ = reply.send(routes);
+            }
+            RibUpdate::QueryRtcRoutes { reply } => {
+                let routes: Vec<crate::route::RtcRibRoute> =
+                    self.loc_rib.iter_rtc().cloned().collect();
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
@@ -1715,6 +1730,45 @@ impl RibManager {
     /// the unicast/FlowSpec/EVPN/BGP-LS recompute + distribution pattern.
     fn recompute_vpn_keys(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
         self.recompute_and_distribute_vpn(affected);
+    }
+
+    /// RT-Constrain ingest (RFC 4684). Mirrors the VPN receive path minus
+    /// the enhanced-refresh stale bookkeeping (no RTC refresh lifecycle yet)
+    /// and minus any VPN-filter membership rebuild — that is the next slice.
+    fn handle_rtc_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::RtcRibRoute>,
+        withdrawn: Vec<crate::route::RtcRibRouteKey>,
+    ) {
+        let mut affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        let mut needs_intern_gc = false;
+
+        {
+            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            for key in withdrawn {
+                if rib.withdraw_rtc(&key) {
+                    needs_intern_gc = true;
+                    affected.insert(key);
+                }
+            }
+            for route in announced {
+                let key = route.key();
+                needs_intern_gc |= rib.insert_rtc(route);
+                affected.insert(key);
+            }
+        }
+
+        self.recompute_rtc_keys(&affected);
+        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
+            rib.gc_intern_table();
+        }
+    }
+
+    /// Recompute the Loc-RIB RT-Constrain selection for each affected key
+    /// and distribute the changes, mirroring [`Self::recompute_vpn_keys`].
+    fn recompute_rtc_keys(&mut self, affected: &HashSet<crate::route::RtcRibRouteKey>) {
+        self.recompute_and_distribute_rtc(affected);
     }
 
     /// Recompute the Loc-RIB BGP-LS selection for each affected key across the

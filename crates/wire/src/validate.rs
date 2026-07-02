@@ -421,6 +421,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
@@ -450,6 +451,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true
@@ -477,6 +479,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -501,6 +504,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -525,6 +529,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         assert!(validate_update_attributes(&attrs, true, false, true).is_err());
@@ -576,6 +581,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -627,6 +633,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -664,6 +671,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         // Empty announced + empty body — FlowSpec EoR-equivalent
@@ -706,6 +714,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
@@ -733,6 +742,7 @@ mod tests {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }),
         ];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());

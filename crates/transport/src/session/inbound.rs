@@ -3,8 +3,8 @@ use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
     EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope,
     NotificationCode, NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route,
-    Safi, VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info, is_ipv6_link_local,
-    resolve_import_nexthop, warn,
+    RtcRibRoute, RtcRibRouteKey, Safi, VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info,
+    is_ipv6_link_local, resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
@@ -483,6 +483,7 @@ impl PeerSession {
                 && mp.evpn_withdrawn.is_empty()
                 && mp.bgpls_withdrawn.is_empty()
                 && mp.vpn_withdrawn.is_empty()
+                && mp.rtc_withdrawn.is_empty()
             {
                 info!(
                     peer = %self.peer_label,
@@ -629,7 +630,10 @@ impl PeerSession {
                     .iter()
                     .filter_map(|a| match a {
                         PathAttribute::MpReachNlri(mp) => Some(
-                            mp.announced.len() + mp.bgpls_announced.len() + mp.vpn_announced.len(),
+                            mp.announced.len()
+                                + mp.bgpls_announced.len()
+                                + mp.vpn_announced.len()
+                                + mp.rtc_announced.len(),
                         ),
                         _ => None,
                     })
@@ -655,6 +659,7 @@ impl PeerSession {
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -679,6 +684,14 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::RtConstrain {
+                            loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
+                                RtcRibRouteKey {
+                                    nlri: *nlri,
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
                 }
                 // VPN announcements in a loop-detected UPDATE are treated as
@@ -696,6 +709,18 @@ impl PeerSession {
                         }
                     }));
                 }
+                // RTC announcements in a loop-detected UPDATE are likewise
+                // treated as withdrawals of any previously accepted version
+                // of the same membership NLRI.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::RtConstrain
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_rtc_withdrawn.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
+                        nlri: *nlri,
+                        path_id: 0,
+                    }));
+                }
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.forget_known_path(prefix, path_id);
@@ -711,6 +736,9 @@ impl PeerSession {
             }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in &loop_rtc_withdrawn {
+                self.known_rtc.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -751,6 +779,19 @@ impl PeerSession {
                         session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_rtc_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_rtc_withdrawn,
                     })
                     .await
                     .is_err()
@@ -801,6 +842,7 @@ impl PeerSession {
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -825,6 +867,14 @@ impl PeerSession {
                                 }
                             }));
                         }
+                        if mp.safi == Safi::RtConstrain {
+                            loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
+                                RtcRibRouteKey {
+                                    nlri: *nlri,
+                                    path_id: 0,
+                                }
+                            }));
+                        }
                     }
                 }
                 // VPN announcements in a loop-detected UPDATE are treated as
@@ -842,6 +892,18 @@ impl PeerSession {
                         }
                     }));
                 }
+                // RTC announcements in a loop-detected UPDATE are likewise
+                // treated as withdrawals of any previously accepted version
+                // of the same membership NLRI.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && mp.safi == Safi::RtConstrain
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_rtc_withdrawn.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
+                        nlri: *nlri,
+                        path_id: 0,
+                    }));
+                }
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.forget_known_path(prefix, path_id);
@@ -857,6 +919,9 @@ impl PeerSession {
             }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in &loop_rtc_withdrawn {
+                self.known_rtc.remove(key);
             }
             if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -897,6 +962,19 @@ impl PeerSession {
                         session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_l3vpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if !loop_rtc_withdrawn.is_empty()
+                && self
+                    .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
+                        peer: self.peer_ip,
+                        session_id: self.session_identity.id,
+                        announced: vec![],
+                        withdrawn: loop_rtc_withdrawn,
                     })
                     .await
                     .is_err()
@@ -1128,6 +1206,8 @@ impl PeerSession {
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
         let mut vpn_announced: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+        let mut rtc_announced: Vec<RtcRibRoute> = Vec::new();
+        let mut rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
         for attr in &parsed.attributes {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
@@ -1410,6 +1490,63 @@ impl PeerSession {
                         }
                         continue;
                     }
+                    if mp.safi == Safi::RtConstrain {
+                        // RT-Constrain announced routes (RFC 4684). Like
+                        // BGP-LS, the policy context carries no prefix — an
+                        // RT membership NLRI has no IP prefix to match on.
+                        for nlri in &mp.rtc_announced {
+                            let ctx = RouteContext {
+                                prefix: None,
+                                next_hop: Some(mp.next_hop),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: mp_aspa_state,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                evpn_route_type: None,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
+                            };
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let (attrs, _) =
+                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                rtc_announced.push(RtcRibRoute {
+                                    nlri: *nlri,
+                                    next_hop: mp.next_hop,
+                                    peer: self.peer_ip,
+                                    attributes: attrs,
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    is_llgr_stale: false,
+                                    path_id: 0,
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if otc_drop_unicast_announcements {
                         continue;
                     }
@@ -1543,6 +1680,12 @@ impl PeerSession {
                             path_id: 0,
                         }));
                     }
+                    if mp.safi == Safi::RtConstrain {
+                        rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| RtcRibRouteKey {
+                            nlri: *nlri,
+                            path_id: 0,
+                        }));
+                    }
                 }
                 _ => {}
             }
@@ -1603,6 +1746,12 @@ impl PeerSession {
         }
         for route in &vpn_announced {
             self.known_vpn.insert(route.key());
+        }
+        for key in &rtc_withdrawn {
+            self.known_rtc.remove(key);
+        }
+        for route in &rtc_announced {
+            self.known_rtc.insert(route.key());
         }
         self.import_policy_routes_permitted = self
             .import_policy_routes_permitted
@@ -1671,6 +1820,19 @@ impl PeerSession {
                     session_id: self.session_identity.id,
                     announced: vpn_announced,
                     withdrawn: vpn_withdrawn,
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+        if (!rtc_announced.is_empty() || !rtc_withdrawn.is_empty())
+            && self
+                .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: rtc_announced,
+                    withdrawn: rtc_withdrawn,
                 })
                 .await
                 .is_err()

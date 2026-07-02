@@ -16,7 +16,8 @@ use tracing::{debug, info, warn};
 
 use super::helpers::{
     LOCAL_PEER, bgpls_routes_equal, evpn_routes_equal, gauge_val, prefix_family, routes_equal,
-    should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki, vpn_routes_equal,
+    rtc_routes_equal, should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
+    vpn_routes_equal,
 };
 use super::{PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_in::AdjRibIn;
@@ -248,6 +249,7 @@ impl RibManager {
 
     #[expect(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "outbound commit needs all family queues for one atomic send"
     )]
     pub(super) fn try_send_and_commit_outbound_update(
@@ -266,6 +268,8 @@ impl RibManager {
         bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
         vpn_announce: Vec<crate::route::VpnRibRoute>,
         vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
+        rtc_announce: Vec<crate::route::RtcRibRoute>,
+        rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
     ) -> bool {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
@@ -284,6 +288,8 @@ impl RibManager {
             || !bgpls_withdraw.is_empty()
             || !vpn_announce.is_empty()
             || !vpn_withdraw.is_empty()
+            || !rtc_announce.is_empty()
+            || !rtc_withdraw.is_empty()
         {
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
@@ -320,6 +326,12 @@ impl RibManager {
             for key in &vpn_withdraw {
                 rib_out.remove_vpn(key);
             }
+            for route in &rtc_announce {
+                rib_out.insert_rtc(route.clone());
+            }
+            for key in &rtc_withdraw {
+                rib_out.remove_rtc(key);
+            }
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
                 "all",
@@ -345,6 +357,11 @@ impl RibManager {
                 "vpn",
                 gauge_val(rib_out.vpn_len()),
             );
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "rtc",
+                gauge_val(rib_out.rtc_len()),
+            );
         }
 
         permit.send(OutboundRouteUpdate {
@@ -361,6 +378,8 @@ impl RibManager {
             bgpls_withdraw,
             vpn_announce,
             vpn_withdraw,
+            rtc_announce,
+            rtc_withdraw,
             request_refresh_all_negotiated: false,
         });
         true
@@ -2069,6 +2088,148 @@ impl RibManager {
         }
     }
 
+    /// Stage RT-Constrain announces and withdrawals for a set of affected
+    /// keys. Mirrors [`Self::stage_vpn_routes`] minus labels; like BGP-LS,
+    /// the export-policy context carries no prefix (`prefix: None`) — an RT
+    /// membership NLRI has no IP prefix to match on.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "RTC staging mirrors VPN/BGP-LS distribution context for RR/export parity"
+    )]
+    pub(super) fn stage_rtc_routes(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        keys: &HashSet<crate::route::RtcRibRouteKey>,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        rtc_announce: &mut Vec<crate::route::RtcRibRoute>,
+        rtc_withdraw: &mut Vec<crate::route::RtcRibRouteKey>,
+        force: bool,
+    ) {
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+        let family = crate::route::RtcRibRouteKey::afi_safi();
+        let family_sendable = sendable.is_some_and(|f| f.contains(&family));
+        for key in keys {
+            if !family_sendable {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
+            let Some(best) = loc_rib.get_rtc(key) else {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            };
+
+            if best.peer == target_peer {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
+            let probe = crate::route::Route {
+                prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                next_hop: best.next_hop,
+                link_local_next_hop: None,
+                next_hop_scope: None,
+                peer: best.peer,
+                attributes: std::sync::Arc::new(vec![]),
+                received_at: best.received_at,
+                origin_type: best.origin_type,
+                peer_router_id: best.peer_router_id,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            };
+            if should_suppress_ibgp_inner(
+                &probe,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                peer_is_rr_client,
+            ) {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
+            let aspath_str = if needs_as_path_string {
+                best.as_path()
+                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+            } else {
+                String::new()
+            };
+            let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let ctx = RouteContext {
+                prefix: None,
+                next_hop: Some(best.next_hop),
+                extended_communities: best.extended_communities(),
+                communities: best.communities(),
+                large_communities: best.large_communities(),
+                as_path_str: &aspath_str,
+                as_path_len: aspath_len,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                peer_address: Some(target_peer),
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group,
+                route_type: Some(route_type(best.origin_type)),
+                evpn_route_type: None,
+                local_pref: best.local_pref_attr(),
+                med: best.med_attr(),
+            };
+            let (result, evaluation) =
+                rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+            if result.action != rustbgpd_policy::PolicyAction::Permit {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
+            let mut modified = best.clone();
+            if !result.modifications.is_empty() {
+                let nh = rustbgpd_policy::apply_modifications(
+                    std::sync::Arc::make_mut(&mut modified.attributes),
+                    &result.modifications,
+                );
+                if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
+                    modified.next_hop = addr;
+                }
+            }
+            modified.path_id = 0;
+
+            if !force
+                && rib_out
+                    .get_rtc(key)
+                    .is_some_and(|existing| rtc_routes_equal(existing, &modified))
+            {
+                continue;
+            }
+            rtc_announce.push(modified);
+        }
+    }
+
     /// Distribute Loc-RIB changes to all registered outbound peers.
     ///
     /// For clean peers, only `changed_prefixes` are evaluated. Dirty peers
@@ -2186,11 +2347,26 @@ impl RibManager {
                 HashSet::new()
             };
 
+            let effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
+                let mut all: HashSet<crate::route::RtcRibRouteKey> = self
+                    .loc_rib
+                    .iter_rtc()
+                    .map(crate::route::RtcRibRoute::key)
+                    .collect();
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    all.extend(rib_out.iter_rtc().map(crate::route::RtcRibRoute::key));
+                }
+                all
+            } else {
+                HashSet::new()
+            };
+
             if effective_prefixes.is_empty()
                 && effective_flowspec_rules.is_empty()
                 && effective_evpn_keys.is_empty()
                 && effective_bgpls_keys.is_empty()
                 && effective_l3vpn_keys.is_empty()
+                && effective_rtc_keys.is_empty()
             {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 // Resync flags must clear here too — otherwise a
@@ -2220,6 +2396,8 @@ impl RibManager {
             let mut bgpls_withdraw = Vec::new();
             let mut vpn_announce = Vec::new();
             let mut vpn_withdraw = Vec::new();
+            let mut rtc_announce = Vec::new();
+            let mut rtc_withdraw = Vec::new();
             let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
                 HashSet::new();
 
@@ -2423,6 +2601,29 @@ impl RibManager {
                 );
             }
 
+            if resync && !effective_rtc_keys.is_empty() {
+                Self::stage_rtc_routes(
+                    loc_rib,
+                    rib_out,
+                    &self.peer_is_rr_client,
+                    &effective_rtc_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut rtc_announce,
+                    &mut rtc_withdraw,
+                    is_force,
+                );
+            }
+
             if !announce.is_empty()
                 || !withdraw.is_empty()
                 || !fs_announce.is_empty()
@@ -2433,6 +2634,8 @@ impl RibManager {
                 || !bgpls_withdraw.is_empty()
                 || !vpn_announce.is_empty()
                 || !vpn_withdraw.is_empty()
+                || !rtc_announce.is_empty()
+                || !rtc_withdraw.is_empty()
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
                 // piggyback it on the successful dirty resync update so it
@@ -2466,6 +2669,8 @@ impl RibManager {
                     bgpls_withdraw,
                     vpn_announce,
                     vpn_withdraw,
+                    rtc_announce,
+                    rtc_withdraw,
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,
@@ -2620,6 +2825,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");
@@ -2759,6 +2966,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — EVPN update deferred");
@@ -2859,6 +3068,8 @@ impl RibManager {
                     vec![],
                     bgpls_announce,
                     bgpls_withdraw,
+                    vec![],
+                    vec![],
                     vec![],
                     vec![],
                 )
@@ -2965,9 +3176,114 @@ impl RibManager {
                     vec![],
                     vpn_announce,
                     vpn_withdraw,
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — VPN update deferred");
+                self.dirty_peers.insert(peer);
+            }
+        }
+    }
+
+    /// Recompute Loc-RIB best path and distribute changes for RT-Constrain
+    /// routes (RFC 4684 §3.2). Reflection semantics mirror VPN: the NLRI and
+    /// stored next-hop pass through unchanged.
+    pub(super) fn recompute_and_distribute_rtc(
+        &mut self,
+        affected: &HashSet<crate::route::RtcRibRouteKey>,
+    ) {
+        use crate::route::RtcRibRoute;
+
+        let mut changed_keys: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        for key in affected {
+            let candidates: Vec<RtcRibRoute> = self
+                .ribs
+                .values()
+                .filter_map(|rib| rib.get_rtc(key).cloned())
+                .collect();
+            if self.loc_rib.recompute_rtc(key.clone(), candidates.iter()) {
+                changed_keys.insert(key.clone());
+            }
+        }
+
+        if changed_keys.is_empty() {
+            return;
+        }
+
+        self.metrics
+            .set_loc_rib_prefixes("rtc", gauge_val(self.loc_rib.rtc_len()));
+
+        let rtc_family = crate::route::RtcRibRouteKey::afi_safi();
+        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        for peer in peers {
+            let sendable = self.peer_sendable_families.get(&peer).cloned();
+            if !sendable
+                .as_ref()
+                .is_some_and(|families| families.contains(&rtc_family))
+            {
+                continue;
+            }
+
+            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+            let target_peer_asn = self.peer_asn.get(&peer).copied();
+            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+            let export_pol = self.export_policy_for(peer).cloned();
+            let target_peer_label = peer.to_string();
+            let metrics = self.metrics.clone();
+
+            let loc_rib_len = self.loc_rib.len();
+            let rib_out = self
+                .adj_ribs_out
+                .entry(peer)
+                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+            let policy_stats = self.export_policy_stats.entry(peer).or_default();
+
+            let mut rtc_announce = Vec::new();
+            let mut rtc_withdraw = Vec::new();
+            Self::stage_rtc_routes(
+                &self.loc_rib,
+                rib_out,
+                &self.peer_is_rr_client,
+                &changed_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                self.cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
+                &mut rtc_announce,
+                &mut rtc_withdraw,
+                false,
+            );
+
+            if (!rtc_announce.is_empty() || !rtc_withdraw.is_empty())
+                && !self.try_send_and_commit_outbound_update(
+                    peer,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    rtc_announce,
+                    rtc_withdraw,
+                )
+            {
+                warn!(%peer, "outbound channel full — RTC update deferred");
                 self.dirty_peers.insert(peer);
             }
         }

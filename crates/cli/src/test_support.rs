@@ -50,6 +50,7 @@ pub(crate) struct MockState {
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
+    pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -1067,6 +1068,43 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 llgr_stale: false,
                 path_id: 0,
             }],
+        }))
+    }
+
+    async fn list_rtc_routes(
+        &self,
+        request: Request<server_proto::ListRtcRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRtcRoutesResponse>, Status> {
+        *self.state.last_list_rtc.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListRtcRoutesResponse {
+            routes: vec![
+                server_proto::RtcRouteEntry {
+                    is_default: true,
+                    origin_as: 0,
+                    route_target: String::new(),
+                    prefix_len: 0,
+                    next_hop: "0.0.0.0".to_string(),
+                    peer_address: "0.0.0.0".to_string(),
+                    as_path: vec![],
+                    communities: vec![],
+                    stale: false,
+                    llgr_stale: false,
+                    path_id: 0,
+                },
+                server_proto::RtcRouteEntry {
+                    is_default: false,
+                    origin_as: 65001,
+                    route_target: "RT:65001:100".to_string(),
+                    prefix_len: 96,
+                    next_hop: "192.0.2.1".to_string(),
+                    peer_address: "198.51.100.1".to_string(),
+                    as_path: vec![64512],
+                    communities: vec![],
+                    stale: false,
+                    llgr_stale: false,
+                    path_id: 0,
+                },
+            ],
         }))
     }
 

@@ -90,6 +90,20 @@ pub(super) fn vpn_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// RT-Constrain counterpart of [`routes_equal`]. Like VPN, the full NLRI is
+/// compared even though it is also the map key — cheap (12 bytes) and robust
+/// against a future key/data split.
+pub(super) fn rtc_routes_equal(
+    a: &crate::route::RtcRibRoute,
+    b: &crate::route::RtcRibRoute,
+) -> bool {
+    a.nlri == b.nlri
+        && a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && a.path_id == b.path_id
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+}
+
 #[must_use]
 pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     match prefix {
@@ -112,14 +126,14 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ipv6, Safi::MplsVpn) => "l3vpn_ipv6_unicast",
         (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
         (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
+        (Afi::Ipv4, Safi::RtConstrain) => "rtc",
         (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
         | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
         | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
         | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn)
-        // RT-Constrain (SAFI 132) is unreachable until the receive slice
-        // promotes (Ipv4, RtConstrain) to "rtc".
-        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => "unsupported",
+        // RT-Constrain is AFI 1 only (RFC 4684 §7).
+        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => "unsupported",
     }
 }
 

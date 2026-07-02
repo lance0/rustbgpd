@@ -1909,6 +1909,17 @@ fn l3vpn_families_parse_to_mpls_vpn_afi_safis() {
     );
 }
 
+#[test]
+fn rtc_family_parses_to_ipv4_rt_constrain() {
+    let toml = gr_toml(r#"families = ["l3vpn_ipv4_unicast", "rtc"]"#);
+    let config = parse(&toml).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.peer.families,
+        vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv4, Safi::RtConstrain)]
+    );
+}
+
 // --- Community match config tests ---
 
 fn community_toml(policy_entries: &str) -> String {

@@ -661,6 +661,13 @@ enum RibAction {
         #[arg(long)]
         peer: Option<String>,
     },
+    /// Show RT-Constrain routes (RFC 4684, single IPv4 family)
+    #[command(name = "rtc")]
+    Rtc {
+        /// Peer IP address filter
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -1365,6 +1372,23 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     let family = vpn_family.or(family);
                     return commands::rib::vpn(connection, family.as_deref(), peer, json).await;
                 }
+                Some(RibAction::Rtc { peer }) => {
+                    reject_rib_status_filters(
+                        binary_name,
+                        "rtc",
+                        RibStatusFilterArgs {
+                            family: &family,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    return commands::rib::rtc(connection, peer, json).await;
+                }
                 _ => {}
             }
 
@@ -1466,7 +1490,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     RibAction::Blackholes
                     | RibAction::Fib { .. }
                     | RibAction::BgpLs { .. }
-                    | RibAction::Vpn { .. },
+                    | RibAction::Vpn { .. }
+                    | RibAction::Rtc { .. },
                 ) => {
                     unreachable!("RIB status subcommands return before route filter handling")
                 }

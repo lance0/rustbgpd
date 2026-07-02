@@ -953,6 +953,7 @@ service RibService {
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
+  rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2117,6 +2118,41 @@ message ListVpnRoutesRequest {
 
 message ListVpnRoutesResponse {
   repeated VpnRouteEntry routes = 1;
+}
+
+// RT-Constrain route entry in the RIB (RFC 4684, AFI 1 / SAFI 132): a
+// 0-96-bit prefix over origin AS + Route Target expressing RT membership
+// interest. The zero-length default NLRI means "every Route Target".
+message RtcRouteEntry {
+  // True for the zero-length default/wildcard membership NLRI.
+  bool is_default = 1;
+  // Origin AS field of the NLRI (zero for the default NLRI).
+  uint32 origin_as = 2;
+  // Route Target rendered for display, e.g. "RT:65001:100" (empty for the
+  // default NLRI).
+  string route_target = 3;
+  // Prefix length in bits: 0 (default) or 32..=96.
+  uint32 prefix_len = 4;
+  string next_hop = 5;
+  // Advertising peer; "0.0.0.0" for the locally-originated default.
+  string peer_address = 6;
+  repeated uint32 as_path = 7;
+  // Standard communities as "high:low" strings.
+  repeated string communities = 8;
+  bool stale = 9;
+  bool llgr_stale = 10;
+  uint32 path_id = 11;
+}
+
+// RT-Constrain is a single family (AFI 1 only), so there is no family
+// filter.
+message ListRtcRoutesRequest {
+  // Only routes from this peer, empty = any.
+  string peer_filter = 1;
+}
+
+message ListRtcRoutesResponse {
+  repeated RtcRouteEntry routes = 1;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3
