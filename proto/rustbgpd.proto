@@ -1099,6 +1099,21 @@ message ExplainModifications {
   optional uint32 as_path_prepend_count = 11;
 }
 
+// One candidate path in an RFC 9107 ORR advertised-route explanation.
+message OrrExplainCandidate {
+  // Adj-RIB-In source peer of this candidate path.
+  string peer_address = 1;
+  // Add-Path identifier of the candidate in its Adj-RIB-In.
+  uint32 path_id = 2;
+  // Candidate's NEXT_HOP - the input to the vantage cost lookup.
+  string next_hop = 3;
+  // Vantage interior (SPF) cost to next_hop. Absent = unknown /
+  // unreachable, ranked least preferred (RFC 9107 section 3.1).
+  optional uint64 cost = 4;
+  // True for the per-vantage winner (first in ORR best-path order).
+  bool selected = 5;
+}
+
 message ExplainAdvertisedRouteResponse {
   ExplainDecision decision = 1;
   string peer_address = 2;
@@ -1110,6 +1125,16 @@ message ExplainAdvertisedRouteResponse {
   string route_type = 8;
   repeated ExplainReason reasons = 9;
   ExplainModifications modifications = 10;
+  // RFC 9107 ORR: the vantage the target peer is bound to. Empty when
+  // the peer has no resolved ORR vantage - non-ORR explain responses
+  // are unchanged by these fields.
+  string orr_vantage = 11;
+  // Per-vantage candidate ranking behind an ORR explain, best first -
+  // the same candidate set and order distribution would use. The
+  // decisive step for the winner is reported through reasons (code
+  // orr_interior_cost when the vantage cost decided, with the compared
+  // costs in the message). Empty for non-ORR explains.
+  repeated OrrExplainCandidate orr_candidates = 12;
 }
 
 message ExplainBestPathRequest {

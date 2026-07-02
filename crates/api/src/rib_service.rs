@@ -913,6 +913,20 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
             })
             .collect(),
         modifications: Some(explain_modifications_to_proto(&explain.modifications)),
+        orr_vantage: explain
+            .orr_vantage
+            .map_or_else(String::new, |vantage| vantage.to_string()),
+        orr_candidates: explain
+            .orr_candidates
+            .into_iter()
+            .map(|candidate| proto::OrrExplainCandidate {
+                peer_address: candidate.peer.to_string(),
+                path_id: candidate.path_id,
+                next_hop: candidate.next_hop.to_string(),
+                cost: candidate.cost,
+                selected: candidate.selected,
+            })
+            .collect(),
     }
 }
 
@@ -3616,6 +3630,23 @@ mod tests {
                     message: "export policy permitted this route".to_string(),
                 }],
                 modifications: rustbgpd_policy::RouteModifications::default(),
+                orr_vantage: Some("10.0.1.1".parse().unwrap()),
+                orr_candidates: vec![
+                    rustbgpd_rib::OrrExplainCandidate {
+                        peer: "198.51.100.2".parse().unwrap(),
+                        path_id: 0,
+                        next_hop: "198.51.100.1".parse().unwrap(),
+                        cost: Some(12),
+                        selected: true,
+                    },
+                    rustbgpd_rib::OrrExplainCandidate {
+                        peer: "198.51.100.3".parse().unwrap(),
+                        path_id: 0,
+                        next_hop: "198.51.100.4".parse().unwrap(),
+                        cost: None,
+                        selected: false,
+                    },
+                ],
             }))
             .unwrap();
 
@@ -3625,6 +3656,17 @@ mod tests {
         assert_eq!(resp.route_peer_address, "198.51.100.2");
         assert_eq!(resp.route_type, "external");
         assert_eq!(resp.reasons.len(), 1);
+        assert_eq!(resp.orr_vantage, "10.0.1.1");
+        assert_eq!(resp.orr_candidates.len(), 2);
+        assert_eq!(resp.orr_candidates[0].next_hop, "198.51.100.1");
+        assert_eq!(resp.orr_candidates[0].cost, Some(12));
+        assert!(resp.orr_candidates[0].selected);
+        assert_eq!(resp.orr_candidates[1].peer_address, "198.51.100.3");
+        assert_eq!(
+            resp.orr_candidates[1].cost, None,
+            "unreachable maps to absent"
+        );
+        assert!(!resp.orr_candidates[1].selected);
     }
 
     #[test]

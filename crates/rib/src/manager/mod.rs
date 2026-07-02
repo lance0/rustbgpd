@@ -1190,8 +1190,19 @@ impl RibManager {
             return;
         };
 
+        // Same resolved-vantage gate as live distribution: an ORR peer
+        // whose vantage did not resolve falls back to the standard
+        // Loc-RIB-best explain, exactly like `flush_pending_distribution`.
+        let orr_ctx = self.peer_orr_vantage.get(&peer).and_then(|vantage| {
+            self.orr
+                .spf
+                .get(vantage)
+                .map(|spf| (&self.orr.topology, spf, *vantage))
+        });
+
         let explanation = Self::explain_single_best_prefix(
             &self.loc_rib,
+            &self.ribs,
             &self.peer_is_rr_client,
             prefix,
             peer,
@@ -1202,6 +1213,7 @@ impl RibManager {
             self.cluster_id,
             Some(sendable),
             self.export_policy_for(peer),
+            orr_ctx,
         );
 
         if reply.send(Some(explanation)).is_err() {

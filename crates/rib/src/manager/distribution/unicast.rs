@@ -7,6 +7,37 @@ use super::{
     should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
 };
 
+/// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
+/// ORR: every Adj-RIB-In entry that survives split horizon and the
+/// iBGP / RFC 4456 reflection rules. Shared by the ORR distribution and
+/// explain paths so both rank the exact same set.
+fn orr_candidates<'a>(
+    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    prefix: &'a Prefix,
+    target_peer: IpAddr,
+    target_is_ebgp: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+) -> impl Iterator<Item = &'a crate::route::Route> {
+    ribs.values()
+        .flat_map(move |rib| rib.iter_prefix(prefix))
+        .filter(move |route| {
+            // Split horizon: exclude routes from the target peer
+            if route.peer == target_peer {
+                return false;
+            }
+            // iBGP split-horizon / RFC 4456 reflection
+            !should_suppress_ibgp_inner(
+                route,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                peer_is_rr_client,
+            )
+        })
+}
+
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
@@ -15,6 +46,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn explain_single_best_prefix(
         loc_rib: &LocRib,
+        ribs: &HashMap<IpAddr, AdjRibIn>,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: Prefix,
         target_peer: IpAddr,
@@ -25,7 +57,13 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
     ) -> ExplainAdvertisedRoute {
+        use crate::best_path::{
+            BestPathReason, best_path_cmp_orr, best_path_cmp_orr_with_reason,
+            best_path_reason_detail, orr_interior_cost_detail,
+        };
+
         let mut explain = ExplainAdvertisedRoute {
             decision: ExplainDecision::NoBestRoute,
             peer: target_peer,
@@ -36,19 +74,94 @@ impl RibManager {
             route_type: None,
             reasons: Vec::new(),
             modifications: rustbgpd_policy::RouteModifications::default(),
+            orr_vantage: None,
+            orr_candidates: Vec::new(),
         };
 
-        let Some(best) = loc_rib.get(&prefix) else {
-            explain.reasons.push(ExplainReason {
-                code: "no_best_route",
-                message: "no best route exists for this prefix".to_string(),
+        // Select the route to explain. An ORR-bound peer's best is NOT
+        // the Loc-RIB best: rank the per-target candidate set with the
+        // vantage's interior costs, exactly like
+        // `distribute_orr_best_prefix` (same collection via
+        // `orr_candidates`, same comparator). A plain peer explains the
+        // Loc-RIB best, unchanged.
+        let best = if let Some((topology, spf, vantage)) = orr {
+            explain.orr_vantage = Some(vantage);
+            let mut ranked: Vec<&crate::route::Route> = orr_candidates(
+                ribs,
+                peer_is_rr_client,
+                &prefix,
+                target_peer,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+            )
+            .collect();
+            ranked.sort_by(|a, b| {
+                best_path_cmp_orr(
+                    a,
+                    b,
+                    spf.cost_to(topology, a.next_hop),
+                    spf.cost_to(topology, b.next_hop),
+                )
             });
-            return explain;
+            explain.orr_candidates = ranked
+                .iter()
+                .enumerate()
+                .map(|(i, route)| crate::update::OrrExplainCandidate {
+                    peer: route.peer,
+                    path_id: route.path_id,
+                    next_hop: route.next_hop,
+                    cost: spf.cost_to(topology, route.next_hop),
+                    selected: i == 0,
+                })
+                .collect();
+            let Some(&winner) = ranked.first() else {
+                explain.reasons.push(ExplainReason {
+                    code: "no_orr_candidate",
+                    message: "no candidate for this prefix survives split-horizon / \
+                              reflection filtering for this ORR peer"
+                        .to_string(),
+                });
+                return explain;
+            };
+            // The decision the winner had to survive vs the runner-up —
+            // the per-vantage counterpart of ExplainBestPath's
+            // best_reason. Rendered with the compared vantage costs when
+            // the interior-cost step decided.
+            if let Some(&runner_up) = ranked.get(1) {
+                let (cost_w, cost_r) = (
+                    spf.cost_to(topology, winner.next_hop),
+                    spf.cost_to(topology, runner_up.next_hop),
+                );
+                let (_, reason) = best_path_cmp_orr_with_reason(winner, runner_up, cost_w, cost_r);
+                let detail = if reason == BestPathReason::OrrInteriorCost {
+                    orr_interior_cost_detail(cost_w, cost_r)
+                } else {
+                    best_path_reason_detail(reason, winner, runner_up)
+                };
+                explain.reasons.push(ExplainReason {
+                    code: reason.code(),
+                    message: format!("selected over runner-up: {detail}"),
+                });
+            }
+            winner
+        } else {
+            let Some(best) = loc_rib.get(&prefix) else {
+                explain.reasons.push(ExplainReason {
+                    code: "no_best_route",
+                    message: "no best route exists for this prefix".to_string(),
+                });
+                return explain;
+            };
+            best
         };
 
         explain.route_peer = Some(best.peer);
         explain.route_type = Some(route_type(best.origin_type));
 
+        // The two suppression checks below are no-ops for an ORR winner
+        // (its candidate set is pre-filtered by `orr_candidates`); they
+        // decide only for the Loc-RIB best of a plain peer.
         if best.peer == target_peer {
             explain.decision = ExplainDecision::Deny;
             explain.reasons.push(ExplainReason {
@@ -780,26 +893,17 @@ impl RibManager {
 
         // Collect all candidates across all Adj-RIB-In entries —
         // verbatim the multipath collector's per-target filter set.
-        let candidates = ribs
-            .values()
-            .flat_map(|rib| rib.iter_prefix(prefix))
-            .filter(|route| {
-                // Split horizon: exclude routes from the target peer
-                if route.peer == target_peer {
-                    return false;
-                }
-                // iBGP split-horizon / RFC 4456 reflection
-                if should_suppress_ibgp_inner(
-                    route,
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    peer_is_rr_client,
-                ) {
-                    return false;
-                }
-                true
-            });
+        // Shared with the ORR explain path (`explain_single_best_prefix`)
+        // so explain ranks exactly what distribution ranks.
+        let candidates = orr_candidates(
+            ribs,
+            peer_is_rr_client,
+            prefix,
+            target_peer,
+            target_is_ebgp,
+            target_is_rr_client,
+            cluster_id,
+        );
 
         // Per-vantage best (RFC 9107): the vantage's interior cost to
         // each NEXT_HOP breaks ties between step 5 and step 5.5.
