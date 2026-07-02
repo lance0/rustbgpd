@@ -11,6 +11,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Optimal Route Reflection (RFC 9107, ADR-0095) — per-client best paths
+  via BGP-LS-sourced SPF.** A route reflector normally reflects *its own*
+  best path to every client; ORR computes each client's best from the
+  client's own topological position. Configure `orr_vantage = "<ip>"`
+  (an IP identifying a node in the BGP-LS topology) on an iBGP
+  route-reflector client or peer-group; the RR builds a topology graph
+  from all received BGP-LS routes (nodes interned by canonical descriptor
+  bytes; link costs from the IGP Metric TLV parsed lazily out of the
+  never-typed BGP-LS Attribute), runs one Dijkstra per distinct vantage,
+  and ranks that client's candidate set with the interior-cost tiebreak
+  at RFC 4271's step-(e) slot — unknown cost is least preferred, and an
+  unresolved vantage falls back silently to the standard best. Topology
+  changes re-stage exactly the affected clients with minimal deltas.
+  Observability: `rbgp topology nodes|links`, `rbgp orr`, and
+  `ListTopologyNodes`/`ListTopologyLinks`/`ListOrrStatus` (SensitiveRead),
+  plus SPF/topology telemetry. Zero cost and zero behavior change when no
+  vantage is configured (pinned by an output-equality guardrail test).
+  Deferred (ADR-0095): backup vantages, inter-RR Add-Path (multi-cluster),
+  VPN-ORR, TE/multi-topology metrics. M76 proves live divergence: two
+  GoBGP clients of one RR receive different best paths for the same
+  prefix, flip on a topology metric change, and collapse to the identical
+  standard best when the topology is withdrawn. **No other open-source
+  BGP daemon ships ORR.**
+
 - **RT-Constrain (RFC 4684, AFI 1 / SAFI 132) — constrained VPN route
   distribution.** The scalability companion to the VPNv4/v6 route reflector:
   peers advertise Route Target membership NLRI (a 0–96-bit prefix over

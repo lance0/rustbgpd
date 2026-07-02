@@ -447,6 +447,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
+| `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: an IP identifying a node in the BGP-LS-sourced topology; this client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |

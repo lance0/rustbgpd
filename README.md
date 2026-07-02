@@ -58,7 +58,10 @@ BGP-LS receive/reflection/API export (RFC 9552), VPNv4/VPNv6 L3VPN
 route-reflection (RFC 4364 / RFC 4659, SAFI 128 — RR/controller-feed with RD,
 MPLS label stack, next-hop, and Route Targets preserved verbatim; no VRF import
 or MPLS FIB), and RT-Constrain (RFC 4684, SAFI 132 — strict per-peer VPN
-reflection filtering) have shipped under ADR-0077; future BGP-LS local topology
+reflection filtering) have shipped under ADR-0077, and **Optimal Route
+Reflection (RFC 9107, ADR-0095)** computes per-client best paths via SPF over
+the BGP-LS-sourced topology — a capability no other open-source BGP daemon
+ships; future BGP-LS local topology
 production and labeled-unicast work stays scoped by
 [ADR-0077](docs/adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
 families must land as typed route-family slices or unreachable substrate, not as
@@ -319,7 +322,7 @@ and more explicit internal architecture.
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md). |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RFC 9552 BGP-LS receive + reflection + API export (SAFI 71/72), RFC 4364/4659 VPNv4/VPNv6 route-reflection (SAFI 128, RR/controller-feed), RFC 4684 RT-Constrain (SAFI 132, constrained VPN distribution), RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
+| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RFC 9552 BGP-LS receive + reflection + API export (SAFI 71/72), RFC 4364/4659 VPNv4/VPNv6 route-reflection (SAFI 128, RR/controller-feed), RFC 4684 RT-Constrain (SAFI 132, constrained VPN distribution), RFC 9107 Optimal Route Reflection (per-client best paths via BGP-LS-sourced SPF), RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash
