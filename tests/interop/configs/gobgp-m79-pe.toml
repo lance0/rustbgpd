@@ -1,0 +1,37 @@
+# M79 restartable labeled-unicast PE. Routes are CLI-injected
+# (`gobgp global rib add -a ipv4-labeled <prefix> <label> nexthop <ip>`)
+# and therefore die with the daemon — exactly the state the GR receipt
+# manipulates. GR restart-time 60 drives the RR's helper stale window;
+# mp-graceful-restart per family puts ipv4-labelled-unicast and
+# ipv6-labelled-unicast (GoBGP's spelling) into the GR capability.
+# connect-retry 5 keeps re-establishment fast after the link-down
+# relaunch dance in the test script.
+
+[global.config]
+as = 65001
+router-id = "10.0.1.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.1.1"
+peer-as = 65001
+description = "rustbgpd-labeled-rr"
+
+[neighbors.timers.config]
+connect-retry = 5
+
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 60
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-labelled-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-labelled-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true

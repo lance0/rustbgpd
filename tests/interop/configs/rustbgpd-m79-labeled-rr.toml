@@ -1,0 +1,41 @@
+# M79 — labeled-unicast (RFC 8277, SAFI 4) route-reflection receipt.
+#
+# iBGP route reflector with two clients: a restartable labeled-unicast PE
+# (GR helper: the stale window uses the PEER's advertised restart-time per
+# RFC 4724 §4.2; gr_stale_routes_time bounds the post-re-establish
+# End-of-RIB wait) and a labeled-unicast client that receives the
+# reflections. Both IPv4 and IPv6 labeled-unicast ride the same v4 session.
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "labeled-pe"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_labeled_unicast", "ipv6_labeled_unicast"]
+graceful_restart = true
+gr_stale_routes_time = 60
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "labeled-client"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_labeled_unicast", "ipv6_labeled_unicast"]
+
+[security.grpc]
+enforcement = "legacy"
