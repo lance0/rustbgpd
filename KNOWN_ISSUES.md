@@ -99,6 +99,17 @@ resolved.
 
 ## Limitations (by design, not bugs)
 
+- **BMP route-monitoring streams are live-only — no table dump on
+  collector (re)connect.** A collector that connects mid-life receives
+  the cached Peer Up replay but no synthesized Route Monitoring dump of
+  the current table contents: the RFC 8671 post-policy Adj-RIB-Out
+  stream (`monitor = ["rib_out_post"]`) starts at the next outbound
+  UPDATE, exactly as the pre-policy Adj-RIB-In stream has always
+  started at the next inbound UPDATE. Collectors should connect before
+  sessions establish (or trigger a route refresh) to observe full
+  state. Dump synthesis is planned alongside the Loc-Rib BMP slice's
+  replay machinery.
+
 - **Commit-confirmed config transactions do not survive a daemon restart.**
   The confirm timer and the captured pre-commit rollback snapshot are held in
   memory only. A restart inside the confirm window leaves the already-committed

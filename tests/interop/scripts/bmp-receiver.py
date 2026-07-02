@@ -85,6 +85,13 @@ def main():
                 "length": length,
                 "timestamp": time.time(),
             }
+            # RouteMonitoring: per-peer header flags at body[1].
+            # RFC 8671 O flag (0x10) marks Adj-RIB-Out; under O=1 the
+            # L flag (0x40) marks post-policy.
+            if msg_type == 0 and len(body) >= 2:
+                flags = body[1]
+                entry["rib_out"] = bool(flags & 0x10)
+                entry["post_policy"] = bool(flags & 0x40)
             messages.append(entry)
             print(f"BMP: {type_name} ({length} bytes)", flush=True)
 

@@ -30,7 +30,9 @@ pub enum BmpEvent {
         /// Reason the session went down.
         reason: PeerDownReason,
     },
-    /// Inbound UPDATE received (pre-policy).
+    /// UPDATE monitoring. Inbound pre-policy Adj-RIB-In when
+    /// `peer_info.is_rib_out` is false; outbound post-policy Adj-RIB-Out
+    /// (RFC 8671) when true.
     RouteMonitoring {
         /// Per-peer header data.
         peer_info: BmpPeerInfo,
@@ -43,6 +45,11 @@ pub enum BmpEvent {
         peer_info: BmpPeerInfo,
         /// RFC 7854 type 7: routes in Adj-RIB-In.
         adj_rib_in_routes: u64,
+        /// RFC 8671 post-policy Adj-RIB-Out counts per `(afi, safi)`,
+        /// encoded as stat type 17 entries plus their sum as type 15.
+        /// `None` means the counts were unavailable this tick — types
+        /// 15/17 are omitted rather than reported as a false zero.
+        adj_rib_out_post: Option<Vec<(u16, u8, u64)>>,
     },
 }
 
@@ -71,6 +78,10 @@ pub enum BmpControlEvent {
 }
 
 /// Information about a monitored peer, used to build the BMP per-peer header.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool mirrors one RFC 7854/8671 per-peer header flag bit (V/L/A/O)"
+)]
 #[derive(Debug, Clone)]
 pub struct BmpPeerInfo {
     /// Remote peer IP address.
@@ -85,6 +96,10 @@ pub struct BmpPeerInfo {
     pub is_ipv6: bool,
     /// Whether this is a post-policy view.
     pub is_post_policy: bool,
+    /// Whether this is an Adj-RIB-Out view (RFC 8671 O flag). Under
+    /// O=1 the L flag (`is_post_policy`) distinguishes pre/post-policy
+    /// Adj-RIB-Out; rustbgpd only emits post-policy (O=1, L=1).
+    pub is_rib_out: bool,
     /// Whether the peer uses 4-octet AS numbers.
     pub is_as4: bool,
     /// Timestamp of the event.
@@ -113,6 +128,28 @@ pub enum PeerDownReason {
     RemoteNotification(Bytes),
     /// Type 4: Remote system closed TCP without NOTIFICATION.
     RemoteNoNotification,
+}
+
+/// Which route-monitoring streams a collector receives.
+///
+/// Non-monitoring messages (Peer Up/Down, Stats, Initiation,
+/// Termination) always go to every collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmpMonitorFilter {
+    /// Pre-policy Adj-RIB-In route monitoring (RFC 7854, O=0).
+    pub rib_in_pre: bool,
+    /// Post-policy Adj-RIB-Out route monitoring (RFC 8671, O=1, L=1).
+    pub rib_out_post: bool,
+}
+
+impl Default for BmpMonitorFilter {
+    /// Pre-RFC 8671 behavior: Adj-RIB-In monitoring only.
+    fn default() -> Self {
+        Self {
+            rib_in_pre: true,
+            rib_out_post: false,
+        }
+    }
 }
 
 /// Configuration for a single BMP collector.

@@ -98,6 +98,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         cluster_id: None,
         explain_enabled: true,
         explain_cache_size: 4096,
+        bmp_rib_out: false,
     }
 }
 

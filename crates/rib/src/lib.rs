@@ -55,7 +55,7 @@ pub use route::{
     RouteOrigin, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 pub use update::{
-    BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate,
-    RibCommandError, RibUpdate,
+    AdjRibOutCounts, BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision,
+    ExplainReason, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OrrExplainCandidate,
+    OutboundRouteUpdate, RibCommandError, RibUpdate,
 };

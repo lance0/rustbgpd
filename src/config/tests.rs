@@ -3116,6 +3116,32 @@ fn bmp_valid_config_accepted() {
     assert_eq!(bmp.sys_name, "rustbgpd");
     assert_eq!(bmp.collectors.len(), 1);
     assert_eq!(bmp.collectors[0].reconnect_interval, 30);
+    assert_eq!(
+        bmp.collectors[0].monitor,
+        vec![BmpMonitorView::RibInPre],
+        "default monitor selection is pre-RFC 8671 rib-in only"
+    );
+}
+
+#[test]
+fn bmp_monitor_rib_out_post_accepted() {
+    let config = parse(&bmp_toml(r#"monitor = ["rib_in_pre", "rib_out_post"]"#)).unwrap();
+    let bmp = config.bmp.as_ref().unwrap();
+    assert_eq!(
+        bmp.collectors[0].monitor,
+        vec![BmpMonitorView::RibInPre, BmpMonitorView::RibOutPost]
+    );
+}
+
+#[test]
+fn bmp_empty_monitor_rejected() {
+    let err = parse(&bmp_toml("monitor = []")).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
+}
+
+#[test]
+fn bmp_unknown_monitor_value_rejected() {
+    assert!(parse(&bmp_toml(r#"monitor = ["rib_out_pre"]"#)).is_err());
 }
 
 #[test]

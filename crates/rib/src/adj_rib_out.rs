@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, Safi};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
@@ -414,6 +414,52 @@ impl AdjRibOut {
     pub fn rtc_len(&self) -> usize {
         self.rtc_routes.len()
     }
+
+    /// Per-AFI/SAFI advertised-route counts across every family map —
+    /// the source for RFC 8671 BMP stat type 17 (post-policy
+    /// Adj-RIB-Out per AFI/SAFI). Families with zero advertised routes
+    /// are omitted.
+    ///
+    /// The mixed-family maps (unicast, `FlowSpec`, VPN, labeled) are
+    /// bucketed by iterating their keys — O(total advertised routes),
+    /// paid once per peer per BMP stats tick (60s).
+    #[must_use]
+    pub fn family_counts(&self) -> Vec<((Afi, Safi), u64)> {
+        let mut counts: Vec<((Afi, Safi), u64)> = Vec::new();
+        let mut bump = |family: (Afi, Safi)| {
+            if let Some((_, count)) = counts.iter_mut().find(|(f, _)| *f == family) {
+                *count += 1;
+            } else {
+                counts.push((family, 1));
+            }
+        };
+        for (prefix, _) in self.routes.keys() {
+            let afi = match prefix {
+                Prefix::V4(_) => Afi::Ipv4,
+                Prefix::V6(_) => Afi::Ipv6,
+            };
+            bump((afi, Safi::Unicast));
+        }
+        for route in self.flowspec_routes.values() {
+            bump((route.afi, Safi::FlowSpec));
+        }
+        for key in self.vpn_routes.keys() {
+            bump(key.afi_safi());
+        }
+        for key in self.labeled_routes.keys() {
+            bump(key.afi_safi());
+        }
+        for key in self.bgpls_routes.keys() {
+            bump(key.family.to_afi_safi());
+        }
+        if !self.evpn_routes.is_empty() {
+            counts.push(((Afi::L2Vpn, Safi::Evpn), self.evpn_routes.len() as u64));
+        }
+        if !self.rtc_routes.is_empty() {
+            counts.push(((Afi::Ipv4, Safi::RtConstrain), self.rtc_routes.len() as u64));
+        }
+        counts
+    }
 }
 
 #[cfg(test)]
@@ -764,5 +810,35 @@ mod tests {
             )))
             .collect();
         assert!(routes_none.is_empty());
+    }
+
+    /// `family_counts` buckets every family map by AFI/SAFI (RFC 8671
+    /// BMP stat type 17 source) and omits empty families.
+    #[test]
+    fn family_counts_buckets_all_family_maps() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(rib.family_counts().is_empty());
+
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert(make_route(prefix_b(), 0));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 1));
+
+        let counts = rib.family_counts();
+        let get = |family: (Afi, Safi)| {
+            counts
+                .iter()
+                .find(|(f, _)| *f == family)
+                .map(|(_, count)| *count)
+        };
+        assert_eq!(get((Afi::Ipv4, Safi::Unicast)), Some(2));
+        assert_eq!(get((Afi::Ipv4, Safi::MplsVpn)), Some(1));
+        assert_eq!(get((Afi::BgpLs, Safi::BgpLs)), Some(1));
+        assert_eq!(
+            get((Afi::L2Vpn, Safi::Evpn)),
+            None,
+            "empty families are omitted"
+        );
+        assert_eq!(counts.len(), 3);
     }
 }

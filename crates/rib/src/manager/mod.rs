@@ -927,6 +927,9 @@ impl RibManager {
                 );
             }
             RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
+            RibUpdate::QueryAdjRibOutCounts { reply } => {
+                self.handle_query_adj_rib_out_counts(reply);
+            }
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
                 self.handle_query_advertised_count(peer, reply);
             }
@@ -1702,6 +1705,18 @@ impl RibManager {
     ) {
         let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
         let _ = reply.send(count);
+    }
+
+    fn handle_query_adj_rib_out_counts(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<crate::update::AdjRibOutCounts>,
+    ) {
+        let counts = self
+            .adj_ribs_out
+            .iter()
+            .map(|(peer, rib)| (*peer, rib.family_counts()))
+            .collect();
+        let _ = reply.send(counts);
     }
 
     fn handle_query_neighbor_policy_stats(
