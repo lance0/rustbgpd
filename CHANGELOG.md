@@ -16,8 +16,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast) ships as one complete
   vertical: MP_REACH/MP_UNREACH dispatch accepts (IPv4/IPv6,
   LabeledUnicast) with the RFC 8277 announce-mode codec and the §2.4
-  withdraw-compatibility field (one ignored 3-octet field, never a label
-  stack); inbound ingest mirrors the VPN path (honest per-prefix policy
+  withdraw-compatibility field (label values ignored on receipt; peers
+  that echo the announced label stack instead are tolerated — see the
+  label-stack-withdraw fix below); inbound ingest mirrors the VPN path (honest per-prefix policy
   context, loop-detection withdraw handling, `known_labeled` max-prefix
   accounting); reflection preserves the MPLS label stack and next-hop
   verbatim (ADR-0077 §4/§6 — next-hop-self is inert for SAFI 4, and a
@@ -31,6 +32,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gRPC `ListLabeledRoutes` at SensitiveRead and `rbgp rib labeled`
   (prefix / labels / next-hop / peer / path-id, `--json`) expose the
   Loc-RIB. RR-only: no label allocation, rewrite, or MPLS FIB install.
+  M79 (GoBGP 4.6.0, hosted CI) is the real-peer receipt: reflection with
+  labels/next-hop verbatim + ORIGINATOR_ID/CLUSTER_LIST (incl. a
+  multi-label stack and a v6 next-hop over the v4 session), relabel
+  implicit replace, multi-label withdraw with zero session flap, the
+  RFC 4724 GR window + End-of-RIB sweep, and no dataplane install —
+  40/40. The lab also caught the label-stack-withdraw session reset
+  pre-CI (fixed below) and two GoBGP quirks recorded in
+  `docs/upstream-findings.md`.
 
 - **RFC 9494 LLGR-stale export gate (closes the last legacy GR/LLGR
   gap).** LLGR-stale routes are no longer advertised to eBGP peers that

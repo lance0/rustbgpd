@@ -1,0 +1,66 @@
+# Containerlab topology: GoBGP PE ↔ rustbgpd RR ↔ GoBGP client
+# (M79 — IPv4/IPv6 labeled-unicast route reflection + GR receipt)
+#
+# Validates: rustbgpd reflects RFC 8277 labeled-unicast (SAFI 4) routes —
+# including a multi-label stack — learned from one iBGP RR client to another
+# with label stack and next-hop preserved verbatim and RFC 4456
+# ORIGINATOR_ID / CLUSTER_LIST attached, treats a re-announce with a new
+# label as an implicit replace, withdraws cleanly (RFC 8277 §2.4
+# compatibility-field withdraw on the wire), preserves the labeled routes
+# stale through a kill -9 GR window (RFC 4724, zero UPDATEs toward the
+# client), sweeps exactly the not-re-advertised route at the relaunched
+# (`gobgpd -r`) PE's End-of-RIB, and installs nothing into any dataplane.
+#
+# The ipv6-labeled-unicast arm rides the SAME IPv4 sessions (MP-BGP with a
+# v6 next-hop) rather than a fourth node — same wire coverage, one fewer
+# container.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   containerlab deploy -t tests/interop/m79-labeled-reflection-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m79-labeled-reflection-gobgp.sh
+#   containerlab destroy -t tests/interop/m79-labeled-reflection-gobgp.clab.yml
+
+name: m79-labeled-reflection-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m79-labeled-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-pe:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m79-pe.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-client:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m79-client.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-client:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-pe:eth1"]

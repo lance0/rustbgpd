@@ -238,7 +238,10 @@ resolved.
   implemented RR-only — the label stack and next-hop are preserved
   verbatim, no label allocation, rewrite, or MPLS FIB install; Add-Path
   per RFC 7911 is supported — completing the ADR-0077 quartet
-  (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast). GR/LLGR stale
+  (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast); M79 is the GoBGP
+  real-peer receipt (reflection incl. multi-label stacks and a v6
+  next-hop over a v4 session, relabel implicit replace, label-stack
+  withdraw with zero session flap, GR window + EoR sweep). GR/LLGR stale
   preservation now covers all of these RR
   families (RFC 4724 helper retention + RFC 9494 two-phase LLGR, M77
   receipt), and the pre-existing unicast/FlowSpec/EVPN paths implement

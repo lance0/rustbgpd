@@ -1,0 +1,25 @@
+# M79 client: receives the reflected labeled-unicast routes. Never
+# restarts and originates nothing — its adj-in view is the assertion
+# surface for verbatim label/next-hop preservation and the RFC 4456
+# ORIGINATOR_ID + CLUSTER_LIST attributes.
+
+[global.config]
+as = 65001
+router-id = "10.0.0.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.0.1"
+peer-as = 65001
+description = "rustbgpd-labeled-rr"
+
+[neighbors.timers.config]
+connect-retry = 5
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-labelled-unicast"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-labelled-unicast"
