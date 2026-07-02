@@ -1189,6 +1189,7 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -1198,7 +1199,7 @@ impl RibManager {
         policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
         force: bool,
     ) {
-        use crate::best_path::best_path_cmp;
+        use crate::best_path::{best_path_cmp, best_path_cmp_orr};
 
         // Sendable family check
         let family = match prefix {
@@ -1245,8 +1246,20 @@ impl RibManager {
             })
             .collect();
 
-        // Sort by best-path preference (best first)
-        candidates.sort_by(|a, b| best_path_cmp(a, b));
+        // Sort by best-path preference (best first). A target bound to a
+        // resolved ORR vantage ranks by the vantage's interior cost to
+        // each NEXT_HOP first (RFC 9107 §3.1) — comparator swap only.
+        match orr {
+            Some((topology, spf)) => candidates.sort_by(|a, b| {
+                best_path_cmp_orr(
+                    a,
+                    b,
+                    spf.cost_to(topology, a.next_hop),
+                    spf.cost_to(topology, b.next_hop),
+                )
+            }),
+            None => candidates.sort_by(|a, b| best_path_cmp(a, b)),
+        }
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
@@ -1494,6 +1507,192 @@ impl RibManager {
 
         // Clean up any stale multi-path entries if this prefix was previously
         // advertised via Add-Path and is now single-best.
+        for &path_id in existing_path_ids {
+            if path_id != 0 {
+                withdraw.push((*prefix, path_id));
+            }
+        }
+    }
+
+    /// RFC 9107 ORR single-best distribution for one prefix to one peer
+    /// bound to a *resolved* vantage.
+    ///
+    /// The best is NOT the Loc-RIB best: the candidate set is collected
+    /// and filtered per target peer exactly like
+    /// [`Self::distribute_multipath_prefix`] (all Adj-RIB-Ins, split
+    /// horizon, iBGP/RR suppression), then the winner is picked with
+    /// [`crate::best_path::best_path_cmp_orr`] using the vantage's SPF
+    /// cost to each candidate's `NEXT_HOP`. The export tail (policy,
+    /// modifications, Adj-RIB-Out diff) mirrors
+    /// [`Self::distribute_single_best_prefix`].
+    ///
+    /// Deliberately NO per-(vantage, prefix) winner memo — it would be
+    /// unsound: the candidate set is per-target-peer (split horizon and
+    /// RR suppression drop different routes for different targets), so a
+    /// memoized winner could be a route the next target must never
+    /// receive. The `SpfResult`'s internal NH-cost LRU is the sound
+    /// cache.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
+    )]
+    pub(super) fn distribute_orr_best_prefix(
+        ribs: &HashMap<IpAddr, AdjRibIn>,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        orr_topology: &crate::orr::OrrTopology,
+        orr_spf: &crate::orr::SpfResult,
+        prefix: &Prefix,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        announce: &mut Vec<crate::route::Route>,
+        withdraw: &mut Vec<(Prefix, u32)>,
+        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
+        force: bool,
+    ) {
+        use crate::best_path::best_path_cmp_orr;
+
+        let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
+
+        // Sendable family check
+        let family = prefix_family(prefix);
+        if !sendable.is_some_and(|f| f.contains(&family)) {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // Outbound Route Filter check (RFC 5291): silent withdraw, not a
+        // policy denial — see `distribute_single_best_prefix`.
+        if orf_filter.is_some_and(|f| !f.permits(prefix)) {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // Collect all candidates across all Adj-RIB-In entries —
+        // verbatim the multipath collector's per-target filter set.
+        let candidates = ribs
+            .values()
+            .flat_map(|rib| rib.iter_prefix(prefix))
+            .filter(|route| {
+                // Split horizon: exclude routes from the target peer
+                if route.peer == target_peer {
+                    return false;
+                }
+                // iBGP split-horizon / RFC 4456 reflection
+                if should_suppress_ibgp_inner(
+                    route,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    peer_is_rr_client,
+                ) {
+                    return false;
+                }
+                true
+            });
+
+        // Per-vantage best (RFC 9107): the vantage's interior cost to
+        // each NEXT_HOP breaks ties between step 5 and step 5.5.
+        let Some(best) = candidates.min_by(|a, b| {
+            best_path_cmp_orr(
+                a,
+                b,
+                orr_spf.cost_to(orr_topology, a.next_hop),
+                orr_spf.cost_to(orr_topology, b.next_hop),
+            )
+        }) else {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        };
+
+        // Export policy check — same tail as `distribute_single_best_prefix`.
+        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
+            best.as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+        } else {
+            String::new()
+        };
+        let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let ctx = RouteContext {
+            prefix: Some(*prefix),
+            next_hop: Some(best.next_hop),
+            extended_communities: best.extended_communities(),
+            communities: best.communities(),
+            large_communities: best.large_communities(),
+            as_path_str: &aspath_str,
+            as_path_len: aspath_len,
+            validation_state: best.validation_state,
+            aspa_state: best.aspa_state,
+            peer_address: Some(target_peer),
+            peer_asn: target_peer_asn,
+            peer_group: target_peer_group,
+            route_type: Some(route_type(best.origin_type)),
+            evpn_route_type: None,
+            local_pref: best.local_pref_attr(),
+            med: best.med_attr(),
+        };
+        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+        if result.action != PolicyAction::Permit {
+            policy_filtered.push(PolicyFilteredRouteKey {
+                target_peer,
+                source_peer: best.peer,
+                prefix: *prefix,
+                path_id: best.path_id,
+            });
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // Apply export modifications to a clone — skip the deep clone of
+        // the Arc<Vec<PathAttribute>> when no modifications are needed.
+        let mut modified = best.clone();
+        let nh_action = if result.modifications.is_empty() {
+            None
+        } else {
+            let nh = rustbgpd_policy::apply_modifications(
+                std::sync::Arc::make_mut(&mut modified.attributes),
+                &result.modifications,
+            );
+            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
+                modified.next_hop = *addr;
+            }
+            nh
+        };
+        modified.path_id = 0;
+
+        // `force` semantics as in `distribute_single_best_prefix`.
+        let changed = force
+            || rib_out
+                .get(prefix, 0)
+                .is_none_or(|existing| !routes_equal(existing, &modified));
+        if changed {
+            nh_override_flags.push(nh_action);
+            announce.push(modified);
+        }
+
+        // Clean up any stale multi-path entries if this prefix was
+        // previously advertised via Add-Path and is now single-best.
         for &path_id in existing_path_ids {
             if path_id != 0 {
                 withdraw.push((*prefix, path_id));
@@ -2323,8 +2522,18 @@ impl RibManager {
                 all
             } else {
                 let mut prefixes = best_changed.clone();
+                // An RFC 9107 ORR peer selects from the per-target
+                // candidate set, not the Loc-RIB best — a candidate
+                // change that leaves the Loc-RIB best untouched can
+                // still flip the vantage best, so ORR peers stage every
+                // affected prefix (same reasoning as Add-Path send).
+                let peer_has_resolved_orr = self
+                    .peer_orr_vantage
+                    .get(&peer)
+                    .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
                 for prefix in all_affected {
-                    if self.add_path_send_max_for_prefix(peer, prefix) > 0 {
+                    if peer_has_resolved_orr || self.add_path_send_max_for_prefix(peer, prefix) > 0
+                    {
                         prefixes.insert(*prefix);
                     }
                 }
@@ -2460,6 +2669,15 @@ impl RibManager {
             // is cheap: ORF filters are small and present only for peers that
             // negotiated ORF (None for everyone else).
             let orf_filters = self.peer_orf_filters.get(&peer).cloned();
+            // RFC 9107 ORR: a peer bound to a vantage that resolved this
+            // pass takes the per-vantage best below; an unresolved
+            // vantage silently falls back to the standard single-best
+            // (the status is surfaced by `rbgp orr`).
+            let orr_ctx = self
+                .peer_orr_vantage
+                .get(&peer)
+                .and_then(|vantage| self.orr.spf.get(vantage))
+                .map(|spf| (&self.orr.topology, spf));
             let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
             let orf_gated = self
                 .peer_orf_pending
@@ -2505,6 +2723,36 @@ impl RibManager {
                         target_peer_asn,
                         target_peer_group,
                         prefix_send_max,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        export_pol.as_ref(),
+                        orf,
+                        orr_ctx,
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                        &mut policy_filtered,
+                        is_force,
+                    );
+                    current_policy_filtered_routes.extend(policy_filtered);
+                } else if let Some((orr_topology, orr_spf)) = orr_ctx {
+                    // ORR peer with a resolved vantage: per-vantage best.
+                    let mut policy_filtered = Vec::new();
+                    Self::distribute_orr_best_prefix(
+                        &self.ribs,
+                        rib_out,
+                        &self.peer_is_rr_client,
+                        orr_topology,
+                        orr_spf,
+                        prefix,
+                        peer,
+                        target_peer_asn,
+                        target_peer_group,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,

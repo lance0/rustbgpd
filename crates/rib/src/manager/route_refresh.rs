@@ -389,6 +389,14 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
+        // RFC 9107 ORR: the refresh replay re-derives the same
+        // per-vantage best the live distribution path would send; an
+        // unresolved vantage falls back to the standard single-best.
+        let orr_ctx = self
+            .peer_orr_vantage
+            .get(&peer)
+            .and_then(|vantage| self.orr.spf.get(vantage))
+            .map(|spf| (&self.orr.topology, spf));
         let loc_rib = &self.loc_rib;
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
@@ -583,6 +591,7 @@ impl RibManager {
                         sendable.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        orr_ctx,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -591,6 +600,35 @@ impl RibManager {
                         &mut nh_override_flags,
                         &mut policy_filtered,
                         false, // route refresh re-emits all anyway via empty refresh_view
+                    );
+                    current_policy_filtered_routes.extend(policy_filtered);
+                } else if let Some((orr_topology, orr_spf)) = orr_ctx {
+                    // ORR peer with a resolved vantage: per-vantage best.
+                    let mut policy_filtered = Vec::new();
+                    Self::distribute_orr_best_prefix(
+                        &self.ribs,
+                        &refresh_view,
+                        &self.peer_is_rr_client,
+                        orr_topology,
+                        orr_spf,
+                        prefix,
+                        peer,
+                        target_peer_asn,
+                        target_peer_group,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        export_pol.as_ref(),
+                        orf_filter.as_ref(),
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                        &mut policy_filtered,
+                        false,
                     );
                     current_policy_filtered_routes.extend(policy_filtered);
                 } else {
