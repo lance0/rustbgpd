@@ -64,28 +64,24 @@ impl RibManager {
         let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
-            // EVPN has a single family tuple, so the inner mark_stale_evpn
-            // call is identical for every entry in `gr_families`. Hoist
-            // it out of the loop and call once when (L2Vpn, Evpn) is
-            // among the GR-preserved families.
+            // RFC 4724 helper retention: mark GR-covered families stale.
+            // Every mark helper returns the keys of routes that were
+            // ALREADY stale from a previous restart and were deleted
+            // (RFC 4724 §4.1: no retention across consecutive restarts) —
+            // collect them so the recompute below withdraws them
+            // downstream. Each helper is a family-scoped no-op for
+            // non-matching tuples. EVPN has a single family tuple, so its
+            // mark call is hoisted out of the loop and made once when
+            // (L2Vpn, Evpn) is among the GR-preserved families.
             for &family in &gr_families {
-                rib.mark_stale(family);
-                rib.mark_stale_flowspec(family);
-            }
-            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
-                rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-            }
-            // RFC 4724 helper retention for the typed RIBs (VPN, BGP-LS,
-            // RTC): mark GR-covered families stale. The returned keys are
-            // routes that were ALREADY stale from a previous restart and
-            // were deleted (RFC 4724 §4.1: no retention across consecutive
-            // restarts) — collect them so the recompute below withdraws
-            // them downstream. Each mark helper is a family-scoped no-op
-            // for non-matching tuples.
-            for &family in &gr_families {
+                affected.extend(rib.mark_stale(family));
+                fs_affected.extend(rib.mark_stale_flowspec(family));
                 vpn_affected.extend(rib.mark_stale_vpn(family));
                 bgpls_affected.extend(rib.mark_stale_bgpls(family));
                 rtc_affected.extend(rib.mark_stale_rtc(family));
+            }
+            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                evpn_affected.extend(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)));
             }
             let withdrawn = rib.withdraw_families_except(&gr_families);
             if !withdrawn.is_empty() {

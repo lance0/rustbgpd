@@ -169,30 +169,50 @@ impl RibManager {
             };
 
             let mut rtc_swept = false;
+            let mut swept_prefixes: Vec<Prefix> = Vec::new();
             if let Some(rib) = self.ribs.get_mut(&peer) {
+                // RFC 4724 §4.1 End-of-RIB removal for every family: a
+                // route still marked stale here was not re-advertised
+                // during the restart window and is deleted (re-advertised
+                // routes had their flag cleared on insert). Routes still
+                // LLGR-stale are swept too: a peer that re-established
+                // DURING the LLGR phase moved back to `gr_peers`
+                // (`handle_peer_up`) while its unrefreshed routes kept
+                // their LLGR-stale flag — they were equally not
+                // re-advertised (RFC 9494 §4.2). The trailing clear is
+                // flag/LLGR-community hygiene for the retained routes.
+                // Each helper is a family-scoped no-op for non-matching
+                // tuples.
+                swept_prefixes = rib.sweep_stale_family((afi, safi));
+                swept_prefixes.extend(rib.sweep_llgr_stale_family((afi, safi)));
                 rib.clear_stale((afi, safi));
+                rib.sweep_stale_flowspec_family((afi, safi));
+                rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
+                rib.sweep_stale_family_evpn((afi, safi));
+                rib.sweep_llgr_stale_family_evpn((afi, safi));
                 rib.clear_stale_evpn((afi, safi));
-                // Typed families (VPN, BGP-LS, RTC) implement the RFC 4724
-                // §4.1 End-of-RIB removal: a route still marked stale here
-                // was not re-advertised during the restart window and is
-                // deleted (re-advertised routes had their flag cleared on
-                // insert). The trailing clear is flag/LLGR-community
-                // hygiene for the retained routes. Each helper is a
-                // family-scoped no-op for non-matching tuples.
                 rib.sweep_stale_family_vpn((afi, safi));
+                rib.sweep_llgr_stale_family_vpn((afi, safi));
                 rib.clear_stale_vpn((afi, safi));
                 rib.sweep_stale_family_bgpls((afi, safi));
+                rib.sweep_llgr_stale_family_bgpls((afi, safi));
                 rib.clear_stale_bgpls((afi, safi));
                 rtc_swept = !rib.sweep_stale_family_rtc((afi, safi)).is_empty();
+                rtc_swept |= !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
                 rib.clear_stale_rtc((afi, safi));
             }
 
-            let affected: HashSet<Prefix> = self
+            // FlowSpec/EVPN affected keys were collected BEFORE the sweep,
+            // so removed keys are already in their sets; the unicast set is
+            // collected from the retained routes and needs the swept
+            // prefixes joined in so their withdrawals distribute.
+            let mut affected: HashSet<Prefix> = self
                 .ribs
                 .get(&peer)
                 .map(|rib| rib.iter().map(|r| r.prefix).collect())
                 .unwrap_or_default();
+            affected.extend(swept_prefixes);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             if !fs_affected.is_empty() {
@@ -312,17 +332,21 @@ impl RibManager {
             };
 
             let mut rtc_swept = false;
+            let mut swept_prefixes: Vec<Prefix> = Vec::new();
             if let Some(rib) = self.ribs.get_mut(&peer) {
+                // RFC-strict End-of-RIB removal for every family, matching
+                // the GR arm: a route still LLGR-stale here was not
+                // re-advertised during the LLGR window and is deleted
+                // (RFC 4724 §4.1 via RFC 9494 §4.2). The trailing clear is
+                // flag/LLGR-community hygiene for the retained routes.
+                // Each helper is a family-scoped no-op for non-matching
+                // tuples.
+                swept_prefixes = rib.sweep_llgr_stale_family((afi, safi));
                 rib.clear_llgr_stale((afi, safi));
+                rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
+                rib.sweep_llgr_stale_family_evpn((afi, safi));
                 rib.clear_llgr_stale_evpn((afi, safi));
-                // Typed families (VPN, BGP-LS, RTC) implement the RFC-strict
-                // End-of-RIB removal, matching the GR arm: a route still
-                // LLGR-stale here was not re-advertised during the LLGR
-                // window and is deleted (RFC 4724 §4.1 via RFC 9494 §4.2).
-                // The trailing clear is flag/LLGR-community hygiene for the
-                // retained routes. The unicast/FlowSpec/EVPN clears above
-                // keep the legacy clear-only behavior (documented gap).
                 rib.sweep_llgr_stale_family_vpn((afi, safi));
                 rib.clear_llgr_stale_vpn((afi, safi));
                 rib.sweep_llgr_stale_family_bgpls((afi, safi));
@@ -331,11 +355,15 @@ impl RibManager {
                 rib.clear_llgr_stale_rtc((afi, safi));
             }
 
-            let affected: HashSet<Prefix> = self
+            // Same shape as the GR arm: FlowSpec/EVPN affected keys already
+            // include the swept ones (collected pre-sweep); join the swept
+            // unicast prefixes so their withdrawals distribute.
+            let mut affected: HashSet<Prefix> = self
                 .ribs
                 .get(&peer)
                 .map(|rib| rib.iter().map(|r| r.prefix).collect())
                 .unwrap_or_default();
+            affected.extend(swept_prefixes);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             if !fs_affected.is_empty() {
