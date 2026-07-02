@@ -1910,13 +1910,42 @@ impl RibManager {
         // (`handle_peer_graceful_restart`, recompute-then-GC ordering),
         // and BGP-LS-bearing peer teardown (`clear_peer_adj_rib_in`) —
         // so the ORR cache rebuild needs exactly one call site.
-        let _changed = self.recompute_orr(); // PR-4 consumes
+        let changed = self.recompute_orr();
+        self.resync_orr_bound_peers(&changed);
+    }
+
+    /// Resync every established peer bound to a changed ORR vantage: a
+    /// changed SPF surface (metric shift, vantage resolution flip) can
+    /// move those peers' per-vantage bests without any unicast RIB
+    /// change, so nothing else would re-stage them. Dirty + empty-set
+    /// `distribute_changes` is the `ReplacePeerExportPolicy` precedent —
+    /// the Adj-RIB-Out equality machinery reduces the full restage to
+    /// the minimal announce/withdraw delta per peer (unaffected peers
+    /// see zero messages).
+    fn resync_orr_bound_peers(&mut self, changed: &HashSet<IpAddr>) {
+        if changed.is_empty() {
+            return;
+        }
+        let bound: Vec<IpAddr> = self
+            .peer_orr_vantage
+            .iter()
+            .filter(|(peer, vantage)| {
+                changed.contains(*vantage) && self.outbound_peers.contains_key(*peer)
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        if bound.is_empty() {
+            return;
+        }
+        self.dirty_peers.extend(bound);
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
     }
 
     /// Rebuild the cached RFC 9107 ORR state: one topology from the
     /// BGP-LS Adj-RIB-In union, one SPF per DISTINCT configured vantage
     /// IP. Returns the vantages whose SPF distance surface changed
-    /// (consumed in PR-4 to dirty their bound peers). Early-outs with no
+    /// (consumed by [`Self::resync_orr_bound_peers`] to dirty their
+    /// bound peers). Early-outs with no
     /// topology build and no SPF while `peer_orr_vantage` is empty, so
     /// non-ORR deployments pay nothing on BGP-LS churn.
     pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {

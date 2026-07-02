@@ -943,9 +943,12 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
     stream
 }
 
-/// THE PR guardrail: configuring an `orr_vantage` has ZERO effect on the
-/// staged unicast output — identical announce/withdraw streams with and
-/// without a vantage. The distribution switch lands in the next slice.
+/// Distribution-switch pin: this scenario's next-hop lies OUTSIDE the
+/// BGP-LS topology (unknown vantage cost) and each prefix has a single
+/// candidate, so the per-vantage ORR path must stage output identical
+/// to the standard path — a configured vantage may never perturb what
+/// it cannot rank. (Originally the pre-switch "zero effect" guardrail;
+/// still load-bearing as the unknown-cost/no-divergence pin.)
 #[tokio::test]
 async fn staged_output_identical_with_and_without_vantages() {
     let without = unicast_stream_with_vantage(None).await;
@@ -957,6 +960,515 @@ async fn staged_output_identical_with_and_without_vantages() {
     assert_eq!(
         without, with,
         "a configured vantage must not change the staged unicast stream"
+    );
+}
+
+// --- RFC 9107 ORR per-vantage best selection ---
+
+/// Feed peer for the square topology (never registered for outbound).
+const ORR_FEED: Ipv4Addr = Ipv4Addr::new(10, 9, 9, 9);
+/// iBGP source announcing via NH-X — lower peer address, so its route
+/// is the standard Loc-RIB best when everything else ties.
+const ORR_SRC_X: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+/// iBGP source announcing via NH-Y.
+const ORR_SRC_Y: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+
+/// Neighbor address of the A→X link — resolves to node X
+/// (interior cost 1 from vantage A, 10 from vantage B).
+fn orr_nh_x() -> IpAddr {
+    use crate::orr::fixtures::{A, X};
+    IpAddr::V4(Ipv4Addr::new(10, 0, X, A))
+}
+
+/// Neighbor address of the A→Y link — resolves to node Y
+/// (interior cost 10 from vantage A, 1 from vantage B).
+fn orr_nh_y() -> IpAddr {
+    use crate::orr::fixtures::{A, Y};
+    IpAddr::V4(Ipv4Addr::new(10, 0, Y, A))
+}
+
+/// Interface address of the B→X link (`10.0.B.X`) — resolves to B.
+fn vantage_at_node_b() -> IpAddr {
+    use crate::orr::fixtures::{B, X};
+    IpAddr::V4(Ipv4Addr::new(10, 0, B, X))
+}
+
+/// The contested prefix of the divergence scenario.
+fn orr_prefix() -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)
+}
+
+/// Adj-RIB-Out map key of the scenario prefix as a single best.
+fn orr_prefix_key() -> (Prefix, u32) {
+    (Prefix::V4(orr_prefix()), 0)
+}
+
+/// An iBGP-learned route for `prefix` from `peer` with the given
+/// next-hop. Attributes are identical across sources so only the ORR
+/// interior-cost step and the final peer-address tiebreak can decide.
+fn ibgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, next_hop: IpAddr) -> Route {
+    Route {
+        prefix: Prefix::V4(prefix),
+        next_hop,
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(100),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    }
+}
+
+/// An RR-mode manager (cluster id set, so iBGP-learned routes reflect
+/// to clients) with the square topology already fed from `ORR_FEED`.
+async fn orr_rr_manager() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 1)),
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+    feed_square_topology(&tx, ORR_FEED).await;
+    (tx, handle)
+}
+
+/// Announce unicast routes from `peer` (unregistered sources pass the
+/// stale-session gate with session id 0).
+async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announced: Vec<Route>) {
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// The arc's divergence scenario: the SAME prefix from two iBGP sources
+/// with next-hops at node X and node Y, followed by a sync point so both
+/// batches are recomputed and distributed.
+async fn announce_divergent_bests(tx: &mpsc::Sender<RibUpdate>) {
+    announce_unicast(
+        tx,
+        ORR_SRC_X,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_X, orr_nh_x())],
+    )
+    .await;
+    announce_unicast(
+        tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_y())],
+    )
+    .await;
+    let _ = query_best_routes(tx).await;
+}
+
+/// Drain every queued outbound update and fold to the final advertised
+/// unicast state: `(prefix, path_id)` → the last announced route.
+fn drain_final_unicast(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> HashMap<(Prefix, u32), Route> {
+    let mut state = HashMap::new();
+    while let Ok(update) = rx.try_recv() {
+        for route in &update.announce {
+            state.insert((route.prefix, route.path_id), route.clone());
+        }
+        for (prefix, path_id) in &update.withdraw {
+            state.remove(&(*prefix, *path_id));
+        }
+    }
+    state
+}
+
+/// THE arc's signature behavior: two RR clients bound to different
+/// vantages receive DIVERGENT bests for the same prefix — each exits
+/// via the next-hop closest to its own IGP location, not the RR's.
+#[tokio::test]
+async fn two_clients_different_vantages_receive_divergent_bests() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    announce_divergent_bests(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_unicast(&mut out_a);
+    let final_b = drain_final_unicast(&mut out_b);
+    assert_eq!(
+        final_a.get(&orr_prefix_key()).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "client at A exits via X (cost 1 < 10)"
+    );
+    assert_eq!(
+        final_b.get(&orr_prefix_key()).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "client at B exits via Y (cost 1 < 10)"
+    );
+}
+
+/// A topology metric flip re-stages ONLY the peers bound to the vantage
+/// whose SPF surface changed: the affected client's best flips, while
+/// the other vantage's client and a non-ORR client see zero messages.
+#[tokio::test]
+async fn topology_metric_flip_marks_only_affected_vantage_peers_dirty_and_flips_best() {
+    use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+    let mut out_c = orr_client_peer_up(&tx, client_c, None).await;
+
+    announce_divergent_bests(&tx).await;
+    // Steady state reached — empty every channel before the flip.
+    let _ = drain_final_unicast(&mut out_a);
+    let _ = drain_final_unicast(&mut out_b);
+    let _ = drain_final_unicast(&mut out_c);
+
+    // Flip A→X to metric 100 (the SAME Link NLRI — identical descriptors
+    // — so the entry is replaced, not duplicated). From A the SPF now
+    // prefers Y (10 < 100); distances from B are untouched.
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![link_route(
+            ORR_FEED,
+            A,
+            X,
+            Some(100),
+            &[
+                v4_interface(Ipv4Addr::new(10, 0, A, X)),
+                v4_neighbor(Ipv4Addr::new(10, 0, X, A)),
+            ],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_unicast(&mut out_a);
+    assert_eq!(
+        final_a.get(&orr_prefix_key()).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "affected client flips to Y (cost 10 < 100)"
+    );
+    assert!(
+        out_b.try_recv().is_err(),
+        "unaffected vantage's client must see zero messages"
+    );
+    assert!(
+        out_c.try_recv().is_err(),
+        "non-ORR client must see zero messages"
+    );
+}
+
+/// A vantage that does not resolve to a topology node silently falls
+/// back to the standard single-best: the ORR client's advertisement is
+/// identical to a vantage-less peer's.
+#[tokio::test]
+async fn unresolved_vantage_falls_back_to_loc_rib_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let orr_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let mut out_orr = orr_client_peer_up(&tx, orr_client, Some(outside)).await;
+    let mut out_plain = orr_client_peer_up(&tx, plain_client, None).await;
+
+    announce_divergent_bests(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_orr = drain_final_unicast(&mut out_orr);
+    let final_plain = drain_final_unicast(&mut out_plain);
+    let unresolved = final_orr
+        .get(&orr_prefix_key())
+        .expect("unresolved-vantage client is advertised the prefix");
+    let plain = final_plain
+        .get(&orr_prefix_key())
+        .expect("vantage-less client is advertised the prefix");
+    assert_eq!(unresolved.next_hop, orr_nh_x(), "the Loc-RIB best");
+    assert_eq!(unresolved.next_hop, plain.next_hop);
+    assert_eq!(unresolved.attributes, plain.attributes);
+    assert_eq!(unresolved.peer, plain.peer);
+    assert_eq!(unresolved.path_id, plain.path_id);
+}
+
+/// Withdrawing every BGP-LS link unresolves all vantages: ORR clients
+/// revert to the standard best. The client whose vantage best already
+/// matched it sees zero messages (equality suppression).
+#[tokio::test]
+async fn bgpls_withdrawal_of_all_links_reverts_orr_peers_to_standard_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    announce_divergent_bests(&tx).await;
+    let _ = drain_final_unicast(&mut out_a);
+    let _ = drain_final_unicast(&mut out_b);
+
+    let keys: Vec<BgpLsRouteKey> = crate::orr::fixtures::square_topology(ORR_FEED)
+        .iter()
+        .map(BgpLsRibRoute::key)
+        .collect();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![],
+        withdrawn: keys,
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_unicast(&mut out_b);
+    assert_eq!(
+        final_b.get(&orr_prefix_key()).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "client at B reverts from NH-Y to the standard best NH-X"
+    );
+    assert!(
+        out_a.try_recv().is_err(),
+        "client at A already held the standard best — zero messages"
+    );
+}
+
+/// A client that establishes AFTER the routes and topology are in place
+/// gets its per-vantage best in the initial table dump.
+#[tokio::test]
+async fn orr_client_initial_dump_gets_vantage_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    announce_divergent_bests(&tx).await;
+
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (out_tx, mut out_b) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: client_b,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_unicast(&mut out_b);
+    assert_eq!(
+        final_b.get(&orr_prefix_key()).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "initial dump carries the vantage best, not the Loc-RIB best"
+    );
+}
+
+/// A ROUTE-REFRESH replay re-derives the same per-vantage best the live
+/// distribution path sent.
+#[tokio::test]
+async fn route_refresh_replays_vantage_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    announce_divergent_bests(&tx).await;
+    let _ = drain_final_unicast(&mut out_b);
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: client_b,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_unicast(&mut out_b);
+    let replayed = final_b
+        .get(&orr_prefix_key())
+        .expect("refresh replays the prefix (empty refresh view forces a re-emit)");
+    assert_eq!(
+        replayed.next_hop,
+        orr_nh_y(),
+        "the replay is the vantage best"
+    );
+}
+
+/// Split horizon and RFC 4456 reflection suppression run BEFORE the ORR
+/// ranking: a cost-0 candidate the target must not receive can never
+/// win.
+#[tokio::test]
+async fn split_horizon_and_rr_suppression_apply_before_orr_ranking() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    // A non-client iBGP peer bound to the same vantage. (Config
+    // validation rejects orr_vantage without rr-client; the RIB layer
+    // trusts PeerUp, and the suppression seam must hold regardless.)
+    let peer_d = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let (out_tx_d, mut out_d) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: peer_d,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx_d,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_d).await;
+
+    // prefix1 — split-horizon probe: client B's OWN route has interior
+    // cost 0 (next-hop at its vantage node); a non-client source offers
+    // cost 10 via NH-X.
+    let prefix1 = orr_prefix();
+    announce_unicast(
+        &tx,
+        client_b_v4,
+        vec![ibgp_route(prefix1, client_b_v4, vantage_at_node_b())],
+    )
+    .await;
+    announce_unicast(
+        &tx,
+        ORR_SRC_X,
+        vec![ibgp_route(prefix1, ORR_SRC_X, orr_nh_x())],
+    )
+    .await;
+
+    // prefix2 — RR-suppression probe: the cost-0 candidate comes from a
+    // NON-client (never reflectable to the non-client target D); client
+    // B offers cost 10 via NH-X (client routes reflect to everyone).
+    let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(prefix2, ORR_SRC_Y, vantage_at_node_b())],
+    )
+    .await;
+    announce_unicast(
+        &tx,
+        client_b_v4,
+        vec![ibgp_route(prefix2, client_b_v4, orr_nh_x())],
+    )
+    .await;
+
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_unicast(&mut out_b);
+    assert_eq!(
+        final_b.get(&(Prefix::V4(prefix1), 0)).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "the target's own cost-0 route is split-horizoned before ranking"
+    );
+    let final_d = drain_final_unicast(&mut out_d);
+    assert_eq!(
+        final_d.get(&(Prefix::V4(prefix2), 0)).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "the cost-0 non-client candidate is RR-suppressed before ranking"
+    );
+}
+
+/// Add-Path send to an ORR peer ranks the advertised paths by the
+/// vantage's interior cost (comparator swap in the multipath sort):
+/// path id 1 is the vantage-closest exit, not the standard-chain
+/// winner.
+#[tokio::test]
+async fn orr_with_addpath_send_ranks_by_vantage_cost() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (out_tx, mut out_b) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: client_b,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_b).await;
+
+    announce_divergent_bests(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_unicast(&mut out_b);
+    // Standard ranking would put NH-X first (lower peer address); from
+    // vantage B the costs are Y=1, X=10 — the ORR comparator must rank
+    // NH-Y as path 1.
+    assert_eq!(
+        final_b
+            .get(&(Prefix::V4(orr_prefix()), 1))
+            .map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "rank 1 is the vantage-closest path"
+    );
+    assert_eq!(
+        final_b
+            .get(&(Prefix::V4(orr_prefix()), 2))
+            .map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "rank 2 is the vantage-farther path"
     );
 }
 

@@ -55,6 +55,11 @@ pub enum BestPathReason {
     LowerMed,
     /// Step 5: eBGP preferred over iBGP.
     EbgpOverIbgp,
+    /// Step 5.3 (RFC 9107 ORR only): lower vantage interior cost to
+    /// `NEXT_HOP` wins; a known cost beats an unknown one. Never produced
+    /// by the Loc-RIB ladder (`best_path_cmp_with_reason` carries no
+    /// vantage costs) — it exists for ORR-path attribution and tests.
+    OrrInteriorCost,
     /// Step 5.5: shorter `CLUSTER_LIST` wins (RFC 4456).
     ShorterClusterList,
     /// Step 5.6: lower `ORIGINATOR_ID` wins (RFC 4456).
@@ -77,6 +82,7 @@ impl std::fmt::Display for BestPathReason {
             Self::LowerOrigin => write!(f, "lower_origin"),
             Self::LowerMed => write!(f, "lower_med"),
             Self::EbgpOverIbgp => write!(f, "ebgp_over_ibgp"),
+            Self::OrrInteriorCost => write!(f, "orr_interior_cost"),
             Self::ShorterClusterList => write!(f, "shorter_cluster_list"),
             Self::LowerOriginatorId => write!(f, "lower_originator_id"),
             Self::LowerPeerAddress => write!(f, "lower_peer_address"),
@@ -230,6 +236,10 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
         // Not produced by the unicast ladder; EVPN MAC mobility carries
         // its sequence in EVPN-specific route state, not on `Route`.
         BestPathReason::EvpnMacMobility => "mac_mobility_sequence".to_string(),
+        // Not produced by `best_path_cmp_with_reason` either — the
+        // vantage costs live on the ORR distribution path, not on
+        // `Route`, so there are no compared values to render here.
+        BestPathReason::OrrInteriorCost => "orr_interior_cost_to_next_hop".to_string(),
     }
 }
 
@@ -286,11 +296,37 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
 /// 4. Lowest MED (default 0; always-compare / deterministic MED)
 /// 5. eBGP over iBGP
+///    5.3. ORR interior cost (RFC 9107) — [`best_path_cmp_orr`] only;
+///    this comparator never runs it
 ///    5.5. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
 ///    5.6. Lowest `ORIGINATOR_ID` (RFC 4456 §9) — only when both present
 /// 6. Lowest peer address (tiebreaker)
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
+    cmp_chain(a, b, None)
+}
+
+/// Compare two routes under RFC 9107 Optimal Route Reflection.
+///
+/// The standard [`best_path_cmp`] chain with one extra step between
+/// step 5 (eBGP over iBGP) and step 5.5 (`CLUSTER_LIST`): the
+/// configured vantage's interior (SPF) cost to each route's `NEXT_HOP`.
+/// Lower cost wins; a known cost beats an unknown one (RFC 9107 §3.1:
+/// an unknown metric-to-next-hop MUST be least preferred); equal or
+/// both-unknown falls through to `CLUSTER_LIST`.
+#[must_use]
+pub fn best_path_cmp_orr(
+    a: &Route,
+    b: &Route,
+    cost_a: Option<u64>,
+    cost_b: Option<u64>,
+) -> Ordering {
+    cmp_chain(a, b, Some((cost_a, cost_b)))
+}
+
+/// The shared decision chain behind [`best_path_cmp`] (`orr_costs =
+/// None`) and [`best_path_cmp_orr`] (`orr_costs = Some(..)`).
+fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>) -> Ordering {
     // 0. Three-tier stale demotion: fresh > GR-stale > LLGR-stale (RFC 4724 + RFC 9494)
     let cmp = stale_rank(a).cmp(&stale_rank(b));
     if cmp != Ordering::Equal {
@@ -343,6 +379,22 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
         return cmp;
     }
 
+    // 5.3. RFC 9107 ORR interior cost to NEXT_HOP — only when the
+    //      caller supplies vantage costs (the Loc-RIB never does).
+    //      Lower cost wins; Some beats None (unknown metric MUST be
+    //      least preferred); equal or both-None falls through.
+    if let Some((cost_a, cost_b)) = orr_costs {
+        let cmp = match (cost_a, cost_b) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
     // 5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
     let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
     if cmp != Ordering::Equal {
@@ -380,8 +432,10 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 ///
 /// iBGP grouping is well-defined here despite the lack of an IGP: `best_path_cmp`
 /// has no IGP-metric step (the daemon carries a directly-usable next-hop and does
-/// no recursive resolution), so iBGP equal-cost is fully determined by the BGP
-/// decision chain above.
+/// no recursive resolution) — the metric step is absent except under RFC 9107
+/// ORR, where `best_path_cmp_orr` compares the configured vantage's SPF cost to
+/// `NEXT_HOP` at distribution time (never here or in the Loc-RIB) — so iBGP
+/// equal-cost is fully determined by the BGP decision chain above.
 ///
 /// Locally injected (controller) routes never participate in maximum-paths — they
 /// install as the single best path — so a `RouteOrigin::Local` on either side
@@ -986,6 +1040,69 @@ mod tests {
         }
     }
 
+    // --- RFC 9107 ORR interior-cost step (best_path_cmp_orr) ---
+
+    #[test]
+    fn orr_cost_only_breaks_ties_below_step5() {
+        // Steps 0-5 all outrank the ORR interior cost. A higher
+        // LOCAL_PREF wins regardless of a worse — or unknown — cost.
+        let a = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        assert_eq!(
+            best_path_cmp_orr(&a, &b, Some(1000), Some(0)),
+            Ordering::Less
+        );
+        assert_eq!(best_path_cmp_orr(&a, &b, None, Some(0)), Ordering::Less);
+        assert_eq!(best_path_cmp_orr(&b, &a, Some(0), None), Ordering::Greater);
+
+        // Step 5 (eBGP over iBGP) also sits above the cost step.
+        let ebgp = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 1)));
+        assert_eq!(
+            best_path_cmp_orr(&ibgp, &ebgp, Some(0), Some(1000)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn orr_unknown_cost_least_preferred() {
+        // RFC 9107 §3.1: an unknown metric-to-next-hop MUST be least
+        // preferred — a known cost wins even against a lower peer
+        // address (a is the higher-peer route here).
+        let a = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        let b = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        assert_eq!(best_path_cmp_orr(&a, &b, Some(500), None), Ordering::Less);
+        assert_eq!(
+            best_path_cmp_orr(&b, &a, None, Some(500)),
+            Ordering::Greater
+        );
+        // And among known costs, the lower one wins.
+        assert_eq!(best_path_cmp_orr(&a, &b, Some(5), Some(10)), Ordering::Less);
+        assert_eq!(
+            best_path_cmp_orr(&a, &b, Some(10), Some(5)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn orr_equal_costs_fall_through_to_cluster_list() {
+        // Equal known costs — and both-unknown — fall through to the
+        // CLUSTER_LIST step: the shorter list wins despite a's higher
+        // peer address.
+        let a = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            vec![Ipv4Addr::new(10, 0, 0, 1)],
+        );
+        let b = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+        );
+        assert_eq!(best_path_cmp_orr(&a, &b, Some(7), Some(7)), Ordering::Less);
+        assert_eq!(best_path_cmp_orr(&a, &b, None, None), Ordering::Less);
+        // The fall-through outcome matches the plain comparator.
+        assert_eq!(best_path_cmp_orr(&a, &b, None, None), best_path_cmp(&a, &b));
+    }
+
     // --- best_path_reason_detail (explain-only compared-values render) ---
 
     #[test]
@@ -1245,6 +1362,25 @@ mod proptests {
         ]
     }
 
+    fn arb_stale_tier() -> impl Strategy<Value = (bool, bool)> {
+        // (is_stale, is_llgr_stale): fresh, GR-stale, LLGR-stale.
+        prop_oneof![
+            Just((false, false)),
+            Just((true, false)),
+            Just((false, true)),
+        ]
+    }
+
+    fn arb_rpki() -> impl Strategy<Value = rustbgpd_wire::RpkiValidation> {
+        use rustbgpd_wire::RpkiValidation as V;
+        prop_oneof![Just(V::Valid), Just(V::NotFound), Just(V::Invalid)]
+    }
+
+    fn arb_aspa() -> impl Strategy<Value = rustbgpd_wire::AspaValidation> {
+        use rustbgpd_wire::AspaValidation as V;
+        prop_oneof![Just(V::Valid), Just(V::Unknown), Just(V::Invalid)]
+    }
+
     fn arb_route() -> impl Strategy<Value = Route> {
         (
             1u8..=4,                                   // peer last octet
@@ -1255,9 +1391,24 @@ mod proptests {
             arb_route_origin(),            // origin_type
             proptest::option::of(1u8..=4), // originator_id last octet
             0u8..=3,                       // cluster_list length
+            arb_stale_tier(),
+            arb_rpki(),
+            arb_aspa(),
         )
             .prop_map(
-                |(peer_oct, lp, asns, origin, med, origin_type, oid_oct, cl_len)| {
+                |(
+                    peer_oct,
+                    lp,
+                    asns,
+                    origin,
+                    med,
+                    origin_type,
+                    oid_oct,
+                    cl_len,
+                    (is_stale, is_llgr_stale),
+                    validation_state,
+                    aspa_state,
+                )| {
                     let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
                     let mut attributes = vec![
                         PathAttribute::LocalPref(lp),
@@ -1289,18 +1440,86 @@ mod proptests {
                         received_at: Instant::now(),
                         origin_type,
                         peer_router_id: Ipv4Addr::UNSPECIFIED,
-                        is_stale: false,
-                        is_llgr_stale: false,
+                        is_stale,
+                        is_llgr_stale,
                         path_id: 0,
-                        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                        validation_state,
+                        aspa_state,
                         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
                     }
                 },
             )
     }
 
+    /// Verbatim fixture copy of `best_path_cmp` as it stood BEFORE the
+    /// `cmp_chain` refactor (the ORR arc) — the oracle for
+    /// `best_path_cmp_unchanged_without_orr`. Do not "fix" or refactor
+    /// this copy; its value is that it never changes.
+    fn legacy_best_path_cmp(a: &Route, b: &Route) -> Ordering {
+        let cmp = stale_rank(a).cmp(&stale_rank(b));
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = rpki_preference(b.validation_state).cmp(&rpki_preference(a.validation_state));
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = aspa_preference(b.aspa_state).cmp(&aspa_preference(a.aspa_state));
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = b.local_pref().cmp(&a.local_pref());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let a_len = a.as_path().map_or(0, AsPath::len);
+        let b_len = b.as_path().map_or(0, AsPath::len);
+        let cmp = a_len.cmp(&b_len);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = a.origin().cmp(&b.origin());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = a.med().cmp(&b.med());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
+            let cmp = a_oid.cmp(&b_oid);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        a.peer.cmp(&b.peer)
+    }
+
     proptest! {
+        /// The `cmp_chain` refactor property: with no ORR costs the
+        /// public comparator is behavior-identical to the pre-refactor
+        /// chain (`legacy_best_path_cmp`, a verbatim fixture copy),
+        /// over the generated route corpus.
+        #[test]
+        fn best_path_cmp_unchanged_without_orr(a in arb_route(), b in arb_route()) {
+            prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
+        }
+
+        /// With both costs unknown the ORR comparator degenerates to
+        /// the standard chain — the both-None fall-through is total.
+        #[test]
+        fn orr_both_unknown_matches_plain_cmp(a in arb_route(), b in arb_route()) {
+            prop_assert_eq!(best_path_cmp_orr(&a, &b, None, None), best_path_cmp(&a, &b));
+        }
+
         /// The explain-only ladder (`best_path_cmp_with_reason`) must
         /// agree with the hot-path comparator on arbitrary inputs —
         /// the randomized counterpart of the per-step agreement matrix

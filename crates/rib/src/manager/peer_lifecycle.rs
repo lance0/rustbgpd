@@ -411,9 +411,15 @@ impl RibManager {
         self.peer_is_rr_client.remove(&peer);
         // The ORR vantage binding is per-registration: dropping the last
         // peer bound to a vantage must also drop the vantage's cached
-        // SPF (and re-arm the empty-state early-out).
+        // SPF (and re-arm the empty-state early-out). Consuming the
+        // changed set is a defensive no-op here — removing a binding
+        // never alters a surviving vantage's SPF surface (the topology
+        // input is untouched; any topology change already ran through
+        // the `recompute_bgpls_keys` seam) — but if it ever fires, the
+        // affected peers still get their resync.
         if self.peer_orr_vantage.remove(&peer).is_some() {
-            let _changed = self.recompute_orr(); // PR-4 consumes
+            let changed = self.recompute_orr();
+            self.resync_orr_bound_peers(&changed);
         }
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
@@ -637,8 +643,13 @@ impl RibManager {
         if let Some(vantage) = orr_vantage {
             self.peer_orr_vantage.insert(peer, vantage);
             // The vantage may register after the BGP-LS routes arrived
-            // (no mutation seam would fire), so seed its SPF here.
-            let _changed = self.recompute_orr(); // PR-4 consumes
+            // (no mutation seam would fire), so seed its SPF here. The
+            // changed set is deliberately NOT consumed: it can only name
+            // this vantage when this peer is the first to bind it (other
+            // vantages see an unchanged topology), and this peer's
+            // per-vantage best flows through `send_initial_table` below —
+            // a resync here would double-send the table.
+            self.recompute_orr();
         }
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
@@ -758,6 +769,15 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
+        // RFC 9107 ORR: a late-joining peer bound to a resolved vantage
+        // gets the per-vantage best in its initial dump (the SPF was
+        // seeded at PeerUp); an unresolved vantage falls back to the
+        // standard single-best.
+        let orr_ctx = self
+            .peer_orr_vantage
+            .get(&peer)
+            .and_then(|vantage| self.orr.spf.get(vantage))
+            .map(|spf| (&self.orr.topology, spf));
         let loc_rib = &self.loc_rib;
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
@@ -794,6 +814,38 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     prefix_send_max,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    // ORF: gated families are skipped above; a non-gated family
+                    // has no installed filter during the initial dump.
+                    None,
+                    orr_ctx,
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut announce,
+                    &mut withdraw,
+                    &mut nh_override_flags,
+                    &mut policy_filtered,
+                    false, // initial dump — equality check is correct
+                );
+                current_policy_filtered_routes.extend(policy_filtered);
+            } else if let Some((orr_topology, orr_spf)) = orr_ctx {
+                // ORR peer with a resolved vantage: per-vantage best.
+                let mut policy_filtered = Vec::new();
+                Self::distribute_orr_best_prefix(
+                    &self.ribs,
+                    &initial_view,
+                    &self.peer_is_rr_client,
+                    orr_topology,
+                    orr_spf,
+                    prefix,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
