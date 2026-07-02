@@ -1862,6 +1862,23 @@ impl RibManager {
     /// equality machinery yields the RFC 4684 minimal update set, no
     /// session reset). An unchanged membership skips the restage entirely.
     fn rebuild_rtc_membership_and_restage_vpn(&mut self, peer: IpAddr) {
+        let membership = self.rtc_membership_from_rib(peer);
+        if self.peer_rt_membership.get(&peer) == Some(&membership) {
+            return;
+        }
+        self.peer_rt_membership.insert(peer, membership);
+        if self.outbound_peers.contains_key(&peer) {
+            self.dirty_peers.insert(peer);
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
+        }
+    }
+
+    /// Derive `peer`'s RT-Constrain membership from its Adj-RIB-In (all
+    /// paths, stale included — GR-preserved interest keeps filtering VPN
+    /// advertisements through the restart window). Shared by the rebuild
+    /// seam above and the GR re-establish path in
+    /// `register_active_session`.
+    fn rtc_membership_from_rib(&self, peer: IpAddr) -> RtcMembership {
         let mut has_default = false;
         let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
         if let Some(rib) = self.ribs.get(&peer) {
@@ -1875,17 +1892,9 @@ impl RibManager {
         }
         entries.sort_unstable();
         entries.dedup();
-        let membership = RtcMembership {
+        RtcMembership {
             has_default,
             entries,
-        };
-        if self.peer_rt_membership.get(&peer) == Some(&membership) {
-            return;
-        }
-        self.peer_rt_membership.insert(peer, membership);
-        if self.outbound_peers.contains_key(&peer) {
-            self.dirty_peers.insert(peer);
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
     }
 

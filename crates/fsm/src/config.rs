@@ -10,13 +10,20 @@ use rustbgpd_wire::{
 
 /// Whether the RIB currently has GR/LLGR stale-retention handling for a family.
 ///
-/// BGP-LS receive/API support stores opaque routes, but does not yet implement
-/// the GR/LLGR stale lifecycle for that typed RIB. Keep it out of restart
-/// preservation until that behavior is added.
+/// Every typed Adj-RIB-In with a wired stale lifecycle is listed: unicast,
+/// `FlowSpec`, EVPN, VPNv4/VPNv6 (SAFI 128), BGP-LS/BGP-LS-VPN (AFI 16388),
+/// and RT-Constrain (SAFI 132). A family absent here is excluded from the
+/// GR/LLGR capability sets and therefore withdrawn (not retained stale) on
+/// session drop.
 pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> bool {
     matches!(
         (afi, safi),
-        (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::FlowSpec) | (Afi::L2Vpn, Safi::Evpn)
+        (
+            Afi::Ipv4 | Afi::Ipv6,
+            Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn
+        ) | (Afi::L2Vpn, Safi::Evpn)
+            | (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn)
+            | (Afi::Ipv4, Safi::RtConstrain)
     )
 }
 
@@ -428,52 +435,46 @@ mod tests {
     }
 
     #[test]
-    fn restart_capabilities_omit_bgpls_families() {
+    fn restart_capabilities_include_preserved_typed_families() {
+        // The GR/LLGR stale lifecycle is wired for BGP-LS, VPN, and RTC,
+        // so the advertised GR and LLGR capability sets carry every
+        // configured family in the preservation allowlist.
         let mut cfg = test_config();
         cfg.families = vec![
             (Afi::Ipv4, Safi::Unicast),
             (Afi::BgpLs, Safi::BgpLs),
             (Afi::BgpLs, Safi::BgpLsVpn),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::RtConstrain),
         ];
         cfg.graceful_restart = true;
         cfg.llgr_stale_time = 3600;
         let caps = cfg.local_capabilities();
 
-        let mp_families: Vec<_> = caps
-            .iter()
-            .filter_map(|cap| match cap {
-                Capability::MultiProtocol { afi, safi } => Some((*afi, *safi)),
-                _ => None,
-            })
-            .collect();
-        assert!(mp_families.contains(&(Afi::BgpLs, Safi::BgpLs)));
-        assert!(mp_families.contains(&(Afi::BgpLs, Safi::BgpLsVpn)));
-
-        let gr_families = caps
+        let gr_families: Vec<_> = caps
             .iter()
             .find_map(|cap| match cap {
                 Capability::GracefulRestart { families, .. } => Some(families),
                 _ => None,
             })
-            .expect("GR capability advertised for unicast");
-        assert_eq!(gr_families.len(), 1);
-        assert_eq!(
-            (gr_families[0].afi, gr_families[0].safi),
-            (Afi::Ipv4, Safi::Unicast)
-        );
+            .expect("GR capability advertised")
+            .iter()
+            .map(|f| (f.afi, f.safi))
+            .collect();
+        assert_eq!(gr_families, cfg.families);
 
-        let llgr_families = caps
+        let llgr_families: Vec<_> = caps
             .iter()
             .find_map(|cap| match cap {
                 Capability::LongLivedGracefulRestart(families) => Some(families),
                 _ => None,
             })
-            .expect("LLGR capability advertised for unicast");
-        assert_eq!(llgr_families.len(), 1);
-        assert_eq!(
-            (llgr_families[0].afi, llgr_families[0].safi),
-            (Afi::Ipv4, Safi::Unicast)
-        );
+            .expect("LLGR capability advertised")
+            .iter()
+            .map(|f| (f.afi, f.safi))
+            .collect();
+        assert_eq!(llgr_families, cfg.families);
     }
 
     #[test]

@@ -770,12 +770,17 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
     handle.await.unwrap();
 }
 
-/// The cached SPF state rebuilds at the BGP-LS mutation seams: a vantage
-/// registered before any topology is unresolved, resolves when BGP-LS
-/// routes arrive through the receive path, and unresolves again when the
-/// feed peer's GR entry sweeps its BGP-LS routes.
+/// The cached SPF state rebuilds at the BGP-LS mutation seams — and the GR
+/// stale window deliberately does NOT count as a mutation for the topology:
+/// a vantage registered before any topology is unresolved, resolves when
+/// BGP-LS routes arrive through the receive path, STAYS resolved while the
+/// feed peer's routes are GR-preserved as stale (the ORR-stability
+/// motivation — `iter_bgpls` keeps feeding stale entries to the topology),
+/// and unresolves only when the GR timer expiry finally sweeps them.
 #[tokio::test]
-async fn spf_cache_rebuilds_on_bgpls_receive_and_gr_sweep() {
+async fn bgpls_gr_stale_topology_keeps_orr_vantages_resolved() {
+    tokio::time::pause();
+
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
@@ -799,13 +804,13 @@ async fn spf_cache_rebuilds_on_bgpls_receive_and_gr_sweep() {
     let runs_after_receive = counter_metric_value(&metrics, "bgp_orr_spf_runs_total");
     assert!(runs_after_receive >= 1.0, "SPF ran for the vantage");
 
-    // GR entry for the feed peer withdraws its BGP-LS routes (BGP-LS is
-    // never GR-retained) and must recompute AFTER the sweep.
+    // GR entry with (BgpLs, BgpLs) in the capability preserves the feed
+    // peer's routes as stale — the topology, and the vantage, must survive.
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
         peer: IpAddr::V4(feed),
-        restart_time: 120,
-        stale_routes_time: 360,
+        restart_time: 2,
+        stale_routes_time: 5,
         gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
@@ -816,8 +821,19 @@ async fn spf_cache_rebuilds_on_bgpls_receive_and_gr_sweep() {
 
     let status = query_orr_status(&tx).await;
     assert!(
+        status.vantages[0].resolved,
+        "GR-stale BGP-LS routes must keep feeding the topology"
+    );
+    assert_eq!(status.topology_nodes, 4);
+
+    // GR timer expiry sweeps the stale routes — NOW the vantage unresolves.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    let status = query_orr_status(&tx).await;
+    assert!(
         !status.vantages[0].resolved,
-        "GR sweep rebuilt the cache against the emptied topology"
+        "GR expiry sweep rebuilt the cache against the emptied topology"
     );
     assert_eq!(status.topology_nodes, 0);
 
@@ -1934,13 +1950,13 @@ async fn bgpls_peer_down_clears_or_falls_back_loc_rib() {
     handle.await.unwrap();
 }
 
-/// BGP-LS GR/LLGR stale preservation is deliberately not implemented in the
-/// receive/API tranche. A peer entering GR must therefore withdraw its BGP-LS
-/// objects conservatively instead of leaving them visible as live topology
-/// data. Two peers advertise the same key so the test pins both fallback and
-/// final removal.
+/// A peer entering GR with (`BgpLs`, `BgpLs`) in its capability keeps its
+/// BGP-LS objects as stale (RFC 4724 helper retention). Staleness demotes
+/// the tiebreak rank, so a fresh route from another peer takes over the
+/// Loc-RIB; when every advertiser is stale, the normal tiebreak order
+/// re-applies among the stale candidates and the key stays visible.
 #[tokio::test]
-async fn bgpls_gr_entry_withdraws_or_falls_back_loc_rib() {
+async fn bgpls_gr_marks_stale_and_demotes_routes() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1981,25 +1997,20 @@ async fn bgpls_gr_entry_withdraws_or_falls_back_loc_rib() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
-        peer_llgr_capable: true,
-        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
-            afi: Afi::BgpLs,
-            safi: Safi::BgpLs,
-            forwarding_preserved: true,
-            stale_time: 3600,
-        }],
-        llgr_stale_time: 3600,
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
     })
     .await
     .unwrap();
 
     let after_winner_gr = query_bgpls_routes(&tx).await;
+    assert_eq!(after_winner_gr.len(), 1);
     assert_eq!(
-        after_winner_gr.len(),
-        1,
-        "BGP-LS GR entry should fall back to the surviving peer"
+        after_winner_gr[0].peer, alternate_peer,
+        "stale demotion must hand the Loc-RIB to the fresh alternate route"
     );
-    assert_eq!(after_winner_gr[0].peer, alternate_peer);
+    assert!(!after_winner_gr[0].is_stale);
 
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -2015,9 +2026,577 @@ async fn bgpls_gr_entry_withdraws_or_falls_back_loc_rib() {
     .unwrap();
 
     let after_last_gr = query_bgpls_routes(&tx).await;
+    assert_eq!(
+        after_last_gr.len(),
+        1,
+        "GR must retain the stale BGP-LS route instead of dropping the key"
+    );
+    assert_eq!(
+        after_last_gr[0].peer, best_peer,
+        "with both candidates stale the normal tiebreak (higher LOCAL_PREF) re-applies"
+    );
+    assert!(after_last_gr[0].is_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer whose GR capability does NOT list (`BgpLs`, `BgpLs`) must have its
+/// BGP-LS routes withdrawn on GR entry — RFC 4724 retains only families in
+/// the advertised capability.
+#[tokio::test]
+async fn bgpls_gr_family_not_in_capability_is_withdrawn() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(advertiser);
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![make_bgpls_route(advertiser, 10, 200)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_bgpls_routes(&tx).await.len(), 1);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
     assert!(
-        after_last_gr.is_empty(),
-        "BGP-LS GR entry should not retain the last peer's route as stale/live"
+        query_bgpls_routes(&tx).await.is_empty(),
+        "BGP-LS absent from the GR capability must be withdrawn, not retained stale"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Re-advertisement during the restart window replaces the stale route;
+/// End-of-RIB clears the survivors' stale flags and removes what was not
+/// re-advertised (RFC 4724 §4.1).
+#[tokio::test]
+async fn bgpls_gr_eor_clears_stale() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(advertiser);
+    let kept = make_bgpls_route(advertiser, 10, 200);
+    let dropped = make_bgpls_route(advertiser, 20, 200);
+    let kept_key = kept.key();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![kept.clone(), dropped],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let stale = query_bgpls_routes(&tx).await;
+    assert_eq!(stale.len(), 2);
+    assert!(stale.iter().all(|r| r.is_stale));
+
+    // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![kept],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer,
+        afi: Afi::BgpLs,
+        safi: Safi::BgpLs,
+    })
+    .await
+    .unwrap();
+
+    let after_eor = query_bgpls_routes(&tx).await;
+    assert_eq!(
+        after_eor.len(),
+        1,
+        "the non-readvertised stale route must be removed at End-of-RIB"
+    );
+    assert_eq!(after_eor[0].key(), kept_key);
+    assert!(!after_eor[0].is_stale, "EoR must clear the stale flag");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// GR timer expiry without LLGR purges the stale BGP-LS routes.
+#[tokio::test]
+async fn bgpls_gr_timer_sweeps_stale_routes() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(advertiser);
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![make_bgpls_route(advertiser, 10, 200)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let stale = query_bgpls_routes(&tx).await;
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].is_stale);
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        query_bgpls_routes(&tx).await.is_empty(),
+        "GR timer expiry must sweep stale BGP-LS routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A second GR entry while routes are still stale (consecutive restart
+/// without a refresh in between) deletes them instead of re-marking
+/// (RFC 4724 §4.1), and the deletion propagates to the Loc-RIB.
+#[tokio::test]
+async fn bgpls_gr_consecutive_restart_deletes_stale_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(advertiser);
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![make_bgpls_route(advertiser, 10, 200)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let gr_entry = |session_id| RibUpdate::PeerGracefulRestart {
+        session_id,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    };
+    tx.send(gr_entry(0)).await.unwrap();
+    let stale = query_bgpls_routes(&tx).await;
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].is_stale);
+
+    // The peer comes back and restarts again without re-advertising.
+    tx.send(gr_entry(0)).await.unwrap();
+    assert!(
+        query_bgpls_routes(&tx).await.is_empty(),
+        "a route still stale at the next restart must be deleted, not re-marked"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer entering GR with (IPv4, `MplsVpn`) in its capability keeps its VPN
+/// routes as stale. Staleness demotes the tiebreak rank, so a fresh route
+/// from another peer takes over; with every candidate stale the normal
+/// tiebreak re-applies and the key stays reflected.
+#[tokio::test]
+async fn vpn_gr_marks_stale_and_demotes_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let best_advertiser = Ipv4Addr::new(10, 0, 0, 1);
+    let alternate_advertiser = Ipv4Addr::new(10, 0, 0, 3);
+    let best_peer = IpAddr::V4(best_advertiser);
+    let alternate_peer = IpAddr::V4(alternate_advertiser);
+
+    // Same RD + prefix (octet) from both peers ⇒ same RIB key.
+    let route_a = make_vpn_rib_route(best_advertiser, 31, 100, 200);
+    let route_b = make_vpn_rib_route(alternate_advertiser, 31, 200, 100);
+    assert_eq!(route_a.key(), route_b.key());
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: best_peer,
+        announced: vec![route_a],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: alternate_peer,
+        announced: vec![route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_before = query_vpn_routes(&tx).await;
+    assert_eq!(best_before.len(), 1);
+    assert_eq!(best_before[0].peer, best_peer);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: best_peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let after_winner_gr = query_vpn_routes(&tx).await;
+    assert_eq!(after_winner_gr.len(), 1);
+    assert_eq!(
+        after_winner_gr[0].peer, alternate_peer,
+        "stale demotion must hand the Loc-RIB to the fresh alternate route"
+    );
+    assert!(!after_winner_gr[0].is_stale);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: alternate_peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let after_last_gr = query_vpn_routes(&tx).await;
+    assert_eq!(
+        after_last_gr.len(),
+        1,
+        "GR must retain the stale VPN route instead of dropping the key"
+    );
+    assert_eq!(
+        after_last_gr[0].peer, best_peer,
+        "with both candidates stale the normal tiebreak (higher LOCAL_PREF) re-applies"
+    );
+    assert!(after_last_gr[0].is_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer whose GR capability does NOT list (IPv4, `MplsVpn`) must have its
+/// VPN routes withdrawn on GR entry and the withdrawal staged downstream.
+#[tokio::test]
+async fn vpn_gr_family_not_in_capability_is_withdrawn() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 1);
+
+    // GR capability carries only unicast: VPN is withdrawn, not retained.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let withdraw = out_rx.recv().await.unwrap();
+    assert_eq!(
+        withdraw.vpn_withdraw,
+        vec![key],
+        "GR entry must withdraw VPN routes absent from the capability"
+    );
+    assert!(
+        query_vpn_routes(&tx).await.is_empty(),
+        "VPN absent from the GR capability must not be retained stale"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Re-advertisement during the restart window replaces the stale VPN route;
+/// End-of-RIB clears the survivor's stale flag and removes (and withdraws
+/// downstream) what was not re-advertised (RFC 4724 §4.1).
+#[tokio::test]
+async fn vpn_gr_eor_clears_stale() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let kept = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 60, 100, 100);
+    let dropped = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100);
+    let kept_key = kept.key();
+    let dropped_key = dropped.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![kept.clone(), dropped],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 2);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let stale = query_vpn_routes(&tx).await;
+    assert_eq!(stale.len(), 2);
+    assert!(stale.iter().all(|r| r.is_stale));
+
+    // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![kept],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+
+    let after_eor = query_vpn_routes(&tx).await;
+    assert_eq!(
+        after_eor.len(),
+        1,
+        "the non-readvertised stale VPN route must be removed at End-of-RIB"
+    );
+    assert_eq!(after_eor[0].key(), kept_key);
+    assert!(!after_eor[0].is_stale, "EoR must clear the stale flag");
+
+    // The removal must be withdrawn downstream.
+    loop {
+        let update = out_rx.recv().await.unwrap();
+        if update.vpn_withdraw.is_empty() {
+            continue;
+        }
+        assert_eq!(update.vpn_withdraw, vec![dropped_key.clone()]);
+        break;
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// GR timer expiry without LLGR purges the stale VPN routes.
+#[tokio::test]
+async fn vpn_gr_timer_sweeps_stale_routes() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let stale = query_vpn_routes(&tx).await;
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].is_stale);
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        query_vpn_routes(&tx).await.is_empty(),
+        "GR timer expiry must sweep stale VPN routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A second GR entry while VPN routes are still stale deletes them
+/// (RFC 4724 §4.1: no retention across consecutive restarts).
+#[tokio::test]
+async fn vpn_gr_consecutive_restart_deletes_stale_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let gr_entry = || RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    };
+    tx.send(gr_entry()).await.unwrap();
+    let stale = query_vpn_routes(&tx).await;
+    assert_eq!(stale.len(), 1);
+    assert!(stale[0].is_stale);
+
+    tx.send(gr_entry()).await.unwrap();
+    assert!(
+        query_vpn_routes(&tx).await.is_empty(),
+        "a route still stale at the next restart must be deleted, not re-marked"
     );
 
     drop(tx);
@@ -2897,11 +3476,11 @@ async fn peer_down_withdraws_rtc_routes_from_other_peers() {
     handle.await.unwrap();
 }
 
-/// RTC has no GR stale lifecycle in this slice (the fsm allowlist excludes
-/// SAFI 132 from preservation): GR entry conservatively withdraws the
-/// restarting peer's RTC routes instead of retaining them stale.
+/// A peer whose GR capability does NOT list (IPv4, `RtConstrain`) must have
+/// its RTC routes withdrawn on GR entry — RFC 4724 retains only families in
+/// the advertised capability.
 #[tokio::test]
-async fn gr_entry_conservatively_withdraws_rtc() {
+async fn rtc_gr_family_not_in_capability_is_withdrawn() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -2924,8 +3503,8 @@ async fn gr_entry_conservatively_withdraws_rtc() {
     let announced = out_rx.recv().await.unwrap();
     assert_eq!(announced.rtc_announce.len(), 1);
 
-    // GR entry: the fsm allowlist can never hand the RIB an RTC family, so
-    // gr_families here carries only unicast.
+    // GR entry with only unicast in the capability: SAFI 132 is not
+    // covered, so the peer's RTC routes are withdrawn, not marked stale.
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
         peer: source,
@@ -2943,7 +3522,7 @@ async fn gr_entry_conservatively_withdraws_rtc() {
     assert_eq!(
         withdraw.rtc_withdraw,
         vec![key],
-        "GR entry must conservatively withdraw RTC routes"
+        "GR entry must withdraw RTC routes absent from the capability"
     );
 
     let remaining = query_rtc_routes(&tx).await;
@@ -2953,6 +3532,259 @@ async fn gr_entry_conservatively_withdraws_rtc() {
         "only the local default survives GR entry"
     );
     assert!(remaining[0].nlri.is_default());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer entering GR with (IPv4, `RtConstrain`) in its capability keeps its
+/// RTC routes as stale: they stay in the Loc-RIB (demoted-rank candidates)
+/// and are NOT withdrawn from other RTC peers.
+#[tokio::test]
+async fn rtc_gr_marks_stale_and_demotes_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.rtc_announce.len(), 1);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::RtConstrain)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let retained = query_rtc_routes(&tx).await;
+    let stale_route = retained
+        .iter()
+        .find(|r| r.key() == key)
+        .expect("GR-covered RTC route must be retained in the Loc-RIB");
+    assert!(stale_route.is_stale, "retained RTC route must be stale");
+
+    // No withdraw may reach the other RTC peer during the retention window
+    // (a benign re-announce of the unchanged route is tolerated).
+    while let Ok(Some(update)) =
+        tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await
+    {
+        assert!(
+            update.rtc_withdraw.is_empty(),
+            "GR-preserved RTC routes must not be withdrawn from other peers"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// End-of-RIB after re-establishment clears the re-advertised RTC route's
+/// stale flag and removes (and withdraws downstream) interest that was not
+/// re-advertised (RFC 4724 §4.1).
+#[tokio::test]
+async fn rtc_gr_eor_clears_stale() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let kept = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let dropped = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 200, 100);
+    let kept_key = kept.key();
+    let dropped_key = dropped.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![kept.clone(), dropped],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.rtc_announce.len(), 2);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::RtConstrain)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Only `kept` is re-advertised before End-of-RIB.
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![kept],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+
+    let after_eor = query_rtc_routes(&tx).await;
+    assert!(
+        after_eor.iter().all(|r| r.key() != dropped_key),
+        "the non-readvertised stale RTC route must be removed at End-of-RIB"
+    );
+    let kept_route = after_eor
+        .iter()
+        .find(|r| r.key() == kept_key)
+        .expect("re-advertised RTC route survives EoR");
+    assert!(!kept_route.is_stale, "EoR must clear the stale flag");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// GR timer expiry without LLGR purges the stale RTC routes and withdraws
+/// them from other peers.
+#[tokio::test]
+async fn rtc_gr_timer_sweeps_stale_routes() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::RtConstrain)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let retained = query_rtc_routes(&tx).await;
+    assert!(retained.iter().any(|r| r.key() == key && r.is_stale));
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    let after_sweep = query_rtc_routes(&tx).await;
+    assert!(
+        after_sweep.iter().all(|r| r.key() != key),
+        "GR timer expiry must sweep stale RTC routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A second GR entry while RTC routes are still stale deletes them
+/// (RFC 4724 §4.1: no retention across consecutive restarts) and the
+/// deletion is withdrawn from other RTC peers.
+#[tokio::test]
+async fn rtc_gr_consecutive_restart_deletes_stale_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.rtc_announce.len(), 1);
+
+    let gr_entry = || RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::RtConstrain)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    };
+    tx.send(gr_entry()).await.unwrap();
+    let retained = query_rtc_routes(&tx).await;
+    assert!(retained.iter().any(|r| r.key() == key && r.is_stale));
+
+    tx.send(gr_entry()).await.unwrap();
+    let after_second = query_rtc_routes(&tx).await;
+    assert!(
+        after_second.iter().all(|r| r.key() != key),
+        "a route still stale at the next restart must be deleted"
+    );
+    // Skip any benign re-announce staged by the first GR entry; the
+    // deletion itself must surface as a downstream withdraw.
+    loop {
+        let update = out_rx.recv().await.unwrap();
+        if update.rtc_withdraw.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            update.rtc_withdraw,
+            vec![key],
+            "the consecutive-restart deletion must be withdrawn downstream"
+        );
+        break;
+    }
 
     drop(tx);
     handle.await.unwrap();
@@ -3607,11 +4439,11 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     handle.await.unwrap();
 }
 
-/// A peer re-establishing after graceful restart starts with a strict empty
-/// membership (the GR-entry conservative withdraw cleared its RTC routes) and
-/// only receives VPN routes once its interest re-arrives.
+/// A peer whose GR capability omits SAFI 132 has its RTC interest withdrawn
+/// on GR entry, so it re-establishes with a strict empty membership and only
+/// receives VPN routes once its interest re-arrives.
 #[tokio::test]
-async fn gr_reestablish_starts_strict_until_rtc_rearrives() {
+async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -3635,6 +4467,8 @@ async fn gr_reestablish_starts_strict_until_rtc_rearrives() {
     let announced = out_rx.recv().await.unwrap();
     assert_eq!(announced.vpn_announce.len(), 1);
 
+    // GR capability covers only VPN — the peer's RTC interest is NOT
+    // retained (RFC 4724: only families in the capability are preserved).
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
         peer: IpAddr::V4(target),
@@ -3657,6 +4491,94 @@ async fn gr_reestablish_starts_strict_until_rtc_rearrives() {
     let reannounced = out_rx.recv().await.unwrap();
     assert_eq!(reannounced.vpn_announce.len(), 1);
     assert_eq!(reannounced.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer whose GR capability covers SAFI 132 keeps its RT interest as stale
+/// through the restart window: the re-establish initial dump serves VPN
+/// routes immediately from the preserved membership (no wait for the
+/// interest to re-arrive), and the End-of-RIB sweep of interest the peer did
+/// NOT re-advertise withdraws the corresponding VPN routes.
+#[tokio::test]
+async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
+    let key_a = route_a.key();
+    let key_b = route_b.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route_a, route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+    send_rtc_interest(&tx, target, &[100, 200]).await;
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 2);
+
+    // GR capability covers both VPN and RTC: the peer's RT interest is
+    // preserved as stale.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv4, Safi::RtConstrain)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Re-establish: VPN routes flow in the INITIAL dump, filtered by the
+    // stale membership — before any RTC re-advertisement arrives.
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let dump = out_rx.recv().await.unwrap();
+    let dumped: Vec<_> = dump.vpn_announce.iter().map(VpnRibRoute::key).collect();
+    assert!(
+        dumped.contains(&key_a) && dumped.contains(&key_b),
+        "the initial dump must serve VPN routes from the GR-preserved membership, got {dumped:?}"
+    );
+
+    // The peer re-advertises interest in RT 100 only; RT 200 stays stale.
+    send_rtc_interest(&tx, target, &[100]).await;
+    // End-of-RIB for SAFI 132 sweeps the non-readvertised interest —
+    // membership shrinks and the uncovered VPN route is withdrawn.
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+
+    loop {
+        let update = out_rx.recv().await.unwrap();
+        if update.vpn_withdraw.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            update.vpn_withdraw,
+            vec![key_b.clone()],
+            "the EoR sweep must withdraw the VPN route whose stale interest was not re-advertised"
+        );
+        assert!(update.vpn_announce.is_empty());
+        break;
+    }
 
     drop(tx);
     handle.await.unwrap();
