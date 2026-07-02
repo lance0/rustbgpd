@@ -446,9 +446,10 @@ pub fn decode_vpn_nlri_addpath(
 /// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4).
 ///
 /// The 4-octet Path Identifier is prepended to the whole withdraw-mode NLRI:
-/// `path_id(4) | len | 3-octet compatibility field | RD | prefix`. The
-/// compatibility field's value is ignored, exactly as in
-/// [`decode_vpn_withdraw_nlri`]. Decoded entries have an empty `labels` vec.
+/// `path_id(4) | len | label field | RD | prefix`. The label field is
+/// dispatched (compatibility value or echoed stack) and ignored, exactly as
+/// in [`decode_vpn_withdraw_nlri`]. Decoded entries have an empty `labels`
+/// vec.
 ///
 /// # Errors
 ///
@@ -582,10 +583,12 @@ pub const VPN_WITHDRAW_COMPATIBILITY: [u8; MPLS_LABEL_ENTRY_LEN] = [0x80, 0x00, 
 /// Decode withdraw-mode `VPNv4`/`VPNv6` NLRI bytes (`MP_UNREACH_NLRI`).
 ///
 /// Per RFC 8277 §2.4 a withdrawn VPN NLRI carries a single 3-octet
-/// compatibility field in the label position, not a BOS-terminated label
-/// stack. The field's value is ignored entirely (it need not be 0x800000 and
-/// its S bit need not be set), so announce-mode label-stack parsing must not
-/// be used here. Decoded entries have an empty `labels` vec.
+/// compatibility field in the label position — but `GoBGP` (and any stack
+/// without a dedicated withdraw encoder) echoes the announced BOS-terminated
+/// label stack instead, so the label position is dispatched per
+/// the shared `split_withdraw_label_field` dispatch: an exact compatibility value (0x800000 or
+/// 0x000000) is one field, anything else is S-bit-walked like announce mode.
+/// Labels are ignored either way; decoded entries have an empty `labels` vec.
 ///
 /// # Errors
 ///
@@ -644,8 +647,9 @@ fn decode_one_vpn_withdraw_nlri(
         );
     }
 
-    // Exactly one 3-octet compatibility field; its value is ignored.
-    let rd_offset = MPLS_LABEL_ENTRY_LEN;
+    let (label_octets, label_bits) =
+        split_withdraw_label_field(value, total_len_bits, family, field_start)?;
+    let rd_offset = label_octets;
     let rd_end = rd_offset + ROUTE_DISTINGUISHER_LEN;
     if value.len() < rd_end {
         return invalid_vpn_nlri(
@@ -657,8 +661,20 @@ fn decode_one_vpn_withdraw_nlri(
     let mut rd = [0u8; ROUTE_DISTINGUISHER_LEN];
     rd.copy_from_slice(&value[rd_offset..rd_end]);
 
-    // min_bits was checked above, so this cannot underflow.
-    let prefix_len = total_len_bits - MPLS_LABEL_ENTRY_BITS - ROUTE_DISTINGUISHER_BITS;
+    // Checked subtraction: an echoed multi-label stack can consume enough
+    // bits that `total_len_bits` no longer covers the RD.
+    let Some(prefix_len) = total_len_bits
+        .checked_sub(label_bits)
+        .and_then(|rem| rem.checked_sub(ROUTE_DISTINGUISHER_BITS))
+    else {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} withdraw NLRI length {total_len_bits} bits cannot hold the {label_bits}-bit label field plus Route Distinguisher"
+            ),
+            field_start,
+            1 + value.len(),
+        );
+    };
     if prefix_len > family.max_prefix_len() {
         return invalid_vpn_nlri(
             format!(
@@ -843,6 +859,39 @@ pub(crate) fn decode_label_stack(
         if label.bottom_of_stack {
             return Ok((labels, offset, label_bits));
         }
+    }
+}
+
+/// Split the label position of a withdraw-mode NLRI off the front of
+/// `value`, returning `(consumed_octets, consumed_bits)`.
+///
+/// RFC 8277 §2.4 senders transmit a single 3-octet compatibility field
+/// (SHOULD be 0x800000; the value is ignored). `GoBGP` has no withdraw-mode
+/// encoder at all — `MPLSLabelStack.Serialize` echoes the announced label
+/// stack verbatim — so a withdraw of a multi-label route arrives with a
+/// BOS-terminated stack in the label position, and assuming a single field
+/// mis-computes the prefix length (M79: NOTIFICATION 3/10, session reset).
+/// Match `GoBGP`'s own decoder (`MPLSLabelStack.DecodeFromBytes` special-cases
+/// `WITHDRAW_LABEL` 0x800000 and `ZERO_LABEL` 0x000000): an exact
+/// compatibility value is one 3-octet field; anything else is walked like an
+/// announce-mode stack. Residual theoretical ambiguity: a lone non-compat
+/// entry with S=0 is rejected as missing its bottom-of-stack marker —
+/// unreachable from compliant (single compat field) or stack-echoing
+/// (BOS-terminated) senders.
+pub(crate) fn split_withdraw_label_field(
+    value: &[u8],
+    total_len_bits: u8,
+    family: impl fmt::Display + Copy,
+    field_start: &[u8],
+) -> Result<(usize, u8), DecodeError> {
+    match value.get(..MPLS_LABEL_ENTRY_LEN) {
+        // 0x800000 (RFC 8277 §2.4) or 0x000000 (GoBGP's ZERO_LABEL; seen
+        // from stacks that zero the withdraw label field).
+        Some([0x80 | 0x00, 0x00, 0x00]) => Ok((MPLS_LABEL_ENTRY_LEN, MPLS_LABEL_ENTRY_BITS)),
+        // Echoed announce-mode label stack: S-bit walk. The decoded label
+        // values are discarded — withdraw identity is RD/prefix only.
+        _ => decode_label_stack(value, total_len_bits, family, field_start)
+            .map(|(_, octets, bits)| (octets, bits)),
     }
 }
 
@@ -1127,10 +1176,11 @@ mod tests {
     }
 
     #[test]
-    fn withdraw_decode_ignores_arbitrary_compatibility_value() {
-        // RFC 8277 §2.4: receiver MUST ignore the field — even a value with
-        // no BOS bit set, which announce-mode parsing would reject or overrun.
-        let mut buf = vec![24 + 64, 0x0C, 0x35, 0x00]; // label 50000, S=0
+    fn withdraw_decode_accepts_zero_compatibility_value() {
+        // GoBGP's ZERO_LABEL: some stacks zero the withdraw label field.
+        // 0x000000 has S=0, so an S-bit walk would consume the RD — it must
+        // be taken as a single compatibility field.
+        let mut buf = vec![24 + 64, 0x00, 0x00, 0x00];
         buf.extend_from_slice(&rd().0);
         let decoded = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
@@ -1139,6 +1189,73 @@ mod tests {
             decoded[0].prefix,
             VpnPrefix::v4(Ipv4Addr::UNSPECIFIED, 0).unwrap()
         );
+    }
+
+    /// GoBGP-shaped multi-label `VPNv4` withdraw: `GoBGP` has no
+    /// withdraw-mode encoder and echoes the announced label stack
+    /// (801, 802) verbatim. The old single-compatibility-field parse
+    /// mis-read the second label as the start of the RD.
+    #[test]
+    fn withdraw_decode_vpnv4_multi_label_stack_echo() {
+        let mut buf = vec![
+            0x88, // 136 bits = 2×24 label + 64 RD + 24 prefix
+            0x00, 0x32, 0x10, // label 801, S=0
+            0x00, 0x32, 0x21, // label 802, S=1
+        ];
+        buf.extend_from_slice(&rd().0);
+        buf.extend_from_slice(&[0xC6, 0x33, 0x65]); // 198.51.101.0/24
+
+        let decoded = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].route_distinguisher, rd());
+        assert_eq!(decoded[0].prefix.to_string(), "198.51.101.0/24");
+    }
+
+    /// GoBGP-shaped multi-label `VPNv6` stack-echo withdraw.
+    #[test]
+    fn withdraw_decode_vpnv6_multi_label_stack_echo() {
+        let mut buf = vec![
+            0xA0, // 160 bits = 2×24 label + 64 RD + 48 prefix
+            0x03, 0xE8, 0x00, // label 16000, S=0
+            0x05, 0xDC, 0x01, // label 24000, S=1
+        ];
+        buf.extend_from_slice(&rd().0);
+        buf.extend_from_slice(&[0x20, 0x01, 0x0D, 0xB8, 0x01, 0x00]); // 2001:db8:100::/48
+
+        let decoded = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V6).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].route_distinguisher, rd());
+        assert_eq!(decoded[0].prefix.to_string(), "2001:db8:100::/48");
+    }
+
+    #[test]
+    fn withdraw_decode_rejects_stack_without_bottom_of_stack() {
+        // Not a compatibility value and no S=1 within the declared length.
+        let buf = vec![
+            0x58, // 88 bits
+            0x00, 0x32, 0x10, // S=0
+            0x00, 0x32, 0x20, // S=0
+            0x00, 0x32, 0x30, // S=0
+            0x00, 0x00, // filler to 11 bytes
+        ];
+        let err = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    #[test]
+    fn withdraw_decode_rejects_stack_consuming_route_distinguisher() {
+        // A 48-bit echoed stack leaves only 40 of the declared 88 bits —
+        // not enough for the 64-bit RD.
+        let buf = vec![
+            0x58, // 88 bits
+            0x00, 0x32, 0x10, // label 801, S=0
+            0x00, 0x32, 0x21, // label 802, S=1
+            0x00, 0x00, 0x00, 0x00, 0x00, // 40 bits of would-be RD
+        ];
+        let err = decode_vpn_withdraw_nlri(&buf, VpnAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
     }
 
     #[test]
@@ -1258,15 +1375,95 @@ mod tests {
     }
 
     #[test]
-    fn addpath_withdraw_decode_ignores_arbitrary_compatibility_value() {
-        // RFC 8277 §2.4 receiver-MUST-ignore holds under Add-Path too.
+    fn addpath_withdraw_decode_label_stack_echo() {
+        // GoBGP-shaped stack-echo withdraw under Add-Path.
         let mut buf = 9u32.to_be_bytes().to_vec();
-        buf.extend_from_slice(&[24 + 64, 0x0C, 0x35, 0x00]); // label 50000, S=0
+        buf.extend_from_slice(&[
+            0x88, // 136 bits = 2×24 label + 64 RD + 24 prefix
+            0x00, 0x32, 0x10, // label 801, S=0
+            0x00, 0x32, 0x21, // label 802, S=1
+        ]);
         buf.extend_from_slice(&rd().0);
+        buf.extend_from_slice(&[0xC6, 0x33, 0x65]); // 198.51.101.0/24
+
         let decoded = decode_vpn_withdraw_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].path_id, 9);
+        assert!(decoded[0].nlri.labels.is_empty());
         assert_eq!(decoded[0].nlri.route_distinguisher, rd());
+        assert_eq!(decoded[0].nlri.prefix.to_string(), "198.51.101.0/24");
+    }
+
+    /// Stack-echo compatibility invariant: for every announce-encodable
+    /// NLRI, the announce bytes (what `GoBGP` sends as a withdraw) decode
+    /// through the withdraw decoders to the same route key.
+    #[test]
+    fn withdraw_stack_echo_matches_announce_key() {
+        let cases = [
+            (
+                VpnAddressFamily::V4,
+                vec![
+                    VpnNlri {
+                        labels: vec![label(3, true)],
+                        route_distinguisher: rd(),
+                        prefix: VpnPrefix::v4(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
+                    },
+                    VpnNlri {
+                        labels: vec![label(801, false), label(802, true)],
+                        route_distinguisher: rd(),
+                        prefix: VpnPrefix::v4(Ipv4Addr::new(198, 51, 101, 0), 24).unwrap(),
+                    },
+                    VpnNlri {
+                        labels: vec![label(100, false), label(200, false), label(300, true)],
+                        route_distinguisher: rd(),
+                        prefix: VpnPrefix::v4(Ipv4Addr::new(203, 0, 113, 7), 32).unwrap(),
+                    },
+                ],
+            ),
+            (
+                VpnAddressFamily::V6,
+                vec![
+                    VpnNlri {
+                        labels: vec![label(16_000, false), label(24_000, true)],
+                        route_distinguisher: rd(),
+                        prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
+                    },
+                    VpnNlri {
+                        labels: vec![label(42, true)],
+                        route_distinguisher: rd(),
+                        prefix: VpnPrefix::v6("2001:db8::1".parse().unwrap(), 128).unwrap(),
+                    },
+                ],
+            ),
+        ];
+
+        for (family, entries) in cases {
+            let mut announce = Vec::new();
+            encode_vpn_nlri(&entries, family, &mut announce).unwrap();
+            let withdrawn = decode_vpn_withdraw_nlri(&announce, family).unwrap();
+            assert_eq!(withdrawn.len(), entries.len());
+            for (got, want) in withdrawn.iter().zip(&entries) {
+                assert!(got.labels.is_empty());
+                assert_eq!(got.key(), want.key(), "{family}");
+            }
+
+            let addpath: Vec<_> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, nlri)| VpnNlriEntry {
+                    path_id: u32::try_from(i).unwrap() + 1,
+                    nlri: nlri.clone(),
+                })
+                .collect();
+            let mut announce = Vec::new();
+            encode_vpn_nlri_addpath(&addpath, family, &mut announce).unwrap();
+            let withdrawn = decode_vpn_withdraw_nlri_addpath(&announce, family).unwrap();
+            assert_eq!(withdrawn.len(), addpath.len());
+            for (got, want) in withdrawn.iter().zip(&addpath) {
+                assert_eq!(got.path_id, want.path_id);
+                assert_eq!(got.nlri.key(), want.nlri.key(), "{family}");
+            }
+        }
     }
 
     #[test]
