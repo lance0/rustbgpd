@@ -334,7 +334,7 @@ Delivered:
 | Task | File / location |
 |------|----------------|
 | `InjectEvpn` / `WithdrawEvpn` `RibUpdate` variants | `crates/rib/src/update.rs` |
-| `handle_inject_evpn` / `handle_withdraw_evpn` handlers | `crates/rib/src/manager/distribution.rs` |
+| `handle_inject_evpn` / `handle_withdraw_evpn` handlers | `crates/rib/src/manager/distribution/evpn.rs` |
 | `RouteOrigin::Local` path for EVPN (mirrors FlowSpec) | `crates/api/src/injection_service.rs` |
 | Proto: `AddEvpnRoute` / `DeleteEvpnRoute` RPCs | `proto/rustbgpd.proto` |
 | `InjectionService` methods + RD / MAC / IP validation | `crates/api/src/injection_service.rs` |
