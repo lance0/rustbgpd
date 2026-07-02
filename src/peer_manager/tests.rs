@@ -8765,3 +8765,75 @@ async fn back_to_idle_drops_candidate_while_bfd_withholding() {
     );
     assert!(mgr.peer_key_for_session(2).is_none());
 }
+
+/// The 60s BMP stats tick sources RFC 8671 types 15/17 from the RIB's
+/// per-peer Adj-RIB-Out family counts via one `QueryAdjRibOutCounts`
+/// round-trip, converting `(Afi, Safi)` to raw wire codes.
+#[tokio::test]
+async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        Some(bmp_tx),
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            counters,
+        ),
+        false,
+    );
+
+    // Answer the single RIB-wide Adj-RIB-Out counts query.
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
+                let mut counts = std::collections::HashMap::new();
+                counts.insert(
+                    addr,
+                    vec![
+                        ((Afi::Ipv4, Safi::Unicast), 12_u64),
+                        ((Afi::Ipv4, Safi::MplsVpn), 3_u64),
+                    ],
+                );
+                let _ = reply.send(counts);
+                return;
+            }
+        }
+        panic!("QueryAdjRibOutCounts never arrived");
+    });
+
+    mgr.emit_periodic_bmp_stats().await;
+    rib_task.await.unwrap();
+
+    match bmp_rx.recv().await.unwrap() {
+        rustbgpd_bmp::BmpEvent::StatsReport {
+            peer_info,
+            adj_rib_in_routes,
+            adj_rib_out_post,
+        } => {
+            assert_eq!(peer_info.peer_addr, addr);
+            assert_eq!(adj_rib_in_routes, 0);
+            assert_eq!(
+                adj_rib_out_post,
+                Some(vec![(1, 1, 12), (1, 128, 3)]),
+                "wire AFI/SAFI codes with AdjRibOut-derived counts"
+            );
+        }
+        other => panic!("expected StatsReport, got {other:?}"),
+    }
+}

@@ -40,14 +40,16 @@ const BMP_TERM_TLV_REASON: u16 = 1;
 const PEER_FLAG_V: u8 = 0x80; // IPv6 peer
 const PEER_FLAG_L: u8 = 0x40; // Post-policy
 const PEER_FLAG_A: u8 = 0x20; // 2-byte AS in per-peer header (legacy)
+const PEER_FLAG_O: u8 = 0x10; // Adj-RIB-Out (RFC 8671)
 
 /// Stat counter for Stats Report messages.
 ///
 /// RFC 7854 numeric stat types (4-byte or 8-byte `Stat Data`):
 /// - 32-bit: 0-6, 11-13
-/// - 64-bit: 7-8
+/// - 64-bit: 7-8, plus RFC 8671 Adj-RIB-Out gauges 14-15
 ///
-/// AFI/SAFI-qualified stat types 9-10 must use [`AfiStatCounter`].
+/// AFI/SAFI-qualified stat types 9-10 and 16-17 must use
+/// [`AfiStatCounter`].
 #[derive(Debug, Clone)]
 pub struct StatCounter {
     /// RFC 7854 stat type code (0-8, 11-13).
@@ -56,11 +58,11 @@ pub struct StatCounter {
     pub value: u64,
 }
 
-/// AFI/SAFI-qualified stat counter (RFC 7854 stat types 9-10).
-/// Payload: AFI(2) + SAFI(1) + count(8).
+/// AFI/SAFI-qualified stat counter (RFC 7854 stat types 9-10,
+/// RFC 8671 types 16-17). Payload: AFI(2) + SAFI(1) + count(8).
 #[derive(Debug, Clone)]
 pub struct AfiStatCounter {
-    /// RFC 7854 stat type code (9 or 10).
+    /// Stat type code (9, 10, 16, or 17).
     pub stat_type: u16,
     /// Address Family Identifier.
     pub afi: u16,
@@ -76,8 +78,8 @@ fn numeric_stat_size(stat_type: u16) -> Option<usize> {
     match stat_type {
         // 4-byte counters: types 0-6, 11-13
         0..=6 | 11..=13 => Some(4),
-        // 64-bit gauges: types 7-8
-        7 | 8 => Some(8),
+        // 64-bit gauges: types 7-8, RFC 8671 Adj-RIB-Out types 14-15
+        7 | 8 | 14 | 15 => Some(8),
         // AFI/SAFI-qualified and unknown type formats are not encoded
         // by this numeric-only helper.
         _ => None,
@@ -85,7 +87,7 @@ fn numeric_stat_size(stat_type: u16) -> Option<usize> {
 }
 
 fn is_afi_stat(stat_type: u16) -> bool {
-    matches!(stat_type, 9 | 10)
+    matches!(stat_type, 9 | 10 | 16 | 17)
 }
 
 /// Encode the per-peer header (42 bytes, RFC 7854 §4.2).
@@ -101,6 +103,9 @@ fn encode_per_peer_header(info: &BmpPeerInfo, buf: &mut BytesMut) {
     }
     if !info.is_as4 {
         flags |= PEER_FLAG_A;
+    }
+    if info.is_rib_out {
+        flags |= PEER_FLAG_O;
     }
     buf.put_u8(flags);
 
@@ -380,6 +385,7 @@ mod tests {
             peer_type: BmpPeerType::Global,
             is_ipv6: false,
             is_post_policy: false,
+            is_rib_out: false,
             is_as4: true,
             timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
         }
@@ -399,7 +405,8 @@ mod tests {
 
         let expected_flags = if info.is_ipv6 { PEER_FLAG_V } else { 0 }
             | if info.is_post_policy { PEER_FLAG_L } else { 0 }
-            | if info.is_as4 { 0 } else { PEER_FLAG_A };
+            | if info.is_as4 { 0 } else { PEER_FLAG_A }
+            | if info.is_rib_out { PEER_FLAG_O } else { 0 };
         assert_eq!(buf[1], expected_flags, "flags");
 
         let asn = u32::from_be_bytes([buf[26], buf[27], buf[28], buf[29]]);
@@ -581,6 +588,91 @@ mod tests {
         info.peer_addr = IpAddr::V6("2001:db8::2".parse().unwrap());
         let msg = encode_route_monitoring(&info, &[0u8; 23]);
         assert_ne!(msg[BMP_COMMON_HEADER_LEN + 1] & PEER_FLAG_V, 0);
+    }
+
+    /// RFC 8671 golden bytes: post-policy Adj-RIB-Out route monitoring
+    /// carries O(0x10) + L(0x40) in the per-peer header flags, with the
+    /// version-3 common header and the exact PDU bytes.
+    #[test]
+    fn rib_out_route_monitoring_sets_o_and_l_flags() {
+        let mut info = sample_peer_info();
+        info.is_rib_out = true;
+        info.is_post_policy = true;
+        let pdu = [0xAB; 23];
+        let msg = encode_route_monitoring(&info, &pdu);
+        verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
+        assert_eq!(msg[0], 3, "BMP version 3");
+        assert_eq!(
+            msg[BMP_COMMON_HEADER_LEN + 1],
+            PEER_FLAG_O | PEER_FLAG_L,
+            "flags must be exactly O|L for post-policy Adj-RIB-Out"
+        );
+        assert_eq!(&msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..], &pdu);
+    }
+
+    /// Non-route-monitoring messages built from the normal (rib-in)
+    /// peer info keep O=0 — RFC 8671 receivers SHOULD ignore O in Peer
+    /// Up/Down, and we never set it there.
+    #[test]
+    fn non_route_monitoring_messages_keep_o_flag_clear() {
+        let info = sample_peer_info();
+        let peer_up = encode_peer_up(
+            &info,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            179,
+            12345,
+            &[0xFF; 29],
+            &[0xFE; 29],
+        );
+        let peer_down = encode_peer_down(&info, &PeerDownReason::RemoteNoNotification);
+        let stats = encode_stats_report(&info, &[], &[]);
+        for msg in [&peer_up, &peer_down, &stats] {
+            assert_eq!(
+                msg[BMP_COMMON_HEADER_LEN + 1] & PEER_FLAG_O,
+                0,
+                "O flag must be clear on non-route-monitoring messages"
+            );
+        }
+    }
+
+    /// RFC 8671 stat type 15 (post-policy Adj-RIB-Out total) is a
+    /// 64-bit gauge; type 17 is its per-AFI/SAFI variant.
+    #[test]
+    fn rib_out_stats_15_and_17_encoding() {
+        let info = sample_peer_info();
+        let counters = vec![StatCounter {
+            stat_type: 15,
+            value: 0x0102_0304_0506_0708,
+        }];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 17,
+            afi: 2,
+            safi: 128,
+            value: 77,
+        }];
+        let msg = encode_stats_report(&info, &counters, &afi_counters);
+        verify_common_header(&msg, BMP_MSG_STATS_REPORT);
+        let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
+        let count = u32::from_be_bytes(msg[count_offset..count_offset + 4].try_into().unwrap());
+        assert_eq!(count, 2);
+        // Type 15: type(2)=15, len(2)=8, value(8)
+        let s = count_offset + 4;
+        assert_eq!(u16::from_be_bytes([msg[s], msg[s + 1]]), 15);
+        assert_eq!(u16::from_be_bytes([msg[s + 2], msg[s + 3]]), 8);
+        assert_eq!(
+            u64::from_be_bytes(msg[s + 4..s + 12].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
+        // Type 17: type(2)=17, len(2)=11, AFI(2)=2, SAFI(1)=128, value(8)
+        let t = s + 12;
+        assert_eq!(u16::from_be_bytes([msg[t], msg[t + 1]]), 17);
+        assert_eq!(u16::from_be_bytes([msg[t + 2], msg[t + 3]]), 11);
+        assert_eq!(u16::from_be_bytes([msg[t + 4], msg[t + 5]]), 2);
+        assert_eq!(msg[t + 6], 128);
+        assert_eq!(
+            u64::from_be_bytes(msg[t + 7..t + 15].try_into().unwrap()),
+            77
+        );
     }
 
     #[test]

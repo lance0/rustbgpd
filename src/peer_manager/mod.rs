@@ -519,6 +519,16 @@ impl PeerManager {
         // write-path gate at its `true` default regardless of config.
         transport.explain_enabled = self.current_config.policy.explain.enabled;
         transport.explain_cache_size = self.current_config.policy.explain.cache_size;
+        // RFC 8671: tap outbound UPDATEs for BMP only when some collector
+        // actually monitors the post-policy Adj-RIB-Out stream ([bmp]
+        // changes require a restart, so read-at-construction is
+        // authoritative for the session's lifetime).
+        transport.bmp_rib_out = self.current_config.bmp.as_ref().is_some_and(|bmp| {
+            bmp.collectors.iter().any(|c| {
+                c.monitor
+                    .contains(&crate::config::BmpMonitorView::RibOutPost)
+            })
+        });
         transport
     }
 

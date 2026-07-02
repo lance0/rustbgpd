@@ -470,6 +470,257 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
         other => panic!("expected BMP RouteMonitoring, got {other:?}"),
     }
 }
+/// Read one raw BGP message (header + body bytes) off the wire without
+/// decoding — for byte-exact comparison against BMP `update_pdu`.
+async fn read_single_raw_bgp_message(stream: &mut TcpStream) -> Vec<u8> {
+    let mut header = [0_u8; 19];
+    stream.read_exact(&mut header).await.unwrap();
+    let msg_len = usize::from(u16::from_be_bytes([header[16], header[17]]));
+    let mut body = vec![0_u8; msg_len - header.len()];
+    stream.read_exact(&mut body).await.unwrap();
+    let mut raw = header.to_vec();
+    raw.extend_from_slice(&body);
+    raw
+}
+/// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
+fn empty_outbound_update() -> OutboundRouteUpdate {
+    OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        labeled_announce: vec![],
+        rtc_announce: vec![],
+        vpn_withdraw: vec![],
+        labeled_withdraw: vec![],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    }
+}
+/// Expect the next BMP event to be a rib-out `RouteMonitoring` and
+/// return its PDU bytes, asserting the RFC 8671 marking.
+fn expect_rib_out_rm(event: BmpEvent) -> Bytes {
+    match event {
+        BmpEvent::RouteMonitoring {
+            peer_info,
+            update_pdu,
+        } => {
+            assert!(peer_info.is_rib_out, "O flag marking (Adj-RIB-Out)");
+            assert!(peer_info.is_post_policy, "L flag marking (post-policy)");
+            update_pdu
+        }
+        other => panic!("expected BMP RouteMonitoring, got {other:?}"),
+    }
+}
+/// Outbound UPDATE → RFC 8671 rib-out BMP `RouteMonitoring`, byte-exact
+/// with what went on the wire, remote peer identity preserved.
+#[tokio::test]
+async fn outbound_update_emits_rib_out_bmp_route_monitoring() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let mut update = empty_outbound_update();
+    update.announce = vec![make_route(100)];
+    update.next_hop_override = vec![None];
+    session.send_route_update(update);
+    let wire = read_single_raw_bgp_message(&mut server).await;
+    let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    assert_eq!(
+        pdu.as_ref(),
+        &wire[..],
+        "BMP rib-out PDU must be byte-exact with the transmitted UPDATE"
+    );
+}
+/// Withdraws and End-of-RIB markers are UPDATEs through the same byte
+/// funnel — both are tapped (`EoR` for free, no special-casing).
+#[tokio::test]
+async fn outbound_withdraw_and_eor_emit_rib_out_bmp() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let mut update = empty_outbound_update();
+    update.withdraw = vec![(
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+        0,
+    )];
+    update.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.send_route_update(update);
+    // Wire order: withdraw UPDATE, then the 23-byte EoR UPDATE.
+    let withdraw_wire = read_single_raw_bgp_message(&mut server).await;
+    let eor_wire = read_single_raw_bgp_message(&mut server).await;
+    assert_eq!(eor_wire.len(), 23, "IPv4 unicast EoR is the empty UPDATE");
+    let withdraw_pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    let eor_pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    assert_eq!(withdraw_pdu.as_ref(), &withdraw_wire[..]);
+    assert_eq!(eor_pdu.as_ref(), &eor_wire[..]);
+}
+/// The rib-out tap is off by default (`bmp_rib_out = false`), and even
+/// when on it never taps non-UPDATE bulk traffic (ROUTE-REFRESH).
+#[tokio::test]
+async fn rib_out_tap_default_off_and_skips_non_update_messages() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    // Default: bmp_rib_out is false — outbound UPDATE not tapped.
+    let mut update = empty_outbound_update();
+    update.announce = vec![make_route(100)];
+    update.next_hop_override = vec![None];
+    session.send_route_update(update);
+    let _ = read_single_raw_bgp_message(&mut server).await;
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "rib-out tap must be off unless a collector monitors rib_out_post"
+    );
+    // Enabled: ROUTE-REFRESH goes through the same bulk channel but is
+    // not route monitoring.
+    session.config.bmp_rib_out = true;
+    let mut refresh = empty_outbound_update();
+    refresh.request_refresh_all_negotiated = true;
+    session.send_route_update(refresh);
+    let _ = read_single_raw_bgp_message(&mut server).await;
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "non-UPDATE bulk messages must not be tapped"
+    );
+}
+/// Outbound `VPNv4` UPDATE (SAFI 128) → rib-out BMP, byte-exact — the tap
+/// sits below the family senders so `RD/label/MP_REACH` encoding is
+/// mirrored exactly as transmitted.
+#[tokio::test]
+async fn outbound_vpn_update_emits_rib_out_bmp_byte_exact() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let mut update = empty_outbound_update();
+    update.vpn_announce = vec![make_vpn_rib_route(4093)];
+    session.send_route_update(update);
+    let wire = read_single_raw_bgp_message(&mut server).await;
+    let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    assert_eq!(pdu.as_ref(), &wire[..]);
+}
+/// Outbound EVPN UPDATE (AFI 25 / SAFI 70) → rib-out BMP, byte-exact.
+#[tokio::test]
+async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        RouteDistinguisher,
+    };
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let evpn_route = rustbgpd_rib::EvpnRibRoute {
+        route: EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
+            label1: MplsLabel::new(100),
+            label2: None,
+        }),
+        next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        link_local_next_hop: None,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+    };
+    let mut update = empty_outbound_update();
+    update.evpn_announce = vec![evpn_route];
+    session.send_route_update(update);
+    let wire = read_single_raw_bgp_message(&mut server).await;
+    let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    assert_eq!(pdu.as_ref(), &wire[..]);
+}
+/// The rib-out tap keeps the lossy posture: a full BMP event channel
+/// drops the event and bumps `bmp_source_drops_total` — it never blocks
+/// or tears down the session.
+#[tokio::test]
+async fn rib_out_tap_full_channel_increments_source_drop_counter() {
+    let (mut session, _rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    // The helper's BMP channel holds 16 events; never drain it. The
+    // 17th tapped UPDATE hits Full and must count a source drop.
+    for _ in 0..17 {
+        let mut update = empty_outbound_update();
+        update.announce = vec![make_route(100)];
+        update.next_hop_override = vec![None];
+        session.send_route_update(update);
+    }
+    let drops: u64 = session
+        .metrics
+        .registry()
+        .gather()
+        .iter()
+        .filter(|f| f.name() == "bmp_source_drops_total")
+        .flat_map(|f| f.metric.iter())
+        .map(|m| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+            )]
+            let v = m.counter.value() as u64;
+            v
+        })
+        .sum();
+    assert_eq!(drops, 1, "17th event over a 16-deep channel drops once");
+}
 #[test]
 fn ebgp_prepends_asn() {
     let session = make_test_session(65001, 65002);

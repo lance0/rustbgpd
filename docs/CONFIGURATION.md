@@ -1708,10 +1708,10 @@ set_med = 50
 
 ## `[bmp]`
 
-Optional. Configures BMP (BGP Monitoring Protocol, RFC 7854) export to external
-collectors. rustbgpd acts as a BMP client, initiating TCP connections to each
-configured collector and streaming BGP state changes (peer up/down, route
-monitoring) as BMP messages.
+Optional. Configures BMP (BGP Monitoring Protocol, RFC 7854 + RFC 8671) export
+to external collectors. rustbgpd acts as a BMP client, initiating TCP
+connections to each configured collector and streaming BGP state changes (peer
+up/down, route monitoring) as BMP messages.
 
 ```toml
 [bmp]
@@ -1721,9 +1721,11 @@ sys_descr = "my bgp speaker"   # optional, default "rustbgpd <version>"
 [[bmp.collectors]]
 address = "10.0.0.100:11019"
 reconnect_interval = 30        # seconds, default 30
+# monitor defaults to ["rib_in_pre"] (RFC 7854 behavior)
 
 [[bmp.collectors]]
 address = "10.0.0.101:11019"
+monitor = ["rib_in_pre", "rib_out_post"]   # + RFC 8671 Adj-RIB-Out
 ```
 
 ### BMP section fields
@@ -1740,6 +1742,7 @@ address = "10.0.0.101:11019"
 |----------------------|--------|----------|---------|--------------------------------------|
 | `address`            | string | yes      | --      | Collector `host:port` socket address  |
 | `reconnect_interval` | u64   | no       | 30      | Seconds between reconnect attempts    |
+| `monitor`            | array  | no       | `["rib_in_pre"]` | Route-monitoring streams: `rib_in_pre` (RFC 7854 pre-policy Adj-RIB-In) and/or `rib_out_post` (RFC 8671 post-policy Adj-RIB-Out) |
 
 ### What is streamed
 
@@ -1750,13 +1753,28 @@ BMP messages sent to collectors:
 | **Initiation** (Type 4) | On TCP connect to collector |
 | **Peer Up** (Type 3) | BGP session reaches Established (includes raw OPEN PDUs) |
 | **Peer Down** (Type 2) | BGP session leaves Established |
-| **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU) |
-| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In route count, type 7) |
+| **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU); with `rib_out_post`, also every outbound UPDATE (post-policy Adj-RIB-Out, RFC 8671) |
+| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In count type 7; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17) |
 | **Termination** (Type 5) | On coordinated daemon shutdown (and on client channel shutdown) |
 
 Route Monitoring messages carry the original raw BGP UPDATE PDU bytes
 (including the 19-byte BGP header), enabling collectors to decode the full
 UPDATE without loss.
+
+### RFC 8671 Adj-RIB-Out monitoring
+
+With `monitor = ["rib_out_post"]` (combinable with `rib_in_pre`), every
+outbound UPDATE — announcements, withdraws, and End-of-RIB markers, across all
+address families — is mirrored to the collector byte-exact as transmitted,
+with the per-peer header O flag set (Adj-RIB-Out) and L flag set
+(post-policy). The peer address/AS/BGP-ID identify the remote peer receiving
+the routes; the timestamp is the advertise time. Pre-policy Adj-RIB-Out
+(O=1, L=0) is deliberately not implemented.
+
+Note: the rib-out stream is live-only. A collector that connects (or
+reconnects) mid-session receives Peer Up state replay but no synthesized
+table dump of already-advertised routes — the same limitation the rib-in
+stream has today. See `KNOWN_ISSUES.md`.
 
 When BMP is not configured, overhead remains minimal: raw frame capture uses
 `Bytes` refcount clones (no message-data copy).

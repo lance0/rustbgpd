@@ -140,9 +140,26 @@ impl PeerManager {
             peer_type: BmpPeerType::Global,
             is_ipv6: peer_addr.is_ipv6(),
             is_post_policy: false,
+            is_rib_out: false,
             is_as4: four_octet_as.unwrap_or(true),
             timestamp: std::time::SystemTime::now(),
         }
+    }
+
+    /// One bounded RIB query for every peer's post-policy Adj-RIB-Out
+    /// counts per AFI/SAFI (RFC 8671 BMP stat types 15/17). `None` when
+    /// the RIB manager is unavailable or slow — the stats report then
+    /// omits types 15/17 rather than reporting a false zero.
+    async fn query_adj_rib_out_counts(&self) -> Option<rustbgpd_rib::AdjRibOutCounts> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.rib_tx
+            .send(rustbgpd_rib::RibUpdate::QueryAdjRibOutCounts { reply })
+            .await
+            .ok()?;
+        tokio::time::timeout(PEER_QUERY_TIMEOUT, rx)
+            .await
+            .ok()?
+            .ok()
     }
 
     pub(super) async fn emit_periodic_bmp_stats(&self) {
@@ -154,6 +171,7 @@ impl PeerManager {
         // any one TCP-back-pressured peer block the per-minute BMP tick and,
         // through it, every other admin command queued behind the BMP arm.
         let states = collect_session_states(&self.peers).await;
+        let rib_out_counts = self.query_adj_rib_out_counts().await;
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
             let Some(Some(state)) = states.get(peer) else {
@@ -165,6 +183,20 @@ impl PeerManager {
 
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
             let remote_asn = effective_remote_asn(managed, Some(state));
+            // RFC 8671 types 15/17: a peer absent from the RIB's
+            // Adj-RIB-Out map simply has nothing advertised — report
+            // an honest empty set (type 15 = 0) rather than omitting.
+            let adj_rib_out_post = rib_out_counts.as_ref().map(|counts| {
+                counts
+                    .get(&peer_addr)
+                    .map(|families| {
+                        families
+                            .iter()
+                            .map(|&((afi, safi), count)| (afi as u16, safi as u8, count))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
             let event = BmpEvent::StatsReport {
                 peer_info: Self::bmp_peer_info(
                     peer_addr,
@@ -173,6 +205,7 @@ impl PeerManager {
                     state.four_octet_as,
                 ),
                 adj_rib_in_routes: prefix_count,
+                adj_rib_out_post,
             };
 
             if let Err(e) = bmp_tx.try_send(event) {

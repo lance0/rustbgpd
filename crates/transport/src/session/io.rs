@@ -157,8 +157,31 @@ impl PeerSession {
             );
             return Ok(());
         };
-        match tx.try_send(Bytes::from(encoded)) {
-            Ok(()) => Ok(()),
+        let encoded = Bytes::from(encoded);
+        // RFC 8671 post-policy Adj-RIB-Out tap: every outbound UPDATE
+        // (announcements, withdraws, EoR markers — all families) funnels
+        // through here as final wire bytes, so the BMP mirror is
+        // byte-exact post-policy. Non-UPDATE bulk traffic (BoRR/EoRR
+        // ROUTE-REFRESH markers) is not route monitoring and is skipped.
+        let bmp_rib_out_pdu =
+            (self.config.bmp_rib_out && self.bmp_tx.is_some() && matches!(msg, Message::Update(_)))
+                .then(|| encoded.clone());
+        match tx.try_send(encoded) {
+            Ok(()) => {
+                if let Some(update_pdu) = bmp_rib_out_pdu {
+                    // Peer identity stays the REMOTE peer's; only the
+                    // direction flips (O=1), and L=1 marks post-policy.
+                    // Timestamp inside is the advertise time (now).
+                    let mut peer_info = self.build_bmp_peer_info();
+                    peer_info.is_rib_out = true;
+                    peer_info.is_post_policy = true;
+                    self.emit_bmp_event(BmpEvent::RouteMonitoring {
+                        peer_info,
+                        update_pdu,
+                    });
+                }
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Centralize the saturation policy here so all 13+
                 // bulk callers in `outbound.rs` get the same behavior:

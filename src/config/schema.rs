@@ -300,6 +300,20 @@ pub struct BmpCollector {
     pub address: String,
     #[serde(default = "default_bmp_reconnect")]
     pub reconnect_interval: u64,
+    /// Which route-monitoring streams this collector receives.
+    /// Default preserves pre-RFC 8671 behavior: pre-policy Adj-RIB-In only.
+    #[serde(default = "default_bmp_monitor")]
+    pub monitor: Vec<BmpMonitorView>,
+}
+
+/// A BMP route-monitoring stream selection (per collector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmpMonitorView {
+    /// Pre-policy Adj-RIB-In route monitoring (RFC 7854).
+    RibInPre,
+    /// Post-policy Adj-RIB-Out route monitoring (RFC 8671).
+    RibOutPost,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -328,6 +342,10 @@ fn default_bmp_sys_name() -> String {
 
 fn default_bmp_reconnect() -> u64 {
     30
+}
+
+fn default_bmp_monitor() -> Vec<BmpMonitorView> {
+    vec![BmpMonitorView::RibInPre]
 }
 
 fn default_rpki_refresh() -> u64 {

@@ -11,16 +11,16 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::codec;
-use crate::types::{BmpControlEvent, BmpEvent};
+use crate::types::{BmpControlEvent, BmpEvent, BmpMonitorFilter};
 
 /// BMP manager that fans out encoded messages to all collectors.
 pub struct BmpManager {
     event_rx: mpsc::Receiver<BmpEvent>,
     control_rx: mpsc::Receiver<BmpControlEvent>,
-    /// Per-collector address + sender, paired by index. The address is
-    /// the operator-facing identifier used as the `collector` label on
-    /// `bmp_*` Prometheus counters.
-    collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>)>,
+    /// Per-collector address + sender + monitoring filter, paired by
+    /// index. The address is the operator-facing identifier used as the
+    /// `collector` label on `bmp_*` Prometheus counters.
+    collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>, BmpMonitorFilter)>,
     /// Latest encoded `PeerUp` message per peer address.
     peer_up_cache: std::collections::HashMap<std::net::IpAddr, Bytes>,
     metrics: BgpMetrics,
@@ -32,7 +32,7 @@ impl BmpManager {
     pub fn new(
         event_rx: mpsc::Receiver<BmpEvent>,
         control_rx: mpsc::Receiver<BmpControlEvent>,
-        collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>)>,
+        collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>, BmpMonitorFilter)>,
         metrics: BgpMetrics,
     ) -> Self {
         Self {
@@ -101,14 +101,32 @@ impl BmpManager {
             BmpEvent::StatsReport {
                 peer_info,
                 adj_rib_in_routes,
-            } => codec::encode_stats_report(
-                peer_info,
-                &[codec::StatCounter {
+                adj_rib_out_post,
+            } => {
+                let mut counters = vec![codec::StatCounter {
                     stat_type: 7,
                     value: *adj_rib_in_routes,
-                }],
-                &[],
-            ),
+                }];
+                let mut afi_counters = Vec::new();
+                // RFC 8671: type 15 = post-policy Adj-RIB-Out total,
+                // type 17 = its per-AFI/SAFI breakdown. Omitted when
+                // the counts were unavailable this tick.
+                if let Some(per_family) = adj_rib_out_post {
+                    counters.push(codec::StatCounter {
+                        stat_type: 15,
+                        value: per_family.iter().map(|(_, _, count)| count).sum(),
+                    });
+                    for &(afi, safi, value) in per_family {
+                        afi_counters.push(codec::AfiStatCounter {
+                            stat_type: 17,
+                            afi,
+                            safi,
+                            value,
+                        });
+                    }
+                }
+                codec::encode_stats_report(peer_info, &counters, &afi_counters)
+            }
         }
     }
 
@@ -125,7 +143,21 @@ impl BmpManager {
                 let encoded = Self::encode_event(event);
                 self.fan_out(&encoded);
             }
-            BmpEvent::RouteMonitoring { .. } | BmpEvent::StatsReport { .. } => {
+            // Route monitoring is the only per-collector-filtered
+            // message: rib-in RM only to `rib_in_pre` collectors,
+            // rib-out RM only to `rib_out_post` collectors.
+            BmpEvent::RouteMonitoring { peer_info, .. } => {
+                let encoded = Self::encode_event(event);
+                let rib_out = peer_info.is_rib_out;
+                self.fan_out_filtered(&encoded, |f| {
+                    if rib_out {
+                        f.rib_out_post
+                    } else {
+                        f.rib_in_pre
+                    }
+                });
+            }
+            BmpEvent::StatsReport { .. } => {
                 let encoded = Self::encode_event(event);
                 self.fan_out(&encoded);
             }
@@ -167,7 +199,7 @@ impl BmpManager {
     }
 
     fn replay_peer_up_to_collector(&self, collector_id: usize) {
-        let Some((addr, tx)) = self.collectors.get(collector_id) else {
+        let Some((addr, tx, _)) = self.collectors.get(collector_id) else {
             warn!(
                 collector_id,
                 "BMP replay target collector index out of range, skipping"
@@ -201,7 +233,14 @@ impl BmpManager {
     }
 
     fn fan_out(&self, msg: &Bytes) {
-        for (addr, tx) in &self.collectors {
+        self.fan_out_filtered(msg, |_| true);
+    }
+
+    fn fan_out_filtered(&self, msg: &Bytes, want: impl Fn(&BmpMonitorFilter) -> bool) {
+        for (addr, tx, filter) in &self.collectors {
+            if !want(filter) {
+                continue;
+            }
             if let Err(e) = tx.try_send(msg.clone()) {
                 let reason = trysend_reason(&e);
                 self.metrics
@@ -245,6 +284,7 @@ mod tests {
             peer_type: BmpPeerType::Global,
             is_ipv6: false,
             is_post_policy: false,
+            is_rib_out: false,
             is_as4: true,
             timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
         }
@@ -260,7 +300,10 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c1_tx), (collector_addr(1), c2_tx)],
+            vec![
+                (collector_addr(0), c1_tx, BmpMonitorFilter::default()),
+                (collector_addr(1), c2_tx, BmpMonitorFilter::default()),
+            ],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -291,6 +334,80 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Per-collector monitor filtering: collector A monitors rib-in
+    /// only (default), collector B monitors both. A rib-in RM reaches
+    /// both; a rib-out RM reaches only B. Non-RM messages (stats)
+    /// reach both regardless.
+    #[tokio::test]
+    async fn route_monitoring_filtered_per_collector_monitor_selection() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (a_tx, mut a_rx) = mpsc::channel(16);
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (collector_addr(0), a_tx, BmpMonitorFilter::default()),
+                (
+                    collector_addr(1),
+                    b_tx,
+                    BmpMonitorFilter {
+                        rib_in_pre: true,
+                        rib_out_post: true,
+                    },
+                ),
+            ],
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        // Rib-out RM: only collector B.
+        let mut rib_out_info = sample_peer_info();
+        rib_out_info.is_rib_out = true;
+        rib_out_info.is_post_policy = true;
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: rib_out_info,
+                update_pdu: Bytes::from_static(&[0xBB; 23]),
+            })
+            .await
+            .unwrap();
+
+        // Rib-in RM: both collectors.
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: sample_peer_info(),
+                update_pdu: Bytes::from_static(&[0xAA; 23]),
+            })
+            .await
+            .unwrap();
+
+        // B sees rib-out first (O flag set), then rib-in.
+        let b_first = b_rx.recv().await.unwrap();
+        assert_eq!(b_first[5], 0, "route monitoring type");
+        assert_ne!(b_first[6 + 1] & 0x10, 0, "O flag set on rib-out RM");
+        assert_ne!(b_first[6 + 1] & 0x40, 0, "L flag set on rib-out RM");
+        let b_second = b_rx.recv().await.unwrap();
+        assert_eq!(b_second[6 + 1] & 0x10, 0, "O flag clear on rib-in RM");
+
+        // A sees only the rib-in RM — the rib-out one was filtered.
+        let a_first = a_rx.recv().await.unwrap();
+        assert_eq!(a_first[5], 0);
+        assert_eq!(a_first[6 + 1] & 0x10, 0, "collector A must not see rib-out");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), a_rx.recv())
+                .await
+                .is_err(),
+            "collector A (rib-in only) must not receive the rib-out RM"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
     #[tokio::test]
     async fn manager_handles_peer_up() {
         let (event_tx, event_rx) = mpsc::channel(16);
@@ -300,7 +417,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx)],
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -334,7 +451,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx)],
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -364,7 +481,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx)],
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -373,12 +490,25 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 42,
+                adj_rib_out_post: Some(vec![(1, 1, 10), (2, 1, 5)]),
             })
             .await
             .unwrap();
 
         let msg = c_rx.recv().await.unwrap();
         assert_eq!(msg[5], 1); // Stats Report type
+        // Stats count at offset 6 (common hdr) + 42 (per-peer hdr):
+        // type 7 + type 15 + two type-17 entries = 4.
+        let count = u32::from_be_bytes(msg[48..52].try_into().unwrap());
+        assert_eq!(count, 4);
+        // First: type 7 (len 8, value 42). Second: type 15 = sum 15.
+        assert_eq!(u16::from_be_bytes([msg[52], msg[53]]), 7);
+        assert_eq!(u64::from_be_bytes(msg[56..64].try_into().unwrap()), 42);
+        assert_eq!(u16::from_be_bytes([msg[64], msg[65]]), 15);
+        assert_eq!(u64::from_be_bytes(msg[68..76].try_into().unwrap()), 15);
+        // Then the two AFI/SAFI-qualified type-17 entries.
+        assert_eq!(u16::from_be_bytes([msg[76], msg[77]]), 17);
+        assert_eq!(u16::from_be_bytes([msg[91], msg[92]]), 17);
 
         drop(event_tx);
         drop(control_tx);
@@ -394,7 +524,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx)],
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -415,7 +545,10 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c1_tx), (collector_addr(1), c2_tx)],
+            vec![
+                (collector_addr(0), c1_tx, BmpMonitorFilter::default()),
+                (collector_addr(1), c2_tx, BmpMonitorFilter::default()),
+            ],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -526,7 +659,12 @@ mod tests {
         let addr = collector_addr(7);
 
         let metrics = BgpMetrics::new();
-        let mgr = BmpManager::new(event_rx, control_rx, vec![(addr, c_tx)], metrics.clone());
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr, c_tx, BmpMonitorFilter::default())],
+            metrics.clone(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         event_tx
@@ -580,7 +718,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(addr, c_tx.clone())],
+            vec![(addr, c_tx.clone(), BmpMonitorFilter::default())],
             metrics.clone(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -655,7 +793,12 @@ mod tests {
         let addr = collector_addr(3);
 
         let metrics = BgpMetrics::new();
-        let mgr = BmpManager::new(event_rx, control_rx, vec![(addr, c_tx)], metrics.clone());
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr, c_tx, BmpMonitorFilter::default())],
+            metrics.clone(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         control_tx
@@ -698,7 +841,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx)],
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
             BgpMetrics::new(),
         );
         let mut handle = tokio::spawn(mgr.run());

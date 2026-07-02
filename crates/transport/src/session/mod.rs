@@ -626,6 +626,7 @@ impl PeerSession {
             peer_type: BmpPeerType::Global,
             is_ipv6: self.peer_ip.is_ipv6(),
             is_post_policy: false,
+            is_rib_out: false,
             is_as4,
             timestamp: SystemTime::now(),
         }

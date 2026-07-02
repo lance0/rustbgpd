@@ -1378,7 +1378,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             bmp_config.sys_descr.clone()
         };
 
-        let mut collectors: Vec<(std::net::SocketAddr, mpsc::Sender<bytes::Bytes>)> = Vec::new();
+        let mut collectors: Vec<(
+            std::net::SocketAddr,
+            mpsc::Sender<bytes::Bytes>,
+            rustbgpd_bmp::BmpMonitorFilter,
+        )> = Vec::new();
         let mut client_handles = Vec::new();
         for collector in &bmp_config.collectors {
             let addr: std::net::SocketAddr = match collector.address.parse() {
@@ -1394,7 +1398,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             };
             let (msg_tx, msg_rx) = mpsc::channel(4096);
             let collector_id = collectors.len();
-            collectors.push((addr, msg_tx));
+            let filter = rustbgpd_bmp::BmpMonitorFilter {
+                rib_in_pre: collector
+                    .monitor
+                    .contains(&config::BmpMonitorView::RibInPre),
+                rib_out_post: collector
+                    .monitor
+                    .contains(&config::BmpMonitorView::RibOutPost),
+            };
+            collectors.push((addr, msg_tx, filter));
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {
                     collector_id,

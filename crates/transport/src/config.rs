@@ -143,6 +143,12 @@ pub struct TransportConfig {
     /// for `PolicyService.ExplainImportPolicy`. Operator knob:
     /// `[policy.explain] cache_size`.
     pub explain_cache_size: usize,
+    /// Emit RFC 8671 post-policy Adj-RIB-Out BMP route monitoring for
+    /// every outbound UPDATE. Set when at least one BMP collector
+    /// monitors `rib_out_post`; kept off otherwise so the lossy BMP
+    /// event channel is not doubled for collectors that never see the
+    /// rib-out stream.
+    pub bmp_rib_out: bool,
 }
 
 impl TransportConfig {
@@ -174,6 +180,7 @@ impl TransportConfig {
             cluster_id: None,
             explain_enabled: true,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
+            bmp_rib_out: false,
         }
     }
 }

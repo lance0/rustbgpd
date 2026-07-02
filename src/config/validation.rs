@@ -685,6 +685,14 @@ impl Config {
                         reason: format!("collectors[{i}]: reconnect_interval must be > 0"),
                     });
                 }
+                if collector.monitor.is_empty() {
+                    return Err(ConfigError::InvalidBmpCollector {
+                        reason: format!(
+                            "collectors[{i}]: monitor must not be empty \
+                             (use [\"rib_in_pre\"] and/or [\"rib_out_post\"])"
+                        ),
+                    });
+                }
             }
 
             // Reject duplicate collector addresses (canonicalize through SocketAddr)

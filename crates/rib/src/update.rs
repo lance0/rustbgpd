@@ -18,6 +18,10 @@ use crate::route::{
     VpnRibRouteKey,
 };
 
+/// Per-peer post-policy Adj-RIB-Out route counts per AFI/SAFI —
+/// the RFC 8671 BMP stat type 15/17 source.
+pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
+
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
     /// Routes to announce to this peer.
@@ -613,6 +617,12 @@ pub enum RibUpdate {
     QueryLocRibCount {
         /// Response channel.
         reply: oneshot::Sender<usize>,
+    },
+    /// Query: return every peer's post-policy Adj-RIB-Out route counts
+    /// per AFI/SAFI — the source for RFC 8671 BMP stat types 15/17.
+    QueryAdjRibOutCounts {
+        /// Response channel: peer -> `((afi, safi), count)` entries.
+        reply: oneshot::Sender<AdjRibOutCounts>,
     },
     /// Query: return the number of prefixes advertised to a specific peer.
     QueryAdvertisedCount {

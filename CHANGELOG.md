@@ -35,6 +35,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   IR + counter set per installed chain instead of recompiling per
   pass); import-side counters accumulate but their read surface is a
   follow-up. See the explain/stats chapter in `docs/rpol-language.md`.
+- **RFC 8671 post-policy Adj-RIB-Out BMP monitoring.** Per-collector
+  `monitor = ["rib_in_pre", "rib_out_post"]` selection on
+  `[[bmp.collectors]]` (default `["rib_in_pre"]` -- existing behavior
+  unchanged). With `rib_out_post`, every outbound UPDATE --
+  announcements, withdraws, and End-of-RIB markers across all address
+  families -- is mirrored to the collector byte-exact as transmitted,
+  with the per-peer header O flag (Adj-RIB-Out) and L flag
+  (post-policy) set and the remote peer's identity / advertise-time in
+  the header. Periodic Stats Reports now also carry the RFC 8671
+  gauges: type 15 (post-policy Adj-RIB-Out total) and type 17 (per
+  AFI/SAFI), sourced from per-peer Adj-RIB-Out sizes. The rib-out
+  stream is live-only (no table dump on collector connect -- see
+  KNOWN_ISSUES). Pre-policy Adj-RIB-Out is deliberately not
+  implemented.
 
 - **`.rpol` policies in the running daemon (ADR-0096 slice 3): config
   references, hot reload, and the `rbgp policy test` live-RIB dry
