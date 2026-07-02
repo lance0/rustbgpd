@@ -802,6 +802,24 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
+    /// RFC 9069 Loc-RIB table dump for a (re)connected BMP collector:
+    /// synthesize one UPDATE PDU per Loc-RIB best route (unicast + VPN)
+    /// with its install time, ending with an End-of-RIB PDU per dumped
+    /// family, streamed back in bounded chunks. The synthesis runs in
+    /// the handler; the chunk sends are driven by a spawned drain task
+    /// so a slow collector never blocks the RIB task.
+    QueryBmpLocRibDump {
+        /// Bounded chunk reply channel (from the BMP manager's
+        /// `BmpDumpRequest`). Dropped when the dump completes.
+        reply: mpsc::Sender<rustbgpd_bmp::BmpDumpChunk>,
+    },
+    /// Query per-AFI/SAFI Loc-RIB route counts for the RFC 9069 BMP
+    /// statistics report (stat type 10 entries; type 8 is their sum).
+    /// Scope matches the streamed Loc-RIB families (unicast + VPN).
+    QueryBmpLocRibStats {
+        /// Response channel: `(afi, safi, count)` per family.
+        reply: oneshot::Sender<Vec<(u16, u8, u64)>>,
+    },
 }
 
 /// Peer metadata for MRT `PEER_INDEX_TABLE`.

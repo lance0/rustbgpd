@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BMP Loc-RIB route monitoring with collector-connect table sync
+  (RFC 9069).** New per-collector `monitor = ["loc_rib"]` view: the
+  daemon streams its post-best-path Loc-RIB as Route Monitoring
+  messages attributed to the emulated Loc-RIB instance peer (peer type
+  3, own flags registry always 0, zero-filled peer address, Peer
+  Distinguisher 0, Peer AS = local AS, BGP ID = local router-id,
+  timestamp = route install time). Peer Up carries a fabricated OPEN
+  (4-octet-ASN capability + one MP capability per streamed family,
+  received OPEN a byte-identical repeat) and the VRF/Table Name TLV
+  (`"global"`); Peer Down uses reason 6 with the TLV echoed; periodic
+  stats add types 8 (Loc-RIB total) and 10 (per-AFI/SAFI). UPDATE PDUs
+  are synthesized from the RIB (4-octet-ASN, no Add-Path); v1 synthesis
+  covers IPv4/IPv6 unicast and VPNv4/VPNv6 — other Loc-RIB families
+  land additively later and are deliberately absent from the fabricated
+  OPEN. **Collector (re)connect now performs a table sync** — closing
+  the RFC 7854 initial-sync gap: after the cached Peer Up replay, a
+  `loc_rib` collector receives a chunked Loc-RIB dump (install-time
+  timestamps) closed by one End-of-RIB per family, then the live stream
+  continues seamlessly (dump/live overlap is the standard BMP race;
+  collectors reconcile by prefix). The dump is produced by the RIB
+  manager as a bounded chunked query and paced to the collector's TCP
+  drain by a dedicated forwarder task — the RIB task and the BMP
+  fan-out loop never block on a slow collector. Adj-RIB-In/Out streams
+  remain live-only (see `KNOWN_ISSUES.md`).
+
 - **M80 interop receipt: `.rpol` policy parity against FRR route-maps —
   the ADR-0096 arc closer.** New `interop` CI job (4-node containerlab):
   rustbgpd runs its whole policy surface from an `.rpol` file

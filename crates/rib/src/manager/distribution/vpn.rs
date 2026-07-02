@@ -449,6 +449,13 @@ impl RibManager {
 
         let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
         for key in &affected_nlri {
+            // RFC 9069 Loc-RIB tap: keep the previous best's NLRI so a
+            // disappeared best can be withdrawn with its full RD +
+            // prefix identity. Cloned only when the tap is installed.
+            let bmp_prev_nlri = self
+                .bmp_tx
+                .as_ref()
+                .and_then(|_| self.loc_rib.get_vpn(key).map(|route| route.nlri.clone()));
             let candidates: Vec<VpnRibRoute> = self
                 .ribs
                 .values()
@@ -456,6 +463,15 @@ impl RibManager {
                 .collect();
             if self.loc_rib.recompute_vpn(*key, candidates.iter()) {
                 changed_keys.insert(*key);
+                if self.bmp_tx.is_some() {
+                    let pdu = match self.loc_rib.get_vpn(key) {
+                        Some(best) => crate::bmp_sync::synthesize_vpn_announce(best),
+                        None => bmp_prev_nlri
+                            .as_ref()
+                            .and_then(crate::bmp_sync::synthesize_vpn_withdraw),
+                    };
+                    self.emit_bmp_loc_rib(pdu, std::time::SystemTime::now());
+                }
             }
         }
 

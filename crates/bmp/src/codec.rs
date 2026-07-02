@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::types::{BmpPeerInfo, PeerDownReason};
+use crate::types::{BmpLocRibConfig, BmpPeerInfo, BmpPeerType, LOC_RIB_TABLE_NAME, PeerDownReason};
 
 // BMP message types (RFC 7854 §4.1)
 const BMP_MSG_ROUTE_MONITORING: u8 = 0;
@@ -35,6 +35,12 @@ const BMP_TLV_STRING_MAX_LEN: usize = u16::MAX as usize;
 // BMP Termination TLV types
 const BMP_TERM_TLV_STRING: u16 = 0;
 const BMP_TERM_TLV_REASON: u16 = 1;
+
+// BMP Peer Up Information TLV: VRF/Table Name (RFC 9069 §5.2.2)
+const BMP_PEER_UP_TLV_VRF_TABLE_NAME: u16 = 3;
+
+// Peer Down reason: Local system closed, TLV data follows (RFC 9069 §5.3)
+const PEER_DOWN_REASON_LOCAL_TLV: u8 = 6;
 
 // Per-peer header flags
 const PEER_FLAG_V: u8 = 0x80; // IPv6 peer
@@ -95,17 +101,24 @@ fn encode_per_peer_header(info: &BmpPeerInfo, buf: &mut BytesMut) {
     buf.put_u8(info.peer_type as u8);
 
     let mut flags: u8 = 0;
-    if info.is_ipv6 {
-        flags |= PEER_FLAG_V;
-    }
-    if info.is_post_policy {
-        flags |= PEER_FLAG_L;
-    }
-    if !info.is_as4 {
-        flags |= PEER_FLAG_A;
-    }
-    if info.is_rib_out {
-        flags |= PEER_FLAG_O;
+    if info.peer_type == BmpPeerType::LocRib {
+        // RFC 9069 §4.2: peer type 3 has its OWN flags registry — only
+        // F (0x80, filtered view) is defined and we never filter, so
+        // the byte is always 0. The RFC 7854 V/L/A/O bits do not exist
+        // here (never V, even when the monitored routes are IPv6).
+    } else {
+        if info.is_ipv6 {
+            flags |= PEER_FLAG_V;
+        }
+        if info.is_post_policy {
+            flags |= PEER_FLAG_L;
+        }
+        if !info.is_as4 {
+            flags |= PEER_FLAG_A;
+        }
+        if info.is_rib_out {
+            flags |= PEER_FLAG_O;
+        }
     }
     buf.put_u8(flags);
 
@@ -257,6 +270,62 @@ pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason) -> Bytes {
             buf.put_u8(4);
         }
     }
+
+    write_common_header(&mut buf, BMP_MSG_PEER_DOWN);
+    buf.freeze()
+}
+
+/// Encode the RFC 9069 Peer Up Notification for the emulated Loc-RIB
+/// instance peer (peer type 3).
+///
+/// Local address and ports are zero-filled ("not applicable"), the sent
+/// OPEN is the fabricated PDU from [`BmpLocRibConfig::open_pdu`], the
+/// received OPEN is a byte-identical repeat of it (§5.2), and the
+/// VRF/Table Name Information TLV (type 3) carries `"global"` for the
+/// default Loc-RIB instance.
+#[must_use]
+pub fn encode_loc_rib_peer_up(cfg: &BmpLocRibConfig, timestamp: std::time::SystemTime) -> Bytes {
+    let info = cfg.peer_info(timestamp);
+    let table_name = LOC_RIB_TABLE_NAME.as_bytes();
+    let total = BMP_COMMON_HEADER_LEN
+        + PER_PEER_HEADER_LEN
+        + 20
+        + 2 * cfg.open_pdu.len()
+        + 4
+        + table_name.len();
+
+    let mut buf = BytesMut::with_capacity(total);
+    buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
+    encode_per_peer_header(&info, &mut buf);
+    buf.put_bytes(0, 16); // local address: zero-filled
+    buf.put_u16(0); // local port
+    buf.put_u16(0); // remote port
+    buf.put_slice(&cfg.open_pdu); // sent OPEN (fabricated)
+    buf.put_slice(&cfg.open_pdu); // received OPEN: repeat of the sent OPEN
+    buf.put_u16(BMP_PEER_UP_TLV_VRF_TABLE_NAME);
+    buf.put_u16(u16::try_from(table_name.len()).unwrap_or(u16::MAX));
+    buf.put_slice(table_name);
+
+    write_common_header(&mut buf, BMP_MSG_PEER_UP);
+    buf.freeze()
+}
+
+/// Encode the RFC 9069 Peer Down Notification for the emulated Loc-RIB
+/// instance peer: reason code 6 ("Local system closed, TLV data
+/// follows") with the VRF/Table Name TLV echoed from the Peer Up.
+#[must_use]
+pub fn encode_loc_rib_peer_down(cfg: &BmpLocRibConfig, timestamp: std::time::SystemTime) -> Bytes {
+    let info = cfg.peer_info(timestamp);
+    let table_name = LOC_RIB_TABLE_NAME.as_bytes();
+    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 1 + 4 + table_name.len();
+
+    let mut buf = BytesMut::with_capacity(total);
+    buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
+    encode_per_peer_header(&info, &mut buf);
+    buf.put_u8(PEER_DOWN_REASON_LOCAL_TLV);
+    buf.put_u16(BMP_PEER_UP_TLV_VRF_TABLE_NAME);
+    buf.put_u16(u16::try_from(table_name.len()).unwrap_or(u16::MAX));
+    buf.put_slice(table_name);
 
     write_common_header(&mut buf, BMP_MSG_PEER_DOWN);
     buf.freeze()
@@ -672,6 +741,149 @@ mod tests {
         assert_eq!(
             u64::from_be_bytes(msg[t + 7..t + 15].try_into().unwrap()),
             77
+        );
+    }
+
+    fn sample_loc_rib_config() -> BmpLocRibConfig {
+        BmpLocRibConfig {
+            local_asn: 65001,
+            router_id: Ipv4Addr::new(10, 0, 0, 1),
+            // Any opaque PDU stands in for the fabricated OPEN — the
+            // codec copies it verbatim into both OPEN fields.
+            open_pdu: Bytes::from_static(&[0xAB; 37]),
+        }
+    }
+
+    fn ts() -> std::time::SystemTime {
+        UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+    }
+
+    /// RFC 9069 golden bytes for the Loc-RIB per-peer header: peer type
+    /// 3, flags 0 (its own registry — only F defined, never set by us),
+    /// zero-filled peer address, distinguisher 0 (global instance),
+    /// Peer AS = local AS, BGP ID = local router-id.
+    #[test]
+    fn loc_rib_per_peer_header_golden() {
+        let cfg = sample_loc_rib_config();
+        let msg = encode_route_monitoring(&cfg.peer_info(ts()), &[0xCD; 23]);
+        verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
+        let hdr = &msg[BMP_COMMON_HEADER_LEN..];
+        assert_eq!(hdr[0], 3, "peer type 3 (Loc-RIB instance)");
+        assert_eq!(hdr[1], 0, "flags 0 (F clear, no V/L/A/O bits exist)");
+        assert_eq!(&hdr[2..10], &[0u8; 8], "peer distinguisher 0");
+        assert_eq!(&hdr[10..26], &[0u8; 16], "peer address zero-filled");
+        assert_eq!(u32::from_be_bytes(hdr[26..30].try_into().unwrap()), 65001);
+        assert_eq!(&hdr[30..34], &[10, 0, 0, 1], "BGP ID = local router-id");
+        assert_eq!(
+            u32::from_be_bytes(hdr[34..38].try_into().unwrap()),
+            1_700_000_000,
+            "timestamp = route install time"
+        );
+    }
+
+    /// Even a hostile `BmpPeerInfo` with every RFC 7854 flag bool set
+    /// must encode flags 0 under peer type 3 — the registry is per
+    /// peer type and only F exists there.
+    #[test]
+    fn loc_rib_flags_zero_even_with_flag_bools_set() {
+        let info = BmpPeerInfo {
+            peer_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer_asn: 65001,
+            peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+            peer_type: BmpPeerType::LocRib,
+            is_ipv6: true,
+            is_post_policy: true,
+            is_rib_out: true,
+            is_as4: false,
+            timestamp: ts(),
+        };
+        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        assert_eq!(msg[BMP_COMMON_HEADER_LEN + 1], 0);
+    }
+
+    /// RFC 9069 §5.2 Peer Up: zero local address/ports, sent OPEN =
+    /// received OPEN = the fabricated PDU, VRF/Table Name TLV (type 3)
+    /// = "global".
+    #[test]
+    fn loc_rib_peer_up_fabricated_open_and_table_name_tlv() {
+        let cfg = sample_loc_rib_config();
+        let msg = encode_loc_rib_peer_up(&cfg, ts());
+        verify_common_header(&msg, BMP_MSG_PEER_UP);
+        assert_eq!(msg[BMP_COMMON_HEADER_LEN], 3, "peer type 3");
+
+        let body = &msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(&body[..16], &[0u8; 16], "local address zero-filled");
+        assert_eq!(&body[16..20], &[0u8; 4], "local + remote ports zero");
+        let open_len = cfg.open_pdu.len();
+        assert_eq!(&body[20..20 + open_len], &cfg.open_pdu[..], "sent OPEN");
+        assert_eq!(
+            &body[20 + open_len..20 + 2 * open_len],
+            &cfg.open_pdu[..],
+            "received OPEN is a byte-identical repeat of the sent OPEN"
+        );
+        let tlv = &body[20 + 2 * open_len..];
+        assert_eq!(u16::from_be_bytes([tlv[0], tlv[1]]), 3, "TLV type 3");
+        assert_eq!(
+            u16::from_be_bytes([tlv[2], tlv[3]]) as usize,
+            "global".len()
+        );
+        assert_eq!(&tlv[4..], b"global");
+        assert_eq!(tlv.len(), 4 + "global".len(), "nothing after the TLV");
+    }
+
+    /// RFC 9069 §5.3 Peer Down: reason code 6 with the VRF/Table Name
+    /// TLV echoed.
+    #[test]
+    fn loc_rib_peer_down_reason_6_with_table_name_tlv() {
+        let cfg = sample_loc_rib_config();
+        let msg = encode_loc_rib_peer_down(&cfg, ts());
+        verify_common_header(&msg, BMP_MSG_PEER_DOWN);
+        assert_eq!(msg[BMP_COMMON_HEADER_LEN], 3, "peer type 3");
+        let body = &msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(body[0], 6, "reason 6: local system closed, TLV follows");
+        assert_eq!(u16::from_be_bytes([body[1], body[2]]), 3, "TLV type 3");
+        assert_eq!(&body[5..], b"global");
+    }
+
+    /// RFC 9069 stats: type 8 (Loc-RIB total, 64-bit gauge) + type 10
+    /// (per-AFI/SAFI Loc-RIB count).
+    #[test]
+    fn loc_rib_stats_8_and_10_encoding() {
+        let cfg = sample_loc_rib_config();
+        let counters = vec![StatCounter {
+            stat_type: 8,
+            value: 15,
+        }];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 10,
+            afi: 1,
+            safi: 1,
+            value: 15,
+        }];
+        let msg = encode_stats_report(&cfg.peer_info(ts()), &counters, &afi_counters);
+        verify_common_header(&msg, BMP_MSG_STATS_REPORT);
+        let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
+        assert_eq!(
+            u32::from_be_bytes(msg[count_offset..count_offset + 4].try_into().unwrap()),
+            2
+        );
+        // Type 8: type(2)=8, len(2)=8, value(8)
+        let s = count_offset + 4;
+        assert_eq!(u16::from_be_bytes([msg[s], msg[s + 1]]), 8);
+        assert_eq!(u16::from_be_bytes([msg[s + 2], msg[s + 3]]), 8);
+        assert_eq!(
+            u64::from_be_bytes(msg[s + 4..s + 12].try_into().unwrap()),
+            15
+        );
+        // Type 10: type(2)=10, len(2)=11, AFI(2)=1, SAFI(1)=1, value(8)
+        let t = s + 12;
+        assert_eq!(u16::from_be_bytes([msg[t], msg[t + 1]]), 10);
+        assert_eq!(u16::from_be_bytes([msg[t + 2], msg[t + 3]]), 11);
+        assert_eq!(u16::from_be_bytes([msg[t + 4], msg[t + 5]]), 1);
+        assert_eq!(msg[t + 6], 1);
+        assert_eq!(
+            u64::from_be_bytes(msg[t + 7..t + 15].try_into().unwrap()),
+            15
         );
     }
 

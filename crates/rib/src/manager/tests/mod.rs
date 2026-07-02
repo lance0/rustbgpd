@@ -888,6 +888,7 @@ async fn llgr_gate_peer_up(
 
 mod attr_intern;
 mod bgpls;
+mod bmp;
 mod events_metrics;
 mod evpn;
 mod explain_mrt;

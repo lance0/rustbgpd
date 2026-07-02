@@ -3134,6 +3134,17 @@ fn bmp_monitor_rib_out_post_accepted() {
 }
 
 #[test]
+fn bmp_monitor_loc_rib_accepted() {
+    let config = parse(&bmp_toml(r#"monitor = ["loc_rib"]"#)).unwrap();
+    let bmp = config.bmp.as_ref().unwrap();
+    assert_eq!(
+        bmp.collectors[0].monitor,
+        vec![BmpMonitorView::LocRib],
+        "RFC 9069 Loc-RIB view is selectable on its own"
+    );
+}
+
+#[test]
 fn bmp_empty_monitor_rejected() {
     let err = parse(&bmp_toml("monitor = []")).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));

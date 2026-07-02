@@ -85,13 +85,34 @@ def main():
                 "length": length,
                 "timestamp": time.time(),
             }
-            # RouteMonitoring: per-peer header flags at body[1].
-            # RFC 8671 O flag (0x10) marks Adj-RIB-Out; under O=1 the
-            # L flag (0x40) marks post-policy.
-            if msg_type == 0 and len(body) >= 2:
+            # Per-peer-header messages (RouteMonitoring, StatsReport,
+            # PeerDown, PeerUp): peer type at body[0], flags at body[1].
+            # RFC 9069 peer type 3 = Loc-RIB instance peer.
+            if msg_type in (0, 1, 2, 3) and len(body) >= 2:
+                entry["peer_type"] = body[0]
+            # RouteMonitoring: RFC 8671 O flag (0x10) marks Adj-RIB-Out;
+            # under O=1 the L flag (0x40) marks post-policy. Not
+            # applicable to peer type 3 (own flags registry, always 0).
+            if msg_type == 0 and len(body) >= 2 and body[0] != 3:
                 flags = body[1]
                 entry["rib_out"] = bool(flags & 0x10)
                 entry["post_policy"] = bool(flags & 0x40)
+            # Loc-RIB PeerUp: parse the VRF/Table Name TLV (type 3)
+            # after the two OPEN PDUs (RFC 9069 §5.2.2).
+            if msg_type == 3 and len(body) >= 2 and body[0] == 3:
+                # per-peer header (42) + local addr/ports (20)
+                off = 42 + 20
+                for _ in range(2):  # sent OPEN, received OPEN
+                    if off + 19 > len(body):
+                        break
+                    open_len = struct.unpack("!H", body[off + 16 : off + 18])[0]
+                    off += open_len
+                while off + 4 <= len(body):
+                    tlv_type, tlv_len = struct.unpack("!HH", body[off : off + 4])
+                    value = body[off + 4 : off + 4 + tlv_len]
+                    if tlv_type == 3:
+                        entry["table_name"] = value.decode("utf-8", "replace")
+                    off += 4 + tlv_len
             messages.append(entry)
             print(f"BMP: {type_name} ({length} bytes)", flush=True)
 

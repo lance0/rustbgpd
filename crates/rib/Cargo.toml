@@ -16,6 +16,8 @@ rustbgpd-wire.workspace = true
 rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-rpki.workspace = true
+rustbgpd-bmp.workspace = true
+bytes.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
 prefix-trie.workspace = true
@@ -34,7 +36,6 @@ tokio-stream.workspace = true
 bench-internals = []
 
 [dev-dependencies]
-bytes.workspace = true
 proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true

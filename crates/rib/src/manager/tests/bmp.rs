@@ -1,0 +1,410 @@
+//! RFC 9069 Loc-RIB BMP tap tests: recompute-commit emissions,
+//! VPN best-change emission, the collector-connect table dump, and
+//! install-time timestamps.
+
+use std::time::SystemTime;
+
+use rustbgpd_bmp::{BmpDumpChunk, BmpEvent};
+use rustbgpd_wire::UpdateMessage;
+
+use super::*;
+
+/// Decode a synthesized Loc-RIB PDU with the fabricated-OPEN session
+/// parameters (4-octet ASN, no Add-Path).
+fn decode_pdu(pdu: &bytes::Bytes) -> rustbgpd_wire::ParsedUpdate {
+    let mut buf = pdu.clone();
+    let header =
+        rustbgpd_wire::BgpHeader::decode(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+            .unwrap();
+    let body_len = usize::from(header.length) - 19;
+    UpdateMessage::decode(&mut buf, body_len)
+        .unwrap()
+        .parse(true, false, &[])
+        .unwrap()
+}
+
+async fn recv_loc_rib_rm(
+    bmp_rx: &mut mpsc::Receiver<BmpEvent>,
+) -> (bytes::Bytes, std::time::SystemTime) {
+    let event = tokio::time::timeout(Duration::from_secs(2), bmp_rx.recv())
+        .await
+        .expect("expected a Loc-RIB BMP event")
+        .expect("BMP channel open");
+    match event {
+        BmpEvent::LocRibRouteMonitoring {
+            update_pdu,
+            timestamp,
+        } => (update_pdu, timestamp),
+        other => panic!("expected LocRibRouteMonitoring, got {other:?}"),
+    }
+}
+
+fn assert_no_event(bmp_rx: &mut mpsc::Receiver<BmpEvent>) {
+    match bmp_rx.try_recv() {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        other => panic!("expected no BMP event, got {other:?}"),
+    }
+}
+
+/// New best → RM announce; better path from another peer → RM announce
+/// of the new best; a change that leaves the best untouched → no
+/// emission; best withdrawn entirely → RM withdraw.
+#[tokio::test]
+async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
+    let (tx, rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(64);
+    let manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_bmp_tx(bmp_tx);
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
+    let peer_a = Ipv4Addr::new(10, 0, 0, 1);
+    let peer_b = Ipv4Addr::new(10, 0, 0, 2);
+
+    // 1. New best → announce.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_a),
+        session_id: 0,
+        announced: vec![make_route_with_lp(prefix, peer_a, 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let parsed = decode_pdu(&pdu);
+    assert_eq!(parsed.announced.len(), 1);
+    assert_eq!(parsed.announced[0].prefix, prefix);
+
+    // 2. Higher LOCAL_PREF from another peer → best changes → announce
+    // of the new best (next-hop = peer B).
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_b),
+        session_id: 0,
+        announced: vec![make_route_with_lp(prefix, peer_b, 200)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let parsed = decode_pdu(&pdu);
+    assert_eq!(parsed.announced[0].prefix, prefix);
+    assert!(
+        parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::NextHop(nh) if *nh == peer_b)),
+        "announce must carry the NEW best's next-hop"
+    );
+
+    // 3. Losing path withdrawn — the best (peer B) is unchanged → no
+    // Loc-RIB emission.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_a),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    // Synchronize on the RIB task having processed the withdraw.
+    let _ = query_vpn_routes(&tx).await;
+    assert_no_event(&mut bmp_rx);
+
+    // 4. Best withdrawn entirely → RM withdraw.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_b),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let parsed = decode_pdu(&pdu);
+    assert!(parsed.announced.is_empty());
+    assert_eq!(parsed.withdrawn.len(), 1);
+    assert_eq!(parsed.withdrawn[0].prefix, prefix);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A VPN best change emits an MP announce; losing the last candidate
+/// emits an MP withdraw carrying the RD+prefix identity.
+#[tokio::test]
+async fn vpn_best_change_emits_loc_rib_route_monitoring() {
+    let (tx, rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(64);
+    let manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_bmp_tx(bmp_tx);
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 5);
+    let route = make_vpn_rib_route(peer, 42, 1042, 100);
+    let nlri = route.nlri.clone();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let parsed = decode_pdu(&pdu);
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN announce rides in MP_REACH");
+    assert_eq!(mp.vpn_announced.len(), 1);
+    assert_eq!(mp.vpn_announced[0].nlri, nlri);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![crate::route::VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 0,
+        }],
+    })
+    .await
+    .unwrap();
+    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let parsed = decode_pdu(&pdu);
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN withdraw rides in MP_UNREACH");
+    assert_eq!(mp.vpn_withdrawn.len(), 1);
+    assert_eq!(mp.vpn_withdrawn[0].nlri.key(), nlri.key());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The Loc-RIB dump streams every best (unicast + VPN) in chunks and
+/// closes with exactly one End-of-RIB per streamed family; dump-entry
+/// timestamps reflect route install time, not dump time.
+#[tokio::test]
+async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![
+            make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16), peer, 100),
+            make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 16), peer, 100),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Let the routes age so install-time and dump-time are separable.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let (reply, mut chunk_rx) = mpsc::channel::<BmpDumpChunk>(4);
+    let dump_started = SystemTime::now();
+    tx.send(RibUpdate::QueryBmpLocRibDump { reply })
+        .await
+        .unwrap();
+
+    let mut messages: Vec<(bytes::Bytes, SystemTime)> = Vec::new();
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(2), chunk_rx.recv())
+        .await
+        .expect("dump chunk within timeout")
+    {
+        messages.extend(chunk.messages);
+        if chunk_rx.is_closed() && chunk_rx.is_empty() {
+            break;
+        }
+    }
+    // 2 unicast + 1 VPN route, then 4 EoRs (v4u, v6u, vpnv4, vpnv6).
+    assert_eq!(messages.len(), 3 + 4, "routes then one EoR per family");
+
+    let (route_msgs, eor_msgs) = messages.split_at(3);
+    let mut dumped_prefixes = Vec::new();
+    let mut dumped_vpn = 0;
+    for (pdu, timestamp) in route_msgs {
+        let parsed = decode_pdu(pdu);
+        assert!(
+            *timestamp < dump_started - Duration::from_millis(900),
+            "dump timestamp must be the route install time, not the dump time"
+        );
+        if let Some(mp) = parsed.attributes.iter().find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        }) {
+            dumped_vpn += mp.vpn_announced.len();
+        } else {
+            dumped_prefixes.extend(parsed.announced.iter().map(|e| e.prefix));
+        }
+    }
+    dumped_prefixes.sort_by_key(|p| p.addr);
+    assert_eq!(
+        dumped_prefixes,
+        vec![
+            Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16),
+            Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 16),
+        ]
+    );
+    assert_eq!(dumped_vpn, 1);
+
+    // The trailing four PDUs are EoRs: no NLRI anywhere, one per family.
+    let mut eor_families = Vec::new();
+    for (pdu, _) in eor_msgs {
+        let parsed = decode_pdu(pdu);
+        assert!(parsed.announced.is_empty() && parsed.withdrawn.is_empty());
+        match parsed.attributes.iter().find_map(|a| match a {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        }) {
+            Some(mp) => {
+                assert!(mp.withdrawn.is_empty() && mp.vpn_withdrawn.is_empty());
+                eor_families.push((mp.afi, mp.safi));
+            }
+            None => eor_families.push((Afi::Ipv4, Safi::Unicast)),
+        }
+    }
+    eor_families.sort_by_key(|&(afi, safi)| (afi as u16, safi as u8));
+    assert_eq!(
+        eor_families,
+        vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv6, Safi::MplsVpn),
+        ]
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Per-family Loc-RIB counts for the RFC 9069 stats report.
+#[tokio::test]
+async fn query_bmp_loc_rib_stats_counts_per_family() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![
+            make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16), peer, 100),
+            make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 16), peer, 100),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (reply, rx_stats) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpLocRibStats { reply })
+        .await
+        .unwrap();
+    let counts = rx_stats.await.unwrap();
+    assert_eq!(
+        counts,
+        vec![
+            (Afi::Ipv4 as u16, Safi::Unicast as u8, 2),
+            (Afi::Ipv6 as u16, Safi::Unicast as u8, 0),
+            (Afi::Ipv4 as u16, Safi::MplsVpn as u8, 1),
+            (Afi::Ipv6 as u16, Safi::MplsVpn as u8, 0),
+        ]
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Without the tap installed (no collector monitors `loc_rib`), best
+/// changes emit nothing and cost only the `is_some()` check — proven by
+/// the absence of any panic/blocking with no BMP channel at all, and
+/// the default construction path used by every other test in this
+/// suite.
+#[tokio::test]
+async fn no_bmp_tx_means_no_synthesis() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_route_with_lp(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 16),
+            peer,
+            100,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (reply, rx_count) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(rx_count.await.unwrap(), 1);
+    drop(tx);
+    handle.await.unwrap();
+}

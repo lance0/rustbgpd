@@ -314,6 +314,9 @@ pub enum BmpMonitorView {
     RibInPre,
     /// Post-policy Adj-RIB-Out route monitoring (RFC 8671).
     RibOutPost,
+    /// Loc-RIB instance monitoring with collector-connect table sync
+    /// (RFC 9069).
+    LocRib,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -526,6 +526,19 @@ impl RibManager {
             if did_change {
                 changed.insert(*prefix);
                 let current_best = self.loc_rib.get(prefix);
+                // RFC 9069 Loc-RIB tap: any change to the best is a
+                // Route Monitoring announce of the new best (BGP
+                // implicit withdraw covers replacement); a best that
+                // disappeared is an explicit withdraw. Timestamp = the
+                // Loc-RIB install time, i.e. now. Best-unchanged
+                // prefixes never reach this branch.
+                if self.bmp_tx.is_some() {
+                    let pdu = match current_best {
+                        Some(best) => crate::bmp_sync::synthesize_unicast_announce(best),
+                        None => crate::bmp_sync::synthesize_unicast_withdraw(*prefix),
+                    };
+                    self.emit_bmp_loc_rib(pdu, std::time::SystemTime::now());
+                }
                 match (previous_best, current_best) {
                     (None, Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path added");
