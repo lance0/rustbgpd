@@ -11,6 +11,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RT-Constrain (RFC 4684, AFI 1 / SAFI 132) — constrained VPN route
+  distribution.** The scalability companion to the VPNv4/v6 route reflector:
+  peers advertise Route Target membership NLRI (a 0–96-bit prefix over
+  origin-AS + the 8-byte RT extended community; zero-length = default
+  wildcard), and the RR filters SAFI-128 reflection per-peer accordingly —
+  strict semantics (a peer that negotiated SAFI 132 with no advertised
+  interest receives no VPN routes; membership changes emit the RFC-minimal
+  announce/withdraw delta with no session resets). RTC routes are themselves
+  stored, best-path-selected, and reflected between clients, and rustbgpd
+  self-originates the default RTC NLRI (it has no VRFs, so its own interest
+  is always "everything" — required so RFC 4684-compliant PEs send it their
+  VPN routes). Configure with the `rtc` family; inspect with
+  `RibService.ListRtcRoutes` (SensitiveRead) or `rbgp rib rtc`. Includes the
+  RFC 7313 Enhanced Route Refresh stale lifecycle whose end-of-refresh sweep
+  re-derives membership and restages VPN. Matching is RFC-faithful 96-bit
+  prefix matching (documented divergence from GoBGP's exact-match shortcut in
+  ADR-0077). Deferred: RFC 4684 §3.2(ii) non-client attribute-swap, the §6
+  60-second EoR delay, eBGP RTC subtleties, RTC×ORF interaction, Add-Path.
+  M75 proves filtering, widen/narrow-without-reset, RTC reflection, and the
+  unfiltered non-RTC-peer path against GoBGP.
+
 - **VPNv4/VPNv6 L3VPN route-reflection (RFC 4364 / RFC 4659, SAFI 128).**
   rustbgpd now negotiates, receives, stores, reflects, and withdraws
   VPN-IPv4/VPN-IPv6 routes as a route reflector / controller feed

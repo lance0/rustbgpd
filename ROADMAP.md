@@ -148,8 +148,8 @@ has it, no broad performance sprints without profile evidence.
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
 - **MPLS / VPN / BGP-LS address-family arc** *(BGP-LS receive + reflection +
-  API-export and VPNv4/v6 route-reflection shipped; labeled-unicast, RTC
-  deferred).*
+  API-export, VPNv4/v6 route-reflection, and RT-Constrain shipped;
+  labeled-unicast deferred).*
   ADR-0077 draws the address-family-expansion boundaries while the
   substrate is still small: a control-plane AFI/SAFI route-key model for
   VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
@@ -183,6 +183,18 @@ has it, no broad performance sprints without profile evidence.
   Add-Path and next-hop rewriting stay rejected/inert per ADR-0077 §6. M74
   proves the VPNv4 reflection, preservation, withdrawal, and
   no-dataplane-install path with a GoBGP source and sink.
+  **Done:** RT-Constrain (RFC 4684, AFI 1 / SAFI 132) shipped as the VPN RR
+  scalability companion: RTC NLRI codec with RFC-faithful 96-bit prefix
+  matching (GoBGP-divergence documented in the ADR-0077 amendment), full
+  receive/reflect/API slice (`rtc` family, `ListRtcRoutes`, `rbgp rib rtc`),
+  self-originated default membership, and strict per-peer VPN reflection
+  filtering with RFC-minimal announce/withdraw deltas on membership change —
+  driven through the same dirty-restage machinery as export-policy
+  replacement. Enhanced Route Refresh sweeps re-derive membership and restage
+  VPN. Deferred (ADR-0077 amendment): §3.2(ii) non-client attribute-swap, §6
+  60s EoR delay, eBGP RTC subtleties, RTC×ORF, Add-Path. M75 proves strict
+  filtering, widen/narrow-without-reset, RTC reflection, and the unfiltered
+  non-RTC-peer path against GoBGP.
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix
