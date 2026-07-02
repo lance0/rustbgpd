@@ -169,6 +169,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Lowest peer tiebreaker | Yes | Yes | |
 | Stale route demotion | Yes | Yes | GR step 0 |
 | RPKI preference | Yes | Yes | Step 0.5: Valid > NotFound > Invalid |
+| Optimal Route Reflection (RFC 9107) | No | **Yes** | Per-client interior-cost tiebreak from a configured vantage, SPF over the BGP-LS-sourced topology (ADR-0095, M76). No open-source daemon ships this |
 | AIGP | Yes | No | |
 | Multipath/ECMP | Yes | Yes | Classic unicast FIB ECMP ships via ADR-0066: `[[fib_tables]].maximum_paths`, per-class `maximum_paths_ebgp` / `maximum_paths_ibgp`, homogeneous eBGP or iBGP groups, and kernel `RTA_MULTIPATH` install. `[global].multipath_relax` provides FRR-style AS_PATH-length grouping; ADR-0068 adds Link Bandwidth weighted multipath. Add-Path multi-path send and EVPN aliasing ECMP also ship |
 
