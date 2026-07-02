@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 regex = "1"
+rustc-hash.workspace = true
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
 
