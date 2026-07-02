@@ -16,8 +16,8 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 | Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
 |--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
 | `rustbgpd-wire`          | **Yes** (crates.io, latest 0.13.0) | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | Staged (decoupled `0.1.0`) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Publish next     | Pure RFC 4271 FSM; no I/O. |
-| `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | After fsm        | VRP table + RTR client. |
+| `rustbgpd-fsm`           | **Yes** (crates.io, latest 0.1.0) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | Publish next     | VRP table + RTR client. |
 | `rustbgpd-rib`           | No           | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
 | `rustbgpd-policy`        | No           | wire                              | —                          | Later            | Import/export policy. |
 | `rustbgpd-transport`     | No           | wire, fsm, rib, rpki, policy, telemetry, bmp | `tokio`, `socket2`, ... | Later (daemon-tier) | Async session runtime. |
@@ -28,13 +28,14 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 | `rustbgpd-evpn-linux`    | No           | (internal)                        | `rtnetlink`, `nix`         | Never (Linux-specific) | Kernel dataplane. |
 | `rustbgpd` (daemon bin)  | No (`publish = false`) | all                            | —                          | N/A              | The daemon. Not a library. |
 
-**Publish order and why:** `wire` → `fsm` → `rpki`. The dependency DAG forces
-this: `fsm` depends only on `wire`; `rpki` depends only on `wire`; `rib`
-depends on `wire + policy + telemetry + rpki`. Publishing in this order means
-each published crate has only *already-published* (or external) dependencies,
-which is a hard crates.io requirement. `fsm` before `rpki` because the fsm is
-the smaller, purer, and more broadly useful building block — a test harness or
-a minimal speaker needs the fsm but not the RPKI table. See §4 for the full
+**Publish order and why:** `wire` and `fsm` are published; `rpki` is the next
+natural candidate. The dependency DAG drives the order: `fsm` depends only on
+`wire`; `rpki` depends only on `wire`; `rib` depends on
+`wire + policy + telemetry + rpki`. Publishing in this order means each
+published crate has only *already-published* (or external) dependencies, which
+is a hard crates.io requirement. `fsm` shipped before `rpki` because it is the
+smaller, purer, and more broadly useful building block — a test harness or a
+minimal speaker needs the fsm but not the RPKI table. See §4 for the full
 rationale.
 
 ---
@@ -183,7 +184,7 @@ This is the "k8s sidecar / SDN controller / test harness" consumer. Links
 intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 
 ```toml
-# Cargo.toml  (after fsm is published)
+# Cargo.toml
 [dependencies]
 rustbgpd-wire = "0.13"
 rustbgpd-fsm = "0.1"
@@ -261,35 +262,34 @@ k8s pod) links `rustbgpd-wire` + `rustbgpd-fsm` and owns one or a few sessions.
 It does *not* get a RIB or best-path — it is a speaker, not a router. This is
 the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
 `rustbgpd-fsm` + `tokio`. If it needs origin validation, add `rustbgpd-rpki`
-(once published).
+once that crate is published.
 
 ---
 
 ## 4. Which crate to publish next, and why
 
-**Order: `wire` → `fsm` → `rpki` → (rib, bmp, mrt, policy later).**
+**Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
+and `policy` are later.**
 
-1. **`rustbgpd-wire` (publish 0.13.0 now).** Already on crates.io; the 0.13.0
-   breaking bump (BGP-LS Afi/Safi + fallible `try_build`) is staged in
-   `crates/wire/Cargo.toml` and the CHANGELOG. This is the foundation — nothing
-   else can publish before it because every internal crate depends on it.
+1. **`rustbgpd-wire` (published as 0.13.0).** Already on crates.io; the 0.13.0
+   breaking bump carried BGP-LS Afi/Safi plus fallible `try_build`. This is the
+   foundation — nothing else can publish before it because every internal crate
+   depends on it.
 
-2. **`rustbgpd-fsm` (publish next, as a decoupled `0.1.0`).** Why:
+2. **`rustbgpd-fsm` (published as decoupled `0.1.0`).** Why it was second:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
-     daemon-tier coupling. It can publish the moment `wire` is on crates.io.
+     daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
      harness, a fuzzer, a minimal speaker, and an SDN controller all want "the
      RFC 4271 state machine" without a RIB.
    - API stability required: `Session`, `Event`, `Action`, `SessionState`,
      `NegotiatedSession`, `PeerConfig` must be stable. `PeerConfig` is a public
      struct with public fields — adding a field is a breaking change unless it
-     is `#[non_exhaustive]` or gets a `Default` + builder. Mark
-     `PeerConfig` and `NegotiatedSession` `#[non_exhaustive]` *before* the
-     first publish so future capability additions are minor bumps. `Event` and
-     `Action` are enums that will grow (new RFCs add new events/actions) —
-     mark them `#[non_exhaustive]` too.
+     is `#[non_exhaustive]` or gets a constructor/default path. The published
+     crate already has the forward-compat boundary: `PeerConfig`,
+     `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
 
-3. **`rustbgpd-rpki` (publish after fsm).** Why:
+3. **`rustbgpd-rpki` (publish next).** Why:
    - It depends only on `rustbgpd-wire` + `tokio` + `tracing` + `smallvec`.
      No `rib`/`policy` edge.
    - It is the natural third publish because a route-injecting sidecar that
@@ -375,17 +375,17 @@ To be the de facto Rust BGP codec, the concrete gaps:
       and `Safi` (line 37) in the *next* major bump (0.14.0 / 1.0.0), not 0.13.x.
 - [ ] `crates/wire/src/lib.rs` — add `#[non_exhaustive]` audit to the enums
       listed in §6.1 above; add `tokio_util::codec` impl behind a feature.
-- [ ] `crates/fsm/Cargo.toml` — remove `publish = false`; set an independent
-      version (`0.1.0` decoupled, or `0.45.0` tracking workspace); add
-      `description`, `readme`, `keywords`, `categories`.
-- [ ] `crates/fsm/src/config.rs` — mark `PeerConfig` (line 29)
-      `#[non_exhaustive]` before first publish.
-- [ ] `crates/fsm/src/{event.rs,action.rs,state.rs}` — mark `Event`, `Action`,
-      `SessionState` `#[non_exhaustive]` before first publish.
+- [x] `crates/fsm/Cargo.toml` — published as independent `0.1.0` with
+      `description`, `readme`, `keywords`, and `categories`.
+- [x] `crates/fsm/src/config.rs` — `PeerConfig` is `#[non_exhaustive]` and has
+      constructor/default paths for external users.
+- [x] `crates/fsm/src/{event.rs,action.rs}` — `Event`, `Action`, and
+      `NegotiatedSession` are `#[non_exhaustive]`; `SessionState` remains the
+      exact RFC 4271 state enum.
 - [ ] `crates/rpki/Cargo.toml` — remove `publish = false`; decouple version.
 - [ ] `docs/RELEASE_CHECKLIST.md` — add a "library crate publish" sub-section
       that runs `cargo semver-checks` and verifies docs.rs renders.
 - [ ] `examples/peer-loop/` — new example binary linking `wire + fsm`
       (the embedding proof).
 - [ ] `.github/workflows/ci.yml` — gate `cargo semver-checks` on
-      `crates/wire/**` and (once published) `crates/fsm/**` path changes.
+      `crates/wire/**` and `crates/fsm/**` path changes.
