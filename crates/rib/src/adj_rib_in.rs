@@ -27,8 +27,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
-    VpnRibRoute, VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute,
+    RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
@@ -72,6 +72,15 @@ pub struct AdjRibIn {
     /// locally-injected communities (which we strip on clear) from
     /// peer-originated ones (which must be preserved).
     evpn_llgr_stale_local_tags: HashSet<EvpnRouteKey>,
+    /// BGP-LS route keys where `LLGR_STALE` was injected locally (see
+    /// `evpn_llgr_stale_local_tags`).
+    bgpls_llgr_stale_local_tags: HashSet<BgpLsRouteKey>,
+    /// VPN route keys where `LLGR_STALE` was injected locally (see
+    /// `evpn_llgr_stale_local_tags`).
+    vpn_llgr_stale_local_tags: HashSet<VpnRibRouteKey>,
+    /// RTC route keys where `LLGR_STALE` was injected locally (see
+    /// `evpn_llgr_stale_local_tags`).
+    rtc_llgr_stale_local_tags: HashSet<RtcRibRouteKey>,
     /// Intern table: deduplicates identical attribute sets across routes.
     /// Lookup by content returns the shared `Arc`.  Entries with
     /// `strong_count == 1` (only the intern table itself) are garbage-
@@ -103,6 +112,9 @@ impl AdjRibIn {
             vpn_routes: HashMap::default(),
             rtc_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
+            bgpls_llgr_stale_local_tags: HashSet::default(),
+            vpn_llgr_stale_local_tags: HashSet::default(),
+            rtc_llgr_stale_local_tags: HashSet::default(),
             attr_intern: HashSet::with_capacity_and_hasher(
                 route_capacity.clamp(16, 64),
                 FxBuildHasher,
@@ -172,6 +184,9 @@ impl AdjRibIn {
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
         self.evpn_llgr_stale_local_tags.clear();
+        self.bgpls_llgr_stale_local_tags.clear();
+        self.vpn_llgr_stale_local_tags.clear();
+        self.rtc_llgr_stale_local_tags.clear();
         self.attr_intern.clear();
     }
 
@@ -675,6 +690,10 @@ impl AdjRibIn {
     /// any selected-route clone.
     pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) -> bool {
         let key = route.key();
+        // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
+        // any record that *we* locally injected LLGR_STALE on its prior
+        // version, so a later EoR never strips a peer-originated community.
+        self.bgpls_llgr_stale_local_tags.remove(&key);
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
             route.attributes = existing.clone();
         } else {
@@ -685,17 +704,21 @@ impl AdjRibIn {
 
     /// Withdraw a BGP-LS route. Returns `true` if it existed.
     pub fn withdraw_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
+        // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
+        self.bgpls_llgr_stale_local_tags.remove(key);
         self.bgpls_routes.remove(key).is_some()
     }
 
     /// Withdraw all BGP-LS routes from this Adj-RIB-In.
     ///
-    /// BGP-LS GR/LLGR stale preservation is not implemented yet, so GR entry
-    /// uses this helper to make the conservative exclusion explicit instead of
+    /// BGP-LS GR/LLGR stale preservation is not wired into GR entry yet (the
+    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
+    /// helper to make the conservative exclusion explicit instead of
     /// accidentally retaining stale controller-feed objects as live.
     pub fn withdraw_all_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
         let keys: Vec<_> = self.bgpls_routes.keys().cloned().collect();
         self.bgpls_routes.clear();
+        self.bgpls_llgr_stale_local_tags.clear();
         keys
     }
 
@@ -716,6 +739,194 @@ impl AdjRibIn {
         self.bgpls_routes.len()
     }
 
+    // --- BGP-LS GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
+    //
+    // Follows the EVPN pattern: BgpLsRibRoute attributes are
+    // Arc<Vec<PathAttribute>>, so community injection goes through
+    // Arc::make_mut to preserve the intern-table sharing invariant.
+    //
+    // Unlike EVPN, BGP-LS spans two family tuples — (BgpLs, BgpLs) and
+    // (BgpLs, BgpLsVpn) — which the GR capability lists separately, so every
+    // helper filters by the exact tuple via BgpLsFamily.
+
+    /// Mark BGP-LS routes of the given family tuple as stale (RFC 4724 §4.1
+    /// helper retention on session drop).
+    ///
+    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
+    /// survived a previous restart without ever being refreshed and is deleted
+    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
+    /// across consecutive restarts). Returns the deleted keys so the caller
+    /// can withdraw them downstream.
+    pub fn mark_stale_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return Vec::new();
+        };
+        let already_stale: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.family == fam)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &already_stale {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+        for route in self.bgpls_routes.values_mut() {
+            if route.family == fam {
+                route.is_stale = true;
+            }
+        }
+        already_stale
+    }
+
+    /// Clear the stale flag on BGP-LS routes of the given family tuple (both
+    /// `is_stale` and `is_llgr_stale`), stripping any locally-injected
+    /// `LLGR_STALE` community. Peer-originated `LLGR_STALE` communities are
+    /// preserved. Called when the session re-establishes (RFC 4724 §4.1).
+    pub fn clear_stale_bgpls(&mut self, family: (Afi, Safi)) {
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return;
+        };
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.bgpls_routes {
+            if route.family == fam {
+                route.is_stale = false;
+                route.is_llgr_stale = false;
+                if self.bgpls_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(key.clone());
+                }
+            }
+        }
+        self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
+    }
+
+    /// Remove all stale BGP-LS routes (both tuples), returning their keys.
+    /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
+    /// restart timer expires or `EoR` sweeps).
+    pub fn sweep_stale_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
+        let stale: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Remove stale BGP-LS routes of the given family tuple, returning their
+    /// keys. Used when a family was in GR but not in the peer's LLGR
+    /// capability.
+    pub fn sweep_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return Vec::new();
+        };
+        let stale: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.family == fam)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Promote GR-stale BGP-LS routes of the given family tuple to LLGR-stale
+    /// (RFC 9494 §4.2/§4.3).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///
+    /// Returns keys affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return Vec::new();
+        };
+
+        // First pass: remove routes carrying NO_LLGR
+        let no_llgr_keys: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| {
+                r.is_stale && r.family == fam && r.communities().contains(&COMMUNITY_NO_LLGR)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut affected: Vec<BgpLsRouteKey> = no_llgr_keys.clone();
+        for key in &no_llgr_keys {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.bgpls_routes.values_mut() {
+            if route.is_stale && route.family == fam {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                        self.bgpls_llgr_stale_local_tags.insert(route.key());
+                    }
+                } else {
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.bgpls_llgr_stale_local_tags.insert(route.key());
+                }
+                affected.push(route.key());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale BGP-LS routes, returning their keys
+    /// (RFC 9494 §4.3: LLGR timer expiry).
+    pub fn sweep_llgr_stale_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
+        let stale: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Clear the LLGR-stale flag on BGP-LS routes of the given family tuple,
+    /// stripping only locally-injected `LLGR_STALE` communities. Called when
+    /// `EoR` is received during the LLGR phase (RFC 9494 §4.2).
+    pub fn clear_llgr_stale_bgpls(&mut self, family: (Afi, Safi)) {
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return;
+        };
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.bgpls_routes {
+            if route.family == fam {
+                route.is_llgr_stale = false;
+                if self.bgpls_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(key.clone());
+                }
+            }
+        }
+        self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
+    }
+
     /// Insert or replace a VPNv4/VPNv6 route, interning its attribute set.
     ///
     /// Returns `true` if an existing route at the same RD + prefix + path-id was
@@ -725,6 +936,10 @@ impl AdjRibIn {
     /// any selected-route clone.
     pub fn insert_vpn(&mut self, mut route: VpnRibRoute) -> bool {
         let key = route.key();
+        // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
+        // any record that *we* locally injected LLGR_STALE on its prior
+        // version, so a later EoR never strips a peer-originated community.
+        self.vpn_llgr_stale_local_tags.remove(&key);
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
             route.attributes = existing.clone();
         } else {
@@ -735,17 +950,21 @@ impl AdjRibIn {
 
     /// Withdraw a VPN route. Returns `true` if it existed.
     pub fn withdraw_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
+        // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
+        self.vpn_llgr_stale_local_tags.remove(key);
         self.vpn_routes.remove(key).is_some()
     }
 
     /// Withdraw all VPN routes from this Adj-RIB-In.
     ///
-    /// VPN GR/LLGR stale preservation is not implemented yet, so GR entry uses
-    /// this helper to make the conservative exclusion explicit instead of
+    /// VPN GR/LLGR stale preservation is not wired into GR entry yet (the
+    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
+    /// helper to make the conservative exclusion explicit instead of
     /// accidentally retaining stale controller-feed routes as live.
     pub fn withdraw_all_vpn(&mut self) -> Vec<VpnRibRouteKey> {
         let keys: Vec<_> = self.vpn_routes.keys().cloned().collect();
         self.vpn_routes.clear();
+        self.vpn_llgr_stale_local_tags.clear();
         keys
     }
 
@@ -766,6 +985,194 @@ impl AdjRibIn {
         self.vpn_routes.len()
     }
 
+    // --- VPN GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
+    //
+    // Follows the EVPN pattern: VpnRibRoute attributes are
+    // Arc<Vec<PathAttribute>>, so community injection goes through
+    // Arc::make_mut to preserve the intern-table sharing invariant.
+    //
+    // Unlike EVPN, VPN spans two family tuples — (Ipv4, MplsVpn) and
+    // (Ipv6, MplsVpn) — which the GR capability lists separately, so every
+    // helper filters by the exact tuple via VpnRibRoute::afi_safi().
+
+    /// Mark VPN routes of the given family tuple as stale (RFC 4724 §4.1
+    /// helper retention on session drop).
+    ///
+    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
+    /// survived a previous restart without ever being refreshed and is deleted
+    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
+    /// across consecutive restarts). Returns the deleted keys so the caller
+    /// can withdraw them downstream.
+    pub fn mark_stale_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+        if family.1 != Safi::MplsVpn {
+            return Vec::new();
+        }
+        let already_stale: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.afi_safi() == family)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &already_stale {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+        for route in self.vpn_routes.values_mut() {
+            if route.afi_safi() == family {
+                route.is_stale = true;
+            }
+        }
+        already_stale
+    }
+
+    /// Clear the stale flag on VPN routes of the given family tuple (both
+    /// `is_stale` and `is_llgr_stale`), stripping any locally-injected
+    /// `LLGR_STALE` community. Peer-originated `LLGR_STALE` communities are
+    /// preserved. Called when the session re-establishes (RFC 4724 §4.1).
+    pub fn clear_stale_vpn(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::MplsVpn {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.vpn_routes {
+            if route.afi_safi() == family {
+                route.is_stale = false;
+                route.is_llgr_stale = false;
+                if self.vpn_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(key.clone());
+                }
+            }
+        }
+        self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
+    }
+
+    /// Remove all stale VPN routes (both tuples), returning their keys.
+    /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
+    /// restart timer expires or `EoR` sweeps).
+    pub fn sweep_stale_vpn(&mut self) -> Vec<VpnRibRouteKey> {
+        let stale: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Remove stale VPN routes of the given family tuple, returning their
+    /// keys. Used when a family was in GR but not in the peer's LLGR
+    /// capability.
+    pub fn sweep_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+        if family.1 != Safi::MplsVpn {
+            return Vec::new();
+        }
+        let stale: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Promote GR-stale VPN routes of the given family tuple to LLGR-stale
+    /// (RFC 9494 §4.2/§4.3).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///
+    /// Returns keys affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+
+        if family.1 != Safi::MplsVpn {
+            return Vec::new();
+        }
+
+        // First pass: remove routes carrying NO_LLGR
+        let no_llgr_keys: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| {
+                r.is_stale && r.afi_safi() == family && r.communities().contains(&COMMUNITY_NO_LLGR)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut affected: Vec<VpnRibRouteKey> = no_llgr_keys.clone();
+        for key in &no_llgr_keys {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.vpn_routes.values_mut() {
+            if route.is_stale && route.afi_safi() == family {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                        self.vpn_llgr_stale_local_tags.insert(route.key());
+                    }
+                } else {
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.vpn_llgr_stale_local_tags.insert(route.key());
+                }
+                affected.push(route.key());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale VPN routes, returning their keys
+    /// (RFC 9494 §4.3: LLGR timer expiry).
+    pub fn sweep_llgr_stale_vpn(&mut self) -> Vec<VpnRibRouteKey> {
+        let stale: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Clear the LLGR-stale flag on VPN routes of the given family tuple,
+    /// stripping only locally-injected `LLGR_STALE` communities. Called when
+    /// `EoR` is received during the LLGR phase (RFC 9494 §4.2).
+    pub fn clear_llgr_stale_vpn(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::MplsVpn {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.vpn_routes {
+            if route.afi_safi() == family {
+                route.is_llgr_stale = false;
+                if self.vpn_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(key.clone());
+                }
+            }
+        }
+        self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
+    }
+
     /// Insert or replace an RT-Constrain route, interning its attribute set.
     ///
     /// Returns `true` if an existing route at the same NLRI + path-id was
@@ -775,6 +1182,10 @@ impl AdjRibIn {
     /// has dropped any selected-route clone.
     pub fn insert_rtc(&mut self, mut route: RtcRibRoute) -> bool {
         let key = route.key();
+        // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
+        // any record that *we* locally injected LLGR_STALE on its prior
+        // version, so a later EoR never strips a peer-originated community.
+        self.rtc_llgr_stale_local_tags.remove(&key);
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
             route.attributes = existing.clone();
         } else {
@@ -785,17 +1196,21 @@ impl AdjRibIn {
 
     /// Withdraw an RTC route. Returns `true` if it existed.
     pub fn withdraw_rtc(&mut self, key: &RtcRibRouteKey) -> bool {
+        // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
+        self.rtc_llgr_stale_local_tags.remove(key);
         self.rtc_routes.remove(key).is_some()
     }
 
     /// Withdraw all RTC routes from this Adj-RIB-In.
     ///
-    /// RTC GR/LLGR stale preservation is not implemented, so GR entry uses
-    /// this helper to make the conservative exclusion explicit instead of
+    /// RTC GR/LLGR stale preservation is not wired into GR entry yet (the
+    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
+    /// helper to make the conservative exclusion explicit instead of
     /// accidentally retaining stale membership routes as live.
     pub fn withdraw_all_rtc(&mut self) -> Vec<RtcRibRouteKey> {
         let keys: Vec<_> = self.rtc_routes.keys().cloned().collect();
         self.rtc_routes.clear();
+        self.rtc_llgr_stale_local_tags.clear();
         keys
     }
 
@@ -814,6 +1229,173 @@ impl AdjRibIn {
     #[must_use]
     pub fn rtc_len(&self) -> usize {
         self.rtc_routes.len()
+    }
+
+    // --- RTC GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
+    //
+    // Follows the EVPN pattern: RtcRibRoute attributes are
+    // Arc<Vec<PathAttribute>>, so community injection goes through
+    // Arc::make_mut to preserve the intern-table sharing invariant.
+    //
+    // Like EVPN, RTC has a single family tuple (Ipv4, RtConstrain), so family
+    // match checks reduce to direct equality.
+
+    /// Mark all RTC routes as stale if `family == (Ipv4, RtConstrain)`
+    /// (RFC 4724 §4.1 helper retention on session drop).
+    ///
+    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
+    /// survived a previous restart without ever being refreshed and is deleted
+    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
+    /// across consecutive restarts). Returns the deleted keys so the caller
+    /// can withdraw them downstream.
+    pub fn mark_stale_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+        if family != RtcRibRouteKey::afi_safi() {
+            return Vec::new();
+        }
+        let already_stale: Vec<RtcRibRouteKey> = self
+            .rtc_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale || r.is_llgr_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &already_stale {
+            self.rtc_llgr_stale_local_tags.remove(key);
+            self.rtc_routes.remove(key);
+        }
+        for route in self.rtc_routes.values_mut() {
+            route.is_stale = true;
+        }
+        already_stale
+    }
+
+    /// Clear the stale flag on RTC routes (both `is_stale` and
+    /// `is_llgr_stale`), stripping any locally-injected `LLGR_STALE`
+    /// community. Peer-originated `LLGR_STALE` communities are preserved.
+    /// Called when the session re-establishes (RFC 4724 §4.1).
+    pub fn clear_stale_rtc(&mut self, family: (Afi, Safi)) {
+        if family != RtcRibRouteKey::afi_safi() {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.rtc_routes {
+            route.is_stale = false;
+            route.is_llgr_stale = false;
+            if self.rtc_llgr_stale_local_tags.contains(key) {
+                clear_local_llgr.push(key.clone());
+            }
+        }
+        self.clear_local_llgr_stale_rtc_community(&clear_local_llgr);
+    }
+
+    /// Remove all stale RTC routes, returning their keys. Timer-expiry purge
+    /// (RFC 4724 §4.1: stale routes deleted when the restart timer expires or
+    /// `EoR` sweeps).
+    pub fn sweep_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
+        let stale: Vec<RtcRibRouteKey> = self
+            .rtc_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.rtc_llgr_stale_local_tags.remove(key);
+            self.rtc_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Remove stale RTC routes if `family == (Ipv4, RtConstrain)`. Used when
+    /// a family was in GR but not in the peer's LLGR capability.
+    pub fn sweep_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+        if family != RtcRibRouteKey::afi_safi() {
+            return Vec::new();
+        }
+        self.sweep_stale_rtc()
+    }
+
+    /// Promote GR-stale RTC routes to LLGR-stale (RFC 9494 §4.2/§4.3).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///
+    /// Returns keys affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+
+        if family != RtcRibRouteKey::afi_safi() {
+            return Vec::new();
+        }
+
+        // First pass: remove routes carrying NO_LLGR
+        let no_llgr_keys: Vec<RtcRibRouteKey> = self
+            .rtc_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.communities().contains(&COMMUNITY_NO_LLGR))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut affected: Vec<RtcRibRouteKey> = no_llgr_keys.clone();
+        for key in &no_llgr_keys {
+            self.rtc_llgr_stale_local_tags.remove(key);
+            self.rtc_routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.rtc_routes.values_mut() {
+            if route.is_stale {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                        self.rtc_llgr_stale_local_tags.insert(route.key());
+                    }
+                } else {
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.rtc_llgr_stale_local_tags.insert(route.key());
+                }
+                affected.push(route.key());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale RTC routes, returning their keys
+    /// (RFC 9494 §4.3: LLGR timer expiry).
+    pub fn sweep_llgr_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
+        let stale: Vec<RtcRibRouteKey> = self
+            .rtc_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.rtc_llgr_stale_local_tags.remove(key);
+            self.rtc_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Clear the LLGR-stale flag on RTC routes, stripping only
+    /// locally-injected `LLGR_STALE` communities. Called when `EoR` is
+    /// received during the LLGR phase (RFC 9494 §4.2).
+    pub fn clear_llgr_stale_rtc(&mut self, family: (Afi, Safi)) {
+        if family != RtcRibRouteKey::afi_safi() {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.rtc_routes {
+            route.is_llgr_stale = false;
+            if self.rtc_llgr_stale_local_tags.contains(key) {
+                clear_local_llgr.push(key.clone());
+            }
+        }
+        self.clear_local_llgr_stale_rtc_community(&clear_local_llgr);
     }
 
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
@@ -1027,6 +1609,33 @@ impl AdjRibIn {
                 remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
             }
             self.evpn_llgr_stale_local_tags.remove(key);
+        }
+    }
+
+    fn clear_local_llgr_stale_bgpls_community(&mut self, keys: &[BgpLsRouteKey]) {
+        for key in keys {
+            if let Some(route) = self.bgpls_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+            }
+            self.bgpls_llgr_stale_local_tags.remove(key);
+        }
+    }
+
+    fn clear_local_llgr_stale_vpn_community(&mut self, keys: &[VpnRibRouteKey]) {
+        for key in keys {
+            if let Some(route) = self.vpn_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+            }
+            self.vpn_llgr_stale_local_tags.remove(key);
+        }
+    }
+
+    fn clear_local_llgr_stale_rtc_community(&mut self, keys: &[RtcRibRouteKey]) {
+        for key in keys {
+            if let Some(route) = self.rtc_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+            }
+            self.rtc_llgr_stale_local_tags.remove(key);
         }
     }
 }
@@ -2116,5 +2725,626 @@ mod tests {
         let swept = rib.sweep_stale_family_evpn((Afi::L2Vpn, Safi::Evpn));
         assert_eq!(swept, vec![key]);
         assert_eq!(rib.evpn_len(), 0);
+    }
+
+    // --- VPN / BGP-LS / RTC GR/LLGR stale handling tests ---
+    //
+    // Mirror the EVPN suite above, plus the per-tuple scoping VPN and BGP-LS
+    // need (each spans two (Afi, Safi) tuples the GR capability lists
+    // separately) and the RFC 4724 consecutive-restart delete-on-remark.
+
+    const VPN_V4: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
+    const VPN_V6: (Afi, Safi) = (Afi::Ipv6, Safi::MplsVpn);
+    const LS_BASE: (Afi, Safi) = (Afi::BgpLs, Safi::BgpLs);
+    const LS_VPN: (Afi, Safi) = (Afi::BgpLs, Safi::BgpLsVpn);
+    const RTC_FAM: (Afi, Safi) = (Afi::Ipv4, Safi::RtConstrain);
+
+    fn vpn_nlri_v6(seg: u16, len: u8, label: u32) -> VpnNlri {
+        VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher::new([0, 0, 0, 0, 0, 0, 0, 2]),
+            prefix: VpnPrefix::v6(Ipv6Addr::new(0x2001, 0xdb8, seg, 0, 0, 0, 0, 0), len).unwrap(),
+        }
+    }
+
+    fn insert_vpn_with(
+        rib: &mut AdjRibIn,
+        nlri: VpnNlri,
+        attrs: Vec<PathAttribute>,
+    ) -> VpnRibRouteKey {
+        let mut route = make_vpn_route(nlri, 1);
+        route.attributes = Arc::new(attrs);
+        let key = route.key();
+        rib.insert_vpn(route);
+        key
+    }
+
+    fn insert_bgpls_with(
+        rib: &mut AdjRibIn,
+        family: BgpLsFamily,
+        nlri: rustbgpd_wire::bgpls::BgpLsNlri,
+        attrs: Vec<PathAttribute>,
+    ) -> BgpLsRouteKey {
+        let mut route = make_bgpls_route(family, nlri, 1);
+        route.attributes = Arc::new(attrs);
+        let key = route.key();
+        rib.insert_bgpls(route);
+        key
+    }
+
+    fn insert_rtc_with(
+        rib: &mut AdjRibIn,
+        nlri: RtcNlri,
+        attrs: Vec<PathAttribute>,
+    ) -> RtcRibRouteKey {
+        let mut route = make_rtc_route(nlri, 1);
+        route.attributes = Arc::new(attrs);
+        let key = route.key();
+        rib.insert_rtc(route);
+        key
+    }
+
+    #[test]
+    fn mark_stale_vpn_scopes_to_family_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 200), vec![]);
+
+        // Wrong SAFI: no-op
+        assert!(rib.mark_stale_vpn((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert!(!rib.vpn_routes[&v4_key].is_stale);
+
+        // VPNv4: only the v4-tuple route becomes stale
+        assert!(rib.mark_stale_vpn(VPN_V4).is_empty());
+        assert!(rib.vpn_routes[&v4_key].is_stale);
+        assert!(
+            !rib.vpn_routes[&v6_key].is_stale,
+            "v6 tuple must be untouched"
+        );
+    }
+
+    #[test]
+    fn mark_stale_vpn_deletes_already_stale_routes_on_consecutive_restart() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let gr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let llgr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 2, 0], 24, 200), vec![]);
+
+        // First session drop: both routes go GR-stale; one then enters LLGR.
+        rib.mark_stale_vpn(VPN_V4);
+        let llgr_route = rib.vpn_routes.get_mut(&llgr_key).unwrap();
+        llgr_route.is_stale = false;
+        llgr_route.is_llgr_stale = true;
+        // Second session drop before any refresh: both already-stale routes
+        // (GR-stale and LLGR-stale) are deleted, not re-marked.
+        let mut deleted = rib.mark_stale_vpn(VPN_V4);
+        deleted.sort_by_key(|k| k.nlri_key.prefix.to_string());
+        assert_eq!(deleted, vec![gr_key, llgr_key]);
+        assert_eq!(rib.vpn_len(), 0);
+    }
+
+    #[test]
+    fn clear_stale_vpn_strips_local_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+
+        rib.mark_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        let promoted = &rib.vpn_routes[&key];
+        assert!(promoted.is_llgr_stale);
+        assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
+        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_stale_vpn(VPN_V4);
+        let route = &rib.vpn_routes[&key];
+        assert!(!route.is_stale);
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_stale_vpn_preserves_peer_originated_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
+        let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), peer_attrs);
+
+        rib.mark_stale_vpn(VPN_V4);
+        rib.clear_stale_vpn(VPN_V4);
+        let route = &rib.vpn_routes[&key];
+        assert!(!route.is_stale);
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn sweep_stale_family_vpn_sweeps_only_matching_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 200), vec![]);
+        rib.mark_stale_vpn(VPN_V4);
+        rib.mark_stale_vpn(VPN_V6);
+
+        let swept = rib.sweep_stale_family_vpn(VPN_V4);
+        assert_eq!(swept, vec![v4_key]);
+        assert_eq!(rib.vpn_len(), 1, "v6 stale route must survive a v4 sweep");
+
+        // Whole-table sweep purges the remaining stale route.
+        let swept = rib.sweep_stale_vpn();
+        assert_eq!(swept, vec![v6_key]);
+        assert_eq!(rib.vpn_len(), 0);
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_vpn_drops_no_llgr_and_scopes_to_tuple() {
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let keep_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let no_llgr_key = insert_vpn_with(
+            &mut rib,
+            vpn_nlri([10, 0, 2, 0], 24, 200),
+            vec![PathAttribute::Communities(vec![COMMUNITY_NO_LLGR])],
+        );
+        let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 300), vec![]);
+
+        rib.mark_stale_vpn(VPN_V4);
+        rib.mark_stale_vpn(VPN_V6);
+        let affected = rib.promote_to_llgr_stale_vpn(VPN_V4);
+
+        // NO_LLGR route removed entirely (RFC 9494 §4.3)
+        assert!(!rib.vpn_routes.contains_key(&no_llgr_key));
+        // Other v4 route promoted, community injected, local tag recorded
+        assert!(rib.vpn_routes[&keep_key].is_llgr_stale);
+        assert!(!rib.vpn_routes[&keep_key].is_stale);
+        assert!(
+            rib.vpn_routes[&keep_key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.vpn_llgr_stale_local_tags.contains(&keep_key));
+        assert!(affected.contains(&keep_key));
+        assert!(affected.contains(&no_llgr_key));
+        // v6 tuple untouched: still GR-stale, not promoted
+        assert!(rib.vpn_routes[&v6_key].is_stale);
+        assert!(!rib.vpn_routes[&v6_key].is_llgr_stale);
+        assert!(!affected.contains(&v6_key));
+
+        // LLGR expiry sweep removes only the promoted route.
+        let swept = rib.sweep_llgr_stale_vpn();
+        assert_eq!(swept, vec![keep_key]);
+        assert_eq!(rib.vpn_len(), 1);
+    }
+
+    #[test]
+    fn insert_vpn_clears_llgr_stale_local_tag_on_readvertise() {
+        // Regression mirror of insert_evpn_clears_llgr_stale_local_tag_on_readvertise:
+        // a re-advertised key must drop our local-injection record so a later
+        // EoR does not strip a peer-originated LLGR_STALE community.
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = insert_vpn_with(&mut rib, nlri.clone(), vec![]);
+
+        rib.mark_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+
+        // Peer re-advertises the same key, itself carrying LLGR_STALE.
+        let readvertised = insert_vpn_with(
+            &mut rib,
+            nlri,
+            vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+        );
+        assert_eq!(readvertised, key);
+        assert!(!rib.vpn_llgr_stale_local_tags.contains(&key));
+
+        // EoR: the peer-originated LLGR_STALE must survive.
+        rib.clear_llgr_stale_vpn(VPN_V4);
+        assert!(
+            rib.vpn_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+    }
+
+    #[test]
+    fn withdraw_vpn_clears_llgr_stale_local_tag() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        rib.mark_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+
+        assert!(rib.withdraw_vpn(&key));
+        assert!(!rib.vpn_llgr_stale_local_tags.contains(&key));
+    }
+
+    #[test]
+    fn mark_stale_bgpls_scopes_to_family_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let base_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        let vpn_key = insert_bgpls_with(
+            &mut rib,
+            BgpLsFamily::LinkStateVpn,
+            bgpls_vpn_nlri(1),
+            vec![],
+        );
+
+        // Non-BGP-LS family: no-op
+        assert!(rib.mark_stale_bgpls((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert!(!rib.bgpls_routes[&base_key].is_stale);
+
+        // SAFI 71: only base link-state routes become stale
+        assert!(rib.mark_stale_bgpls(LS_BASE).is_empty());
+        assert!(rib.bgpls_routes[&base_key].is_stale);
+        assert!(
+            !rib.bgpls_routes[&vpn_key].is_stale,
+            "SAFI 72 tuple must be untouched"
+        );
+    }
+
+    #[test]
+    fn mark_stale_bgpls_deletes_already_stale_routes_on_consecutive_restart() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+
+        rib.mark_stale_bgpls(LS_BASE);
+        let deleted = rib.mark_stale_bgpls(LS_BASE);
+        assert_eq!(deleted, vec![key]);
+        assert_eq!(rib.bgpls_len(), 0);
+    }
+
+    #[test]
+    fn clear_stale_bgpls_strips_local_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        assert!(rib.bgpls_routes[&key].is_llgr_stale);
+        assert!(
+            rib.bgpls_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_stale_bgpls(LS_BASE);
+        let route = &rib.bgpls_routes[&key];
+        assert!(!route.is_stale);
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_stale_bgpls_preserves_peer_originated_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
+        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), peer_attrs);
+
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.clear_stale_bgpls(LS_BASE);
+        let route = &rib.bgpls_routes[&key];
+        assert!(!route.is_stale);
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn sweep_stale_family_bgpls_sweeps_only_matching_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let base_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        let vpn_key = insert_bgpls_with(
+            &mut rib,
+            BgpLsFamily::LinkStateVpn,
+            bgpls_vpn_nlri(1),
+            vec![],
+        );
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.mark_stale_bgpls(LS_VPN);
+
+        let swept = rib.sweep_stale_family_bgpls(LS_BASE);
+        assert_eq!(swept, vec![base_key]);
+        assert_eq!(
+            rib.bgpls_len(),
+            1,
+            "SAFI 72 stale route must survive a SAFI 71 sweep"
+        );
+
+        let swept = rib.sweep_stale_bgpls();
+        assert_eq!(swept, vec![vpn_key]);
+        assert_eq!(rib.bgpls_len(), 0);
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_bgpls_drops_no_llgr_and_scopes_to_tuple() {
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let keep_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        let no_llgr_key = insert_bgpls_with(
+            &mut rib,
+            BgpLsFamily::LinkState,
+            bgpls_nlri(2),
+            vec![PathAttribute::Communities(vec![COMMUNITY_NO_LLGR])],
+        );
+        let vpn_key = insert_bgpls_with(
+            &mut rib,
+            BgpLsFamily::LinkStateVpn,
+            bgpls_vpn_nlri(1),
+            vec![],
+        );
+
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.mark_stale_bgpls(LS_VPN);
+        let affected = rib.promote_to_llgr_stale_bgpls(LS_BASE);
+
+        assert!(!rib.bgpls_routes.contains_key(&no_llgr_key));
+        assert!(rib.bgpls_routes[&keep_key].is_llgr_stale);
+        assert!(!rib.bgpls_routes[&keep_key].is_stale);
+        assert!(
+            rib.bgpls_routes[&keep_key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.bgpls_llgr_stale_local_tags.contains(&keep_key));
+        assert!(affected.contains(&keep_key));
+        assert!(affected.contains(&no_llgr_key));
+        // SAFI 72 tuple untouched: still GR-stale, not promoted
+        assert!(rib.bgpls_routes[&vpn_key].is_stale);
+        assert!(!rib.bgpls_routes[&vpn_key].is_llgr_stale);
+        assert!(!affected.contains(&vpn_key));
+
+        let swept = rib.sweep_llgr_stale_bgpls();
+        assert_eq!(swept, vec![keep_key]);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn insert_bgpls_clears_llgr_stale_local_tag_on_readvertise() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = bgpls_nlri(1);
+        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, nlri.clone(), vec![]);
+
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+
+        let readvertised = insert_bgpls_with(
+            &mut rib,
+            BgpLsFamily::LinkState,
+            nlri,
+            vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+        );
+        assert_eq!(readvertised, key);
+        assert!(!rib.bgpls_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_llgr_stale_bgpls(LS_BASE);
+        assert!(
+            rib.bgpls_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+    }
+
+    #[test]
+    fn withdraw_bgpls_clears_llgr_stale_local_tag() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+
+        assert!(rib.withdraw_bgpls(&key));
+        assert!(!rib.bgpls_llgr_stale_local_tags.contains(&key));
+    }
+
+    #[test]
+    fn mark_stale_rtc_scopes_to_family_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+
+        // Non-RTC family: no-op
+        assert!(rib.mark_stale_rtc((Afi::Ipv4, Safi::Unicast)).is_empty());
+        assert!(!rib.rtc_routes[&key].is_stale);
+
+        assert!(rib.mark_stale_rtc(RTC_FAM).is_empty());
+        assert!(rib.rtc_routes[&key].is_stale);
+    }
+
+    #[test]
+    fn mark_stale_rtc_deletes_already_stale_routes_on_consecutive_restart() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+
+        rib.mark_stale_rtc(RTC_FAM);
+        let deleted = rib.mark_stale_rtc(RTC_FAM);
+        assert_eq!(deleted, vec![key]);
+        assert_eq!(rib.rtc_len(), 0);
+    }
+
+    #[test]
+    fn clear_stale_rtc_strips_local_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        assert!(rib.rtc_routes[&key].is_llgr_stale);
+        assert!(
+            rib.rtc_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_stale_rtc(RTC_FAM);
+        let route = &rib.rtc_routes[&key];
+        assert!(!route.is_stale);
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_stale_rtc_preserves_peer_originated_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), peer_attrs);
+
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.clear_stale_rtc(RTC_FAM);
+        let route = &rib.rtc_routes[&key];
+        assert!(!route.is_stale);
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn sweep_stale_family_rtc_ignores_non_rtc_family() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        rib.mark_stale_rtc(RTC_FAM);
+
+        let swept = rib.sweep_stale_family_rtc((Afi::Ipv4, Safi::Unicast));
+        assert!(swept.is_empty());
+        assert_eq!(rib.rtc_len(), 1);
+
+        let swept = rib.sweep_stale_family_rtc(RTC_FAM);
+        assert_eq!(swept, vec![key]);
+        assert_eq!(rib.rtc_len(), 0);
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_rtc_drops_no_llgr_routes() {
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let keep_key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        let no_llgr_key = insert_rtc_with(
+            &mut rib,
+            rtc_nlri(200),
+            vec![PathAttribute::Communities(vec![COMMUNITY_NO_LLGR])],
+        );
+
+        rib.mark_stale_rtc(RTC_FAM);
+        let affected = rib.promote_to_llgr_stale_rtc(RTC_FAM);
+
+        assert!(!rib.rtc_routes.contains_key(&no_llgr_key));
+        assert!(rib.rtc_routes[&keep_key].is_llgr_stale);
+        assert!(!rib.rtc_routes[&keep_key].is_stale);
+        assert!(
+            rib.rtc_routes[&keep_key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.rtc_llgr_stale_local_tags.contains(&keep_key));
+        assert!(affected.contains(&keep_key));
+        assert!(affected.contains(&no_llgr_key));
+
+        let swept = rib.sweep_llgr_stale_rtc();
+        assert_eq!(swept, vec![keep_key]);
+        assert_eq!(rib.rtc_len(), 0);
+    }
+
+    #[test]
+    fn insert_rtc_clears_llgr_stale_local_tag_on_readvertise() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = rtc_nlri(100);
+        let key = insert_rtc_with(&mut rib, nlri, vec![]);
+
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+
+        let readvertised = insert_rtc_with(
+            &mut rib,
+            nlri,
+            vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+        );
+        assert_eq!(readvertised, key);
+        assert!(!rib.rtc_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_llgr_stale_rtc(RTC_FAM);
+        assert!(
+            rib.rtc_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+    }
+
+    #[test]
+    fn withdraw_rtc_clears_llgr_stale_local_tag() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+
+        assert!(rib.withdraw_rtc(&key));
+        assert!(!rib.rtc_llgr_stale_local_tags.contains(&key));
+    }
+
+    #[test]
+    fn clear_resets_llgr_stale_local_tags_for_vpn_bgpls_rtc() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        rib.mark_stale_vpn(VPN_V4);
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        assert!(!rib.vpn_llgr_stale_local_tags.is_empty());
+        assert!(!rib.bgpls_llgr_stale_local_tags.is_empty());
+        assert!(!rib.rtc_llgr_stale_local_tags.is_empty());
+
+        rib.clear();
+        assert!(rib.vpn_llgr_stale_local_tags.is_empty());
+        assert!(rib.bgpls_llgr_stale_local_tags.is_empty());
+        assert!(rib.rtc_llgr_stale_local_tags.is_empty());
+    }
+
+    #[test]
+    fn withdraw_all_resets_llgr_stale_local_tags_per_family() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        rib.mark_stale_vpn(VPN_V4);
+        rib.mark_stale_bgpls(LS_BASE);
+        rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+
+        rib.withdraw_all_vpn();
+        rib.withdraw_all_bgpls();
+        rib.withdraw_all_rtc();
+        assert!(rib.vpn_llgr_stale_local_tags.is_empty());
+        assert!(rib.bgpls_llgr_stale_local_tags.is_empty());
+        assert!(rib.rtc_llgr_stale_local_tags.is_empty());
     }
 }
