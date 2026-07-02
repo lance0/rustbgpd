@@ -87,6 +87,7 @@ the old neighbor is torn down, the new one starts fresh.
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |
+| `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node). Registered with the RIB manager at session establishment, so a change takes effect on the next session. Currently drives the vantage registry, cached SPF state, and `rbgp orr` status only; the per-vantage best-path selection ships with the ORR distribution switch. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
 | `role` | live (effective next session) | RFC 9234 BGP Role capability — advertised in OPEN. Compatibility check + NOTIFICATION 2/11 enforcement happen at OPEN time, so role changes require a session bounce to renegotiate. The §5 OTC procedures (driven by the local role) re-evaluate against the next received/emitted UPDATE. |
 | `strict_role` | live (effective next session) | Strict-mode toggle. Without an OPEN renegotiation, the existing session keeps whatever it negotiated. |
@@ -122,6 +123,7 @@ dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |
 | `route_reflector_client` | live (effective next session) | |
+| `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. |
 | `route_server_client` | live (effective next session) | |
 | `role` | live (effective next session) | |
 | `strict_role` | live (effective next session) | |

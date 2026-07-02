@@ -13,8 +13,9 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, OrrLinkSnapshot, OrrNodeSnapshot, OrrTopologySnapshot,
-    RibUpdate, Route, RouteEventType, RtcRibRoute, VpnRibRoute,
+    ExplainDecision, FlowSpecRoute, OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot,
+    OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route, RouteEventType, RtcRibRoute,
+    VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -183,6 +184,17 @@ impl RibService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryOrrTopology { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
+    }
+
+    async fn query_orr_status(&self) -> Result<OrrStatusSnapshot, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryOrrStatus { reply: reply_tx })
             .await
             .map_err(|_| Status::internal("RIB manager unavailable"))?;
         reply_rx
@@ -1618,6 +1630,22 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
+    async fn list_orr_status(
+        &self,
+        _request: Request<proto::ListOrrStatusRequest>,
+    ) -> Result<Response<proto::ListOrrStatusResponse>, Status> {
+        let snapshot = self.query_orr_status().await?;
+        Ok(Response::new(proto::ListOrrStatusResponse {
+            vantages: snapshot
+                .vantages
+                .iter()
+                .map(orr_vantage_status_to_proto)
+                .collect(),
+            topology_nodes: snapshot.topology_nodes,
+            topology_links: snapshot.topology_links,
+        }))
+    }
+
     async fn set_fib_table(
         &self,
         request: Request<proto::SetFibTableRequest>,
@@ -2044,6 +2072,21 @@ pub(crate) fn topology_node_to_proto(node: &OrrNodeSnapshot) -> proto::TopologyN
         bgp_ls_id: node.bgp_ls_id.unwrap_or(0),
         router_id: node.router_id_hex.clone(),
         link_count: node.link_count,
+    }
+}
+
+pub(crate) fn orr_vantage_status_to_proto(
+    status: &OrrVantageStatus,
+) -> proto::OrrVantageStatusEntry {
+    proto::OrrVantageStatusEntry {
+        vantage: status.vantage.to_string(),
+        resolved: status.resolved,
+        node_key: status.node_key_hex.clone(),
+        asn: status.asn.unwrap_or(0),
+        bgp_ls_id: status.bgp_ls_id.unwrap_or(0),
+        router_id: status.router_id_hex.clone(),
+        reachable_nodes: status.reachable_nodes,
+        peers: status.peers.iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -2488,6 +2531,76 @@ mod tests {
         assert_eq!(links[0].remote_router_id, "");
         assert_eq!(links[0].cost, 10);
         assert_eq!(links[0].addresses, ["10.0.8.1"]);
+    }
+
+    /// `ListOrrStatus` round-trip: the service queries the manager
+    /// channel and maps the per-vantage status snapshot to proto entries
+    /// (absent descriptors flatten to 0/empty).
+    #[tokio::test]
+    async fn list_orr_status_round_trips_snapshot() {
+        use rustbgpd_rib::OrrVantageStatus;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = RibService::new(tx);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::QueryOrrStatus { reply } = update else {
+                    panic!("unexpected RIB update");
+                };
+                let _ = reply.send(OrrStatusSnapshot {
+                    vantages: vec![
+                        OrrVantageStatus {
+                            vantage: "10.0.8.1".parse().unwrap(),
+                            resolved: true,
+                            node_key_hex: "02aabb".to_string(),
+                            asn: Some(64512),
+                            bgp_ls_id: None,
+                            router_id_hex: "000000000001".to_string(),
+                            reachable_nodes: 3,
+                            peers: vec!["192.0.2.1".parse().unwrap()],
+                        },
+                        OrrVantageStatus {
+                            vantage: "203.0.113.9".parse().unwrap(),
+                            resolved: false,
+                            node_key_hex: String::new(),
+                            asn: None,
+                            bgp_ls_id: None,
+                            router_id_hex: String::new(),
+                            reachable_nodes: 0,
+                            peers: vec!["192.0.2.2".parse().unwrap()],
+                        },
+                    ],
+                    topology_nodes: 4,
+                    topology_links: 4,
+                });
+            }
+        });
+
+        let resp = svc
+            .list_orr_status(Request::new(proto::ListOrrStatusRequest {}))
+            .await
+            .expect("status query succeeds")
+            .into_inner();
+        assert_eq!(resp.topology_nodes, 4);
+        assert_eq!(resp.topology_links, 4);
+        assert_eq!(resp.vantages.len(), 2);
+
+        let resolved = &resp.vantages[0];
+        assert_eq!(resolved.vantage, "10.0.8.1");
+        assert!(resolved.resolved);
+        assert_eq!(resolved.node_key, "02aabb");
+        assert_eq!(resolved.asn, 64512);
+        assert_eq!(resolved.bgp_ls_id, 0, "absent BGP-LS id flattens to 0");
+        assert_eq!(resolved.router_id, "000000000001");
+        assert_eq!(resolved.reachable_nodes, 3);
+        assert_eq!(resolved.peers, ["192.0.2.1"]);
+
+        let unresolved = &resp.vantages[1];
+        assert_eq!(unresolved.vantage, "203.0.113.9");
+        assert!(!unresolved.resolved);
+        assert_eq!(unresolved.node_key, "");
+        assert_eq!(unresolved.reachable_nodes, 0);
+        assert_eq!(unresolved.peers, ["192.0.2.2"]);
     }
 
     #[tokio::test]

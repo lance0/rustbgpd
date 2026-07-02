@@ -409,6 +409,12 @@ impl RibManager {
         self.peer_sendable_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
+        // The ORR vantage binding is per-registration: dropping the last
+        // peer bound to a vantage must also drop the vantage's cached
+        // SPF (and re-arm the empty-state early-out).
+        if self.peer_orr_vantage.remove(&peer).is_some() {
+            let _changed = self.recompute_orr(); // PR-4 consumes
+        }
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
         // ORF state is per-session (RFC 5291): a surviving §6 gate can never
@@ -459,6 +465,7 @@ impl RibManager {
         sendable_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         is_ebgp: bool,
         route_reflector_client: bool,
+        orr_vantage: Option<IpAddr>,
         add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         add_path_send_max: u32,
         negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
@@ -505,6 +512,7 @@ impl RibManager {
             sendable_families,
             is_ebgp,
             route_reflector_client,
+            orr_vantage,
             add_path_send_families,
             add_path_send_max,
             negotiated_orf_recv,
@@ -550,6 +558,7 @@ impl RibManager {
         let sendable_families = record.sendable_families.clone();
         let is_ebgp = record.is_ebgp;
         let route_reflector_client = record.route_reflector_client;
+        let orr_vantage = record.orr_vantage;
         let add_path_send_families = record.add_path_send_families.clone();
         let add_path_send_max = record.add_path_send_max;
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
@@ -625,6 +634,12 @@ impl RibManager {
         self.peer_sendable_families.insert(peer, sendable_families);
         self.peer_is_ebgp.insert(peer, is_ebgp);
         self.peer_is_rr_client.insert(peer, route_reflector_client);
+        if let Some(vantage) = orr_vantage {
+            self.peer_orr_vantage.insert(peer, vantage);
+            // The vantage may register after the BGP-LS routes arrived
+            // (no mutation seam would fire), so seed its SPF here.
+            let _changed = self.recompute_orr(); // PR-4 consumes
+        }
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);

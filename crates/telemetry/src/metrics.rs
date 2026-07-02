@@ -48,6 +48,12 @@ pub struct BgpMetrics {
     route_event_history_depth: IntGauge,
     route_event_history_capacity: IntGauge,
 
+    // ── ORR (RFC 9107, ADR-0095) ────────────────────────────────
+    orr_spf_runs_total: IntCounter,
+    orr_topology_nodes: IntGauge,
+    orr_topology_links: IntGauge,
+    orr_unresolved_vantages: IntGauge,
+
     // ── Event streams ───────────────────────────────────────────
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
@@ -311,6 +317,30 @@ impl BgpMetrics {
         let route_event_history_capacity = IntGauge::new(
             "bgp_route_event_history_capacity",
             "Configured capacity of the bounded in-memory unicast route-event history ring.",
+        )
+        .expect("valid metric definition");
+
+        let orr_spf_runs_total = IntCounter::new(
+            "bgp_orr_spf_runs_total",
+            "RFC 9107 ORR SPF computations (one per distinct resolved vantage per BGP-LS topology rebuild). Stays zero while no orr_vantage is configured.",
+        )
+        .expect("valid metric definition");
+
+        let orr_topology_nodes = IntGauge::new(
+            "bgp_orr_topology_nodes",
+            "Nodes in the cached RFC 9107 ORR topology graph (BGP-LS Adj-RIB-In union). Zero while no orr_vantage is configured.",
+        )
+        .expect("valid metric definition");
+
+        let orr_topology_links = IntGauge::new(
+            "bgp_orr_topology_links",
+            "Usable directed links (carrying an IGP Metric) in the cached RFC 9107 ORR topology graph. Zero while no orr_vantage is configured.",
+        )
+        .expect("valid metric definition");
+
+        let orr_unresolved_vantages = IntGauge::new(
+            "bgp_orr_unresolved_vantages",
+            "Configured RFC 9107 ORR vantages that do not resolve to a BGP-LS topology node (their peers fall back to the standard best path).",
         )
         .expect("valid metric definition");
 
@@ -1126,6 +1156,18 @@ impl BgpMetrics {
             .register(Box::new(route_event_history_capacity.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(orr_spf_runs_total.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(orr_topology_nodes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(orr_topology_links.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(orr_unresolved_vantages.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(event_stream_lagged.clone()))
             .expect("metric not already registered");
         registry
@@ -1401,6 +1443,10 @@ impl BgpMetrics {
             rib_loc_prefixes,
             route_event_history_depth,
             route_event_history_capacity,
+            orr_spf_runs_total,
+            orr_topology_nodes,
+            orr_topology_links,
+            orr_unresolved_vantages,
             event_stream_lagged,
             event_stream_subscribers,
             grpc_authz_decisions,
@@ -1704,6 +1750,27 @@ impl BgpMetrics {
     /// ring.
     pub fn set_route_event_history_capacity(&self, count: i64) {
         self.route_event_history_capacity.set(count);
+    }
+
+    /// Record one RFC 9107 ORR SPF computation.
+    pub fn record_orr_spf_run(&self) {
+        self.orr_spf_runs_total.inc();
+    }
+
+    /// Set the cached ORR topology node count.
+    pub fn set_orr_topology_nodes(&self, count: i64) {
+        self.orr_topology_nodes.set(count);
+    }
+
+    /// Set the cached ORR topology usable-link count.
+    pub fn set_orr_topology_links(&self, count: i64) {
+        self.orr_topology_links.set(count);
+    }
+
+    /// Set the number of configured ORR vantages that do not resolve to
+    /// a topology node.
+    pub fn set_orr_unresolved_vantages(&self, count: i64) {
+        self.orr_unresolved_vantages.set(count);
     }
 
     /// Record events missed by a slow live event-stream subscriber.

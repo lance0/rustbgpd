@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -625,6 +626,11 @@ pub struct Neighbor {
     /// Mark this neighbor as a route reflector client (RFC 4456).
     /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
     pub route_reflector_client: Option<bool>,
+    /// Optimal Route Reflection vantage point (RFC 9107): an IP address
+    /// identifying this client's IGP location as a BGP-LS topology node
+    /// (a link interface/neighbor address, or an address covered by a
+    /// Prefix NLRI). Requires `route_reflector_client = true` (iBGP).
+    pub orr_vantage: Option<IpAddr>,
     /// Mark this eBGP neighbor as a transparent route-server client.
     ///
     /// When enabled, outbound unicast advertisements preserve the original
@@ -725,6 +731,9 @@ pub struct PeerGroupConfig {
     pub llgr_stale_time: Option<u32>,
     pub local_ipv6_nexthop: Option<String>,
     pub route_reflector_client: Option<bool>,
+    /// Optimal Route Reflection vantage point (RFC 9107) inherited by
+    /// neighbors in this group. See the neighbor-level `orr_vantage`.
+    pub orr_vantage: Option<IpAddr>,
     pub route_server_client: Option<bool>,
     pub role: Option<BgpRoleConfig>,
     pub strict_role: Option<bool>,

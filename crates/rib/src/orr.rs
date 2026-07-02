@@ -2,10 +2,11 @@
 //!
 //! Pure data structures and algorithms: BGP-LS routes in, a directed
 //! weighted graph out, hand-rolled Dijkstra SPF per vantage, and BGP
-//! next-hop cost resolution. No manager state lives here in this slice —
-//! the manager builds a topology on demand for the read-only API
-//! (`RibUpdate::QueryOrrTopology`); the cached `OrrState` arrives with the
-//! `orr_vantage` config plumbing.
+//! next-hop cost resolution. The manager holds a cached [`OrrState`]
+//! (rebuilt by `RibManager::recompute_orr` at every BGP-LS mutation
+//! seam once any `orr_vantage` is configured) and falls back to an
+//! on-demand topology build for the read-only API
+//! (`RibUpdate::QueryOrrTopology`) when none is.
 //!
 //! Design points (ADR-0095):
 //! - Node identity is the canonical descriptor-byte
@@ -21,12 +22,12 @@
 //! - Unknown cost to a next-hop is `None` — the caller must treat it as
 //!   least preferred (RFC 9107 §3.1).
 
-use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use lru::LruCache;
@@ -151,6 +152,13 @@ pub struct OrrTopology {
     /// (TLV 1155, 0 when absent).
     prefix_v4: PrefixMap<Ipv4Net, Vec<(NodeIx, u32)>>,
     prefix_v6: PrefixMap<Ipv6Net, Vec<(NodeIx, u32)>>,
+}
+
+impl Default for OrrTopology {
+    /// The empty topology (no nodes, no links, no prefixes).
+    fn default() -> Self {
+        Self::build(std::iter::empty())
+    }
 }
 
 /// Deduped graph element parsed from one NLRI.
@@ -384,10 +392,33 @@ impl OrrTopology {
         }
         SpfResult {
             dist,
-            nh_cache: RefCell::new(LruCache::new(
+            nh_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(NH_COST_CACHE_CAPACITY).unwrap_or(NonZeroUsize::MIN),
             )),
         }
+    }
+
+    /// Canonical per-node distance surface of an SPF run: `(node key
+    /// bytes, distance)` for every reachable node, sorted by key. Node
+    /// indexes are interning-order-dependent (Adj-RIB-In iteration order
+    /// is not stable across rebuilds), so change detection must compare
+    /// key-addressed distances, never raw `dist` vectors.
+    #[must_use]
+    pub fn spf_signature(&self, spf: &SpfResult) -> Vec<(Vec<u8>, u64)> {
+        let mut signature: Vec<(Vec<u8>, u64)> = self
+            .node_keys
+            .iter()
+            .enumerate()
+            .filter_map(|(i, key)| {
+                spf.dist
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map(|dist| (key.as_bytes().to_vec(), dist))
+            })
+            .collect();
+        signature.sort();
+        signature
     }
 
     /// Serializable snapshot for the read-only topology API.
@@ -464,11 +495,13 @@ impl OrrTopology {
 
 /// SPF distance map from one vantage node, with a per-run next-hop cost
 /// LRU (a rebuild produces a fresh `SpfResult`, so the cache can never go
-/// stale against its topology).
+/// stale against its topology). The cache is a `Mutex` (not `RefCell`)
+/// only so the manager holding cached results stays `Sync`; access is
+/// single-threaded and uncontended.
 #[derive(Debug)]
 pub struct SpfResult {
     dist: Vec<Option<u64>>,
-    nh_cache: RefCell<LruCache<IpAddr, Option<u64>>>,
+    nh_cache: Mutex<LruCache<IpAddr, Option<u64>>>,
 }
 
 impl SpfResult {
@@ -476,6 +509,13 @@ impl SpfResult {
     #[must_use]
     pub fn dist_to(&self, node: NodeIx) -> Option<u64> {
         self.dist.get(node.index()).copied().flatten()
+    }
+
+    /// Number of nodes reachable from the vantage (the vantage itself
+    /// included).
+    #[must_use]
+    pub fn reachable_count(&self) -> usize {
+        self.dist.iter().filter(|d| d.is_some()).count()
     }
 
     /// Interior cost from the vantage to a BGP next-hop: (a) exact link
@@ -486,11 +526,15 @@ impl SpfResult {
     /// `topo` must be the topology this SPF was computed over.
     #[must_use]
     pub fn cost_to(&self, topo: &OrrTopology, nh: IpAddr) -> Option<u64> {
-        if let Some(&cached) = self.nh_cache.borrow_mut().get(&nh) {
+        if let Ok(mut cache) = self.nh_cache.lock()
+            && let Some(&cached) = cache.get(&nh)
+        {
             return cached;
         }
         let cost = self.compute_cost(topo, nh);
-        self.nh_cache.borrow_mut().put(nh, cost);
+        if let Ok(mut cache) = self.nh_cache.lock() {
+            cache.put(nh, cost);
+        }
         cost
     }
 
@@ -564,7 +608,72 @@ pub struct OrrPrefixSnapshot {
     pub metric: u32,
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// Cached ORR state held by the RIB manager beside the Loc-RIB: the
+/// topology graph plus one SPF (and its canonical distance signature,
+/// for change detection) per distinct configured vantage. Rebuilt by
+/// `RibManager::recompute_orr` at every BGP-LS mutation seam; stays
+/// empty (zero steady-state cost) while no vantage is configured.
+#[derive(Debug, Default)]
+pub struct OrrState {
+    /// The topology the SPF results below were computed over.
+    pub topology: OrrTopology,
+    /// SPF result per resolved vantage IP. Unresolved vantages have no
+    /// entry (unknown cost ⇒ least preferred, RFC 9107 §3.1).
+    pub spf: HashMap<IpAddr, SpfResult>,
+    /// Resolution outcome per configured vantage IP (resolved vantages
+    /// also have an `spf` entry). Drives the status API and the
+    /// resolved↔unresolved transition logging.
+    pub resolved: HashMap<IpAddr, bool>,
+    /// Canonical distance signature per resolved vantage (see
+    /// [`OrrTopology::spf_signature`]); compared across rebuilds to
+    /// detect which vantages' SPF surface actually changed.
+    pub signatures: HashMap<IpAddr, Vec<(Vec<u8>, u64)>>,
+}
+
+impl OrrState {
+    /// True when no vantage state is held (the non-ORR steady state).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.resolved.is_empty() && self.spf.is_empty()
+    }
+}
+
+/// Serializable per-vantage status snapshot for `ListOrrStatus`.
+#[derive(Debug, Clone, Default)]
+pub struct OrrStatusSnapshot {
+    /// One entry per distinct configured vantage IP.
+    pub vantages: Vec<OrrVantageStatus>,
+    /// Topology node total (the SPF input size).
+    pub topology_nodes: u32,
+    /// Topology usable-directed-link total.
+    pub topology_links: u32,
+}
+
+/// Status of one configured ORR vantage.
+#[derive(Debug, Clone)]
+pub struct OrrVantageStatus {
+    /// The configured vantage IP (RFC 9107 IGP location).
+    pub vantage: IpAddr,
+    /// Whether the vantage resolved to a topology node.
+    pub resolved: bool,
+    /// Resolved node's canonical key, lowercase hex; empty when
+    /// unresolved.
+    pub node_key_hex: String,
+    /// Resolved node's AS descriptor (sub-TLV 512).
+    pub asn: Option<u32>,
+    /// Resolved node's BGP-LS Identifier descriptor (sub-TLV 513).
+    pub bgp_ls_id: Option<u32>,
+    /// Resolved node's IGP Router-ID descriptor, lowercase hex; empty
+    /// when absent or unresolved.
+    pub router_id_hex: String,
+    /// Nodes reachable from the vantage's SPF (0 when unresolved).
+    pub reachable_nodes: u32,
+    /// Peers bound to this vantage (established RR clients configured
+    /// with it).
+    pub peers: Vec<IpAddr>,
+}
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes
         .iter()
         .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {

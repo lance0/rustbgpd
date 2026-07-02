@@ -8,6 +8,7 @@ pub mod flowspec;
 pub mod global;
 pub mod neighbor;
 pub mod neighbor_set;
+pub mod orr;
 pub mod peer_group;
 pub mod policy;
 pub mod policy_input;

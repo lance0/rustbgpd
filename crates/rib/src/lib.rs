@@ -47,7 +47,7 @@ pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
-    OrrTopology, OrrTopologySnapshot, SpfResult,
+    OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
 };
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,

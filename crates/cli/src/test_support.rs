@@ -53,6 +53,7 @@ pub(crate) struct MockState {
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
+    pub(crate) last_list_orr_status: Mutex<Option<server_proto::ListOrrStatusRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -1140,6 +1141,27 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 cost: 10,
                 addresses: vec!["10.0.8.1".to_string()],
             }],
+        }))
+    }
+
+    async fn list_orr_status(
+        &self,
+        request: Request<server_proto::ListOrrStatusRequest>,
+    ) -> Result<Response<server_proto::ListOrrStatusResponse>, Status> {
+        *self.state.last_list_orr_status.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListOrrStatusResponse {
+            vantages: vec![server_proto::OrrVantageStatusEntry {
+                vantage: "10.0.8.1".to_string(),
+                resolved: true,
+                node_key: "02aabb".to_string(),
+                asn: 64512,
+                bgp_ls_id: 0,
+                router_id: "000000000001".to_string(),
+                reachable_nodes: 4,
+                peers: vec!["192.0.2.1".to_string()],
+            }],
+            topology_nodes: 4,
+            topology_links: 4,
         }))
     }
 

@@ -83,6 +83,12 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
         ConfigError::InvalidRrConfig { reason } => {
             if reason.contains("cluster_id") {
                 lookup_value_span(source, &["global", "cluster_id"], reason)
+            } else if reason.contains("orr_vantage") {
+                // Checked before route_reflector_client: the
+                // "orr_vantage requires route_reflector_client" reason
+                // mentions both, and the rr-client key may be absent
+                // (that IS the error) while the vantage is present.
+                find_value_anywhere(source, "orr_vantage", "", reason)
             } else if reason.contains("route_reflector_client") {
                 find_value_anywhere(source, "route_reflector_client", "true", reason)
             } else {

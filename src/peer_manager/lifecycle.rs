@@ -74,6 +74,7 @@ impl PeerManager {
             gr_restart_eligible: false,
             local_ipv6_nexthop: tc.local_ipv6_nexthop,
             route_reflector_client: tc.route_reflector_client,
+            orr_vantage: tc.orr_vantage,
             route_server_client: tc.route_server_client,
             remove_private_as: tc.remove_private_as,
             add_path_receive: tc.peer.add_path_receive,

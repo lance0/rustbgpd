@@ -18,7 +18,7 @@ use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
@@ -101,6 +101,13 @@ pub struct RibManager {
     peer_is_ebgp: HashMap<IpAddr, bool>,
     /// Whether each registered outbound peer is a route reflector client.
     peer_is_rr_client: HashMap<IpAddr, bool>,
+    /// RFC 9107 ORR vantage per registered outbound peer (RR clients
+    /// configured with `orr_vantage` only).
+    peer_orr_vantage: HashMap<IpAddr, IpAddr>,
+    /// Cached ORR topology + per-vantage SPF state (RFC 9107), rebuilt
+    /// by [`Self::recompute_orr`] at every BGP-LS mutation seam. Empty
+    /// while `peer_orr_vantage` is empty (zero non-ORR cost).
+    orr: crate::orr::OrrState,
     /// Local cluster ID for route reflection (RFC 4456). `None` = not an RR.
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
@@ -291,6 +298,7 @@ pub(super) struct LiveSessionRecord {
     sendable_families: Vec<(Afi, Safi)>,
     is_ebgp: bool,
     route_reflector_client: bool,
+    orr_vantage: Option<IpAddr>,
     add_path_send_families: Vec<(Afi, Safi)>,
     add_path_send_max: u32,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
@@ -549,6 +557,8 @@ impl RibManager {
             peer_sendable_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
+            peer_orr_vantage: HashMap::new(),
+            orr: crate::orr::OrrState::default(),
             cluster_id,
             dirty_peers: HashSet::new(),
             force_outbound_peers: HashSet::new(),
@@ -774,6 +784,7 @@ impl RibManager {
                 sendable_families,
                 is_ebgp,
                 route_reflector_client,
+                orr_vantage,
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
@@ -787,6 +798,7 @@ impl RibManager {
                 sendable_families,
                 is_ebgp,
                 route_reflector_client,
+                orr_vantage,
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
@@ -994,13 +1006,23 @@ impl RibManager {
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryOrrTopology { reply } => {
-                let topology = crate::orr::OrrTopology::build(
-                    self.ribs
-                        .values()
-                        .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
-                );
-                let _ = reply.send(topology.snapshot());
+                // With vantages configured the cached topology is fresh
+                // by construction (rebuilt at every BGP-LS mutation
+                // seam); without them the cache is intentionally empty,
+                // so build on demand as before.
+                let snapshot = if self.peer_orr_vantage.is_empty() {
+                    crate::orr::OrrTopology::build(
+                        self.ribs
+                            .values()
+                            .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
+                    )
+                    .snapshot()
+                } else {
+                    self.orr.topology.snapshot()
+                };
+                let _ = reply.send(snapshot);
             }
+            RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
         }
     }
@@ -1882,6 +1904,139 @@ impl RibManager {
     /// unicast/FlowSpec/EVPN recompute + distribution pattern.
     fn recompute_bgpls_keys(&mut self, affected: &HashSet<crate::route::BgpLsRouteKey>) {
         self.recompute_and_distribute_bgpls(affected);
+        // Every BGP-LS mutation seam routes through here — receive
+        // (`handle_bgpls_routes_received`), the enhanced-refresh EoRR
+        // sweep (`finish_route_refresh`), the GR entry sweep
+        // (`handle_peer_graceful_restart`, recompute-then-GC ordering),
+        // and BGP-LS-bearing peer teardown (`clear_peer_adj_rib_in`) —
+        // so the ORR cache rebuild needs exactly one call site.
+        let _changed = self.recompute_orr(); // PR-4 consumes
+    }
+
+    /// Rebuild the cached RFC 9107 ORR state: one topology from the
+    /// BGP-LS Adj-RIB-In union, one SPF per DISTINCT configured vantage
+    /// IP. Returns the vantages whose SPF distance surface changed
+    /// (consumed in PR-4 to dirty their bound peers). Early-outs with no
+    /// topology build and no SPF while `peer_orr_vantage` is empty, so
+    /// non-ORR deployments pay nothing on BGP-LS churn.
+    pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {
+        if self.peer_orr_vantage.is_empty() {
+            if !self.orr.is_empty() {
+                self.orr = crate::orr::OrrState::default();
+                self.metrics.set_orr_topology_nodes(0);
+                self.metrics.set_orr_topology_links(0);
+                self.metrics.set_orr_unresolved_vantages(0);
+            }
+            return HashSet::new();
+        }
+
+        let topology = crate::orr::OrrTopology::build(
+            self.ribs
+                .values()
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
+        );
+        let vantages: HashSet<IpAddr> = self.peer_orr_vantage.values().copied().collect();
+        let mut changed = HashSet::new();
+        let mut spf = HashMap::new();
+        let mut resolved = HashMap::new();
+        let mut signatures = HashMap::new();
+        for vantage in vantages {
+            let node = topology.resolve_node(vantage);
+            let was_resolved = self.orr.resolved.get(&vantage).copied();
+            // Log once per transition (a fresh vantage counts as one).
+            match (was_resolved, node.is_some()) {
+                (Some(true) | None, false) => warn!(
+                    %vantage,
+                    "ORR vantage does not resolve to a BGP-LS topology node — \
+                     bound peers fall back to the standard best path"
+                ),
+                (Some(false) | None, true) => {
+                    info!(%vantage, "ORR vantage resolved to a BGP-LS topology node");
+                }
+                (Some(true), true) | (Some(false), false) => {}
+            }
+            resolved.insert(vantage, node.is_some());
+            if let Some(node) = node {
+                let result = topology.spf(node);
+                self.metrics.record_orr_spf_run();
+                let signature = topology.spf_signature(&result);
+                if self.orr.signatures.get(&vantage) != Some(&signature) {
+                    changed.insert(vantage);
+                }
+                spf.insert(vantage, result);
+                signatures.insert(vantage, signature);
+            } else if self.orr.spf.contains_key(&vantage) {
+                // Resolved → unresolved is a change too: bound peers
+                // revert to the standard best path (PR-4).
+                changed.insert(vantage);
+            }
+        }
+
+        let unresolved = resolved.values().filter(|resolved| !**resolved).count();
+        self.metrics
+            .set_orr_topology_nodes(i64::try_from(topology.node_count()).unwrap_or(i64::MAX));
+        self.metrics
+            .set_orr_topology_links(i64::try_from(topology.link_count()).unwrap_or(i64::MAX));
+        self.metrics
+            .set_orr_unresolved_vantages(i64::try_from(unresolved).unwrap_or(i64::MAX));
+        self.orr = crate::orr::OrrState {
+            topology,
+            spf,
+            resolved,
+            signatures,
+        };
+        changed
+    }
+
+    /// Serve `QueryOrrStatus`: per-vantage resolution/SPF/bound-peer
+    /// status plus topology totals, from the cached `OrrState` (fresh by
+    /// construction while any vantage is configured; empty otherwise).
+    fn handle_query_orr_status(
+        &self,
+        reply: tokio::sync::oneshot::Sender<crate::orr::OrrStatusSnapshot>,
+    ) {
+        let mut vantages: Vec<crate::orr::OrrVantageStatus> = self
+            .orr
+            .resolved
+            .iter()
+            .map(|(&vantage, &resolved)| {
+                let node = self
+                    .orr
+                    .topology
+                    .resolve_node(vantage)
+                    .and_then(|ix| self.orr.topology.node_key(ix));
+                let descriptors = node.map(crate::orr::NodeDescriptors::parse);
+                let mut peers: Vec<IpAddr> = self
+                    .peer_orr_vantage
+                    .iter()
+                    .filter(|&(_, &bound)| bound == vantage)
+                    .map(|(&peer, _)| peer)
+                    .collect();
+                peers.sort();
+                crate::orr::OrrVantageStatus {
+                    vantage,
+                    resolved,
+                    node_key_hex: node
+                        .map(|key| crate::orr::hex(key.as_bytes()))
+                        .unwrap_or_default(),
+                    asn: descriptors.as_ref().and_then(|d| d.asn),
+                    bgp_ls_id: descriptors.as_ref().and_then(|d| d.bgp_ls_id),
+                    router_id_hex: descriptors
+                        .and_then(|d| d.router_id.as_deref().map(crate::orr::hex))
+                        .unwrap_or_default(),
+                    reachable_nodes: self.orr.spf.get(&vantage).map_or(0, |spf| {
+                        u32::try_from(spf.reachable_count()).unwrap_or(u32::MAX)
+                    }),
+                    peers,
+                }
+            })
+            .collect();
+        vantages.sort_by_key(|status| status.vantage);
+        let _ = reply.send(crate::orr::OrrStatusSnapshot {
+            vantages,
+            topology_nodes: u32::try_from(self.orr.topology.node_count()).unwrap_or(u32::MAX),
+            topology_links: u32::try_from(self.orr.topology.link_count()).unwrap_or(u32::MAX),
+        });
     }
 
     fn handle_query_mrt_snapshot(&mut self, reply: tokio::sync::oneshot::Sender<MrtSnapshotData>) {

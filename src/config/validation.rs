@@ -386,6 +386,31 @@ impl Config {
                 });
             }
 
+            // Validate orr_vantage (RFC 9107): ORR is a route-reflector
+            // feature, so the vantage only makes sense on an iBGP
+            // route-reflector-client.
+            let orr_vantage = neighbor
+                .orr_vantage
+                .or_else(|| group.and_then(|g| g.orr_vantage));
+            if orr_vantage.is_some() {
+                if neighbor.remote_asn != self.global.asn {
+                    return Err(ConfigError::InvalidRrConfig {
+                        reason: format!(
+                            "orr_vantage requires iBGP (remote_asn {} != local asn {})",
+                            neighbor.remote_asn, self.global.asn
+                        ),
+                    });
+                }
+                if !route_reflector_client {
+                    return Err(ConfigError::InvalidRrConfig {
+                        reason: format!(
+                            "orr_vantage on neighbor {} requires route_reflector_client = true",
+                            neighbor.address
+                        ),
+                    });
+                }
+            }
+
             let route_server_client = neighbor
                 .route_server_client
                 .or_else(|| group.and_then(|g| g.route_server_client))
@@ -797,7 +822,49 @@ impl Config {
         validate_fib_tables(self)?;
         validate_bfd(self)?;
 
+        // RFC 9107 ORR: a vantage without a BGP-LS feed can never
+        // resolve — the topology would be permanently empty. Legal
+        // (linkstate peers may be added later), but worth a warning.
+        if self.orr_vantage_without_linkstate() {
+            tracing::warn!(
+                "orr_vantage is configured but no neighbor negotiates the \
+                 \"linkstate\" family — the ORR topology feed will be empty \
+                 and every vantage will stay unresolved (standard best-path \
+                 fallback applies)"
+            );
+        }
+
         Ok(())
+    }
+
+    /// True when any neighbor (directly or via its peer group) has an
+    /// effective `orr_vantage` but NO neighbor's effective `families`
+    /// include `"linkstate"` — i.e. the BGP-LS topology feed the ORR SPF
+    /// needs would be empty. Pure so the warning condition is testable.
+    pub(crate) fn orr_vantage_without_linkstate(&self) -> bool {
+        let group_of = |neighbor: &super::Neighbor| {
+            neighbor
+                .peer_group
+                .as_deref()
+                .and_then(|name| self.peer_groups.get(name))
+        };
+        let any_vantage = self.neighbors.iter().any(|n| {
+            n.orr_vantage
+                .or_else(|| group_of(n).and_then(|g| g.orr_vantage))
+                .is_some()
+        });
+        if !any_vantage {
+            return false;
+        }
+        !self.neighbors.iter().any(|n| {
+            let own = &n.families;
+            let effective: &[String] = if own.is_empty() {
+                group_of(n).map_or(&[], |g| g.families.as_slice())
+            } else {
+                own.as_slice()
+            };
+            effective.iter().any(|f| f == "linkstate")
+        })
     }
 }
 
