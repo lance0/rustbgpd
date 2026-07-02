@@ -98,19 +98,17 @@ has it, no broad performance sprints without profile evidence.
 
 ### Next
 
-- **GR/LLGR stale preservation for the RR families (VPN, BGP-LS, RTC)**
-  *(current anchor arc).* Today a graceful restart conservatively withdraws
-  the entire VPNv4/v6, BGP-LS, and RT-Constrain tables — correct-but-blunt
-  first-slice posture every family arc deferred with a pointer. Restart-safe
-  stale preservation (RFC 4724 marking + RFC 9494 LLGR two-phase demotion,
-  per-family scoping in the GR/LLGR capability negotiation, stale sweeps on
-  the existing three-tier best-path demotion) is what makes the RR role
-  production-real: a reflector that dumps its table on restart defeats GR
-  for every client behind it. Template: the unicast/EVPN stale machinery
-  (`graceful_restart_preserves_family`, `is_stale`/`is_llgr_stale`,
-  GR/LLGR sweeps). Exit: a restarting RR peer's families survive as stale
-  through the GR window, LLGR demotes rather than drops, EoR/timer sweeps
-  clean up, and an interop receipt proves it against a real peer restart.
+- **GR/LLGR stale preservation for the RR families (VPN, BGP-LS, RTC)** —
+  **SHIPPED 2026-07-02** (#636 Adj-RIB-In substrate, #637 RFC 4724 helper
+  preservation with the not-in-capability withdraw rule and RTC
+  membership-served re-establish, #638 RFC 9494 two-phase LLGR with
+  NO_LLGR + community-riding re-export; M77 live peer-restart receipt).
+  The RR role is restart-real: no table dump on a PE restart, no VPN
+  blackout at RR-client re-establish, ORR vantages survive a topology
+  source restart. The new families implement RFC-strict
+  consecutive-restart deletion and EoR sweeps; three legacy gaps in the
+  pre-existing unicast/FlowSpec/EVPN paths are recorded under tech debt
+  below.
 - **RR-composition follow-ons** *(queued behind the GR arc, in order)*:
   `distribution.rs` module split (three arcs of growth; pure relocation);
   ORR explainability (`rbgp explain` answering "why did client X get path
@@ -1114,6 +1112,17 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
 Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
+
+- [ ] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN.** The RR families
+  (VPN/BGP-LS/RTC, #636–#638) implement the strict semantics; the
+  pre-existing paths have three documented divergences to bring in line:
+  (1) consecutive-restart re-marks already-stale routes in place where
+  RFC 4724 says delete; (2) the EoR arms only clear flags — non-readvertised
+  stale routes survive where RFC 4724 §4.1 says remove; (3) no LLGR-stale
+  export restriction toward peers that didn't advertise LLGR (RFC 9494
+  SHOULD; the intra-AS NO_EXPORT + LOCAL_PREF-0 exception also unbuilt).
+  Each is a small, test-driven change with the new families' code as the
+  in-repo exemplar; (3) is repo-wide and needs a distribution-layer gate.
 
 - [x] **EVPN origination cross-actor seam audit — RESOLVED** (2026-06-12,
   PR #477). The seam inventory (drain vs. replay, withdrawal ordering,

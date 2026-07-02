@@ -11,6 +11,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GR/LLGR stale preservation for the RR families (VPNv4/v6, BGP-LS,
+  RT-Constrain).** A restarting peer's SAFI-128/71/72/132 routes are now
+  preserved as stale through the graceful-restart window (RFC 4724 helper
+  retention, keyed to the peer's advertised GR families; families absent
+  from the capability are withdrawn) instead of conservatively withdrawn,
+  with the full RFC 9494 two-phase LLGR lifecycle (NO_LLGR honored,
+  LLGR_STALE community injected and preserved through re-export,
+  per-family promote-vs-purge on the LLGR capability split, least-preferred
+  demotion via the existing three-tier stale ranks). Operationally this
+  makes the RR role restart-real: a reflector no longer dumps its VPN
+  table to every client when one PE restarts; an RR client's VPN filter
+  membership survives its own restart so VPN routes flow immediately at
+  re-establish (no strict-empty blackout); and an ORR topology source's
+  restart no longer unresolves vantages mid-window. The new families
+  implement the RFC-strict consecutive-restart deletion and EoR sweep of
+  non-readvertised stale routes; three pre-existing legacy gaps in the
+  unicast/FlowSpec/EVPN paths are documented in KNOWN_ISSUES rather than
+  silently changed. M77 is the live peer-restart interop receipt.
+
 - **Optimal Route Reflection (RFC 9107, ADR-0095) — per-client best paths
   via BGP-LS-sourced SPF.** A route reflector normally reflects *its own*
   best path to every client; ORR computes each client's best from the
