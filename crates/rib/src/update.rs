@@ -324,6 +324,10 @@ pub enum RibUpdate {
         is_ebgp: bool,
         /// Whether this peer is a route reflector client (RFC 4456).
         route_reflector_client: bool,
+        /// Optimal Route Reflection vantage point (RFC 9107) configured
+        /// for this route-reflector-client, if any: an IP identifying the
+        /// client's IGP location as a BGP-LS topology node.
+        orr_vantage: Option<IpAddr>,
         /// Families for which this peer negotiated Add-Path Send/Both.
         /// Multi-path export is only enabled for these families.
         add_path_send_families: Vec<(Afi, Safi)>,
@@ -699,6 +703,13 @@ pub enum RibUpdate {
     QueryOrrTopology {
         /// Response channel.
         reply: oneshot::Sender<crate::orr::OrrTopologySnapshot>,
+    },
+    /// Query per-vantage RFC 9107 ORR status: resolution state, SPF
+    /// reach, bound peers, and topology totals — served from the cached
+    /// `OrrState` when vantages are configured.
+    QueryOrrStatus {
+        /// Response channel.
+        reply: oneshot::Sender<crate::orr::OrrStatusSnapshot>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {

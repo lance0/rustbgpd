@@ -1,7 +1,7 @@
 //! Transport-layer configuration types.
 
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
@@ -122,6 +122,10 @@ pub struct TransportConfig {
     pub gr_restart_until: Option<Instant>,
     /// Whether this neighbor is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
+    /// Optimal Route Reflection vantage point (RFC 9107): an IP address
+    /// identifying this client's IGP location as a BGP-LS topology node.
+    /// Only meaningful when `route_reflector_client` is set.
+    pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP neighbor is a transparent route-server client.
     pub route_server_client: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
@@ -164,6 +168,7 @@ impl TransportConfig {
             llgr_stale_time: 0,
             gr_restart_until: None,
             route_reflector_client: false,
+            orr_vantage: None,
             route_server_client: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,

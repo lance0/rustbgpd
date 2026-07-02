@@ -539,6 +539,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             gr_restart_eligible: false,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
+            // Like route_reflector_client, the ORR vantage is not exposed
+            // on the runtime neighbor-add gRPC surface; configure it via
+            // the static TOML `orr_vantage` knob.
+            orr_vantage: None,
             route_server_client: config.route_server_client,
             remove_private_as,
             add_path_receive: config.add_path_receive,
@@ -1065,6 +1069,7 @@ mod tests {
             gr_restart_eligible: false,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
+            orr_vantage: None,
             route_server_client: false,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,

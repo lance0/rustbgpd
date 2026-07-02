@@ -180,6 +180,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub route_reflector_client: Option<bool>,
     #[serde(default)]
+    pub orr_vantage: Option<String>,
+    #[serde(default)]
     pub route_server_client: Option<bool>,
     #[serde(default)]
     pub remove_private_as: Option<String>,
@@ -216,6 +218,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             llgr_stale_time: j.llgr_stale_time,
             local_ipv6_nexthop: j.local_ipv6_nexthop,
             route_reflector_client: j.route_reflector_client,
+            orr_vantage: j.orr_vantage,
             route_server_client: j.route_server_client,
             remove_private_as: j.remove_private_as,
             add_path_receive: j.add_path_receive,

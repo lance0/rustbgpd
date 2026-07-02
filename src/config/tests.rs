@@ -2075,6 +2075,141 @@ route_reflector_client = true
     assert_eq!(config.neighbors[0].route_reflector_client, Some(true));
 }
 
+/// RFC 9107 `orr_vantage` config-surface harness: one iBGP RR (asn
+/// 65001) with the given neighbor + peer-group field bodies.
+fn orr_toml(neighbor_fields: &str, group_fields: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.clients]
+{group_fields}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+peer_group = "clients"
+{neighbor_fields}
+"#
+    )
+}
+
+#[test]
+fn orr_vantage_inherits_from_peer_group() {
+    let toml = orr_toml(
+        "",
+        "route_reflector_client = true\norr_vantage = \"192.0.2.7\"",
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.neighbors[0].orr_vantage, None);
+    let resolved = config.resolved_neighbors().unwrap();
+    assert_eq!(
+        resolved[0].transport_config.orr_vantage,
+        Some("192.0.2.7".parse().unwrap()),
+        "group vantage inherited into the transport config"
+    );
+}
+
+#[test]
+fn orr_vantage_neighbor_overrides_group() {
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.9\"",
+        "route_reflector_client = true\norr_vantage = \"192.0.2.7\"",
+    );
+    let config = parse(&toml).unwrap();
+    let resolved = config.resolved_neighbors().unwrap();
+    assert_eq!(
+        resolved[0].transport_config.orr_vantage,
+        Some("192.0.2.9".parse().unwrap()),
+        "neighbor vantage wins over the group's"
+    );
+
+    // Persister-shaped round-trip: a Some(IpAddr) vantage survives TOML
+    // serialize → re-parse (the config-persister write path).
+    let rendered = toml::to_string_pretty(&config).unwrap();
+    let reparsed = parse(&rendered).unwrap();
+    assert_eq!(
+        reparsed.neighbors[0].orr_vantage,
+        Some("192.0.2.9".parse().unwrap())
+    );
+}
+
+#[test]
+fn orr_vantage_rejected_without_rr_client() {
+    let toml = orr_toml("orr_vantage = \"192.0.2.7\"", "");
+    let err = parse(&toml).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    assert!(
+        err.to_string().contains("orr_vantage"),
+        "diagnostic names the field: {err}"
+    );
+}
+
+#[test]
+fn orr_vantage_rejected_on_ebgp() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+orr_vantage = "192.0.2.7"
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    assert!(
+        err.to_string().contains("requires iBGP"),
+        "diagnostic names the eBGP conflict: {err}"
+    );
+}
+
+#[test]
+fn orr_vantage_warns_without_linkstate_family() {
+    // The warning condition (pure helper backing the load-time warn):
+    // vantage set, no linkstate family anywhere → true.
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
+        "",
+    );
+    let config = parse(&toml).unwrap();
+    assert!(config.orr_vantage_without_linkstate());
+
+    // Any neighbor with the linkstate family (even another one — it is
+    // the topology FEED, not the vantage carrier) clears the warning.
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true\nfamilies = [\"ipv4_unicast\", \"linkstate\"]",
+        "",
+    );
+    let config = parse(&toml).unwrap();
+    assert!(!config.orr_vantage_without_linkstate());
+
+    // A linkstate family inherited from a group counts too.
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
+        "families = [\"linkstate\"]",
+    );
+    let config = parse(&toml).unwrap();
+    assert!(!config.orr_vantage_without_linkstate());
+
+    // No vantage anywhere → no warning regardless of families.
+    let config = parse(&orr_toml("", "")).unwrap();
+    assert!(!config.orr_vantage_without_linkstate());
+}
+
 #[test]
 fn route_server_client_on_ebgp_accepted() {
     let toml_str = r#"
@@ -3585,6 +3720,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: Some(false),
+        orr_vantage: None,
         route_server_client: Some(false),
         role: None,
         strict_role: None,
@@ -4183,6 +4319,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
             route_reflector_client: None,
+            orr_vantage: None,
             route_server_client: None,
             role: None,
             strict_role: None,
@@ -4223,6 +4360,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,
+        orr_vantage: None,
         route_server_client: None,
         role: None,
         strict_role: None,
@@ -4255,6 +4393,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,
+        orr_vantage: None,
         route_server_client: None,
         role: None,
         strict_role: None,
@@ -4313,6 +4452,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,
+        orr_vantage: None,
         route_server_client: None,
         role: None,
         strict_role: None,

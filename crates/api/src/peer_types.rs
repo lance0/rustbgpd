@@ -1281,6 +1281,9 @@ pub struct PeerGroupDefinition {
     pub local_ipv6_nexthop: Option<String>,
     /// Optional route-reflector-client override.
     pub route_reflector_client: Option<bool>,
+    /// Optional RFC 9107 ORR vantage point (IGP location) inherited by
+    /// neighbors in this group. Requires `route_reflector_client`.
+    pub orr_vantage: Option<IpAddr>,
     /// Optional route-server-client override.
     pub route_server_client: Option<bool>,
     /// Optional private-AS removal mode.
@@ -1361,6 +1364,8 @@ pub struct PeerManagerNeighborConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     /// Whether this peer is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
+    /// RFC 9107 ORR vantage point (IGP location) for this RR client.
+    pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.

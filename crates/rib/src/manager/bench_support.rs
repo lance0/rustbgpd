@@ -61,6 +61,7 @@ impl RibManager {
                 vec![(Afi::Ipv4, Safi::Unicast)],
                 false, // is_ebgp = false (iBGP / route-reflector scenario)
                 is_rr_client,
+                None,       // no ORR vantage
                 Vec::new(), // no Add-Path send
                 0,
                 Vec::new(), // no negotiated receive-side ORF

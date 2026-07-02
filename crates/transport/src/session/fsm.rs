@@ -453,6 +453,7 @@ impl PeerSession {
                             sendable_families,
                             is_ebgp,
                             route_reflector_client: self.config.route_reflector_client,
+                            orr_vantage: self.config.orr_vantage,
                             add_path_send_families,
                             add_path_send_max,
                             negotiated_orf_recv: self

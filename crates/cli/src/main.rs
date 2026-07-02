@@ -128,6 +128,9 @@ enum Command {
         action: TopologyAction,
     },
 
+    /// Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)
+    Orr,
+
     /// Manage FlowSpec routes
     Flowspec {
         #[command(subcommand)]
@@ -1562,6 +1565,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             TopologyAction::Nodes => commands::topology::nodes(connection, json).await,
             TopologyAction::Links => commands::topology::links(connection, json).await,
         },
+        Command::Orr => commands::orr::status(connection, json).await,
         Command::Watch { address, family } => {
             let family_val = resolve_family(&family)?;
             commands::watch::run(connection, address, family_val, json).await

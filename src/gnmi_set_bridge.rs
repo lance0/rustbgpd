@@ -401,6 +401,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,
+        orr_vantage: None,
         route_server_client: None,
         role: None,
         strict_role: None,

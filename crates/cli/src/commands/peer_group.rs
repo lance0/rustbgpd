@@ -52,6 +52,8 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_reflector_client: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    orr_vantage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     route_server_client: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remove_private_as: Option<String>,
@@ -136,6 +138,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             llgr_stale_time: def.llgr_stale_time,
             local_ipv6_nexthop: def.local_ipv6_nexthop.clone(),
             route_reflector_client: def.route_reflector_client,
+            orr_vantage: def.orr_vantage.clone(),
             route_server_client: def.route_server_client,
             remove_private_as: def.remove_private_as.clone(),
             add_path_receive: def.add_path_receive,
@@ -181,6 +184,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(rr) = def.route_reflector_client {
             println!("RR Client:             {rr}");
+        }
+        if let Some(vantage) = &def.orr_vantage {
+            println!("ORR Vantage:           {vantage}");
         }
         if let Some(rs) = def.route_server_client {
             println!("RS Client:             {rs}");

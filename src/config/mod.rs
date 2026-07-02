@@ -699,6 +699,9 @@ impl Config {
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))
             .unwrap_or(false);
+        transport.orr_vantage = neighbor
+            .orr_vantage
+            .or_else(|| group.and_then(|g| g.orr_vantage));
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
         // RFC 4456: thread the local cluster-id just like
         // `PeerManager::build_transport_config`. Without it a runtime-added
@@ -760,6 +763,7 @@ impl Config {
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
             route_reflector_client: None,
+            orr_vantage: None,
             route_server_client: None,
             role: None,
             strict_role: None,
@@ -1439,6 +1443,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
+    cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);
@@ -1543,6 +1548,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.llgr_stale_time == new.llgr_stale_time
         && old.local_ipv6_nexthop == new.local_ipv6_nexthop
         && old.route_reflector_client == new.route_reflector_client
+        && old.orr_vantage == new.orr_vantage
         && old.route_server_client == new.route_server_client
         && old.role == new.role
         && old.strict_role == new.strict_role
@@ -4072,6 +4078,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
+    cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);

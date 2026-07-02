@@ -549,6 +549,10 @@ message PeerGroupDefinition {
   // existing value for read/modify/write clients; false with no md5_password
   // explicitly clears it.
   optional bool has_md5_password = 21;
+  // RFC 9107 Optimal Route Reflection vantage point inherited by neighbors
+  // in this group: an IP address identifying the clients' IGP location as a
+  // BGP-LS topology node. Requires route_reflector_client = true.
+  optional string orr_vantage = 22;
 }
 
 message NamedPeerGroup {
@@ -961,6 +965,11 @@ service RibService {
   // not listed, but their endpoint nodes still appear.
   rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse);
   rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse);
+  // RFC 9107 ORR status: per configured vantage, its resolution against the
+  // BGP-LS topology, SPF reach, and the peers bound to it, plus topology
+  // node/link totals. Config + derived state only — the per-vantage best-path
+  // selection ships separately.
+  rpc ListOrrStatus(ListOrrStatusRequest) returns (ListOrrStatusResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2204,6 +2213,39 @@ message TopologyLinkEntry {
 
 message ListTopologyLinksResponse {
   repeated TopologyLinkEntry links = 1;
+}
+
+message ListOrrStatusRequest {}
+
+// Status of one configured RFC 9107 ORR vantage.
+message OrrVantageStatusEntry {
+  // The configured vantage IP (the IGP location).
+  string vantage = 1;
+  // Whether the vantage resolved to a BGP-LS topology node.
+  bool resolved = 2;
+  // Resolved node's canonical key, lowercase hex; empty when unresolved.
+  string node_key = 3;
+  // Resolved node's Autonomous System descriptor (sub-TLV 512); 0 when
+  // absent or unresolved.
+  uint32 asn = 4;
+  // Resolved node's BGP-LS Identifier descriptor (sub-TLV 513); 0 when
+  // absent or unresolved.
+  uint32 bgp_ls_id = 5;
+  // Resolved node's IGP Router-ID descriptor, lowercase hex; empty when
+  // absent or unresolved.
+  string router_id = 6;
+  // Nodes reachable from the vantage's SPF (0 when unresolved).
+  uint32 reachable_nodes = 7;
+  // Established peers bound to this vantage.
+  repeated string peers = 8;
+}
+
+message ListOrrStatusResponse {
+  repeated OrrVantageStatusEntry vantages = 1;
+  // Cached ORR topology node total.
+  uint32 topology_nodes = 2;
+  // Cached ORR topology usable-directed-link total.
+  uint32 topology_links = 3;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3

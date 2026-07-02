@@ -509,6 +509,7 @@ impl PeerManager {
             None
         };
         transport.route_reflector_client = config.route_reflector_client;
+        transport.orr_vantage = config.orr_vantage;
         transport.route_server_client = config.route_server_client;
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;

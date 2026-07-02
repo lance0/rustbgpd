@@ -176,6 +176,7 @@ log_format = "json"
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
             route_reflector_client: Some(false),
+            orr_vantage: None,
             route_server_client: Some(false),
             role: None,
             strict_role: None,

@@ -603,6 +603,363 @@ async fn query_topology_reflects_adj_rib_in_across_multiple_peers() {
     handle.await.unwrap();
 }
 
+async fn query_orr_status(tx: &mpsc::Sender<RibUpdate>) -> crate::orr::OrrStatusSnapshot {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryOrrStatus { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
+/// Value of a label-less counter metric (0.0 when never incremented).
+fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| family.metric.first())
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
+/// Bring up an iBGP RR-client peer with the given ORR vantage and drain
+/// its initial-table `EoR` so the channel starts empty.
+async fn orr_client_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    vantage: Option<IpAddr>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: vantage,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+/// The arc-wide square topology, fed through the normal BGP-LS receive
+/// path from `peer`.
+async fn feed_square_topology(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced: crate::orr::fixtures::square_topology(peer),
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// Interface address of fixture node A (`10.0.A.X`) — resolves to A.
+fn vantage_at_node_a() -> IpAddr {
+    use crate::orr::fixtures::{A, X};
+    IpAddr::V4(Ipv4Addr::new(10, 0, A, X))
+}
+
+/// `PeerUp` with an `orr_vantage` registers the vantage (visible through
+/// `QueryOrrStatus` and the topology gauges); tearing the peer down
+/// clears the registry and empties the cached state again.
+#[tokio::test]
+async fn peer_up_registers_orr_vantage_and_teardown_clears() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    feed_square_topology(&tx, feed).await;
+
+    // Before any vantage: the cache is intentionally empty.
+    let status = query_orr_status(&tx).await;
+    assert!(status.vantages.is_empty());
+    assert_eq!(status.topology_nodes, 0);
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+
+    let status = query_orr_status(&tx).await;
+    assert_eq!(status.vantages.len(), 1);
+    assert_eq!(status.vantages[0].vantage, vantage_at_node_a());
+    assert!(status.vantages[0].resolved);
+    assert_eq!(status.vantages[0].peers, vec![client]);
+    assert_eq!(status.topology_nodes, 4);
+    assert_eq!(status.topology_links, 4);
+    assert!(
+        (gauge_metric_value(&metrics, "bgp_orr_topology_nodes", &[]) - 4.0).abs() < f64::EPSILON
+    );
+
+    tx.send(RibUpdate::PeerDown {
+        peer: client,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    let status = query_orr_status(&tx).await;
+    assert!(
+        status.vantages.is_empty(),
+        "teardown clears the vantage registry"
+    );
+    assert_eq!(status.topology_nodes, 0, "cached state emptied");
+    assert!(gauge_metric_value(&metrics, "bgp_orr_topology_nodes", &[]).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// `QueryOrrStatus` reports a resolved vantage (with node descriptors +
+/// SPF reach) and an unresolved one (no node, zero reach) side by side,
+/// sorted by vantage IP, with the unresolved gauge tracking.
+#[tokio::test]
+async fn orr_status_reports_resolved_and_unresolved_vantages() {
+    use crate::orr::fixtures::A;
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
+
+    let client1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let _out1 = orr_client_peer_up(&tx, client1, Some(vantage_at_node_a())).await;
+    let _out2 = orr_client_peer_up(&tx, client2, Some(outside)).await;
+
+    let status = query_orr_status(&tx).await;
+    assert_eq!(status.vantages.len(), 2);
+    // Sorted by vantage IP: 10.0.1.3 < 203.0.113.9.
+    let resolved = &status.vantages[0];
+    assert_eq!(resolved.vantage, vantage_at_node_a());
+    assert!(resolved.resolved);
+    assert!(!resolved.node_key_hex.is_empty());
+    assert_eq!(resolved.asn, Some(64512));
+    assert_eq!(resolved.router_id_hex, format!("00000000000{A:x}"));
+    // From A the square reaches A, X, and Y — never B.
+    assert_eq!(resolved.reachable_nodes, 3);
+    assert_eq!(resolved.peers, vec![client1]);
+
+    let unresolved = &status.vantages[1];
+    assert_eq!(unresolved.vantage, outside);
+    assert!(!unresolved.resolved);
+    assert!(unresolved.node_key_hex.is_empty());
+    assert_eq!(unresolved.reachable_nodes, 0);
+    assert_eq!(unresolved.peers, vec![client2]);
+
+    assert!(
+        (gauge_metric_value(&metrics, "bgp_orr_unresolved_vantages", &[]) - 1.0).abs()
+            < f64::EPSILON
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The cached SPF state rebuilds at the BGP-LS mutation seams: a vantage
+/// registered before any topology is unresolved, resolves when BGP-LS
+/// routes arrive through the receive path, and unresolves again when the
+/// feed peer's GR entry sweeps its BGP-LS routes.
+#[tokio::test]
+async fn spf_cache_rebuilds_on_bgpls_receive_and_gr_sweep() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+
+    let status = query_orr_status(&tx).await;
+    assert!(!status.vantages[0].resolved, "no topology yet");
+
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    feed_square_topology(&tx, feed).await;
+
+    let status = query_orr_status(&tx).await;
+    assert!(
+        status.vantages[0].resolved,
+        "receive path rebuilt the cache"
+    );
+    assert_eq!(status.topology_nodes, 4);
+    let runs_after_receive = counter_metric_value(&metrics, "bgp_orr_spf_runs_total");
+    assert!(runs_after_receive >= 1.0, "SPF ran for the vantage");
+
+    // GR entry for the feed peer withdraws its BGP-LS routes (BGP-LS is
+    // never GR-retained) and must recompute AFTER the sweep.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(feed),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let status = query_orr_status(&tx).await;
+    assert!(
+        !status.vantages[0].resolved,
+        "GR sweep rebuilt the cache against the emptied topology"
+    );
+    assert_eq!(status.topology_nodes, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The early-out pin: with no vantage configured, BGP-LS churn (and even
+/// an RR client without a vantage) never triggers a topology rebuild or
+/// an SPF run — the `bgp_orr_spf_runs_total` counter stays at zero and
+/// the topology gauges stay untouched.
+#[tokio::test]
+async fn no_vantage_configured_skips_topology_rebuild() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _out_rx = orr_client_peer_up(&tx, client, None).await;
+
+    // BGP-LS churn: announce, re-announce, withdraw.
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    feed_square_topology(&tx, feed).await;
+    feed_square_topology(&tx, feed).await;
+    let keys: Vec<_> = crate::orr::fixtures::square_topology(feed)
+        .iter()
+        .map(crate::route::BgpLsRibRoute::key)
+        .collect();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(feed),
+        announced: vec![],
+        withdrawn: keys,
+    })
+    .await
+    .unwrap();
+
+    // Sync point so all churn above has been processed.
+    let status = query_orr_status(&tx).await;
+    assert!(status.vantages.is_empty());
+    assert!(
+        counter_metric_value(&metrics, "bgp_orr_spf_runs_total").abs() < f64::EPSILON,
+        "no SPF may run without a configured vantage"
+    );
+    assert!(gauge_metric_value(&metrics, "bgp_orr_topology_nodes", &[]).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Collect the unicast staging stream (announce prefixes + withdraws per
+/// update) an RR client sees for a fixed scenario, with or without an
+/// ORR vantage configured on it.
+async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String>, Vec<String>)> {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // The BGP-LS topology is present in BOTH runs; the vantage config is
+    // the only variable.
+    feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = orr_client_peer_up(&tx, client, vantage).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1)),
+            make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    // Sync point between the batches: without it the manager may
+    // coalesce them (distribute-coalesce), making the CHUNKING of the
+    // staged stream timing-dependent — this test compares two runs and
+    // needs both paced identically.
+    let _ = query_best_routes(&tx).await;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix1), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Sync point: both batches processed and distributed.
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let mut stream = Vec::new();
+    while let Ok(update) = out_rx.try_recv() {
+        // Order WITHIN one staged update is HashSet-iteration incidental;
+        // sort so the comparison pins semantics, not hasher state.
+        let mut announce: Vec<String> = update
+            .announce
+            .iter()
+            .map(|r| r.prefix.to_string())
+            .collect();
+        announce.sort();
+        let mut withdraw: Vec<String> =
+            update.withdraw.iter().map(|(p, _)| p.to_string()).collect();
+        withdraw.sort();
+        stream.push((announce, withdraw));
+    }
+    stream
+}
+
+/// THE PR guardrail: configuring an `orr_vantage` has ZERO effect on the
+/// staged unicast output — identical announce/withdraw streams with and
+/// without a vantage. The distribution switch lands in the next slice.
+#[tokio::test]
+async fn staged_output_identical_with_and_without_vantages() {
+    let without = unicast_stream_with_vantage(None).await;
+    let with = unicast_stream_with_vantage(Some(vantage_at_node_a())).await;
+    assert!(
+        !without.is_empty(),
+        "scenario must actually stage unicast output"
+    );
+    assert_eq!(
+        without, with,
+        "a configured vantage must not change the staged unicast stream"
+    );
+}
+
 #[tokio::test]
 async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let (tx, rx) = mpsc::channel(64);
@@ -621,6 +978,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
         sendable_families: bgpls_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -684,6 +1042,7 @@ async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
         sendable_families: bgpls_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -738,6 +1097,7 @@ async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
         sendable_families: bgpls_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -757,6 +1117,7 @@ async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
         sendable_families: bgpls_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -809,6 +1170,7 @@ async fn bgpls_routes_received_does_not_reflect_to_unsendable_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -856,6 +1218,7 @@ async fn dirty_resync_includes_bgpls_routes_after_channel_full() {
         sendable_families: bgpls_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -953,6 +1316,7 @@ async fn send_initial_table_includes_bgpls_routes() {
         sendable_families: bgpls_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1168,6 +1532,7 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1245,6 +1610,7 @@ async fn vpn_rr_reflects_non_client_route_to_clients_only() {
             sendable_families: vpn_sendable(),
             is_ebgp: false,
             route_reflector_client: is_client,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -1310,6 +1676,7 @@ async fn vpn_same_peer_relabel_triggers_re_advertise() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1380,6 +1747,7 @@ async fn vpn_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1456,6 +1824,7 @@ async fn send_initial_table_includes_vpn_routes() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1509,6 +1878,7 @@ async fn route_refresh_vpn_re_advertises_routes() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1574,6 +1944,7 @@ async fn rtc_peer_up(
         sendable_families: rtc_sendable(),
         is_ebgp,
         route_reflector_client: rr_client,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -1912,6 +2283,7 @@ async fn default_rtc_not_originated_to_non_rtc_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -2205,6 +2577,7 @@ async fn vpn_rtc_peer_up(
         sendable_families: vpn_rtc_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -2546,6 +2919,7 @@ async fn non_rtc_peer_reflection_unchanged() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -2937,6 +3311,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3474,6 +3849,7 @@ async fn peer_up_triggers_initial_table_dump() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3509,6 +3885,7 @@ async fn route_change_distributes_to_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3558,6 +3935,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3610,6 +3988,7 @@ async fn split_horizon_prevents_echo() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3729,6 +4108,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3779,6 +4159,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3833,6 +4214,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3875,6 +4257,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -3959,6 +4342,7 @@ async fn local_route_sent_to_ibgp_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4051,6 +4435,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4088,6 +4473,7 @@ async fn peer_down_cleans_up_outbound() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4136,6 +4522,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4210,6 +4597,7 @@ async fn withdraw_injected_removes_and_distributes() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4304,6 +4692,7 @@ async fn export_policy_counter_records_single_best_permit() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4386,6 +4775,7 @@ async fn graceful_restart_clears_export_policy_stats() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4456,6 +4846,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4527,6 +4918,7 @@ async fn export_policy_blocks_denied() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4589,6 +4981,7 @@ async fn query_advertised_routes() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4679,6 +5072,7 @@ async fn per_peer_export_policy() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4698,6 +5092,7 @@ async fn per_peer_export_policy() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4787,6 +5182,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4919,6 +5315,7 @@ async fn export_policy_match_next_hop_filters_route() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -4969,6 +5366,7 @@ async fn explain_advertised_route_reports_no_best_route() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5012,6 +5410,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5124,6 +5523,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5217,6 +5617,7 @@ async fn explain_advertised_route_reports_modifications() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5306,6 +5707,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
         sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5384,6 +5786,7 @@ async fn peer_down_cleans_up_export_policy() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5442,6 +5845,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5596,6 +6000,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5740,6 +6145,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -5827,6 +6233,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -6983,6 +7390,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7080,6 +7488,7 @@ async fn query_advertised_count() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7156,6 +7565,7 @@ async fn distribute_changes_filters_unsendable_families() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7282,6 +7692,7 @@ async fn send_initial_table_filters_unsendable_families() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7369,6 +7780,7 @@ async fn dual_stack_peer_receives_both_families() {
         sendable_families: dual_stack_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7419,6 +7831,7 @@ async fn send_initial_table_includes_flowspec_routes() {
         sendable_families: ipv4_flowspec_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7475,6 +7888,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
         sendable_families: ipv4_flowspec_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -7538,6 +7952,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
         sendable_families: bgpls_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8243,6 +8658,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
         sendable_families: vpn_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8322,6 +8738,7 @@ async fn dirty_resync_retries_flowspec_updates() {
         sendable_families: ipv4_flowspec_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8387,6 +8804,7 @@ async fn gr_marks_stale_and_demotes_routes() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8456,6 +8874,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
         sendable_families: ipv4_flowspec_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8743,6 +9162,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -8839,6 +9259,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9207,6 +9628,7 @@ async fn llgr_eor_clears_llgr_stale() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9390,6 +9812,7 @@ fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9721,6 +10144,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9740,6 +10164,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9760,6 +10185,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9824,6 +10250,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9843,6 +10270,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9863,6 +10291,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9926,6 +10355,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -9983,6 +10413,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -10039,6 +10470,7 @@ async fn rr_local_route_to_all_ibgp() {
         sendable_families: ipv4_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -10605,6 +11037,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -10787,6 +11220,7 @@ async fn multipath_send_advertises_multiple_routes() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -10857,6 +11291,7 @@ async fn multipath_send_respects_send_max() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 2,
         negotiated_orf_recv: Vec::new(),
@@ -10937,6 +11372,7 @@ async fn multipath_send_split_horizon() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -10982,6 +11418,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11115,6 +11552,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -11162,6 +11600,7 @@ async fn multipath_peer_down_cleans_up_state() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11210,6 +11649,7 @@ async fn multipath_peer_down_cleans_up_state() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -11248,6 +11688,7 @@ async fn multipath_send_incremental_route_addition() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11372,6 +11813,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11391,6 +11833,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -11482,6 +11925,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11569,6 +12013,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
         sendable_families: dual_stack_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11665,6 +12110,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
         sendable_families: dual_stack_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11765,6 +12211,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
         sendable_families: dual_stack_sendable(),
         is_ebgp: false,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -11874,6 +12321,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 1,
         negotiated_orf_recv: Vec::new(),
@@ -11960,6 +12408,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
         negotiated_orf_recv: Vec::new(),
@@ -12090,6 +12539,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12417,6 +12867,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 2,
         negotiated_orf_recv: Vec::new(),
@@ -12510,6 +12961,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12579,6 +13031,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12652,6 +13105,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 4,
         negotiated_orf_recv: Vec::new(),
@@ -12774,6 +13228,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12797,6 +13252,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12888,6 +13344,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12908,6 +13365,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -12989,6 +13447,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -13009,6 +13468,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -13127,6 +13587,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
             sendable_families: evpn_sendable(),
             is_ebgp: false,
             route_reflector_client: true,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -13197,6 +13658,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -13269,6 +13731,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
             sendable_families: evpn_sendable(),
             is_ebgp: false,
             route_reflector_client: true,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -13310,6 +13773,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -13390,6 +13854,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
             sendable_families: evpn_sendable(),
             is_ebgp: false,
             route_reflector_client: true,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -13515,6 +13980,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -13589,6 +14055,7 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
             sendable_families: evpn_sendable(),
             is_ebgp: false,
             route_reflector_client: true,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -13684,6 +14151,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
             sendable_families: vec![],
             is_ebgp: false,
             route_reflector_client: true,
+            orr_vantage: None,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
@@ -13749,6 +14217,7 @@ fn session_peer_up(
         sendable_families,
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -14741,6 +15210,7 @@ async fn inject_evpn_reflects_to_peer() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -14851,6 +15321,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -14893,6 +15364,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -15065,6 +15537,7 @@ async fn evpn_export_policy_applies_modifications() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -15084,6 +15557,7 @@ async fn evpn_export_policy_applies_modifications() {
         sendable_families: evpn_sendable(),
         is_ebgp: false,
         route_reflector_client: true,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
@@ -16207,6 +16681,7 @@ async fn orf_setup() -> (
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![(Afi::Ipv4, Safi::Unicast)],
@@ -16547,6 +17022,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![],
@@ -16622,6 +17098,7 @@ async fn graceful_restart_clears_orf_filter() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![],
@@ -16705,6 +17182,7 @@ async fn gr_flap_and_reup(
         sendable_families,
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv,
@@ -16887,6 +17365,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
         sendable_families: dual_stack_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: both.clone(),
@@ -17004,6 +17483,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![],
@@ -17031,6 +17511,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
+        orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![family],

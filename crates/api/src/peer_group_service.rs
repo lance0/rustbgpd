@@ -101,6 +101,15 @@ fn proto_definition_to_input(
             rustbgpd_transport::RemovePrivateAs::Replace => "replace".to_string(),
         });
 
+    let orr_vantage = definition
+        .orr_vantage
+        .as_deref()
+        .map(|raw| {
+            raw.parse::<std::net::IpAddr>()
+                .map_err(|e| Status::invalid_argument(format!("invalid orr_vantage {raw:?}: {e}")))
+        })
+        .transpose()?;
+
     Ok(PeerGroupDefinition {
         hold_time,
         max_prefixes: definition.max_prefixes,
@@ -113,6 +122,7 @@ fn proto_definition_to_input(
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop,
         route_reflector_client: definition.route_reflector_client,
+        orr_vantage,
         route_server_client: definition.route_server_client,
         remove_private_as: if remove_private_as.is_empty() {
             None
@@ -155,6 +165,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
         route_reflector_client: definition.route_reflector_client,
+        orr_vantage: definition.orr_vantage.map(|addr| addr.to_string()),
         route_server_client: definition.route_server_client,
         remove_private_as: definition.remove_private_as.clone(),
         add_path_receive: definition
@@ -641,6 +652,25 @@ mod tests {
             route_server_client: Some(true),
             ..Default::default()
         }
+    }
+
+    /// `orr_vantage` round-trips proto string → typed `IpAddr` → proto
+    /// string, and an unparseable vantage is rejected with
+    /// `InvalidArgument` rather than silently dropped.
+    #[test]
+    fn orr_vantage_round_trips_and_rejects_invalid() {
+        let mut definition = sample_definition();
+        definition.orr_vantage = Some("192.0.2.7".into());
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.orr_vantage, Some("192.0.2.7".parse().unwrap()));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.orr_vantage.as_deref(), Some("192.0.2.7"));
+
+        let mut invalid = sample_definition();
+        invalid.orr_vantage = Some("not-an-ip".into());
+        let err = proto_definition_to_input(invalid).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("orr_vantage"));
     }
 
     #[tokio::test]
