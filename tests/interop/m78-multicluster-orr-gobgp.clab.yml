@@ -1,0 +1,127 @@
+# Containerlab topology: 2 rustbgpd RRs (different clusters) + GoBGP LS source
+# + 1 GoBGP PE and 1 GoBGP client per cluster
+# (M78 — RFC 9107 multi-cluster ORR with inter-RR Add-Path receipt)
+#
+# Validates the closing RFC 9107 deployment story: "optimal routing between
+# clients of different clusters relies upon all route reflectors learning
+# all paths... BGP ADD-PATH needs to be deployed between route reflectors."
+# rr1 (cluster 1.1.1.1) and rr2 (cluster 2.2.2.2) hold a standard non-client
+# iBGP session with Add-Path negotiated both directions; pe1/pe2 announce
+# the SAME prefix into different clusters; each RR learns the other
+# cluster's path ONLY over the inter-RR session, and each cluster's client
+# still gets its own topologically-correct per-vantage best.
+#
+# gobgp-src (linkstate only) peers with BOTH RRs so both LSDBs hold the full
+# square — deliberately simpler than reflecting BGP-LS between the RRs,
+# which the non-client inter-RR session would suppress (RFC 4456: a
+# non-client iBGP route is never reflected to another non-client).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   containerlab deploy -t tests/interop/m78-multicluster-orr-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m78-multicluster-orr-gobgp.sh
+#   containerlab destroy -t tests/interop/m78-multicluster-orr-gobgp.clab.yml
+
+name: m78-multicluster-orr-gobgp
+
+topology:
+  nodes:
+    rr1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m78-rr1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.3.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.12.1/24 dev eth4
+        - ip link set eth4 up
+      env:
+        RUST_LOG: info
+
+    rr2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m78-rr2.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.5.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.4.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.12.2/24 dev eth4
+        - ip link set eth4 up
+      env:
+        RUST_LOG: info
+
+    gobgp-src:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m78-src.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.5.2/24 dev eth2
+        - ip link set eth2 up
+
+    gobgp-pe1:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m78-pe1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-pe2:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m78-pe2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-c1:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m78-c1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.3.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-c2:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m78-c2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.4.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rr1:eth1", "gobgp-src:eth1"]
+    - endpoints: ["rr1:eth2", "gobgp-pe1:eth1"]
+    - endpoints: ["rr1:eth3", "gobgp-c1:eth1"]
+    - endpoints: ["rr1:eth4", "rr2:eth4"]
+    - endpoints: ["rr2:eth1", "gobgp-src:eth2"]
+    - endpoints: ["rr2:eth2", "gobgp-pe2:eth1"]
+    - endpoints: ["rr2:eth3", "gobgp-c2:eth1"]

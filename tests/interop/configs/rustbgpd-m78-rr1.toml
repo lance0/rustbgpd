@@ -1,0 +1,62 @@
+# M78 — RFC 9107 multi-cluster ORR receipt, RR for cluster 1.1.1.1.
+#
+# Clients: the linkstate-only BGP-LS source, pe1 (announces the contested
+# prefix with next-hop X), and c1 (pinned to ORR vantage A). rr2 is a
+# standard NON-client iBGP peer — the RFC 9107 inter-RR session — with
+# Add-Path both directions so every cluster's client-learned path crosses
+# the cluster boundary regardless of either RR's own best.
+
+[global]
+asn = 65001
+router_id = "1.1.1.1"
+listen_port = 179
+cluster_id = "1.1.1.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "bgpls-source"
+hold_time = 90
+route_reflector_client = true
+families = ["linkstate"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "pe1"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.3.2"
+remote_asn = 65001
+description = "client-1"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast"]
+orr_vantage = "10.0.8.1"
+
+# Inter-RR session: NOT a route-reflector client (RFC 4456 non-client
+# iBGP between reflectors of different clusters), Add-Path both ways.
+[[neighbors]]
+address = "10.0.12.2"
+remote_asn = 65001
+description = "rr2"
+hold_time = 90
+families = ["ipv4_unicast"]
+
+[neighbors.add_path]
+receive = true
+send = true
+send_max = 4
+
+[security.grpc]
+enforcement = "legacy"
