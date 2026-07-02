@@ -48,11 +48,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plus SPF/topology telemetry. Zero cost and zero behavior change when no
   vantage is configured (pinned by an output-equality guardrail test).
   Deferred (ADR-0095): backup vantages, inter-RR Add-Path (multi-cluster),
-  VPN-ORR, TE/multi-topology metrics. M76 proves live divergence: two
+  TE/multi-topology metrics. M76 proves live divergence: two
   GoBGP clients of one RR receive different best paths for the same
   prefix, flip on a topology metric change, and collapse to the identical
   standard best when the topology is withdrawn. **No other open-source
   BGP daemon ships ORR.**
+
+- **VPN-ORR: per-vantage best selection for VPNv4/VPNv6 reflection.**
+  ORR now composes with the SAFI-128 route reflector (the ADR-0095
+  deferral, un-deferred): an ORR client's VPN routes are ranked with its
+  vantage's interior cost to each candidate's next-hop, exactly like
+  unicast — same candidate filtering (split horizon + RFC 4456
+  suppression before ranking), same interior-cost slot in the tiebreak
+  chain, same unknown-cost-least-preferred and unresolved-vantage
+  fallback semantics, live across receive, initial dump, dirty resync,
+  route-refresh replay, and topology-driven restage. The RFC 4684
+  RT-Constrain gate applies to the vantage winner's Route Targets (the
+  route actually advertised), not the Loc-RIB best's. Non-ORR peers are
+  byte-identical to before. (M76 pins the unicast ORR wire behavior;
+  VPN-ORR is the same engine — a VPN-ORR interop receipt can join a
+  future M-job if demanded.)
 
 - **RT-Constrain (RFC 4684, AFI 1 / SAFI 132) — constrained VPN route
   distribution.** The scalability companion to the VPNv4/v6 route reflector:

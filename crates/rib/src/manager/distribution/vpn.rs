@@ -1,8 +1,33 @@
 use super::{
-    AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
-    PolicyChain, RibManager, RouteContext, Safi, gauge_val, record_export_policy_eval, route_type,
-    should_suppress_ibgp_inner, vpn_routes_equal, warn,
+    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib,
+    NeighborPolicyStats, PolicyChain, RibManager, RouteContext, Safi, gauge_val,
+    record_export_policy_eval, route_type, should_suppress_ibgp_inner, vpn_routes_equal, warn,
 };
+use crate::loc_rib::vpn_tiebreak_orr;
+
+/// A unicast-shaped probe of a VPN route for the shared RFC 4456
+/// suppression helper: `should_suppress_ibgp_inner` only reads
+/// peer/origin identity, so the inner prefix stands in and the
+/// attributes stay empty (same shape the pre-ORR staging used).
+fn vpn_suppression_probe(route: &crate::route::VpnRibRoute) -> crate::route::Route {
+    crate::route::Route {
+        prefix: route.inner_prefix(),
+        next_hop: route.next_hop,
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: route.peer,
+        attributes: std::sync::Arc::new(vec![]),
+        received_at: route.received_at,
+        origin_type: route.origin_type,
+        peer_router_id: route.peer_router_id,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    }
+}
 
 impl RibManager {
     /// Stage VPNv4/VPNv6 announces and withdrawals for a set of affected keys.
@@ -20,6 +45,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn stage_vpn_routes(
         loc_rib: &LocRib,
+        ribs: &HashMap<IpAddr, AdjRibIn>,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         keys: &HashSet<crate::route::VpnRibRouteKey>,
@@ -31,6 +57,7 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         rtc_filter: Option<&crate::manager::RtcMembership>,
+        orr_ctx: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
@@ -49,11 +76,50 @@ impl RibManager {
                 continue;
             }
 
-            let Some(best) = loc_rib.get_vpn(key) else {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
-                }
-                continue;
+            // Per-key best. An RFC 9107 ORR peer with a resolved vantage
+            // does NOT take the Loc-RIB best: the per-target candidate
+            // set (every Adj-RIB-In entry for the key that survives split
+            // horizon and RFC 4456 reflection — the unicast
+            // `orr_candidates` filter adapted to `VpnRibRoute`) is ranked
+            // with the vantage's interior cost to each candidate's
+            // next-hop. A plain peer keeps the Loc-RIB best, unchanged.
+            let best = if let Some((orr_topology, orr_spf)) = orr_ctx {
+                let winner = ribs
+                    .values()
+                    .filter_map(|rib| rib.get_vpn(key))
+                    .filter(|candidate| {
+                        candidate.peer != target_peer
+                            && !should_suppress_ibgp_inner(
+                                &vpn_suppression_probe(candidate),
+                                target_is_ebgp,
+                                target_is_rr_client,
+                                cluster_id,
+                                peer_is_rr_client,
+                            )
+                    })
+                    .min_by(|a, b| {
+                        vpn_tiebreak_orr(
+                            a,
+                            b,
+                            orr_spf.cost_to(orr_topology, a.next_hop),
+                            orr_spf.cost_to(orr_topology, b.next_hop),
+                        )
+                    });
+                let Some(winner) = winner else {
+                    if rib_out.get_vpn(key).is_some() {
+                        vpn_withdraw.push(key.clone());
+                    }
+                    continue;
+                };
+                winner
+            } else {
+                let Some(best) = loc_rib.get_vpn(key) else {
+                    if rib_out.get_vpn(key).is_some() {
+                        vpn_withdraw.push(key.clone());
+                    }
+                    continue;
+                };
+                best
             };
 
             // RFC 4684 outbound gate: a peer that negotiated RT-Constrain
@@ -61,7 +127,10 @@ impl RibManager {
             // advertised membership (`None` = SAFI 132 not negotiated ⇒
             // unfiltered). Membership is per-peer, so the one gate covers
             // both VPNv4 and VPNv6 keys. Miss ⇒ withdraw-if-present,
-            // exactly the sendable-family gate shape above.
+            // exactly the sendable-family gate shape above. For an ORR
+            // peer the gate applies to the vantage WINNER's extended
+            // communities — the route actually being advertised — not the
+            // Loc-RIB best's.
             if let Some(membership) = rtc_filter
                 && !membership.matches_any(best.extended_communities())
             {
@@ -71,6 +140,9 @@ impl RibManager {
                 continue;
             }
 
+            // The two suppression checks below are no-ops for an ORR
+            // winner (its candidate set is pre-filtered above); they
+            // decide only for the Loc-RIB best of a plain peer.
             if best.peer == target_peer {
                 if rib_out.get_vpn(key).is_some() {
                     vpn_withdraw.push(key.clone());
@@ -78,25 +150,8 @@ impl RibManager {
                 continue;
             }
 
-            let probe = crate::route::Route {
-                prefix: best.inner_prefix(),
-                next_hop: best.next_hop,
-                link_local_next_hop: None,
-                next_hop_scope: None,
-                peer: best.peer,
-                attributes: std::sync::Arc::new(vec![]),
-                received_at: best.received_at,
-                origin_type: best.origin_type,
-                peer_router_id: best.peer_router_id,
-                is_stale: false,
-                is_llgr_stale: false,
-                path_id: 0,
-                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-            };
             if should_suppress_ibgp_inner(
-                &probe,
+                &vpn_suppression_probe(best),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -172,6 +227,10 @@ impl RibManager {
     /// The selected route is reflected as received: Route Distinguisher,
     /// MPLS label stack, and next-hop pass through unchanged (ADR-0077 §6),
     /// with ordinary BGP attribute handling applied by transport.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "VPN recompute keeps loc-rib selection and per-peer ORR staging together"
+    )]
     pub(in crate::manager) fn recompute_and_distribute_vpn(
         &mut self,
         affected: &HashSet<crate::route::VpnRibRouteKey>,
@@ -190,17 +249,42 @@ impl RibManager {
             }
         }
 
-        if changed_keys.is_empty() {
+        // An RFC 9107 ORR peer selects from the per-target candidate set,
+        // not the Loc-RIB best — a candidate change that leaves the
+        // Loc-RIB best untouched can still flip a vantage best, so
+        // ORR-bound peers stage every affected key (the VPN parallel of
+        // the unicast `all_affected` inclusion in `distribute_changes`).
+        let any_resolved_orr_peer = self.outbound_peers.keys().any(|peer| {
+            self.peer_orr_vantage
+                .get(peer)
+                .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
+        });
+        if changed_keys.is_empty() && !any_resolved_orr_peer {
             return;
         }
 
-        self.metrics
-            .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
+        if !changed_keys.is_empty() {
+            self.metrics
+                .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
+        }
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            // A peer bound to a vantage that resolved this pass takes the
+            // per-vantage best; an unresolved vantage silently falls back
+            // to the standard Loc-RIB best (same shape as unicast).
+            let orr_ctx = self
+                .peer_orr_vantage
+                .get(&peer)
+                .and_then(|vantage| self.orr.spf.get(vantage))
+                .map(|spf| (&self.orr.topology, spf));
+            let staged_keys = if orr_ctx.is_some() {
+                affected
+            } else {
+                &changed_keys
+            };
             let sendable = self.peer_sendable_families.get(&peer).cloned();
-            if !changed_keys.iter().any(|key| {
+            if !staged_keys.iter().any(|key| {
                 sendable
                     .as_ref()
                     .is_some_and(|families| families.contains(&key.afi_safi()))
@@ -228,9 +312,10 @@ impl RibManager {
             let mut vpn_withdraw = Vec::new();
             Self::stage_vpn_routes(
                 &self.loc_rib,
+                &self.ribs,
                 rib_out,
                 &self.peer_is_rr_client,
-                &changed_keys,
+                staged_keys,
                 peer,
                 target_peer_asn,
                 target_peer_group,
@@ -239,6 +324,7 @@ impl RibManager {
                 self.cluster_id,
                 sendable.as_ref(),
                 rtc_filter.as_ref(),
+                orr_ctx,
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,

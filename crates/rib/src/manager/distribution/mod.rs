@@ -935,6 +935,7 @@ impl RibManager {
             if resync && !effective_l3vpn_keys.is_empty() {
                 Self::stage_vpn_routes(
                     loc_rib,
+                    &self.ribs,
                     rib_out,
                     &self.peer_is_rr_client,
                     &effective_l3vpn_keys,
@@ -946,6 +947,7 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     rtc_filter.as_ref(),
+                    orr_ctx,
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,

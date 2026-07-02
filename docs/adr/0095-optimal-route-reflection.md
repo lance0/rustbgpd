@@ -93,8 +93,11 @@ BIRD/GoBGP/OpenBGPd lack it); only commercial routers do.
   vantage redundancy.
 - **Inter-RR Add-Path** (required by RFC 9107 only for multi-cluster
   deployments) — when a second-RR topology lands.
-- **VPN-ORR** (vantage ranking for SAFI 128) — natural composition,
-  queued as a follow-on candidate.
+- **VPN-ORR** (vantage ranking for SAFI 128) — **shipped**: an ORR
+  client's VPNv4/VPNv6 routes are ranked with its vantage's interior
+  cost to each candidate's next-hop, exactly like unicast
+  (`vpn_tiebreak_orr`, same slot in the chain; the RFC 4684 RTC gate
+  applies to the vantage winner).
 - **TE / Multi-Topology metrics** — operator demand.
 - **RFC 9107 §3.2 per-policy multiple Decision Processes** — policy
   divergence below step (e) is out of scope until a concrete case appears.
