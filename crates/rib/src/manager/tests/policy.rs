@@ -1173,3 +1173,142 @@ async fn peer_down_cleans_up_export_policy() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// ADR-0096 explain slice: when the deciding export-chain member is an
+/// `.rpol` policy, the explain reason labels the decision
+/// `<chain-ref>:<term>`, and the live per-term hit counters are
+/// queryable — with explain itself not counting (side-effect-free).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end walk: install, distribute, explain, query counters"
+)]
+async fn explain_names_rpol_term_and_term_hit_counters_are_queryable() {
+    const RPOL: &str = r"
+policy no-doc {
+    term block-doc {
+        if route.prefix == 203.0.113.0/24 { reject }
+    }
+}
+";
+    let file = rustbgpd_policy::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let mut store = rustbgpd_policy::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("no-doc", &[], &mut store)
+        .expect("policy exists");
+    let chain =
+        rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+            "no-doc".to_string(),
+            Arc::new(compiled),
+        )]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(chain),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // One route the rpol term rejects, one it falls through to permit.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let explain = query_explain_advertised_route(&tx, target, prefix).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(explain.reasons[0].code, "policy_denied");
+    assert!(
+        explain.reasons[0].message.contains("no-doc:block-doc"),
+        "expected the deciding rpol term in the label, got {:?}",
+        explain.reasons[0].message
+    );
+
+    // Live counters: the two distributed routes evaluated once each;
+    // the deny term matched exactly one. The explain above must not
+    // have counted (side-effect-free read).
+    let hits = {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryExportPolicyTermHits {
+            peer: None,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].peer, Some(target));
+    assert_eq!(hits[0].evals, 2);
+    assert_eq!(hits[0].terms.len(), 1);
+    assert_eq!(hits[0].terms[0].policy.as_deref(), Some("no-doc"));
+    assert_eq!(hits[0].terms[0].term.as_deref(), Some("block-doc"));
+    assert_eq!(hits[0].terms[0].hits, 1);
+
+    // The peer-filtered form answers the same; an unknown peer answers
+    // empty.
+    let filtered = {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryExportPolicyTermHits {
+            peer: Some(target),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].terms[0].hits, 1);
+    let missing = {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryExportPolicyTermHits {
+            peer: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    assert!(missing.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}

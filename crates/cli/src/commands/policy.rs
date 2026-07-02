@@ -22,7 +22,7 @@ use crate::proto::{
     self, ClearGlobalExportChainRequest, ClearGlobalImportChainRequest,
     ClearNeighborExportChainRequest, ClearNeighborImportChainRequest, DeletePolicyRequest,
     ExplainImportPolicyRequest, GetGlobalPolicyChainsRequest, GetNeighborPolicyChainsRequest,
-    GetPolicyRequest, ListPoliciesRequest, SetGlobalExportChainRequest,
+    GetPolicyRequest, GetPolicyStatsRequest, ListPoliciesRequest, SetGlobalExportChainRequest,
     SetGlobalImportChainRequest, SetNeighborExportChainRequest, SetNeighborImportChainRequest,
     SetPolicyRequest,
 };
@@ -387,6 +387,93 @@ pub async fn test(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct JsonPolicyStats {
+    peer_address: String,
+    direction: String,
+    routes_evaluated: u64,
+    terms: Vec<JsonPolicyTermStat>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonPolicyTermStat {
+    policy_index: u32,
+    policy: Option<String>,
+    term_index: u32,
+    term: Option<String>,
+    hits: u64,
+}
+
+/// `rbgp policy stats [--peer ADDR] [--direction export]` — live
+/// per-term hit counters of the installed chains (ADR-0096).
+pub async fn stats(
+    connection: Connection,
+    peer: Option<&str>,
+    direction: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .get_policy_stats(GetPolicyStatsRequest {
+            peer_address: peer.unwrap_or_default().to_string(),
+            direction: direction.to_string(),
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        let out: Vec<JsonPolicyStats> = resp
+            .chains
+            .iter()
+            .map(|chain| JsonPolicyStats {
+                peer_address: chain.peer_address.clone(),
+                direction: chain.direction.clone(),
+                routes_evaluated: chain.routes_evaluated,
+                terms: chain
+                    .terms
+                    .iter()
+                    .map(|t| JsonPolicyTermStat {
+                        policy_index: t.policy_index,
+                        policy: (!t.policy.is_empty()).then(|| t.policy.clone()),
+                        term_index: t.term_index,
+                        term: (!t.term.is_empty()).then(|| t.term.clone()),
+                        hits: t.hits,
+                    })
+                    .collect(),
+            })
+            .collect();
+        output::print_json_pretty(&out)?;
+        return Ok(());
+    }
+
+    if resp.chains.is_empty() {
+        println!("No installed policy chains");
+        return Ok(());
+    }
+    for chain in &resp.chains {
+        println!(
+            "{} {} chain — {} routes evaluated since install",
+            chain.peer_address, chain.direction, chain.routes_evaluated
+        );
+        println!("  {:<32} {:<24} HITS", "POLICY", "TERM");
+        for t in &chain.terms {
+            let policy = if t.policy.is_empty() {
+                "inline".to_string()
+            } else {
+                t.policy.clone()
+            };
+            let term = if t.term.is_empty() {
+                format!("statement {}", t.term_index)
+            } else {
+                t.term.clone()
+            };
+            println!("  {policy:<32} {term:<24} {}", t.hits);
+        }
+    }
+    Ok(())
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -519,6 +606,11 @@ struct JsonImportExplainStatement {
     action: String,
     matched_conditions: Vec<String>,
     modifications: Vec<String>,
+    // rpol deciding-term name (ADR-0096); `None` for TOML statements
+    // and fallthroughs.
+    term: Option<String>,
+    // rpol per-term trace lines; empty for TOML members.
+    term_traces: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -667,6 +759,9 @@ pub async fn explain_import(
                     println!("    statements:");
                 }
                 println!("      {}", statement_line(s));
+                for trace in &s.term_traces {
+                    println!("        {trace}");
+                }
             }
         }
     }
@@ -686,6 +781,15 @@ fn statement_line(s: &proto::ImportExplainStatementStep) -> String {
     let mut line = format!("[{}] policy {policy}", s.policy_index);
     if s.default_action {
         line.push_str(&format!(" default-action {}", s.action));
+    } else if !s.term.is_empty() {
+        // rpol member: the deciding term has a name.
+        line.push_str(&format!(" term {} {}", s.term, s.action));
+        if !s.matched_conditions.is_empty() {
+            line.push_str(&format!("  match: {}", s.matched_conditions.join(", ")));
+        }
+        if !s.modifications.is_empty() {
+            line.push_str(&format!("  set: {}", s.modifications.join(", ")));
+        }
     } else {
         line.push_str(&format!(" statement {} {}", s.statement_index, s.action));
         if !s.matched_conditions.is_empty() {
@@ -739,6 +843,8 @@ fn statement_to_json(s: &proto::ImportExplainStatementStep) -> JsonImportExplain
         action: s.action.clone(),
         matched_conditions: s.matched_conditions.clone(),
         modifications: s.modifications.clone(),
+        term: (!s.term.is_empty()).then(|| s.term.clone()),
+        term_traces: s.term_traces.clone(),
     }
 }
 
@@ -1280,6 +1386,39 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn stats_renders_text_and_json() {
+        let server = spawn_mock_server(None).await;
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        stats(json_conn, Some("10.0.0.2"), "export", true)
+            .await
+            .unwrap();
+        let text_conn = connect(&server.addr, None).await.unwrap();
+        stats(text_conn, None, "export", false).await.unwrap();
+    }
+
+    #[test]
+    fn statement_line_renders_rpol_term_name() {
+        let step = proto::ImportExplainStatementStep {
+            policy_index: 0,
+            policy_name: "customer-in(200)".to_string(),
+            default_action: false,
+            statement_index: 2,
+            action: "permit".to_string(),
+            matched_conditions: vec!["guard route.prefix in customers".to_string()],
+            modifications: vec!["local_pref 100 -> 200".to_string()],
+            term: "customer-routes".to_string(),
+            term_traces: vec![
+                "term rpki-guard: route.rpki == invalid => reject [not matched]".to_string(),
+            ],
+        };
+        assert_eq!(
+            statement_line(&step),
+            "[0] policy customer-in(200) term customer-routes permit  \
+             match: guard route.prefix in customers  set: local_pref 100 -> 200"
+        );
+    }
+
     #[test]
     fn statement_line_renders_match_and_set_clauses() {
         let step = proto::ImportExplainStatementStep {
@@ -1293,6 +1432,8 @@ mod tests {
                 "community 65001:100".to_string(),
             ],
             modifications: vec!["local_pref 100 -> 200".to_string()],
+            term: String::new(),
+            term_traces: vec![],
         };
         assert_eq!(
             statement_line(&step),
@@ -1312,6 +1453,8 @@ mod tests {
             action: "deny".to_string(),
             matched_conditions: vec![],
             modifications: vec![],
+            term: String::new(),
+            term_traces: vec![],
         };
         assert_eq!(
             statement_line(&step),
@@ -1329,6 +1472,8 @@ mod tests {
             action: "permit".to_string(),
             matched_conditions: vec!["any".to_string()],
             modifications: vec![],
+            term: String::new(),
+            term_traces: vec![],
         };
         let j = statement_to_json(&matched);
         assert_eq!(j.statement_index, Some(3));

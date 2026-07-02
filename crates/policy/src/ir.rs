@@ -244,6 +244,14 @@ pub struct CompiledChain {
     pub community_sets: Vec<Arc<CommunitySet>>,
     /// Compiled regexes referenced by [`MatchExpr::AsPathMatches`].
     pub as_path_regexes: Vec<Arc<AsPathRegex>>,
+    /// Source names of `prefix_sets` entries (same indexing), for
+    /// explain rendering. `None` for sets the frontend had no name for
+    /// (the TOML compiler; inline data). Participates in `PartialEq`
+    /// like everything else here: renaming a set changes chain
+    /// identity, which is honest — the rename is a config change.
+    pub prefix_set_names: Vec<Option<String>>,
+    /// Source names of `community_sets` entries (same indexing).
+    pub community_set_names: Vec<Option<String>>,
 }
 
 impl CompiledChain {
@@ -255,6 +263,8 @@ impl CompiledChain {
             prefix_sets: Vec::new(),
             community_sets: Vec::new(),
             as_path_regexes: Vec::new(),
+            prefix_set_names: Vec::new(),
+            community_set_names: Vec::new(),
         }
     }
 

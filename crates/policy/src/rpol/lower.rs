@@ -99,6 +99,8 @@ pub(super) struct Lowerer<'a> {
     prefix_sets: Vec<Arc<PrefixSet>>,
     community_sets: Vec<Arc<CommunitySet>>,
     as_path_regexes: Vec<Arc<AsPathRegex>>,
+    prefix_set_names: Vec<Option<String>>,
+    community_set_names: Vec<Option<String>>,
     prefix_set_ids: HashMap<String, SetId>,
     community_set_ids: HashMap<String, SetId>,
     regex_ids: HashMap<String, RegexId>,
@@ -113,6 +115,8 @@ impl<'a> Lowerer<'a> {
             prefix_sets: Vec::new(),
             community_sets: Vec::new(),
             as_path_regexes: Vec::new(),
+            prefix_set_names: Vec::new(),
+            community_set_names: Vec::new(),
             prefix_set_ids: HashMap::new(),
             community_set_ids: HashMap::new(),
             regex_ids: HashMap::new(),
@@ -130,6 +134,7 @@ impl<'a> Lowerer<'a> {
             let set = store.prefix_set(&entries);
             let id = SetId(u32::try_from(lowerer.prefix_sets.len()).expect("fits u32"));
             lowerer.prefix_sets.push(set);
+            lowerer.prefix_set_names.push(Some(def.name.node.clone()));
             lowerer.prefix_set_ids.insert(def.name.node.clone(), id);
         }
         for def in &file.community_sets {
@@ -138,6 +143,9 @@ impl<'a> Lowerer<'a> {
             let set = store.community_set(&criteria);
             let id = SetId(u32::try_from(lowerer.community_sets.len()).expect("fits u32"));
             lowerer.community_sets.push(set);
+            lowerer
+                .community_set_names
+                .push(Some(def.name.node.clone()));
             lowerer.community_set_ids.insert(def.name.node.clone(), id);
         }
         // Regexes are interned lazily at each use site (they can be
@@ -163,6 +171,8 @@ impl<'a> Lowerer<'a> {
             prefix_sets: self.prefix_sets.clone(),
             community_sets: self.community_sets.clone(),
             as_path_regexes: self.as_path_regexes.clone(),
+            prefix_set_names: self.prefix_set_names.clone(),
+            community_set_names: self.community_set_names.clone(),
         }
     }
 
@@ -186,6 +196,8 @@ impl<'a> Lowerer<'a> {
             prefix_sets: self.prefix_sets.clone(),
             community_sets: self.community_sets.clone(),
             as_path_regexes: self.as_path_regexes.clone(),
+            prefix_set_names: self.prefix_set_names.clone(),
+            community_set_names: self.community_set_names.clone(),
         }
     }
 

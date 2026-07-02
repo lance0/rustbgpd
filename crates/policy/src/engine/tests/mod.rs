@@ -9,6 +9,8 @@ mod aspath_regex;
 mod chain;
 mod community;
 mod evpn_route_type;
+mod guard_render;
+mod hit_counters;
 mod ir_parity;
 mod large_community;
 mod modifications;

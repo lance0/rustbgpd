@@ -503,6 +503,18 @@ service PolicyService {
   // affected, no policy counters increment. V1 scope is IPv4 / IPv6
   // unicast routes.
   rpc TestPolicy(TestPolicyRequest) returns (TestPolicyResponse);
+
+  // GetPolicyStats — live per-term guard-hit counters for installed
+  // policy chains (ADR-0096 Decision 3.3, the IOS-XR "show pcl" idea).
+  // Counters accumulate on the live evaluation path since a chain
+  // instance was installed and reset when the chain is replaced
+  // (policy reload / hot-apply installs a fresh instance). V1 surfaces
+  // the export direction (the RIB manager owns those chains); import
+  // counters accumulate in the session tasks but have no read surface
+  // yet.
+  //
+  // Side-effect free read; does not reset any counter.
+  rpc GetPolicyStats(GetPolicyStatsRequest) returns (GetPolicyStatsResponse);
 }
 
 service PeerGroupService {
@@ -917,8 +929,22 @@ message ImportExplainStatementStep {
   // Rendered attribute modifications this statement contributes, with
   // "before -> after" for scalar attributes (the before side is the
   // route's pre-policy value — chain modifications accumulate and
-  // apply once, so later statements never see earlier edits).
+  // apply once, so later statements never see earlier edits). For an
+  // rpol member this is the policy's merged contribution: matched
+  // continue-terms folded under the deciding permit, mirroring the
+  // live evaluator's merge.
   repeated string modifications = 7;
+  // rpol term name of the deciding term (ADR-0096). Empty for TOML
+  // statements and for default-action fallthroughs.
+  string term = 8;
+  // Per-term rendered trace lines for an rpol member, in walk order:
+  // "term NAME: GUARD => ACTION [matched|not matched]". Guards render
+  // in rpol surface syntax with sets shown by their source name;
+  // human-oriented, not a machine-parsable grammar. Terms after the
+  // deciding one were never evaluated and carry no line; on a
+  // default-action fallthrough every term appears. Empty for TOML
+  // members.
+  repeated string term_traces = 9;
 }
 
 message ExplainImportPolicyResponse {
@@ -987,6 +1013,51 @@ message TestPolicyDiff {
   // Human-readable attribute changes, e.g. "local_pref 100 - 200" or
   // "communities + 65001:999".
   repeated string changes = 4;
+}
+
+message GetPolicyStatsRequest {
+  // Optional peer filter (IPv4 or IPv6 literal). Empty = every peer
+  // with an installed chain.
+  string peer_address = 1;
+  // Direction filter: "export" (the default when empty). "import" is
+  // reserved — the daemon rejects it until the import-side read
+  // surface lands.
+  string direction = 2;
+}
+
+// One term's live hit counter within an installed chain.
+message PolicyTermStat {
+  // 0-based position of the policy within the chain.
+  uint32 policy_index = 1;
+  // Chain-member name. Empty when the policy is inline / anonymous
+  // (operators read "inline").
+  string policy = 2;
+  // 0-based term index within the policy.
+  uint32 term_index = 3;
+  // rpol term name (multi-step rpol terms are suffixed ".1", ".2", ...
+  // by the compiler). Empty for TOML statements — address those by
+  // term_index.
+  string term = 4;
+  // Times this term's guard matched since chain install.
+  uint64 hits = 5;
+}
+
+// Live counters for one installed chain instance.
+message PolicyChainStats {
+  // Peer the chain is installed for. "global" for the shared global
+  // fallback chain instance (peers evaluated against the fallback
+  // before any per-peer install).
+  string peer_address = 1;
+  // "export" (import arrives with the import-side read surface).
+  string direction = 2;
+  // Routes evaluated through this chain since install — the
+  // denominator for the per-term hit counts.
+  uint64 routes_evaluated = 3;
+  repeated PolicyTermStat terms = 4;
+}
+
+message GetPolicyStatsResponse {
+  repeated PolicyChainStats chains = 1;
 }
 
 message TestPolicyResponse {

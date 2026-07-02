@@ -489,7 +489,9 @@ impl RibManager {
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
-            let export_pol = self.export_policy_for(peer).cloned();
+            let export_pol = self
+                .export_policy_for(peer)
+                .map(rustbgpd_policy::PolicyChain::share);
             let add_path_send_max = if peer_add_path {
                 self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0)
             } else {

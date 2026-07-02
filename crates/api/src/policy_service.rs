@@ -126,6 +126,8 @@ fn statement_step_to_proto(
         },
         matched_conditions: step.matched_conditions.clone(),
         modifications: step.modifications.clone(),
+        term: step.term_name.clone().unwrap_or_default(),
+        term_traces: step.term_traces.clone(),
     }
 }
 
@@ -1504,6 +1506,74 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             &peer_context,
         )))
     }
+
+    async fn get_policy_stats(
+        &self,
+        request: Request<proto::GetPolicyStatsRequest>,
+    ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
+        use rustbgpd_rib::RibUpdate;
+
+        let req = request.into_inner();
+        match req.direction.as_str() {
+            "" | "export" => {}
+            "import" => {
+                return Err(Status::unimplemented(
+                    "import-side hit counters have no read surface yet; \
+                     counters accumulate and the query arrives in a later slice",
+                ));
+            }
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "direction must be \"import\" or \"export\", got {other:?}"
+                )));
+            }
+        }
+        let peer: Option<IpAddr> = if req.peer_address.is_empty() {
+            None
+        } else {
+            Some(req.peer_address.parse().map_err(|_| {
+                Status::invalid_argument(format!("invalid peer address {:?}", req.peer_address))
+            })?)
+        };
+        let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
+            Status::failed_precondition("policy stats runtime unavailable on this listener")
+        })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryExportPolicyTermHits {
+                peer,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        let chains = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        Ok(Response::new(proto::GetPolicyStatsResponse {
+            chains: chains
+                .into_iter()
+                .map(|chain| proto::PolicyChainStats {
+                    peer_address: chain
+                        .peer
+                        .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
+                    direction: "export".to_string(),
+                    routes_evaluated: chain.evals,
+                    terms: chain
+                        .terms
+                        .into_iter()
+                        .map(|row| proto::PolicyTermStat {
+                            policy_index: u32::try_from(row.policy_index).unwrap_or(u32::MAX),
+                            policy: row.policy.unwrap_or_default(),
+                            term_index: u32::try_from(row.term_index).unwrap_or(u32::MAX),
+                            term: row.term.unwrap_or_default(),
+                            hits: row.hits,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }))
+    }
 }
 
 /// Route selection scope for one `TestPolicy` dry run.
@@ -1762,6 +1832,11 @@ mod tests {
                     action: PolicyAction::Permit,
                     matched_conditions: vec!["community 65001:100".into()],
                     modifications: vec!["local_pref 100 -> 200".into()],
+                    term_name: Some("customer-routes".into()),
+                    term_traces: vec![
+                        "term customer-routes: route.communities has 65001:100 => accept [matched]"
+                            .into(),
+                    ],
                 },
                 StatementAttribution {
                     policy_index: 1,
@@ -1770,6 +1845,8 @@ mod tests {
                     action: PolicyAction::Permit,
                     matched_conditions: vec![],
                     modifications: vec![],
+                    term_name: None,
+                    term_traces: vec![],
                 },
             ],
         };
@@ -2598,5 +2675,109 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(resp.routes_evaluated, 2);
         assert_eq!(resp.accepted, 2);
         assert!(resp.diffs.is_empty());
+    }
+
+    // -- GetPolicyStats (ADR-0096 Decision 3.3) ---------------------
+
+    /// Fake RIB backend answering the term-hits query with one
+    /// installed chain snapshot.
+    fn stats_service() -> PolicyService {
+        let (peer_tx, _peer_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
+                        assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
+                        let _ = reply.send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
+                            peer,
+                            evals: 7,
+                            terms: vec![
+                                rustbgpd_policy::TermHitRow {
+                                    policy_index: 0,
+                                    policy: Some("customer-in(200)".to_string()),
+                                    term_index: 0,
+                                    term: Some("customer-routes".to_string()),
+                                    hits: 5,
+                                },
+                                rustbgpd_policy::TermHitRow {
+                                    policy_index: 0,
+                                    policy: Some("customer-in(200)".to_string()),
+                                    term_index: 1,
+                                    term: None,
+                                    hits: 2,
+                                },
+                            ],
+                        }]);
+                    }
+                    _ => panic!("unexpected RIB query"),
+                }
+            }
+        });
+        PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx)
+    }
+
+    #[tokio::test]
+    async fn get_policy_stats_round_trips_term_rows() {
+        let svc = stats_service();
+        let resp = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "10.0.0.2".to_string(),
+                direction: String::new(),
+            }),
+        )
+        .await
+        .expect("stats query succeeds")
+        .into_inner();
+        assert_eq!(resp.chains.len(), 1);
+        let chain = &resp.chains[0];
+        assert_eq!(chain.peer_address, "10.0.0.2");
+        assert_eq!(chain.direction, "export");
+        assert_eq!(chain.routes_evaluated, 7);
+        assert_eq!(chain.terms.len(), 2);
+        assert_eq!(chain.terms[0].policy, "customer-in(200)");
+        assert_eq!(chain.terms[0].term, "customer-routes");
+        assert_eq!(chain.terms[0].hits, 5);
+        assert_eq!(chain.terms[1].term, "", "TOML statements are unnamed");
+        assert_eq!(chain.terms[1].term_index, 1);
+        assert_eq!(chain.terms[1].hits, 2);
+    }
+
+    #[tokio::test]
+    async fn get_policy_stats_rejects_import_and_bad_direction() {
+        let svc = stats_service();
+        let err = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: String::new(),
+                direction: "import".to_string(),
+            }),
+        )
+        .await
+        .expect_err("import read surface is a follow-up");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+
+        let err = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: String::new(),
+                direction: "sideways".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown direction is invalid");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "not-an-ip".to_string(),
+                direction: String::new(),
+            }),
+        )
+        .await
+        .expect_err("bad peer literal is invalid");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

@@ -13,12 +13,67 @@
 //! matched permit term actually carries some, and the attribution name
 //! is cloned only for a named terminal policy (exactly as before).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::engine::{
     IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult, RouteContext,
     RouteModifications,
 };
 use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, TermAction};
 use crate::sets::prefix_entry_matches;
+
+/// Live per-term guard-hit counters for one chain (ADR-0096 Decision
+/// 3.3, the IOS-XR `show pcl` idea): `hits[p][t]` counts how many
+/// evaluated routes matched policy `p`'s term `t`'s guard, plus a
+/// chain-level evaluation count as the denominator. Incremented with
+/// relaxed atomics on the live evaluation path (one uncontended add per
+/// matched term) and read by the policy-stats surface.
+///
+/// A counter set is shaped for — and only valid against — the
+/// [`CompiledChain`] it was built from. It lives on the owning
+/// `PolicyChain` instance, so replacing a chain resets the counts by
+/// construction ("since chain install" semantics).
+#[derive(Debug)]
+pub struct PolicyHitCounters {
+    policies: Vec<Vec<AtomicU64>>,
+    evals: AtomicU64,
+}
+
+impl PolicyHitCounters {
+    /// Zeroed counters shaped like `chain` (one per term).
+    #[must_use]
+    pub fn for_chain(chain: &CompiledChain) -> Self {
+        Self {
+            policies: chain
+                .policies
+                .iter()
+                .map(|policy| (0..policy.terms.len()).map(|_| AtomicU64::new(0)).collect())
+                .collect(),
+            evals: AtomicU64::new(0),
+        }
+    }
+
+    /// Routes evaluated through the chain since these counters were
+    /// created (= since the chain instance was installed).
+    #[must_use]
+    pub fn evals(&self) -> u64 {
+        self.evals.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of the per-term hit grid (`snapshot()[p][t]`).
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<Vec<u64>> {
+        self.policies
+            .iter()
+            .map(|terms| {
+                terms
+                    .iter()
+                    .map(|hit| hit.load(Ordering::Relaxed))
+                    .collect()
+            })
+            .collect()
+    }
+}
 
 /// A policy's disposition of the route, borrowing the matched term's
 /// modifications (cloned only if merged). `PermitOwned` carries
@@ -49,9 +104,43 @@ impl CompiledChain {
         &self,
         ctx: &RouteContext<'_>,
     ) -> (PolicyResult, PolicyEvaluation) {
+        self.evaluate_attributed::<false>(ctx, None)
+    }
+
+    /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
+    /// plus live hit counting: every matched guard bumps its term's
+    /// counter (relaxed; `Continue` terms included, terms after the
+    /// decider are never evaluated and never count) and the chain-level
+    /// evaluation count increments once. `hits` must have been built
+    /// from this chain ([`PolicyHitCounters::for_chain`]); a mismatched
+    /// shape is a caller bug (the increment indexes directly).
+    #[must_use]
+    pub fn evaluate_with_attribution_counting(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: &PolicyHitCounters,
+    ) -> (PolicyResult, PolicyEvaluation) {
+        hits.evals.fetch_add(1, Ordering::Relaxed);
+        self.evaluate_attributed::<true>(ctx, Some(hits))
+    }
+
+    /// `COUNT` monomorphizes the walk: the non-counting instantiation
+    /// compiles the counter plumbing away entirely, so the plain
+    /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
+    /// path costs exactly what it did before counters existed.
+    fn evaluate_attributed<const COUNT: bool>(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: Option<&PolicyHitCounters>,
+    ) -> (PolicyResult, PolicyEvaluation) {
         let mut accumulated = RouteModifications::default();
-        for policy in &self.policies {
-            match self.evaluate_policy(policy, ctx) {
+        for (policy_index, policy) in self.policies.iter().enumerate() {
+            let policy_hits = if COUNT {
+                hits.map(|h| h.policies[policy_index].as_slice())
+            } else {
+                None
+            };
+            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits) {
                 PolicyDecision::Deny => {
                     return (
                         PolicyResult::deny(),
@@ -174,14 +263,18 @@ impl CompiledChain {
     /// eventual Permit merges them (the deciding term's own
     /// modifications winning scalar conflicts, mirroring chain-level
     /// merge), while a Deny — matched term or default — discards them.
-    fn evaluate_policy<'a>(
+    fn evaluate_policy<'a, const COUNT: bool>(
         &self,
         policy: &'a CompiledPolicy,
         ctx: &RouteContext<'_>,
+        hits: Option<&[AtomicU64]>,
     ) -> PolicyDecision<'a> {
         let mut continued: Option<RouteModifications> = None;
-        for term in &policy.terms {
+        for (term_index, term) in policy.terms.iter().enumerate() {
             if self.eval_expr(&term.guard, ctx) {
+                if COUNT && let Some(hits) = hits {
+                    hits[term_index].fetch_add(1, Ordering::Relaxed);
+                }
                 match &term.action {
                     TermAction::Permit(mods) => {
                         return match continued {
@@ -206,6 +299,15 @@ impl CompiledChain {
             (PolicyAction::Permit, None) => PolicyDecision::Permit(None),
             (PolicyAction::Deny, _) => PolicyDecision::Deny,
         }
+    }
+
+    /// Evaluate a single guard against this chain's set tables — the
+    /// explain walk's window into the live matcher, so explain and
+    /// evaluation cannot disagree about whether a guard fires (the
+    /// same discipline as the legacy walk sharing
+    /// `PolicyStatement::matches`).
+    pub(crate) fn guard_matches(&self, expr: &MatchExpr, ctx: &RouteContext<'_>) -> bool {
+        self.eval_expr(expr, ctx)
     }
 
     /// Evaluate one guard node. Pure and allocation-free; set/regex
@@ -310,8 +412,7 @@ mod tests {
                 source: PolicySource::Toml,
             }],
             prefix_sets,
-            community_sets: Vec::new(),
-            as_path_regexes: Vec::new(),
+            ..CompiledChain::empty()
         }
     }
 
@@ -402,9 +503,7 @@ mod tests {
                 default_action: PolicyAction::Deny,
                 source: PolicySource::Toml,
             }],
-            prefix_sets: Vec::new(),
-            community_sets: Vec::new(),
-            as_path_regexes: Vec::new(),
+            ..CompiledChain::empty()
         };
 
         let mut hits = chain.zero_term_hits();

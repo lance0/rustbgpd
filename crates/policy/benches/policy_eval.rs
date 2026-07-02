@@ -428,8 +428,7 @@ fn bench_set_heavy(c: &mut Criterion) {
             source: PolicySource::Toml,
         }],
         prefix_sets: vec![set],
-        community_sets: Vec::new(),
-        as_path_regexes: Vec::new(),
+        ..CompiledChain::empty()
     };
 
     // 172.16.0.0/24 is in no member's 10.x.y.0/24 — full walk / probe miss.

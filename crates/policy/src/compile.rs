@@ -68,6 +68,8 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
         prefix_sets: sets.prefix_sets,
         community_sets: sets.community_sets,
         as_path_regexes: sets.as_path_regexes,
+        prefix_set_names: sets.prefix_set_names,
+        community_set_names: sets.community_set_names,
     }
 }
 
@@ -101,11 +103,19 @@ fn splice_policy(
 fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> MatchExpr {
     match expr {
         MatchExpr::PrefixInSet(id) => {
-            MatchExpr::PrefixInSet(sets.prefix_set_id(donor.prefix_sets[id.0 as usize].clone()))
+            let index = id.0 as usize;
+            MatchExpr::PrefixInSet(sets.prefix_set_id(
+                donor.prefix_sets[index].clone(),
+                donor.prefix_set_names.get(index).cloned().flatten(),
+            ))
         }
-        MatchExpr::CommunityInSet(id) => MatchExpr::CommunityInSet(
-            sets.community_set_id(donor.community_sets[id.0 as usize].clone()),
-        ),
+        MatchExpr::CommunityInSet(id) => {
+            let index = id.0 as usize;
+            MatchExpr::CommunityInSet(sets.community_set_id(
+                donor.community_sets[index].clone(),
+                donor.community_set_names.get(index).cloned().flatten(),
+            ))
+        }
         MatchExpr::AsPathMatches(id) => {
             MatchExpr::AsPathMatches(sets.regex_id(donor.as_path_regexes[id.0 as usize].clone()))
         }
@@ -185,7 +195,7 @@ fn compile_statement(
         [single] => children.push(MatchExpr::CommunityContains(*single)),
         criteria => {
             let set = store.community_set(criteria);
-            children.push(MatchExpr::CommunityInSet(sets.community_set_id(set)));
+            children.push(MatchExpr::CommunityInSet(sets.community_set_id(set, None)));
         }
     }
     if let Some(regex) = statement.match_as_path.as_ref() {
@@ -225,28 +235,32 @@ struct ChainSets {
     prefix_sets: Vec<Arc<PrefixSet>>,
     community_sets: Vec<Arc<CommunitySet>>,
     as_path_regexes: Vec<Arc<AsPathRegex>>,
+    prefix_set_names: Vec<Option<String>>,
+    community_set_names: Vec<Option<String>>,
 }
 
 impl ChainSets {
-    fn prefix_set_id(&mut self, set: Arc<PrefixSet>) -> SetId {
+    fn prefix_set_id(&mut self, set: Arc<PrefixSet>, name: Option<String>) -> SetId {
         let index = self
             .prefix_sets
             .iter()
             .position(|existing| Arc::ptr_eq(existing, &set))
             .unwrap_or_else(|| {
                 self.prefix_sets.push(set);
+                self.prefix_set_names.push(name);
                 self.prefix_sets.len() - 1
             });
         SetId(u32::try_from(index).expect("set table fits u32"))
     }
 
-    fn community_set_id(&mut self, set: Arc<CommunitySet>) -> SetId {
+    fn community_set_id(&mut self, set: Arc<CommunitySet>, name: Option<String>) -> SetId {
         let index = self
             .community_sets
             .iter()
             .position(|existing| Arc::ptr_eq(existing, &set))
             .unwrap_or_else(|| {
                 self.community_sets.push(set);
+                self.community_set_names.push(name);
                 self.community_sets.len() - 1
             });
         SetId(u32::try_from(index).expect("set table fits u32"))

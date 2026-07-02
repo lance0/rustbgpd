@@ -246,9 +246,7 @@ fn apply_inlines_the_target_decision() {
     };
     let single = crate::ir::CompiledChain {
         policies: vec![outer.clone()],
-        prefix_sets: chain.prefix_sets.clone(),
-        community_sets: chain.community_sets.clone(),
-        as_path_regexes: chain.as_path_regexes.clone(),
+        ..chain.clone()
     };
     assert_eq!(single.evaluate(&low_med).action, PolicyAction::Deny);
     assert_eq!(single.evaluate(&high_med).action, PolicyAction::Permit);

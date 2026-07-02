@@ -10,6 +10,7 @@ use rustbgpd_wire::{
     Prefix, RpkiValidation,
 };
 
+use crate::eval::PolicyHitCounters;
 use crate::ir::CompiledChain;
 use crate::sets::SetStore;
 
@@ -889,8 +890,17 @@ pub struct PolicyChain {
     /// and the cache is derived state. Invariant: `policies` must not
     /// be mutated after the first evaluation — config construction
     /// finishes all mutation (including the implicit gshut/blackhole
-    /// appends) before a chain ever sees a route.
-    compiled: OnceLock<Box<CompiledChain>>,
+    /// appends) before a chain ever sees a route. `Arc` so
+    /// [`share`](Self::share) handles reuse one compiled IR.
+    compiled: OnceLock<Arc<CompiledChain>>,
+    /// Live per-term guard-hit counters (ADR-0096 Decision 3.3),
+    /// created lazily alongside the compiled IR and bumped by every
+    /// [`evaluate_with_attribution`](Self::evaluate_with_attribution).
+    /// Derived state like `compiled` (excluded from
+    /// `PartialEq`/`Clone`/`Debug`); a cloned or replaced chain starts
+    /// from zero — stats read as "since this chain instance was
+    /// installed".
+    hits: OnceLock<Arc<PolicyHitCounters>>,
 }
 
 impl Clone for PolicyChain {
@@ -902,6 +912,7 @@ impl Clone for PolicyChain {
         Self {
             policies: self.policies.clone(),
             compiled: OnceLock::new(),
+            hits: OnceLock::new(),
         }
     }
 }
@@ -936,6 +947,7 @@ impl PolicyChain {
         Self {
             policies: policies.into_iter().map(NamedPolicy::from).collect(),
             compiled: OnceLock::new(),
+            hits: OnceLock::new(),
         }
     }
 
@@ -945,6 +957,7 @@ impl PolicyChain {
         Self {
             policies,
             compiled: OnceLock::new(),
+            hits: OnceLock::new(),
         }
     }
 
@@ -956,11 +969,35 @@ impl PolicyChain {
     /// `crate::compile::compile_chain` already takes the store).
     #[must_use]
     pub fn compiled(&self) -> &CompiledChain {
-        // Boxed so an uncompiled chain stays pointer-sized — chains are
-        // embedded in config/session structs (and api event enums) that
-        // mostly never evaluate routes themselves.
+        // Behind a pointer so an uncompiled chain stays pointer-sized —
+        // chains are embedded in config/session structs (and api event
+        // enums) that mostly never evaluate routes themselves.
         self.compiled
-            .get_or_init(|| Box::new(crate::compile::compile_chain(self, &mut SetStore::new())))
+            .get_or_init(|| Arc::new(crate::compile::compile_chain(self, &mut SetStore::new())))
+    }
+
+    /// A shallow evaluation handle onto an **installed** chain: shares
+    /// this chain's compiled IR and live hit counters instead of
+    /// resetting them the way [`Clone`] does. For read-only borrow
+    /// splitting (the RIB distribution passes clone the installed
+    /// chain to release a `&self` borrow): evaluations through the
+    /// handle land in the same counters, and the IR compiles once per
+    /// install instead of once per pass. Not for chains still under
+    /// construction — that is exactly what `Clone`'s fresh-cache
+    /// semantics exist for.
+    #[must_use]
+    pub fn share(&self) -> Self {
+        // `hit_counters()` materializes the compiled IR too.
+        let hits = Arc::clone(self.hit_counters());
+        Self {
+            policies: self.policies.clone(),
+            compiled: self
+                .compiled
+                .get()
+                .map(Arc::clone)
+                .map_or_else(OnceLock::new, OnceLock::from),
+            hits: OnceLock::from(hits),
+        }
     }
 
     /// Whether evaluating this chain needs the rendered `AS_PATH` string.
@@ -1018,7 +1055,39 @@ impl PolicyChain {
         &self,
         ctx: &RouteContext<'_>,
     ) -> (PolicyResult, PolicyEvaluation) {
-        self.compiled().evaluate_with_attribution(ctx)
+        self.compiled()
+            .evaluate_with_attribution_counting(ctx, self.hit_counters())
+    }
+
+    /// The chain's live per-term hit counters (ADR-0096 Decision 3.3),
+    /// shaped like [`compiled`](Self::compiled) and bumped on every
+    /// evaluation. `Arc`-shared so a stats reader can snapshot without
+    /// borrowing the chain.
+    #[must_use]
+    pub fn hit_counters(&self) -> &Arc<PolicyHitCounters> {
+        self.hits
+            .get_or_init(|| Arc::new(PolicyHitCounters::for_chain(self.compiled())))
+    }
+
+    /// Snapshot the per-term hit counters as labeled rows for the
+    /// policy-stats surface, in chain walk order.
+    #[must_use]
+    pub fn term_hit_rows(&self) -> Vec<TermHitRow> {
+        let compiled = self.compiled();
+        let grid = self.hit_counters().snapshot();
+        let mut rows = Vec::new();
+        for (policy_index, (policy, hits)) in compiled.policies.iter().zip(&grid).enumerate() {
+            for (term_index, (term, hits)) in policy.terms.iter().zip(hits).enumerate() {
+                rows.push(TermHitRow {
+                    policy_index,
+                    policy: policy.name.clone(),
+                    term_index,
+                    term: term.name.clone(),
+                    hits: *hits,
+                });
+            }
+        }
+        rows
     }
 
     /// The pre-IR chain walker, kept intact as the oracle for the
@@ -1063,6 +1132,22 @@ impl PolicyChain {
             },
         )
     }
+}
+
+/// One row of the policy-stats surface: a term's live guard-hit count
+/// with its naming context (see [`PolicyChain::term_hit_rows`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermHitRow {
+    /// 0-based position of the policy within the chain.
+    pub policy_index: usize,
+    /// Chain-member name (`None` = inline / anonymous).
+    pub policy: Option<String>,
+    /// 0-based term index within the policy.
+    pub term_index: usize,
+    /// `.rpol` term name; `None` for TOML statements.
+    pub term: Option<String>,
+    /// Times this term's guard matched since chain install.
+    pub hits: u64,
 }
 
 /// Convenience: evaluate an optional policy chain. Returns `Permit` with no modifications if no chain.

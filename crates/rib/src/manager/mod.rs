@@ -933,6 +933,9 @@ impl RibManager {
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);
             }
+            RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
+                self.handle_query_export_policy_term_hits(peer, reply);
+            }
             RibUpdate::ReplacePeerExportPolicy {
                 peer,
                 export_policy,
@@ -1712,6 +1715,49 @@ impl RibManager {
             .copied()
             .unwrap_or_default();
         let _ = reply.send(stats);
+    }
+
+    /// Snapshot the live per-term hit counters of installed export
+    /// chains (ADR-0096 Decision 3.3): one entry per peer with an
+    /// installed chain, plus the shared global fallback instance for
+    /// peers evaluated before any per-peer install. Read-only — no
+    /// counter is touched.
+    fn handle_query_export_policy_term_hits(
+        &mut self,
+        peer: Option<IpAddr>,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::update::ExportPolicyTermHits>>,
+    ) {
+        let snapshot = |owner: Option<IpAddr>,
+                        chain: &rustbgpd_policy::PolicyChain|
+         -> crate::update::ExportPolicyTermHits {
+            crate::update::ExportPolicyTermHits {
+                peer: owner,
+                evals: chain.hit_counters().evals(),
+                terms: chain.term_hit_rows(),
+            }
+        };
+        let mut out = Vec::new();
+        if let Some(peer) = peer {
+            if let Some(chain) = self.export_policy_for(peer) {
+                out.push(snapshot(Some(peer), chain));
+            }
+        } else {
+            let mut peers: Vec<IpAddr> = self
+                .peer_export_policies
+                .iter()
+                .filter_map(|(peer, chain)| chain.as_ref().map(|_| *peer))
+                .collect();
+            peers.sort_unstable();
+            for peer in peers {
+                if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
+                    out.push(snapshot(Some(peer), chain));
+                }
+            }
+            if let Some(chain) = self.export_policy.as_ref() {
+                out.push(snapshot(None, chain));
+            }
+        }
+        let _ = reply.send(out);
     }
 
     fn handle_query_flowspec_routes(

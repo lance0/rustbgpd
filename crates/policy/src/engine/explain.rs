@@ -23,12 +23,22 @@
 //! lists of `"<label> <detail>"` strings whose leading label is stable
 //! (`prefix`, `community`, `as_path`, `neighbor_set`, `route_type`,
 //! `evpn_route_type`, `rpki`, `aspa`, `as_path_len`, `local_pref`,
-//! `med`, `next_hop`, `any`; modification labels add
-//! `extended_community` / `large_community`). The detail portion is
-//! human-oriented and not a machine-parsable grammar — consume the
-//! structured indices and the leading label for automation, mirroring
-//! the `vs_best_reason` / `vs_best_detail` split on the best-path
-//! explain surface.
+//! `med`, `next_hop`, `any`, plus `guard` for an `.rpol` member's
+//! deciding guard; modification labels add `extended_community` /
+//! `large_community`). The detail portion is human-oriented and not a
+//! machine-parsable grammar — consume the structured indices and the
+//! leading label for automation, mirroring the `vs_best_reason` /
+//! `vs_best_detail` split on the best-path explain surface.
+//!
+//! `.rpol` chain members (ADR-0096) trace at term granularity: the
+//! step's `term_name`/`term_traces` carry the walk over the member's
+//! compiled IR terms, with guards rendered back to `.rpol` surface
+//! syntax by this module's pretty-printer (sets by source name). Guard
+//! *evaluation* is shared with the live evaluator
+//! (`CompiledChain::guard_matches`), so the two walks cannot disagree
+//! about whether a guard fires; the rpol agreement matrix in
+//! `statement_trace.rs` additionally pins the trace against
+//! `evaluate_recording_hits` term by term.
 
 use std::fmt::Write as _;
 
@@ -36,6 +46,7 @@ use super::{
     CommunityMatch, IMPLICIT_LOCAL_PREF, IMPLICIT_MED, NextHopAction, PolicyAction, PolicyChain,
     PolicyStatement, RouteContext, RouteModifications, RouteType,
 };
+use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, Term, TermAction};
 
 /// One step of a statement-level chain trace: how a single policy in
 /// the chain disposed of the route.
@@ -68,7 +79,21 @@ pub struct StatementAttribution {
     /// always the route's *pre-policy* value: chain semantics
     /// accumulate modifications and apply them once after the walk, so
     /// a later statement does not see an earlier statement's edits.
+    /// For an `.rpol` member this is the policy's merged contribution
+    /// (matched `Continue` terms folded under the deciding permit,
+    /// mirroring the live evaluator's merge).
     pub modifications: Vec<String>,
+    /// `.rpol` term name of the deciding term (ADR-0096). `None` for
+    /// TOML statements and for default-action fallthroughs.
+    pub term_name: Option<String>,
+    /// Per-term rendered trace lines for an `.rpol` member, in walk
+    /// order: `term <name>: <guard> => <action> [matched|not matched]`.
+    /// Terms after the deciding one were never evaluated and carry no
+    /// line (the same philosophy as chain policies after a deny); on a
+    /// default-action fallthrough every term appears. Empty for TOML
+    /// members. Guards render in `.rpol` surface syntax (sets by their
+    /// source name); human-oriented, not a machine-parsable grammar.
+    pub term_traces: Vec<String>,
 }
 
 /// A full statement-level trace of one chain evaluation.
@@ -103,6 +128,28 @@ pub fn explain_chain_statements(
 
     let mut steps = Vec::new();
     for (policy_index, named) in chain.policies.iter().enumerate() {
+        if let Some(rpol) = named.rpol.as_deref() {
+            // `.rpol` member: walk the pre-compiled IR terms against
+            // the donor chain's own set tables (guard evaluation goes
+            // through the live evaluator's `guard_matches`, so the two
+            // walks cannot disagree about a guard).
+            let mut denied = false;
+            for policy in &rpol.policies {
+                let step = trace_rpol_policy(policy_index, named.name.clone(), policy, rpol, ctx);
+                denied = step.action == PolicyAction::Deny;
+                steps.push(step);
+                if denied {
+                    break;
+                }
+            }
+            if denied {
+                return ChainStatementTrace {
+                    action: PolicyAction::Deny,
+                    steps,
+                };
+            }
+            continue;
+        }
         let matched = named.policy.entries.iter().position(|e| e.matches(ctx));
         let (statement_index, action, matched_conditions, modifications) = match matched {
             Some(index) => {
@@ -132,6 +179,8 @@ pub fn explain_chain_statements(
             action,
             matched_conditions,
             modifications,
+            term_name: None,
+            term_traces: Vec::new(),
         });
         if action == PolicyAction::Deny {
             // Chain semantics: a Deny terminates evaluation. Later
@@ -317,4 +366,344 @@ fn render_modifications(mods: &RouteModifications, ctx: &RouteContext<'_>) -> Ve
         out.push(format!("as_path prepend {asn} x{count}"));
     }
     out
+}
+
+// ---------------------------------------------------------------------
+// `.rpol` member tracing (ADR-0096 explain slice).
+// ---------------------------------------------------------------------
+
+/// Trace one pre-compiled `.rpol` policy: walk its terms exactly like
+/// `CompiledChain::evaluate_policy` (first decider wins, matched
+/// `Continue` modifications accumulate under an eventual permit and are
+/// discarded by a deny), rendering a `term_traces` line per evaluated
+/// term. `tables` is the member's donor chain — its set/regex tables
+/// and names are self-contained.
+fn trace_rpol_policy(
+    policy_index: usize,
+    policy_name: Option<String>,
+    policy: &CompiledPolicy,
+    tables: &CompiledChain,
+    ctx: &RouteContext<'_>,
+) -> StatementAttribution {
+    let mut term_traces = Vec::new();
+    let mut continued: Option<RouteModifications> = None;
+    let mut decided: Option<(usize, &Term)> = None;
+    for (index, term) in policy.terms.iter().enumerate() {
+        let matched = tables.guard_matches(&term.guard, ctx);
+        term_traces.push(format!(
+            "term {}: {} => {} [{}]",
+            term.name.as_deref().unwrap_or("<unnamed>"),
+            render_expr(&term.guard, tables),
+            render_term_action(&term.action),
+            if matched { "matched" } else { "not matched" },
+        ));
+        if !matched {
+            continue;
+        }
+        match &term.action {
+            TermAction::Continue(mods) => {
+                continued
+                    .get_or_insert_with(RouteModifications::default)
+                    .merge_from(mods.clone());
+            }
+            TermAction::Permit(_) | TermAction::Deny => {
+                decided = Some((index, term));
+                break;
+            }
+        }
+    }
+    if let Some((index, term)) = decided {
+        // Live-path parity: a deny discards accumulated Continue
+        // modifications and contributes none of its own.
+        let (action, modifications) = match &term.action {
+            TermAction::Permit(mods) => {
+                let mut merged = continued.unwrap_or_default();
+                merged.merge_from(mods.clone());
+                (PolicyAction::Permit, render_modifications(&merged, ctx))
+            }
+            _ => (PolicyAction::Deny, Vec::new()),
+        };
+        StatementAttribution {
+            policy_index,
+            policy_name,
+            statement_index: Some(index),
+            action,
+            matched_conditions: vec![format!("guard {}", render_expr(&term.guard, tables))],
+            modifications,
+            term_name: term.name.clone(),
+            term_traces,
+        }
+    } else {
+        // Fallthrough to the policy default; a permitting default
+        // keeps accumulated Continue modifications (live parity).
+        let modifications = match (policy.default_action, continued) {
+            (PolicyAction::Permit, Some(mods)) => render_modifications(&mods, ctx),
+            _ => Vec::new(),
+        };
+        StatementAttribution {
+            policy_index,
+            policy_name,
+            statement_index: None,
+            action: policy.default_action,
+            matched_conditions: Vec::new(),
+            modifications,
+            term_name: None,
+            term_traces,
+        }
+    }
+}
+
+/// Render a compiled term's action in `.rpol` surface syntax, e.g.
+/// `set local-pref 200; accept` / `reject` / `add community 65001:999;
+/// continue` (`continue` names the IR fallthrough — a term body that
+/// modified without a verdict).
+fn render_term_action(action: &TermAction) -> String {
+    let (mods, verdict) = match action {
+        TermAction::Permit(mods) => (Some(mods), "accept"),
+        TermAction::Deny => (None, "reject"),
+        TermAction::Continue(mods) => (Some(mods), "continue"),
+    };
+    let mut parts = mods.map_or_else(Vec::new, render_action_stmts);
+    parts.push(verdict.to_string());
+    parts.join("; ")
+}
+
+/// Modifications as `.rpol` action statements (static description of
+/// what the term *does* — contrast `render_modifications`, which
+/// renders the `before -> after` transition for a specific route).
+fn render_action_stmts(mods: &RouteModifications) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(lp) = mods.set_local_pref {
+        out.push(format!("set local-pref {lp}"));
+    }
+    if let Some(med) = mods.set_med {
+        out.push(format!("set med {med}"));
+    }
+    if let Some(action) = mods.set_next_hop.as_ref() {
+        let target = match action {
+            NextHopAction::Self_ => "self".to_string(),
+            NextHopAction::Specific(addr) => addr.to_string(),
+        };
+        out.push(format!("set next-hop {target}"));
+    }
+    for c in &mods.communities_add {
+        out.push(format!("add community {}", fmt_standard_community(*c)));
+    }
+    for c in &mods.communities_remove {
+        out.push(format!("remove community {}", fmt_standard_community(*c)));
+    }
+    for lc in &mods.large_communities_add {
+        out.push(format!(
+            "add community {}:{}:{}",
+            lc.global_admin, lc.local_data1, lc.local_data2
+        ));
+    }
+    for lc in &mods.large_communities_remove {
+        out.push(format!(
+            "remove community {}:{}:{}",
+            lc.global_admin, lc.local_data1, lc.local_data2
+        ));
+    }
+    for ec in &mods.extended_communities_add {
+        out.push(format!("add community {ec}"));
+    }
+    for ec in &mods.extended_communities_remove {
+        out.push(format!("remove community {ec}"));
+    }
+    if let Some((asn, count)) = mods.as_path_prepend {
+        out.push(format!("prepend {asn} {count}"));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// Guard pretty-printer: compiled MatchExpr back to `.rpol` surface
+// syntax. Sets render by their source name where the chain tables carry
+// one. Compact and human-oriented; a lowering round-trip is NOT
+// guaranteed (e.g. `==` on integers renders as its `>= && <=` pair,
+// `contains N` as its `matches "_N_"` regex).
+// ---------------------------------------------------------------------
+
+/// Binding strength for parenthesization: `Or` < `And` < atoms.
+/// A multi-member neighbor set renders as an internal `||`, so it
+/// binds like `Or`.
+fn binding(expr: &MatchExpr) -> u8 {
+    match expr {
+        MatchExpr::Or(_) => 0,
+        MatchExpr::NeighborIn(set)
+            if set.addresses.len() + set.remote_asns.len() + set.peer_groups.len() > 1 =>
+        {
+            0
+        }
+        MatchExpr::And(_) => 1,
+        _ => 2,
+    }
+}
+
+/// Render `expr` against `tables` (the chain whose set/regex ids the
+/// expression references).
+pub(crate) fn render_expr(expr: &MatchExpr, tables: &CompiledChain) -> String {
+    render_prec(expr, tables, 0)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per MatchExpr node type; splitting would scatter the rendering table"
+)]
+fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> String {
+    let rendered = match expr {
+        MatchExpr::True => "true".to_string(),
+        MatchExpr::PrefixInSet(id) => format!(
+            "route.prefix in {}",
+            set_label(&tables.prefix_set_names, id.0, "prefix-set")
+        ),
+        MatchExpr::PrefixEq { prefix, ge, le } => {
+            let mut out = format!("route.prefix == {prefix}");
+            if let Some(ge) = ge {
+                let _ = write!(out, " ge {ge}");
+            }
+            if let Some(le) = le {
+                let _ = write!(out, " le {le}");
+            }
+            out
+        }
+        MatchExpr::CommunityContains(cm) => {
+            format!(
+                "{} has {}",
+                community_field(&[*cm]),
+                fmt_community_match(cm)
+            )
+        }
+        MatchExpr::CommunityInSet(id) => {
+            let field = tables
+                .community_sets
+                .get(id.0 as usize)
+                .map_or("route.communities", |set| community_field(set.criteria()));
+            format!(
+                "{field} in {}",
+                set_label(&tables.community_set_names, id.0, "community-set")
+            )
+        }
+        MatchExpr::AsPathMatches(id) => format!(
+            "route.as-path matches {:?}",
+            tables
+                .as_path_regexes
+                .get(id.0 as usize)
+                .map_or("", |regex| regex.pattern())
+        ),
+        MatchExpr::AsPathLen(cmp) => render_cmp("route.as-path.len", *cmp),
+        MatchExpr::LocalPref(cmp) => render_cmp("route.local-pref", *cmp),
+        MatchExpr::Med(cmp) => render_cmp("route.med", *cmp),
+        MatchExpr::NextHopEq(addr) => format!("route.next-hop == {addr}"),
+        MatchExpr::NeighborIn(set) => {
+            let mut parts: Vec<String> = Vec::new();
+            for addr in &set.addresses {
+                parts.push(format!("peer.address == {addr}"));
+            }
+            for asn in &set.remote_asns {
+                parts.push(format!("peer.asn == {asn}"));
+            }
+            for group in &set.peer_groups {
+                parts.push(format!("peer.group == {group:?}"));
+            }
+            if parts.is_empty() {
+                // An empty neighbor set never matches.
+                "false".to_string()
+            } else {
+                parts.join(" || ")
+            }
+        }
+        MatchExpr::RouteTypeIs(route_type) => {
+            format!("route.route-type == {}", route_type_label(*route_type))
+        }
+        MatchExpr::EvpnRouteTypeIs(evpn_type) => {
+            format!("route.evpn-route-type == {evpn_type}")
+        }
+        MatchExpr::RpkiIs(state) => format!(
+            "route.rpki == {}",
+            match state {
+                rustbgpd_wire::RpkiValidation::Valid => "valid",
+                rustbgpd_wire::RpkiValidation::Invalid => "invalid",
+                rustbgpd_wire::RpkiValidation::NotFound => "not-found",
+            }
+        ),
+        MatchExpr::AspaIs(state) => format!(
+            "route.aspa == {}",
+            match state {
+                rustbgpd_wire::AspaValidation::Valid => "valid",
+                rustbgpd_wire::AspaValidation::Invalid => "invalid",
+                rustbgpd_wire::AspaValidation::Unknown => "unknown",
+            }
+        ),
+        MatchExpr::And(children) => {
+            if children.is_empty() {
+                "true".to_string()
+            } else {
+                children
+                    .iter()
+                    .map(|child| render_prec(child, tables, 2))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            }
+        }
+        MatchExpr::Or(children) => {
+            if children.is_empty() {
+                // An empty Or never matches.
+                "false".to_string()
+            } else {
+                children
+                    .iter()
+                    .map(|child| render_prec(child, tables, 1))
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            }
+        }
+        MatchExpr::Not(inner) => {
+            // Always parenthesized: `!(...)` is unambiguous regardless
+            // of the inner expression's shape.
+            return format!("!({})", render_prec(inner, tables, 0));
+        }
+    };
+    if binding(expr) < min_binding {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn render_cmp(field: &str, cmp: Cmp) -> String {
+    match cmp {
+        Cmp::Ge(bound) => format!("{field} >= {bound}"),
+        Cmp::Le(bound) => format!("{field} <= {bound}"),
+    }
+}
+
+/// The `.rpol` field a community criterion set reads: all-standard →
+/// `route.communities`, all-large → `route.large-communities`,
+/// all-RT/RO → `route.ext-communities`, mixed → the generic
+/// `route.communities`.
+fn community_field(criteria: &[CommunityMatch]) -> &'static str {
+    let mut fields = criteria.iter().map(|cm| match cm {
+        CommunityMatch::Standard { .. } => "route.communities",
+        CommunityMatch::LargeCommunity { .. } => "route.large-communities",
+        CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => {
+            "route.ext-communities"
+        }
+    });
+    let Some(first) = fields.next() else {
+        return "route.communities";
+    };
+    if fields.all(|field| field == first) {
+        first
+    } else {
+        "route.communities"
+    }
+}
+
+fn set_label(names: &[Option<String>], id: u32, kind: &str) -> String {
+    names
+        .get(id as usize)
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| format!("{kind}#{id}"))
 }
