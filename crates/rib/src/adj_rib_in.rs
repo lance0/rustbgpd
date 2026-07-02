@@ -908,6 +908,26 @@ impl AdjRibIn {
         stale
     }
 
+    /// Remove LLGR-stale BGP-LS routes of the given family tuple, returning
+    /// their keys. `EoR` during the LLGR phase deletes what was not
+    /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    pub fn sweep_llgr_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
+            return Vec::new();
+        };
+        let stale: Vec<BgpLsRouteKey> = self
+            .bgpls_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale && r.family == fam)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+            self.bgpls_routes.remove(key);
+        }
+        stale
+    }
+
     /// Clear the LLGR-stale flag on BGP-LS routes of the given family tuple,
     /// stripping only locally-injected `LLGR_STALE` communities. Called when
     /// `EoR` is received during the LLGR phase (RFC 9494 §4.2).
@@ -1154,6 +1174,26 @@ impl AdjRibIn {
         stale
     }
 
+    /// Remove LLGR-stale VPN routes of the given family tuple, returning
+    /// their keys. `EoR` during the LLGR phase deletes what was not
+    /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    pub fn sweep_llgr_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+        if family.1 != Safi::MplsVpn {
+            return Vec::new();
+        }
+        let stale: Vec<VpnRibRouteKey> = self
+            .vpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale && r.afi_safi() == family)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &stale {
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.vpn_routes.remove(key);
+        }
+        stale
+    }
+
     /// Clear the LLGR-stale flag on VPN routes of the given family tuple,
     /// stripping only locally-injected `LLGR_STALE` communities. Called when
     /// `EoR` is received during the LLGR phase (RFC 9494 §4.2).
@@ -1379,6 +1419,16 @@ impl AdjRibIn {
             self.rtc_routes.remove(key);
         }
         stale
+    }
+
+    /// Remove LLGR-stale RTC routes if `family == (Ipv4, RtConstrain)`,
+    /// returning their keys. `EoR` during the LLGR phase deletes what was
+    /// not re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    pub fn sweep_llgr_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+        if family != RtcRibRouteKey::afi_safi() {
+            return Vec::new();
+        }
+        self.sweep_llgr_stale_rtc()
     }
 
     /// Clear the LLGR-stale flag on RTC routes, stripping only

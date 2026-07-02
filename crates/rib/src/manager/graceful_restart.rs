@@ -445,12 +445,19 @@ impl RibManager {
                         evpn_affected.insert(k);
                     }
                 }
-                // VPN, BGP-LS, and RTC always purge at GR expiry — even for
-                // tuples in the LLGR intersection — because their LLGR
-                // promotion is not wired yet. PR-3 promotes these.
-                // Each sweep helper is a family-scoped no-op for
-                // non-matching tuples.
-                for &family in &gr_families {
+                // Typed families (VPN, BGP-LS, RTC) follow the same split:
+                // LLGR-negotiated tuples promote to LLGR-stale (routes
+                // carrying NO_LLGR are removed instead and their keys join
+                // the affected sets so the recomputes below withdraw them
+                // downstream); tuples outside the LLGR capability purge.
+                // Each helper is a family-scoped no-op for non-matching
+                // tuples.
+                for &family in &llgr_families {
+                    vpn_affected.extend(rib.promote_to_llgr_stale_vpn(family));
+                    bgpls_affected.extend(rib.promote_to_llgr_stale_bgpls(family));
+                    rtc_affected.extend(rib.promote_to_llgr_stale_rtc(family));
+                }
+                for &family in &non_llgr_families {
                     vpn_affected.extend(rib.sweep_stale_family_vpn(family));
                     bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
                     rtc_affected.extend(rib.sweep_stale_family_rtc(family));
@@ -484,8 +491,8 @@ impl RibManager {
             if !vpn_affected.is_empty() {
                 self.recompute_vpn_keys(&vpn_affected);
             }
-            let rtc_swept = !rtc_affected.is_empty();
-            if rtc_swept {
+            let rtc_changed = !rtc_affected.is_empty();
+            if rtc_changed {
                 self.recompute_rtc_keys(&rtc_affected);
             }
             if (!affected.is_empty()
@@ -493,16 +500,19 @@ impl RibManager {
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
                 || !vpn_affected.is_empty()
-                || rtc_swept)
+                || rtc_changed)
                 && let Some(rib) = self.ribs.get_mut(&peer)
             {
                 rib.gc_intern_table();
             }
-            if rtc_swept {
-                // The purge just shrank this peer's RTC Adj-RIB-In; if the
-                // peer re-established (only its End-of-RIB was late), its RT
+            if rtc_changed {
+                // A non-LLGR purge (or a NO_LLGR removal during promotion)
+                // shrank this peer's RTC Adj-RIB-In; if the peer
+                // re-established (only its End-of-RIB was late), its RT
                 // membership must shrink with it so uncovered VPN routes are
-                // withdrawn from its Adj-RIB-Out.
+                // withdrawn from its Adj-RIB-Out. A promotion-only change
+                // leaves the derived membership equal and the rebuild
+                // no-ops.
                 self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
             self.metrics
@@ -620,19 +630,31 @@ impl RibManager {
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
 
-        let (swept, fs_swept, evpn_swept, rib_len, evpn_len) =
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                let swept = rib.sweep_llgr_stale();
-                let fs_swept = rib.sweep_llgr_stale_flowspec();
-                let evpn_swept = rib.sweep_llgr_stale_evpn();
-                rib.gc_intern_table();
-                (swept, fs_swept, evpn_swept, rib.len(), rib.evpn_len())
-            } else {
-                (Vec::new(), Vec::new(), Vec::new(), 0, 0)
-            };
+        let mut swept = Vec::new();
+        let mut fs_swept = Vec::new();
+        let mut evpn_swept = Vec::new();
+        let mut bgpls_swept = Vec::new();
+        let mut l3vpn_swept = Vec::new();
+        let mut rtc_swept = Vec::new();
+        let mut rib_len = 0;
+        let mut evpn_len = 0;
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            swept = rib.sweep_llgr_stale();
+            fs_swept = rib.sweep_llgr_stale_flowspec();
+            evpn_swept = rib.sweep_llgr_stale_evpn();
+            bgpls_swept = rib.sweep_llgr_stale_bgpls();
+            l3vpn_swept = rib.sweep_llgr_stale_vpn();
+            rtc_swept = rib.sweep_llgr_stale_rtc();
+            rib.gc_intern_table();
+            rib_len = rib.len();
+            evpn_len = rib.evpn_len();
+        }
         let had_swept = !swept.is_empty();
         let had_fs_swept = !fs_swept.is_empty();
         let had_evpn_swept = !evpn_swept.is_empty();
+        let had_bgpls_swept = !bgpls_swept.is_empty();
+        let had_l3vpn_swept = !l3vpn_swept.is_empty();
+        let had_rtc_swept = !rtc_swept.is_empty();
         if had_swept {
             info!(%peer, count = swept.len(), "swept LLGR-stale routes");
             let affected: HashSet<Prefix> = swept.into_iter().collect();
@@ -651,10 +673,40 @@ impl RibManager {
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
-        if (had_swept || had_fs_swept || had_evpn_swept)
+        if had_bgpls_swept {
+            // The sweep drops the LLGR-stale entries from the topology feed,
+            // so this recompute is also where ORR vantages that survived the
+            // whole GR + LLGR retention on the departed peer's links finally
+            // unresolve.
+            let bgpls_affected: HashSet<BgpLsRouteKey> = bgpls_swept.into_iter().collect();
+            self.recompute_bgpls_keys(&bgpls_affected);
+        }
+        if had_l3vpn_swept {
+            let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
+                l3vpn_swept.into_iter().collect();
+            self.recompute_vpn_keys(&vpn_affected);
+        }
+        if had_rtc_swept {
+            let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
+                rtc_swept.into_iter().collect();
+            self.recompute_rtc_keys(&rtc_affected);
+        }
+        if (had_swept
+            || had_fs_swept
+            || had_evpn_swept
+            || had_bgpls_swept
+            || had_l3vpn_swept
+            || had_rtc_swept)
             && let Some(rib) = self.ribs.get_mut(&peer)
         {
             rib.gc_intern_table();
+        }
+        if had_rtc_swept {
+            // Same obligation as the GR-expiry sweeps: the down peer's
+            // preserved RT interest dies here, so `peer_rt_membership` must
+            // shrink with the Adj-RIB-In to stay consistent for the
+            // re-establish path (which re-derives membership from this RIB).
+            self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
         self.release_peer_state_if_departed(peer);
