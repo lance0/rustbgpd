@@ -636,7 +636,7 @@ impl RibManager {
     /// to any already-established RTC peers. Never withdrawn — harmless if
     /// no RTC peer remains. No config knob by design.
     fn ensure_default_rtc_originated(&mut self) {
-        use rustbgpd_wire::{Origin, PathAttribute, RtcNlri};
+        use rustbgpd_wire::{AsPath, Origin, PathAttribute, RtcNlri};
 
         use super::helpers::LOCAL_PEER;
         use crate::adj_rib_in::AdjRibIn;
@@ -657,7 +657,14 @@ impl RibManager {
             nlri: RtcNlri::DEFAULT,
             next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             peer: LOCAL_PEER,
-            attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            // AS_PATH is well-known mandatory even when empty (local
+            // origination over iBGP): RFC 7606 peers treat-as-withdraw an
+            // UPDATE without it, which starves the RR of VPN routes (M75
+            // finding). Matches every other local originator.
+            attributes: std::sync::Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+            ]),
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

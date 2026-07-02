@@ -1816,6 +1816,16 @@ async fn peer_up_with_rtc_family_originates_default_rtc_to_peer() {
         default.next_hop.is_unspecified(),
         "local default stores an unspecified next-hop; transport emits the session-local address"
     );
+    // AS_PATH is well-known mandatory even when empty: without it, RFC 7606
+    // peers treat-as-withdraw the default-RTC UPDATE and never send the RR
+    // their VPN routes (M75 regression).
+    assert!(
+        default
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, rustbgpd_wire::PathAttribute::AsPath(_))),
+        "locally-originated default RTC NLRI must carry an (empty) AS_PATH"
+    );
 
     let eor = out_rx.recv().await.unwrap();
     assert_eq!(eor.end_of_rib, rtc_sendable());

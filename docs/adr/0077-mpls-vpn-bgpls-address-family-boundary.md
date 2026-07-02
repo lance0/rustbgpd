@@ -383,3 +383,45 @@ See also ADR-0023 (Prefix enum and AFI-agnostic RIB), ADR-0054 (EVPN Linux
 dataplane boundary), ADR-0061 (unicast Linux FIB integration), ADR-0070
 (gNMI / OpenConfig telemetry and Set adapter), and ADR-0075 (receive-side
 Address-Prefix ORF).
+
+## Amendment (2026-07-01): RT-Constrain shipped — recorded decisions
+
+RTC (AFI 1 / SAFI 132) shipped as the VPN RR scalability companion scoped
+above. Four implementation decisions are recorded here because they are not
+derivable from RFC 4684 alone:
+
+1. **Strict empty-membership semantics.** A peer that negotiated SAFI 132
+   but has advertised no RT membership receives **no** VPN routes (including
+   the initial table dump — the RR never floods-then-prunes). A peer that did
+   not negotiate SAFI 132 is unfiltered. The membership for each peer derives
+   from that peer's own Adj-RIB-In SAFI-132 routes (all paths, honoring
+   §3.2's all-paths clause), never from Loc-RIB best.
+2. **RFC-faithful prefix matching, with a documented GoBGP divergence.**
+   Matching builds a 96-bit candidate — the RT's global-administrator field
+   as the origin AS, concatenated with the full 8-byte RT extended
+   community — and prefix-compares against the membership NLRI. GoBGP
+   instead matches the 8-byte RT exactly and ignores the origin-AS bits;
+   the two agree whenever an RT's administrator equals the advertising AS
+   (the conventional case, and what GoBGP-originated /96 NLRI carry). When
+   an RT's administrator differs from the advertiser's AS, rustbgpd
+   under-advertises relative to GoBGP. This is RFC-defensible; if it bites
+   in practice, the recorded upgrade path is to additionally accept a match
+   when bits 32..len match the RT alone. Do not silently switch to exact
+   matching — that breaks legitimate sub-96-bit prefix filters.
+3. **Self-originated default membership.** rustbgpd has no VRFs, so its own
+   RT interest is always "everything": it lazily originates the zero-length
+   default RTC NLRI (LOCAL_PEER, no config knob) once any peer negotiates
+   SAFI 132. Without this, RFC 4684-compliant PEs filter their VPN routes
+   toward the RR and the reflector starves.
+4. **Deferral register** (each with its un-defer trigger): §3.2(ii)
+   non-client attribute-swap (multi-RR non-client meshes); §6 60-second VPN
+   delay until RTC EoR (strict-empty already prevents flood-then-prune;
+   revisit only if gradual-interest churn is observed); eBGP RTC
+   distribution subtleties (§3.1 — the shipped arc is iBGP RR; GoBGP's own
+   eBGP RTC filtering is broken upstream); RTC × ORF cross-validation
+   (filters compose independently today); Add-Path for SAFI 132 (rejected
+   at negotiation, matching the VPN/BGP-LS posture).
+
+M75 is the interop receipt: GoBGP source/sink, strict filtering, RTC
+reflection, widen/narrow membership without session resets, an unfiltered
+non-RTC peer, and no dataplane installs.

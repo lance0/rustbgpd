@@ -229,9 +229,13 @@ resolved.
   (AFI 1/2, SAFI 128) route-reflection (RFC 4364 / RFC 4659 —
   RR/controller-feed only: RD, MPLS label stack, next-hop, and Route
   Targets are preserved verbatim; no VRF import, no MPLS FIB install,
-  no Add-Path, GR does not preserve SAFI-128 routes as stale). Other
-  families such as labeled-unicast (SAFI 4), RT-Constrain (SAFI 132),
-  and VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
+  no Add-Path, GR does not preserve SAFI-128 routes as stale), and
+  RT-Constrain (AFI 1, SAFI 132) per RFC 4684 (strict per-peer VPN
+  reflection filtering with self-originated default membership; §3.2(ii)
+  non-client attribute-swap, the §6 60-second EoR delay, eBGP RTC
+  subtleties, and Add-Path remain deferred — see the ADR-0077
+  amendment). Other families such as labeled-unicast (SAFI 4) and VPN
+  FlowSpec (AFI 1/2, SAFI 134) are not implemented.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,

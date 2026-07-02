@@ -54,11 +54,12 @@ diversity scripts remain local / manual gates. See
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
-BGP-LS receive/reflection/API export (RFC 9552) and VPNv4/VPNv6 L3VPN
+BGP-LS receive/reflection/API export (RFC 9552), VPNv4/VPNv6 L3VPN
 route-reflection (RFC 4364 / RFC 4659, SAFI 128 — RR/controller-feed with RD,
 MPLS label stack, next-hop, and Route Targets preserved verbatim; no VRF import
-or MPLS FIB) have shipped under ADR-0077; future BGP-LS local topology
-production, RTC, and labeled-unicast work stays scoped by
+or MPLS FIB), and RT-Constrain (RFC 4684, SAFI 132 — strict per-peer VPN
+reflection filtering) have shipped under ADR-0077; future BGP-LS local topology
+production and labeled-unicast work stays scoped by
 [ADR-0077](docs/adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
 families must land as typed route-family slices or unreachable substrate, not as
 unicast `Prefix` shortcuts or MPLS dataplane creep.
@@ -256,7 +257,7 @@ transaction-backed config subset:
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to config when started with `--config`), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain`, `ExplainImportPolicy` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, and import-policy decision explain |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListVpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN, BGP-LS, and VPNv4/v6), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListVpnRoutes`, `ListRtcRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN, BGP-LS, VPNv4/v6, and RT-Constrain), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
 | `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
@@ -318,7 +319,7 @@ and more explicit internal architecture.
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md). |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RFC 9552 BGP-LS receive + reflection + API export (SAFI 71/72), RFC 4364/4659 VPNv4/VPNv6 route-reflection (SAFI 128, RR/controller-feed), RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
+| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RFC 9552 BGP-LS receive + reflection + API export (SAFI 71/72), RFC 4364/4659 VPNv4/VPNv6 route-reflection (SAFI 128, RR/controller-feed), RFC 4684 RT-Constrain (SAFI 132, constrained VPN distribution), RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash
