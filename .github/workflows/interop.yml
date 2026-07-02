@@ -46,6 +46,14 @@ name: Interop
 #     to different ORR vantages must receive DIVERGENT best paths,
 #     flip on a topology metric change (no churn to the unaffected
 #     client), and fall back to one standard best on withdrawal.
+#   - M77 (~4 min test): GR/LLGR stale preservation for the RR
+#     families (RFC 4724 / RFC 9494) — a GoBGP PE (VPNv4 + RTC) is
+#     kill -9'd: rustbgpd must hold its routes stale, keep serving
+#     the client, sweep exactly the not-re-advertised route at the
+#     relaunched (`gobgpd -r`) PE's End-of-RIB, promote to the LLGR
+#     stale phase (LLGR_STALE toward the client) when the PE never
+#     returns, and keep the ORR vantage resolved through a BGP-LS
+#     source's GR window.
 #
 # Operational + security tier — BMP monitoring, transport security,
 # FlowSpec:
@@ -456,6 +464,44 @@ jobs:
           label: M76
           topology: tests/interop/m76-orr-divergent-best-gobgp.clab.yml
           script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
+
+  m77:
+    name: M77 — GR/LLGR RR-family stale preservation (GoBGP 4.6.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build gobgp:bgpls
+        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+
+      - name: Run M77 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M77
+          topology: tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
+          script: tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
 
   m22:
     name: M22 — FlowSpec (FRR 10.3.1)

@@ -1,0 +1,69 @@
+# M77 restartable PE. The VRFs live in the CONFIG FILE (not `gobgp vrf add`)
+# so a `gobgpd -r` relaunch restores the RTC membership NLRIs without CLI
+# help; the VPN routes themselves are CLI-injected and therefore die with
+# the daemon — exactly the state the GR receipt manipulates.
+#
+# GR: restart-time 60 drives the RR's helper stale window. mp-graceful-restart
+# per family puts l3vpn-ipv4-unicast and rtc into the GR capability;
+# long-lived-graceful-restart per family (restart-time 30) puts them into the
+# LLGR capability, so the RR's GR-expiry promotes to a 30 s LLGR stale phase.
+# connect-retry 5 keeps re-establishment fast after the link-down relaunch
+# dance in the test script.
+
+[global.config]
+as = 65001
+router-id = "10.0.1.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.1.1"
+peer-as = 65001
+description = "rustbgpd-gr-rr"
+
+[neighbors.timers.config]
+connect-retry = 5
+
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 60
+long-lived-enabled = true
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv4-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 30
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "rtc"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 30
+
+[[vrfs]]
+[vrfs.config]
+name = "blue"
+id = 1
+rd = "65001:100"
+both-rt-list = ["65001:100"]
+
+# The extra IMPORT-only RT 65001:222 is matched by no VPN route and no
+# other peer's interest: it derives the one RTC NLRI in the topology that
+# is uniquely PE-originated, so the PE's RTC staleness lifecycle stays
+# visible in rustbgpd's best-path-only RTC view (blue and red /96s are
+# both dual-originated with the client and flip to its fresh copy the
+# moment the PE's copy goes stale). Import-only keeps it off the red VPN
+# route's export RT set.
+[[vrfs]]
+[vrfs.config]
+name = "red"
+id = 2
+rd = "65001:200"
+import-rt-list = ["65001:200", "65001:222"]
+export-rt-list = ["65001:200"]
