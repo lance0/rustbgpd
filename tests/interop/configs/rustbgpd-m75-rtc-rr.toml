@@ -1,0 +1,41 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "vpnv4-source"
+hold_time = 90
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast", "rtc"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "vpnv4-sink-rtc"
+hold_time = 90
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast", "rtc"]
+
+# No "rtc" here on purpose: sink2 pins the SAFI-132-not-negotiated rule —
+# a peer without RTC must receive the full unfiltered VPN table.
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65001
+description = "vpnv4-sink-no-rtc"
+hold_time = 90
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast"]
+
+[security.grpc]
+enforcement = "legacy"

@@ -1,0 +1,75 @@
+# Containerlab topology: GoBGP source ↔ rustbgpd RR ↔ GoBGP sinks
+# (M75 — RT-Constrain VPNv4 reflection filtering, RFC 4684)
+#
+# Validates: rustbgpd filters VPNv4 (SAFI 128) route reflection per-peer by
+# RT-Constrain (SAFI 132) membership. gobgp-src holds two VRFs (RT 65001:100
+# and 65001:200) and injects one VPN route in each; gobgp-sink negotiates RTC
+# and starts with only the 65001:100 VRF, so it must receive exactly the blue
+# route; gobgp-sink2 does NOT negotiate RTC and must receive both routes
+# unfiltered (SAFI-132-not-negotiated rule). Widening/narrowing sink's RTC
+# membership drives delta UPDATEs/withdraws from the RR without a session
+# reset. iBGP-only: GoBGP's eBGP RTC handling is broken upstream
+# (gobgp #2427).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m75-rtc-vpnv4-filter-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh
+#   containerlab destroy -t tests/interop/m75-rtc-vpnv4-filter-gobgp.clab.yml
+
+name: m75-rtc-vpnv4-filter-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m75-rtc-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    gobgp-src:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m75-src.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-sink:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m75-sink.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-sink2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m75-sink2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-src:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-sink:eth1"]
+    - endpoints: ["rustbgpd:eth3", "gobgp-sink2:eth1"]
