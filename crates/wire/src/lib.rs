@@ -31,6 +31,8 @@
 pub mod attribute;
 /// BGP-LS NLRI codec substrate (RFC 9552).
 pub mod bgpls;
+/// Typed BGP-LS topology accessors over the opaque codec (RFC 9552).
+pub mod bgpls_topo;
 /// BGP capability negotiation types and codec (RFC 5492).
 pub mod capability;
 /// Wire-format constants: markers, lengths, type codes.
@@ -207,6 +209,16 @@ pub use bgpls::{
     BGP_LS_AFI, BGP_LS_ROUTE_DISTINGUISHER_LEN, BGP_LS_SAFI, BGP_LS_VPN_SAFI, BgpLsNlri,
     BgpLsNlriKey, BgpLsNlriType, BgpLsTlv, decode_bgpls_nlri, decode_bgpls_tlvs,
     decode_bgpls_vpn_nlri, encode_bgpls_nlri, encode_bgpls_tlvs,
+};
+pub use bgpls_topo::{
+    BGP_LS_TLV_AUTONOMOUS_SYSTEM, BGP_LS_TLV_BGP_LS_IDENTIFIER, BGP_LS_TLV_IGP_METRIC,
+    BGP_LS_TLV_IGP_ROUTER_ID, BGP_LS_TLV_IP_REACHABILITY, BGP_LS_TLV_IPV4_INTERFACE_ADDRESS,
+    BGP_LS_TLV_IPV4_NEIGHBOR_ADDRESS, BGP_LS_TLV_IPV6_INTERFACE_ADDRESS,
+    BGP_LS_TLV_IPV6_NEIGHBOR_ADDRESS, BGP_LS_TLV_LINK_LOCAL_REMOTE_IDENTIFIERS,
+    BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, BGP_LS_TLV_MULTI_TOPOLOGY_ID, BGP_LS_TLV_OSPF_AREA_ID,
+    BGP_LS_TLV_OSPF_ROUTE_TYPE, BGP_LS_TLV_PREFIX_METRIC, BGP_LS_TLV_REMOTE_NODE_DESCRIPTORS,
+    BGP_LS_TLV_TE_DEFAULT_METRIC, BgpLsNodeKey, bgp_ls_attribute_tlvs, igp_metric, prefix_metric,
+    te_default_metric,
 };
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use orf::{
