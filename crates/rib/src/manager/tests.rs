@@ -2056,6 +2056,736 @@ async fn route_refresh_rtc_re_advertises_routes() {
     handle.await.unwrap();
 }
 
+// --- RFC 4684 VPN reflection filter (RT-Constrain membership) ---
+
+/// Sendable families for a peer that negotiated VPNv4+VPNv6 and RT-Constrain.
+fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
+    vec![
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv6, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::RtConstrain),
+    ]
+}
+
+/// A two-octet-AS Route Target `RT:65001:<local_admin>` — the family that
+/// `make_rtc_rib_route`'s /96 membership NLRI covers.
+fn rt(local_admin: u16) -> ExtendedCommunity {
+    ExtendedCommunity::new(0x0002_FDE9_0000_0000 | u64::from(local_admin))
+}
+
+/// An RT membership route from `peer` carrying an arbitrary NLRI.
+fn make_rtc_rib_route_with_nlri(
+    peer: Ipv4Addr,
+    nlri: rustbgpd_wire::RtcNlri,
+) -> crate::route::RtcRibRoute {
+    let mut route = make_rtc_rib_route(peer, 0, 100);
+    route.nlri = nlri;
+    route
+}
+
+/// A `VPNv4` route from `peer` carrying the given extended communities.
+fn make_vpn_rib_route_with_rts(
+    peer: Ipv4Addr,
+    prefix_octet: u8,
+    rts: Vec<ExtendedCommunity>,
+) -> VpnRibRoute {
+    let mut route = make_vpn_rib_route(peer, prefix_octet, 100, 100);
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(rts));
+    route
+}
+
+/// A `VPNv6` route from `peer` carrying the given extended communities.
+fn make_vpn6_rib_route_with_rts(
+    peer: Ipv4Addr,
+    segment: u16,
+    rts: Vec<ExtendedCommunity>,
+) -> VpnRibRoute {
+    let nlri = VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(100, 0, true).unwrap()],
+        route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+        prefix: VpnPrefix::v6(Ipv6Addr::new(0x2001, 0xdb8, segment, 0, 0, 0, 0, 0), 48).unwrap(),
+    };
+    VpnRibRoute {
+        nlri,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(100),
+            PathAttribute::ExtendedCommunities(rts),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+
+/// Bring up an eBGP peer that negotiated VPN + RT-Constrain families.
+/// Does NOT drain — callers assert the initial dump.
+async fn vpn_rtc_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_rtc_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+/// Drain a VPN+RTC peer's initial dump + `EoR`, asserting the RFC 4684
+/// strict rule: the dump carries the local default RTC NLRI and ZERO VPN
+/// routes (SAFI 132 negotiated + empty membership ⇒ advertise nothing).
+async fn drain_strict_vpn_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+    let dump = out_rx.recv().await.unwrap();
+    assert!(
+        dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
+        "initial dump must carry the locally-originated default RTC NLRI"
+    );
+    assert!(
+        dump.vpn_announce.is_empty(),
+        "empty RTC membership must withhold every VPN route from the initial dump"
+    );
+    assert!(dump.vpn_withdraw.is_empty());
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, vpn_rtc_sendable());
+}
+
+/// Send RT membership NLRI (interest in `RT:65001:<la>` per entry) from `peer`.
+async fn send_rtc_interest(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, local_admins: &[u16]) {
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced: local_admins
+            .iter()
+            .map(|&la| make_rtc_rib_route(peer, la, 100))
+            .collect(),
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// SAFI 132 negotiated + no RTC interest received ⇒ NO VPN routes advertised
+/// (the strict rule) — the initial dump stages zero VPN routes.
+#[tokio::test]
+async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_vpn_rib_route_with_rts(
+            Ipv4Addr::new(10, 0, 0, 1),
+            60,
+            vec![rt(100)],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = vpn_rtc_peer_up(&tx, target).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// When a matching RTC NLRI arrives, the withheld VPN route is announced as a
+/// minimal delta — no session reset, and already-correct Adj-RIB-Out state is
+/// not re-sent.
+#[tokio::test]
+async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
+    let key_a = route_a.key();
+    let key_b = route_b.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route_a, route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let first = out_rx.recv().await.unwrap();
+    assert_eq!(first.vpn_announce.len(), 1);
+    assert_eq!(first.vpn_announce[0].key(), key_a);
+    assert!(first.vpn_withdraw.is_empty());
+
+    // Widening the membership announces ONLY the newly-covered route — the
+    // already-advertised one is suppressed by the Adj-RIB-Out equality check.
+    send_rtc_interest(&tx, target, &[200]).await;
+    let second = out_rx.recv().await.unwrap();
+    assert_eq!(second.vpn_announce.len(), 1);
+    assert_eq!(second.vpn_announce[0].key(), key_b);
+    assert!(second.vpn_withdraw.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Withdrawing the covering RTC NLRI withdraws the VPN route from that peer.
+#[tokio::test]
+async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 62, vec![rt(100)]);
+    let vpn_key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 1);
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![],
+        withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
+    })
+    .await
+    .unwrap();
+    let withdrawn = out_rx.recv().await.unwrap();
+    assert!(withdrawn.vpn_announce.is_empty());
+    assert_eq!(withdrawn.vpn_withdraw, vec![vpn_key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The zero-length default NLRI is wildcard interest: every VPN route passes,
+/// including one with no Route Target extended community at all.
+#[tokio::test]
+async fn default_rtc_nlri_matches_all_vpn_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]),
+            // No extended communities at all — only default interest covers it.
+            make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100),
+        ],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![make_rtc_rib_route_with_nlri(
+            target,
+            rustbgpd_wire::RtcNlri::DEFAULT,
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(
+        update.vpn_announce.len(),
+        2,
+        "default RTC NLRI must admit every VPN route"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A /48 membership NLRI (origin AS + RT type/subtype bytes) admits the whole
+/// two-octet-AS RT family regardless of local admin, while an RT of a
+/// different type encoding stays filtered — prefix matching is masked, not
+/// exact.
+#[tokio::test]
+async fn rtc_prefix_match_gates_by_masked_bits() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let covered_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let covered_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(999)]);
+    // Type 0x01 (IPv4-administrator) Route Target: outside the /48's
+    // type/subtype bits, so it must stay filtered.
+    let uncovered = make_vpn_rib_route_with_rts(
+        Ipv4Addr::new(10, 0, 0, 1),
+        62,
+        vec![ExtendedCommunity::new(0x0102_0A00_0001_0064)],
+    );
+    let covered_keys: HashSet<_> = [covered_a.key(), covered_b.key()].into();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![covered_a, covered_b, uncovered],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    // /48 = origin AS 65001 (32 bits) + RT type 0x00 / subtype 0x02 (16 bits).
+    let nlri = rustbgpd_wire::RtcNlri::new(65001, 0x0002_0000_0000_0000, 48).unwrap();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![make_rtc_rib_route_with_nlri(target, nlri)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let update = out_rx.recv().await.unwrap();
+    let announced_keys: HashSet<_> = update
+        .vpn_announce
+        .iter()
+        .map(crate::route::VpnRibRoute::key)
+        .collect();
+    assert_eq!(
+        announced_keys, covered_keys,
+        "the /48 must admit the whole RT:65001:* family and nothing else"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// One membership gates BOTH `VPNv4` and `VPNv6` keys.
+#[tokio::test]
+async fn rtc_filter_applies_to_both_vpnv4_and_vpnv6() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let v4_covered = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let v6_covered = make_vpn6_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 1, vec![rt(100)]);
+    let v4_other = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
+    let v6_other = make_vpn6_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 2, vec![rt(200)]);
+    let covered_keys: HashSet<_> = [v4_covered.key(), v6_covered.key()].into();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![v4_covered, v6_covered, v4_other, v6_other],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let update = out_rx.recv().await.unwrap();
+    let announced_keys: HashSet<_> = update
+        .vpn_announce
+        .iter()
+        .map(crate::route::VpnRibRoute::key)
+        .collect();
+    assert_eq!(
+        announced_keys, covered_keys,
+        "the RTC gate must admit the matching VPNv4 AND VPNv6 routes only"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer that did NOT negotiate SAFI 132 keeps today's unfiltered VPN
+/// reflection — the regression guard for the `None`-filter path.
+#[tokio::test]
+async fn non_rtc_peer_reflection_unchanged() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A VPN route with several Route Targets passes when ANY of them matches
+/// the peer's membership.
+#[tokio::test]
+async fn route_with_any_matching_rt_passes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(555), rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Membership derives from the peer's OWN Adj-RIB-In — all paths, never the
+/// Loc-RIB best: when two peers advertise the same RTC NLRI, the tiebreak
+/// loser's interest still opens its VPN filter.
+#[tokio::test]
+async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let winner = Ipv4Addr::new(10, 0, 0, 2);
+    let loser = Ipv4Addr::new(10, 0, 0, 3);
+    let mut winner_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(winner)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut winner_rx).await;
+    let mut loser_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(loser)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut loser_rx).await;
+
+    // Winner's copy of the NLRI takes the Loc-RIB tiebreak (higher LOCAL_PREF)
+    // and gets reflected to the loser.
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(winner),
+        announced: vec![make_rtc_rib_route(winner, 100, 200)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let winner_vpn = winner_rx.recv().await.unwrap();
+    assert_eq!(winner_vpn.vpn_announce.len(), 1);
+    let reflected = loser_rx.recv().await.unwrap();
+    assert_eq!(reflected.rtc_announce.len(), 1);
+
+    // The loser advertises the SAME NLRI with a losing LOCAL_PREF: the
+    // Loc-RIB best is unchanged, but the loser's own membership must still
+    // open — the filter reads the peer's Adj-RIB-In, not the Loc-RIB.
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(loser),
+        announced: vec![make_rtc_rib_route(loser, 100, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let loser_vpn = loser_rx.recv().await.unwrap();
+    assert_eq!(
+        loser_vpn.vpn_announce.len(),
+        1,
+        "tiebreak-losing RTC path must still open the loser's VPN filter"
+    );
+    assert_eq!(loser_vpn.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// An enhanced-refresh `EoRR` sweep that removes an unreplaced RTC route must
+/// shrink the peer's membership and withdraw the now-uncovered VPN route.
+#[tokio::test]
+async fn rtc_refresh_eorr_sweep_restages_vpn() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
+    let key_b = route_b.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route_a, route_b],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100, 200]).await;
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 2);
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+    // Only the RT:100 interest is re-announced inside the window; RT:200
+    // stays marked stale.
+    send_rtc_interest(&tx, target, &[100]).await;
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+
+    let swept = out_rx.recv().await.unwrap();
+    assert!(swept.vpn_announce.is_empty());
+    assert_eq!(
+        swept.vpn_withdraw,
+        vec![key_b],
+        "the EoRR sweep must withdraw the VPN route whose RTC interest was not replayed"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer re-establishing after graceful restart starts with a strict empty
+/// membership (the GR-entry conservative withdraw cleared its RTC routes) and
+/// only receives VPN routes once its interest re-arrives.
+#[tokio::test]
+async fn gr_reestablish_starts_strict_until_rtc_rearrives() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+    send_rtc_interest(&tx, target, &[100]).await;
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.vpn_announce.len(), 1);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Re-establish: the strict initial dump proves the membership did not
+    // survive the restart — no VPN routes until the interest re-arrives.
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let reannounced = out_rx.recv().await.unwrap();
+    assert_eq!(reannounced.vpn_announce.len(), 1);
+    assert_eq!(reannounced.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The initial table dump to an RTC peer stages zero VPN routes, and the
+/// table flows as soon as matching interest arrives — no flap needed.
+#[tokio::test]
+async fn initial_dump_to_rtc_peer_stages_no_vpn_then_flows_on_interest() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A duplicate RTC announce leaves the rebuilt membership equal to the old
+/// one and must NOT trigger a dirty resync — nothing is re-sent.
+#[tokio::test]
+async fn rtc_membership_unchanged_skips_restage() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_vpn_rib_route_with_rts(
+            Ipv4Addr::new(10, 0, 0, 1),
+            60,
+            vec![rt(100)],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let first = out_rx.recv().await.unwrap();
+    assert_eq!(first.vpn_announce.len(), 1);
+
+    // Duplicate announce: membership rebuild compares equal — no restage.
+    send_rtc_interest(&tx, target, &[100]).await;
+    let resend = tokio::time::timeout(Duration::from_millis(50), out_rx.recv()).await;
+    assert!(
+        resend.is_err(),
+        "unchanged RTC membership must skip the dirty resync entirely"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn closed_query_channel_does_not_block_primary_channel() {
     let (tx, rx) = mpsc::channel(64);

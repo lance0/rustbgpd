@@ -35,6 +35,33 @@ use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
 #[cfg(test)]
 use helpers::{ERR_REFRESH_TIMEOUT, LOCAL_PEER, validate_route_rpki};
 
+/// A peer's RT-Constrain membership (RFC 4684): the Route Targets the peer
+/// declared interest in via SAFI-132 NLRI. Rebuilt whole from the peer's OWN
+/// Adj-RIB-In (all paths — never the Loc-RIB best, whose tiebreak winner may
+/// belong to a different peer) whenever that Adj-RIB-In mutates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RtcMembership {
+    /// Peer advertised the zero-length default NLRI: interest in every RT.
+    has_default: bool,
+    /// Non-default membership NLRI, sorted + deduped so rebuilds of the
+    /// same set compare equal regardless of `HashMap` iteration order.
+    entries: Vec<rustbgpd_wire::RtcNlri>,
+}
+
+impl RtcMembership {
+    /// Whether any of `rts` falls inside this membership. An empty
+    /// membership (SAFI 132 negotiated, no interest received yet) matches
+    /// nothing — the strict RFC 4684 rule, so a route with no Route Target
+    /// at all only passes via the default NLRI.
+    fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
+        if self.has_default {
+            return true;
+        }
+        rts.iter()
+            .any(|&rt| self.entries.iter().any(|nlri| nlri.matches(rt)))
+    }
+}
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -109,6 +136,8 @@ pub struct RibManager {
     refresh_stale_bgpls: HashMap<IpAddr, HashSet<crate::route::BgpLsRouteKey>>,
     /// VPNv4/VPNv6 routes still awaiting replacement during an inbound refresh.
     refresh_stale_vpn: HashMap<IpAddr, HashSet<crate::route::VpnRibRouteKey>>,
+    /// RT-Constrain routes still awaiting replacement during an inbound refresh.
+    refresh_stale_rtc: HashMap<IpAddr, HashSet<crate::route::RtcRibRouteKey>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
     refresh_stale_counts: HashMap<(IpAddr, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
@@ -140,6 +169,13 @@ pub struct RibManager {
     /// `(AFI, SAFI)`. Consulted as an additional outbound filter before export
     /// policy when distributing to the peer. Absent ⇒ no ORF constraint.
     peer_orf_filters: HashMap<IpAddr, HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
+    /// Per-peer RT-Constrain membership (RFC 4684) gating VPNv4/VPNv6
+    /// distribution. Present (possibly empty = advertise NO VPN routes,
+    /// the strict rule) from peer-up for every peer that negotiated
+    /// `(IPv4, RtConstrain)`; absent ⇒ no RTC constraint. Per-session
+    /// state: cleared with the rest of the outbound teardown, so a GR
+    /// re-establish starts strict until the peer's interest re-arrives.
+    peer_rt_membership: HashMap<IpAddr, RtcMembership>,
     /// Families whose initial advertisement is gated pending the peer's first
     /// ROUTE-REFRESH (RFC 5291 §6). While a `(peer, AFI, SAFI)` is here, the
     /// initial table dump skips it; the gate is lifted on the first refresh.
@@ -525,6 +561,7 @@ impl RibManager {
             refresh_stale_evpn: HashMap::new(),
             refresh_stale_bgpls: HashMap::new(),
             refresh_stale_vpn: HashMap::new(),
+            refresh_stale_rtc: HashMap::new(),
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
@@ -535,6 +572,7 @@ impl RibManager {
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
+            peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
             peer_asn: HashMap::new(),
@@ -639,6 +677,7 @@ impl RibManager {
         self.refresh_stale_evpn.remove(&peer);
         self.refresh_stale_bgpls.remove(&peer);
         self.refresh_stale_vpn.remove(&peer);
+        self.refresh_stale_rtc.remove(&peer);
         self.refresh_stale_counts
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
         self.refresh_deadlines
@@ -1732,16 +1771,22 @@ impl RibManager {
         self.recompute_and_distribute_vpn(affected);
     }
 
-    /// RT-Constrain ingest (RFC 4684). Mirrors the VPN receive path minus
-    /// the enhanced-refresh stale bookkeeping (no RTC refresh lifecycle yet)
-    /// and minus any VPN-filter membership rebuild — that is the next slice.
+    /// RT-Constrain ingest (RFC 4684). Mirrors the VPN receive path; after
+    /// the Adj-RIB-In mutation the peer's RT membership is rebuilt so the
+    /// VPNv4/VPNv6 Adj-RIB-Out restages under the new filter.
     fn handle_rtc_routes_received(
         &mut self,
         peer: IpAddr,
         announced: Vec<crate::route::RtcRibRoute>,
         withdrawn: Vec<crate::route::RtcRibRouteKey>,
     ) {
+        let family = crate::route::RtcRibRouteKey::afi_safi();
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family));
         let mut affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        let mut removed_stale = 0usize;
         let mut needs_intern_gc = false;
 
         {
@@ -1749,19 +1794,68 @@ impl RibManager {
             for key in withdrawn {
                 if rib.withdraw_rtc(&key) {
                     needs_intern_gc = true;
-                    affected.insert(key);
+                    affected.insert(key.clone());
+                }
+                if active_refresh
+                    && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    removed_stale += 1;
                 }
             }
             for route in announced {
                 let key = route.key();
                 needs_intern_gc |= rib.insert_rtc(route);
+                if active_refresh
+                    && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    removed_stale += 1;
+                }
                 affected.insert(key);
             }
         }
 
+        self.decrement_refresh_stale_count(peer, family.0, family.1, removed_stale);
+        self.update_peer_refresh_metrics(peer);
         self.recompute_rtc_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+        }
+        self.rebuild_rtc_membership_and_restage_vpn(peer);
+    }
+
+    /// Rebuild `peer`'s RT-Constrain membership from its Adj-RIB-In (all
+    /// paths) and, when it changed, mark the peer dirty and run a resync so
+    /// the VPN Adj-RIB-Out restages under the new filter (the
+    /// `handle_replace_peer_export_policy` precedent — the Adj-RIB-Out
+    /// equality machinery yields the RFC 4684 minimal update set, no
+    /// session reset). An unchanged membership skips the restage entirely.
+    fn rebuild_rtc_membership_and_restage_vpn(&mut self, peer: IpAddr) {
+        let mut has_default = false;
+        let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
+        if let Some(rib) = self.ribs.get(&peer) {
+            for route in rib.iter_rtc() {
+                if route.nlri.is_default() {
+                    has_default = true;
+                } else {
+                    entries.push(route.nlri);
+                }
+            }
+        }
+        entries.sort_unstable();
+        entries.dedup();
+        let membership = RtcMembership {
+            has_default,
+            entries,
+        };
+        if self.peer_rt_membership.get(&peer) == Some(&membership) {
+            return;
+        }
+        self.peer_rt_membership.insert(peer, membership);
+        if self.outbound_peers.contains_key(&peer) {
+            self.dirty_peers.insert(peer);
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
     }
 

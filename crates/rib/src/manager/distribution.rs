@@ -1943,6 +1943,29 @@ impl RibManager {
         }
     }
 
+    /// Resolve the RFC 4684 VPN outbound filter for `peer`: `Some` iff the
+    /// peer negotiated `(IPv4, RtConstrain)`; a somehow-absent membership
+    /// entry resolves to the strict empty filter (advertise nothing) rather
+    /// than fail-open. Returns an owned clone because every caller holds a
+    /// `&mut` Adj-RIB-Out borrow through `self` while staging (the ORF
+    /// precedent) — memberships are small, present only for RTC peers.
+    pub(super) fn rtc_vpn_filter(
+        &self,
+        peer: IpAddr,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+    ) -> Option<super::RtcMembership> {
+        if sendable.is_some_and(|f| f.contains(&crate::route::RtcRibRouteKey::afi_safi())) {
+            Some(
+                self.peer_rt_membership
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        }
+    }
+
     /// Stage VPNv4/VPNv6 announces and withdrawals for a set of affected keys.
     ///
     /// ADR-0077 §6 guardrail: the next-hop, MPLS label stack, and Route
@@ -1968,6 +1991,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        rtc_filter: Option<&super::RtcMembership>,
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
@@ -1992,6 +2016,21 @@ impl RibManager {
                 }
                 continue;
             };
+
+            // RFC 4684 outbound gate: a peer that negotiated RT-Constrain
+            // only receives VPN routes whose Route Targets fall inside its
+            // advertised membership (`None` = SAFI 132 not negotiated ⇒
+            // unfiltered). Membership is per-peer, so the one gate covers
+            // both VPNv4 and VPNv6 keys. Miss ⇒ withdraw-if-present,
+            // exactly the sendable-family gate shape above.
+            if let Some(membership) = rtc_filter
+                && !membership.matches_any(best.extended_communities())
+            {
+                if rib_out.get_vpn(key).is_some() {
+                    vpn_withdraw.push(key.clone());
+                }
+                continue;
+            }
 
             if best.peer == target_peer {
                 if rib_out.get_vpn(key).is_some() {
@@ -2421,6 +2460,7 @@ impl RibManager {
             // is cheap: ORF filters are small and present only for peers that
             // negotiated ORF (None for everyone else).
             let orf_filters = self.peer_orf_filters.get(&peer).cloned();
+            let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
             let orf_gated = self
                 .peer_orf_pending
                 .get(&peer)
@@ -2591,6 +2631,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    rtc_filter.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -3127,6 +3168,7 @@ impl RibManager {
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
+            let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
             let target_peer_label = peer.to_string();
             let metrics = self.metrics.clone();
 
@@ -3151,6 +3193,7 @@ impl RibManager {
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),
+                rtc_filter.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,

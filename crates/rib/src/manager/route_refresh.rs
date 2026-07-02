@@ -301,6 +301,16 @@ impl RibManager {
                         stale_count += 1;
                     }
                 }
+            } else if safi == Safi::RtConstrain {
+                // RTC is a single family (AFI 1 only), so clearing the whole
+                // per-peer set is safe — the EVPN pattern, not the VPN one.
+                let stale = self.refresh_stale_rtc.entry(peer).or_default();
+                stale.clear();
+                for route in rib.iter_rtc() {
+                    if stale.insert(route.key()) {
+                        stale_count += 1;
+                    }
+                }
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
                 stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
@@ -367,6 +377,7 @@ impl RibManager {
         let mut rtc_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let target_peer_asn = self.peer_asn.get(&peer).copied();
@@ -508,6 +519,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    rtc_filter.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -828,12 +840,21 @@ impl RibManager {
         } else {
             Vec::new()
         };
+        let stale_rtc_keys: Vec<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
+            self.refresh_stale_rtc
+                .get(&peer)
+                .map(|stale| stale.iter().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for (prefix, path_id) in &stale_route_keys {
                 if rib.withdraw(prefix, *path_id) {
@@ -860,6 +881,11 @@ impl RibManager {
                     vpn_affected.insert(key.clone());
                 }
             }
+            for key in &stale_rtc_keys {
+                if rib.withdraw_rtc(key) {
+                    rtc_affected.insert(key.clone());
+                }
+            }
             // Reclaim attribute interns dropped by the bulk withdraw —
             // each withdraw above can leave a `strong_count==1` Arc in
             // the intern table that wouldn't otherwise be GC'd until
@@ -869,6 +895,7 @@ impl RibManager {
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
                 || !vpn_affected.is_empty()
+                || !rtc_affected.is_empty()
             {
                 rib.gc_intern_table();
             }
@@ -907,6 +934,9 @@ impl RibManager {
 
         if family == (Afi::L2Vpn, Safi::Evpn) {
             self.refresh_stale_evpn.remove(&peer);
+        }
+        if safi == Safi::RtConstrain {
+            self.refresh_stale_rtc.remove(&peer);
         }
         if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
             let clear_bgpls_stale_entry =
@@ -973,6 +1003,16 @@ impl RibManager {
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
             }
+        }
+        if !rtc_affected.is_empty() {
+            self.recompute_rtc_keys(&rtc_affected);
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+            // The sweep just mutated this peer's RTC Adj-RIB-In — its RT
+            // membership shrank, so VPN routes no longer covered must be
+            // withdrawn from this peer's Adj-RIB-Out.
+            self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
     }
 }

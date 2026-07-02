@@ -419,6 +419,11 @@ impl RibManager {
         // `negotiated_orf_recv`.
         self.peer_orf_filters.remove(&peer);
         self.peer_orf_pending.remove(&peer);
+        // RT-Constrain membership is per-session too (RFC 4684 filters
+        // derive from the session's Adj-RIB-In, conservatively withdrawn on
+        // GR entry): `handle_peer_up` re-creates it empty-strict when the
+        // new session negotiates the family.
+        self.peer_rt_membership.remove(&peer);
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
@@ -592,6 +597,18 @@ impl RibManager {
         // `send_initial_table`.
         if sendable_families.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
             self.ensure_default_rtc_originated();
+            // RFC 4684 strict rule: a peer that negotiated SAFI 132 starts
+            // with an EMPTY membership — no VPN routes are advertised
+            // (initial dump included) until its RT interest arrives. This
+            // also covers a GR re-establish: the previous session's
+            // membership was torn down, so the returning peer is strict
+            // until its RTC routes re-arrive.
+            self.peer_rt_membership
+                .insert(peer, super::RtcMembership::default());
+        } else {
+            // A replacement session that dropped the family must not
+            // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
+            self.peer_rt_membership.remove(&peer);
         }
 
         debug!(%peer, "peer up — registering for outbound updates");
@@ -696,6 +713,7 @@ impl RibManager {
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
         // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
         // for families still awaiting the peer's first ROUTE-REFRESH. For a
         // non-GR peer the EoR is still emitted (an honest "empty table so
@@ -911,6 +929,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                rtc_filter.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
