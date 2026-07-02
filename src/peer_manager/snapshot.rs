@@ -162,6 +162,41 @@ impl PeerManager {
             .ok()
     }
 
+    /// RFC 9069 Loc-RIB stats (types 8 + 10) for the emulated Loc-RIB
+    /// instance peer, emitted on the same periodic tick as the per-peer
+    /// stats. Skipped entirely unless some collector monitors `loc_rib`.
+    async fn emit_loc_rib_bmp_stats(&self, bmp_tx: &tokio::sync::mpsc::Sender<BmpEvent>) {
+        let monitored = self.current_config.bmp.as_ref().is_some_and(|bmp| {
+            bmp.collectors.iter().any(|collector| {
+                collector
+                    .monitor
+                    .contains(&crate::config::BmpMonitorView::LocRib)
+            })
+        });
+        if !monitored {
+            return;
+        }
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self
+            .rib_tx
+            .send(rustbgpd_rib::RibUpdate::QueryBmpLocRibStats { reply })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Ok(Ok(per_family)) = tokio::time::timeout(PEER_QUERY_TIMEOUT, rx).await else {
+            // Unavailable this tick — omit rather than report a false zero.
+            return;
+        };
+        if let Err(e) = bmp_tx.try_send(BmpEvent::LocRibStats { per_family }) {
+            warn!(
+                error = %e,
+                "BMP event channel full or closed, dropping periodic Loc-RIB stats report"
+            );
+        }
+    }
+
     pub(super) async fn emit_periodic_bmp_stats(&self) {
         let Some(ref bmp_tx) = self.bmp_tx else {
             return;
@@ -172,6 +207,7 @@ impl PeerManager {
         // through it, every other admin command queued behind the BMP arm.
         let states = collect_session_states(&self.peers).await;
         let rib_out_counts = self.query_adj_rib_out_counts().await;
+        self.emit_loc_rib_bmp_stats(bmp_tx).await;
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
             let Some(Some(state)) = states.get(peer) else {

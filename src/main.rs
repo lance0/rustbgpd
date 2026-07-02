@@ -1257,6 +1257,120 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(resolve_rib_channel_capacity());
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
+
+    // Spawn BMP subsystem (manager + per-collector clients). Spawned
+    // before the RIB manager so the RFC 9069 Loc-RIB tap and the
+    // collector-connect table-dump forwarder can be wired into both.
+    let mut bmp_runtime: Option<BmpRuntime> = None;
+    let mut bmp_loc_rib_tx: Option<mpsc::Sender<rustbgpd_bmp::BmpEvent>> = None;
+    let bmp_tx = if let Some(ref bmp_config) = config.bmp
+        && !bmp_config.collectors.is_empty()
+    {
+        let (bmp_event_tx, bmp_event_rx) = mpsc::channel(4096);
+        let (bmp_control_tx, bmp_control_rx) = mpsc::channel(256);
+        let sys_name = bmp_config.sys_name.clone();
+        let sys_descr = if bmp_config.sys_descr.is_empty() {
+            format!("rustbgpd {}", env!("CARGO_PKG_VERSION"))
+        } else {
+            bmp_config.sys_descr.clone()
+        };
+
+        let mut collectors: Vec<(
+            std::net::SocketAddr,
+            mpsc::Sender<bytes::Bytes>,
+            rustbgpd_bmp::BmpMonitorFilter,
+        )> = Vec::new();
+        let mut client_handles = Vec::new();
+        for collector in &bmp_config.collectors {
+            let addr: std::net::SocketAddr = match collector.address.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    error!(
+                        address = %collector.address,
+                        error = %e,
+                        "invalid BMP collector address — skipping"
+                    );
+                    continue;
+                }
+            };
+            let (msg_tx, msg_rx) = mpsc::channel(4096);
+            let collector_id = collectors.len();
+            let filter = rustbgpd_bmp::BmpMonitorFilter {
+                rib_in_pre: collector
+                    .monitor
+                    .contains(&config::BmpMonitorView::RibInPre),
+                rib_out_post: collector
+                    .monitor
+                    .contains(&config::BmpMonitorView::RibOutPost),
+                loc_rib: collector.monitor.contains(&config::BmpMonitorView::LocRib),
+            };
+            collectors.push((addr, msg_tx, filter));
+            let client = rustbgpd_bmp::BmpClient::new(
+                rustbgpd_bmp::BmpClientConfig {
+                    collector_id,
+                    collector_addr: addr,
+                    reconnect_interval: collector.reconnect_interval,
+                },
+                msg_rx,
+                sys_name.clone(),
+                sys_descr.clone(),
+                Some(bmp_control_tx.clone()),
+                metrics.clone(),
+            );
+            info!(collector = %addr, "spawning BMP client");
+            client_handles.push(tokio::spawn(client.run()));
+        }
+
+        let loc_rib_enabled = collectors.iter().any(|(_, _, filter)| filter.loc_rib);
+        let mut mgr = rustbgpd_bmp::BmpManager::new(
+            bmp_event_rx,
+            bmp_control_rx,
+            collectors,
+            metrics.clone(),
+        );
+        if loc_rib_enabled {
+            // RFC 9069 Loc-RIB monitoring: fabricate the emulated
+            // instance-peer identity and bridge the manager's
+            // collector-connect dump requests onto the RIB manager's
+            // priority query channel.
+            let open_pdu = rustbgpd_rib::bmp_sync::loc_rib_open_pdu(config.global.asn, router_id);
+            let (dump_tx, mut dump_rx) = mpsc::channel::<rustbgpd_bmp::BmpDumpRequest>(8);
+            let dump_rib_tx = rib_query_tx.clone();
+            tokio::spawn(async move {
+                while let Some(request) = dump_rx.recv().await {
+                    if dump_rib_tx
+                        .send(RibUpdate::QueryBmpLocRibDump {
+                            reply: request.reply,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            mgr = mgr.with_loc_rib(
+                rustbgpd_bmp::BmpLocRibConfig {
+                    local_asn: config.global.asn,
+                    router_id,
+                    open_pdu,
+                },
+                dump_tx,
+            );
+            bmp_loc_rib_tx = Some(bmp_event_tx.clone());
+        }
+        let manager_handle = tokio::spawn(mgr.run());
+        bmp_runtime = Some(BmpRuntime {
+            control_tx: bmp_control_tx,
+            manager_handle,
+            client_handles,
+        });
+
+        Some(bmp_event_tx)
+    } else {
+        None
+    };
+
     let mut rib_manager = RibManager::new(
         rib_rx,
         rib_query_rx,
@@ -1264,6 +1378,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         cluster_id,
         metrics.clone(),
     );
+    if let Some(tx) = bmp_loc_rib_tx {
+        rib_manager = rib_manager.with_bmp_tx(tx);
+    }
     if let Some(handle) = event_history_handle.clone() {
         rib_manager = rib_manager.with_event_sink(
             rustbgpd_api::event_history_sinks::make_rib_event_sink(handle, metrics.clone()),
@@ -1363,83 +1480,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             tokio::spawn(client.run());
         }
     }
-
-    // Spawn BMP subsystem (manager + per-collector clients)
-    let mut bmp_runtime: Option<BmpRuntime> = None;
-    let bmp_tx = if let Some(ref bmp_config) = config.bmp
-        && !bmp_config.collectors.is_empty()
-    {
-        let (bmp_event_tx, bmp_event_rx) = mpsc::channel(4096);
-        let (bmp_control_tx, bmp_control_rx) = mpsc::channel(256);
-        let sys_name = bmp_config.sys_name.clone();
-        let sys_descr = if bmp_config.sys_descr.is_empty() {
-            format!("rustbgpd {}", env!("CARGO_PKG_VERSION"))
-        } else {
-            bmp_config.sys_descr.clone()
-        };
-
-        let mut collectors: Vec<(
-            std::net::SocketAddr,
-            mpsc::Sender<bytes::Bytes>,
-            rustbgpd_bmp::BmpMonitorFilter,
-        )> = Vec::new();
-        let mut client_handles = Vec::new();
-        for collector in &bmp_config.collectors {
-            let addr: std::net::SocketAddr = match collector.address.parse() {
-                Ok(a) => a,
-                Err(e) => {
-                    error!(
-                        address = %collector.address,
-                        error = %e,
-                        "invalid BMP collector address — skipping"
-                    );
-                    continue;
-                }
-            };
-            let (msg_tx, msg_rx) = mpsc::channel(4096);
-            let collector_id = collectors.len();
-            let filter = rustbgpd_bmp::BmpMonitorFilter {
-                rib_in_pre: collector
-                    .monitor
-                    .contains(&config::BmpMonitorView::RibInPre),
-                rib_out_post: collector
-                    .monitor
-                    .contains(&config::BmpMonitorView::RibOutPost),
-            };
-            collectors.push((addr, msg_tx, filter));
-            let client = rustbgpd_bmp::BmpClient::new(
-                rustbgpd_bmp::BmpClientConfig {
-                    collector_id,
-                    collector_addr: addr,
-                    reconnect_interval: collector.reconnect_interval,
-                },
-                msg_rx,
-                sys_name.clone(),
-                sys_descr.clone(),
-                Some(bmp_control_tx.clone()),
-                metrics.clone(),
-            );
-            info!(collector = %addr, "spawning BMP client");
-            client_handles.push(tokio::spawn(client.run()));
-        }
-
-        let mgr = rustbgpd_bmp::BmpManager::new(
-            bmp_event_rx,
-            bmp_control_rx,
-            collectors,
-            metrics.clone(),
-        );
-        let manager_handle = tokio::spawn(mgr.run());
-        bmp_runtime = Some(BmpRuntime {
-            control_tx: bmp_control_tx,
-            manager_handle,
-            client_handles,
-        });
-
-        Some(bmp_event_tx)
-    } else {
-        None
-    };
 
     // Spawn MRT manager (periodic TABLE_DUMP_V2 snapshots)
     let mrt_trigger_tx: Option<mpsc::Sender<oneshot::Sender<Result<std::path::PathBuf, String>>>> =

@@ -11,7 +11,15 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::codec;
-use crate::types::{BmpControlEvent, BmpEvent, BmpMonitorFilter};
+use crate::types::{
+    BmpControlEvent, BmpDumpChunk, BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter,
+};
+
+/// Per-message send timeout for a Loc-RIB dump forwarder. Paces the dump
+/// to the collector's TCP drain rate via the bounded collector channel;
+/// a collector that stalls longer than this aborts the dump (the next
+/// reconnect triggers a fresh one).
+const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// BMP manager that fans out encoded messages to all collectors.
 pub struct BmpManager {
@@ -23,6 +31,12 @@ pub struct BmpManager {
     collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>, BmpMonitorFilter)>,
     /// Latest encoded `PeerUp` message per peer address.
     peer_up_cache: std::collections::HashMap<std::net::IpAddr, Bytes>,
+    /// RFC 9069 Loc-RIB instance-peer identity. `None` = no collector
+    /// monitors `loc_rib`; Loc-RIB events are dropped.
+    loc_rib: Option<BmpLocRibConfig>,
+    /// Loc-RIB table-dump request channel toward the RIB manager, used
+    /// on collector (re)connect to synthesize the initial table sync.
+    dump_tx: Option<mpsc::Sender<BmpDumpRequest>>,
     metrics: BgpMetrics,
 }
 
@@ -40,8 +54,24 @@ impl BmpManager {
             control_rx,
             collectors,
             peer_up_cache: std::collections::HashMap::new(),
+            loc_rib: None,
+            dump_tx: None,
             metrics,
         }
+    }
+
+    /// Enable RFC 9069 Loc-RIB monitoring: the emulated Loc-RIB instance
+    /// peer identity plus the table-dump request channel used to
+    /// synchronize a (re)connecting collector with the current Loc-RIB.
+    #[must_use]
+    pub fn with_loc_rib(
+        mut self,
+        cfg: BmpLocRibConfig,
+        dump_tx: mpsc::Sender<BmpDumpRequest>,
+    ) -> Self {
+        self.loc_rib = Some(cfg);
+        self.dump_tx = Some(dump_tx);
+        self
     }
 
     /// Run the manager loop. Receives events, encodes, and fans out.
@@ -78,6 +108,9 @@ impl BmpManager {
 
     fn encode_event(event: &BmpEvent) -> Bytes {
         match event {
+            BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
+                unreachable!("Loc-RIB events are encoded in handle_loc_rib_event")
+            }
             BmpEvent::PeerUp {
                 peer_info,
                 local_open,
@@ -130,8 +163,50 @@ impl BmpManager {
         }
     }
 
+    /// Encode and fan out an RFC 9069 Loc-RIB event to `loc_rib`
+    /// collectors. Dropped silently when Loc-RIB monitoring is not
+    /// configured (no collector monitors the view).
+    fn handle_loc_rib_event(&self, event: &BmpEvent) {
+        let Some(ref cfg) = self.loc_rib else {
+            return;
+        };
+        let encoded = match event {
+            BmpEvent::LocRibRouteMonitoring {
+                update_pdu,
+                timestamp,
+            } => codec::encode_route_monitoring(&cfg.peer_info(*timestamp), update_pdu),
+            BmpEvent::LocRibStats { per_family } => {
+                // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
+                // type 10 = its per-AFI/SAFI breakdown.
+                let counters = vec![codec::StatCounter {
+                    stat_type: 8,
+                    value: per_family.iter().map(|(_, _, count)| count).sum(),
+                }];
+                let afi_counters: Vec<codec::AfiStatCounter> = per_family
+                    .iter()
+                    .map(|&(afi, safi, value)| codec::AfiStatCounter {
+                        stat_type: 10,
+                        afi,
+                        safi,
+                        value,
+                    })
+                    .collect();
+                codec::encode_stats_report(
+                    &cfg.peer_info(std::time::SystemTime::now()),
+                    &counters,
+                    &afi_counters,
+                )
+            }
+            _ => return,
+        };
+        self.fan_out_filtered(&encoded, |f| f.loc_rib);
+    }
+
     fn handle_event(&mut self, event: &BmpEvent) {
         match event {
+            BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
+                self.handle_loc_rib_event(event);
+            }
             BmpEvent::PeerUp { peer_info, .. } => {
                 let encoded = Self::encode_event(event);
                 self.peer_up_cache
@@ -178,6 +253,7 @@ impl BmpManager {
                     "BMP collector connected, replaying current PeerUp state"
                 );
                 self.replay_peer_up_to_collector(collector_id);
+                self.start_loc_rib_sync(collector_id);
                 false
             }
             BmpControlEvent::CollectorDisconnected {
@@ -193,6 +269,12 @@ impl BmpManager {
             }
             BmpControlEvent::Shutdown => {
                 info!("BMP manager received shutdown request");
+                // RFC 9069 §5.3: the Loc-RIB instance peer goes down with
+                // reason 6 + the VRF/Table Name TLV when monitoring stops.
+                if let Some(ref cfg) = self.loc_rib {
+                    let down = codec::encode_loc_rib_peer_down(cfg, std::time::SystemTime::now());
+                    self.fan_out_filtered(&down, |f| f.loc_rib);
+                }
                 true
             }
         }
@@ -232,6 +314,69 @@ impl BmpManager {
         }
     }
 
+    /// RFC 9069 table sync for a (re)connected collector that monitors
+    /// `loc_rib`: replay the Loc-RIB instance Peer Up, then request a
+    /// Loc-RIB dump from the RIB manager and forward its chunks —
+    /// synthesized Route Monitoring PDUs ending with per-AFI/SAFI
+    /// End-of-RIB markers — to this collector only.
+    ///
+    /// The forwarder runs as its own task so the manager loop never
+    /// blocks on a slow collector; live Loc-RIB events keep fanning out
+    /// concurrently and may overlap the dump (the standard BMP
+    /// dump-vs-live race — collectors reconcile by prefix).
+    fn start_loc_rib_sync(&self, collector_id: usize) {
+        let Some(ref cfg) = self.loc_rib else {
+            return;
+        };
+        let Some((addr, collector_tx, filter)) = self.collectors.get(collector_id) else {
+            return;
+        };
+        if !filter.loc_rib {
+            return;
+        }
+
+        let addr_label = addr.to_string();
+        let peer_up = codec::encode_loc_rib_peer_up(cfg, std::time::SystemTime::now());
+        if let Err(e) = collector_tx.try_send(peer_up) {
+            let reason = trysend_reason(&e);
+            self.metrics
+                .record_bmp_collector_drop(&addr_label, "loc_rib_dump", reason, 1);
+            warn!(
+                collector = %addr,
+                error = %e,
+                "BMP collector channel full or closed for Loc-RIB PeerUp; skipping dump"
+            );
+            return;
+        }
+
+        let Some(ref dump_tx) = self.dump_tx else {
+            return;
+        };
+        let (chunk_tx, chunk_rx) = mpsc::channel::<BmpDumpChunk>(4);
+        if let Err(e) = dump_tx.try_send(BmpDumpRequest { reply: chunk_tx }) {
+            let reason = trysend_reason(&e);
+            self.metrics
+                .record_bmp_collector_drop(&addr_label, "loc_rib_dump", reason, 1);
+            warn!(
+                collector = %addr,
+                error = %e,
+                "Loc-RIB dump request channel full or closed; collector starts live-only"
+            );
+            return;
+        }
+
+        let cfg = cfg.clone();
+        let collector_tx = collector_tx.clone();
+        let metrics = self.metrics.clone();
+        tokio::spawn(forward_loc_rib_dump(
+            chunk_rx,
+            collector_tx,
+            cfg,
+            metrics,
+            addr_label,
+        ));
+    }
+
     fn fan_out(&self, msg: &Bytes) {
         self.fan_out_filtered(msg, |_| true);
     }
@@ -253,6 +398,51 @@ impl BmpManager {
             }
         }
     }
+}
+
+/// Forward one Loc-RIB dump — chunks of `(synthesized UPDATE PDU,
+/// install time)` from the RIB manager — to a single collector as
+/// Route Monitoring messages. The bounded collector channel plus a
+/// per-message send timeout pace the dump at the collector's drain
+/// rate; a timeout or closed channel aborts the dump (a fresh one runs
+/// on the next reconnect).
+async fn forward_loc_rib_dump(
+    mut chunk_rx: mpsc::Receiver<BmpDumpChunk>,
+    collector_tx: mpsc::Sender<Bytes>,
+    cfg: BmpLocRibConfig,
+    metrics: BgpMetrics,
+    addr_label: String,
+) {
+    let mut sent: u64 = 0;
+    while let Some(chunk) = chunk_rx.recv().await {
+        for (pdu, timestamp) in chunk.messages {
+            let msg = codec::encode_route_monitoring(&cfg.peer_info(timestamp), &pdu);
+            match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, collector_tx.send(msg)).await {
+                Ok(Ok(())) => sent += 1,
+                Ok(Err(_)) => {
+                    metrics.record_bmp_collector_drop(
+                        &addr_label,
+                        "loc_rib_dump",
+                        "channel_closed",
+                        1,
+                    );
+                    warn!(collector = %addr_label, "collector channel closed mid Loc-RIB dump, aborting");
+                    return;
+                }
+                Err(_) => {
+                    metrics.record_bmp_collector_drop(
+                        &addr_label,
+                        "loc_rib_dump",
+                        "send_timeout",
+                        1,
+                    );
+                    warn!(collector = %addr_label, "collector stalled during Loc-RIB dump, aborting");
+                    return;
+                }
+            }
+        }
+    }
+    debug!(collector = %addr_label, messages = sent, "Loc-RIB dump forwarded");
 }
 
 /// Classify a `tokio::sync::mpsc::error::TrySendError` into the
@@ -356,6 +546,7 @@ mod tests {
                     BmpMonitorFilter {
                         rib_in_pre: true,
                         rib_out_post: true,
+                        loc_rib: false,
                     },
                 ),
             ],
@@ -830,6 +1021,298 @@ mod tests {
         drop(event_tx);
         drop(control_tx);
         handle.await.unwrap();
+    }
+
+    fn loc_rib_config() -> crate::types::BmpLocRibConfig {
+        crate::types::BmpLocRibConfig {
+            local_asn: 65001,
+            router_id: Ipv4Addr::new(10, 0, 0, 1),
+            open_pdu: Bytes::from_static(&[0xAB; 29]),
+        }
+    }
+
+    fn loc_rib_filter() -> BmpMonitorFilter {
+        BmpMonitorFilter {
+            rib_in_pre: false,
+            rib_out_post: false,
+            loc_rib: true,
+        }
+    }
+
+    /// Loc-RIB RM events reach only `loc_rib` collectors (peer type 3 in
+    /// the header); rib-in RM events do NOT reach a loc_rib-only
+    /// collector.
+    #[tokio::test]
+    async fn loc_rib_route_monitoring_filtered_per_collector() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (rib_in_tx, mut rib_in_rx) = mpsc::channel(16);
+        let (loc_rib_tx, mut loc_rib_rx) = mpsc::channel(16);
+        let (dump_tx, _dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (collector_addr(0), rib_in_tx, BmpMonitorFilter::default()),
+                (collector_addr(1), loc_rib_tx, loc_rib_filter()),
+            ],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        event_tx
+            .send(BmpEvent::LocRibRouteMonitoring {
+                update_pdu: Bytes::from_static(&[0xCC; 23]),
+                timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: sample_peer_info(),
+                update_pdu: Bytes::from_static(&[0xAA; 23]),
+            })
+            .await
+            .unwrap();
+
+        // loc_rib collector: exactly the Loc-RIB RM, peer type 3, flags 0.
+        let msg = loc_rib_rx.recv().await.unwrap();
+        assert_eq!(msg[5], 0, "route monitoring type");
+        assert_eq!(msg[6], 3, "peer type 3 (Loc-RIB instance)");
+        assert_eq!(msg[7], 0, "loc-rib flags always 0");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), loc_rib_rx.recv())
+                .await
+                .is_err(),
+            "loc_rib-only collector must not receive the rib-in RM"
+        );
+
+        // rib-in collector: only the rib-in RM (peer type 0).
+        let msg = rib_in_rx.recv().await.unwrap();
+        assert_eq!(msg[6], 0, "peer type 0 (global instance peer)");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rib_in_rx.recv())
+                .await
+                .is_err(),
+            "rib-in collector must not receive the Loc-RIB RM"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// RFC 9069 stats (types 8 + 10) fan out to `loc_rib` collectors only.
+    #[tokio::test]
+    async fn loc_rib_stats_reach_only_loc_rib_collectors() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (rib_in_tx, mut rib_in_rx) = mpsc::channel(16);
+        let (loc_rib_tx, mut loc_rib_rx) = mpsc::channel(16);
+        let (dump_tx, _dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (collector_addr(0), rib_in_tx, BmpMonitorFilter::default()),
+                (collector_addr(1), loc_rib_tx, loc_rib_filter()),
+            ],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        event_tx
+            .send(BmpEvent::LocRibStats {
+                per_family: vec![(1, 1, 10), (2, 1, 5)],
+            })
+            .await
+            .unwrap();
+
+        let msg = loc_rib_rx.recv().await.unwrap();
+        assert_eq!(msg[5], 1, "stats report type");
+        assert_eq!(msg[6], 3, "peer type 3");
+        // count(4) at offset 48: type 8 + two type-10 entries = 3.
+        assert_eq!(u32::from_be_bytes(msg[48..52].try_into().unwrap()), 3);
+        // First: type 8, len 8, value = 15 (sum).
+        assert_eq!(u16::from_be_bytes([msg[52], msg[53]]), 8);
+        assert_eq!(u64::from_be_bytes(msg[56..64].try_into().unwrap()), 15);
+        // Then the per-family type-10 entries.
+        assert_eq!(u16::from_be_bytes([msg[64], msg[65]]), 10);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rib_in_rx.recv())
+                .await
+                .is_err(),
+            "non-loc_rib collector must not receive Loc-RIB stats"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Collector connect triggers the RFC 9069 table sync: Loc-RIB Peer
+    /// Up first, then the dump chunks as RM messages (install-time
+    /// headers), then live Loc-RIB events keep flowing — and the dump
+    /// request goes out for `loc_rib` collectors only.
+    #[tokio::test]
+    async fn collector_connect_triggers_loc_rib_peer_up_then_dump_then_live() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, mut c_rx) = mpsc::channel(16);
+        let (dump_tx, mut dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx, loc_rib_filter())],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+
+        // 1. Loc-RIB Peer Up replay (peer type 3, fabricated OPEN twice,
+        // table-name TLV at the tail).
+        let peer_up = c_rx.recv().await.unwrap();
+        assert_eq!(peer_up[5], 3, "PeerUp message type");
+        assert_eq!(peer_up[6], 3, "peer type 3");
+        assert_eq!(&peer_up[peer_up.len() - 6..], b"global");
+
+        // 2. The manager requested a dump; answer with two chunks
+        // playing the RIB manager's role (2 routes + 1 "EoR" PDU).
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("dump requested on connect")
+            .expect("dump channel open");
+        let install = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        request
+            .reply
+            .send(crate::types::BmpDumpChunk {
+                messages: vec![
+                    (Bytes::from_static(&[0xD1; 23]), install),
+                    (Bytes::from_static(&[0xD2; 23]), install),
+                ],
+            })
+            .await
+            .unwrap();
+        request
+            .reply
+            .send(crate::types::BmpDumpChunk {
+                messages: vec![(Bytes::from_static(&[0xE0; 23]), install)],
+            })
+            .await
+            .unwrap();
+        drop(request);
+
+        for expected in [0xD1u8, 0xD2, 0xE0] {
+            let msg = c_rx.recv().await.unwrap();
+            assert_eq!(msg[5], 0, "route monitoring type");
+            assert_eq!(msg[6], 3, "peer type 3");
+            let ts = u32::from_be_bytes(msg[40..44].try_into().unwrap());
+            assert_eq!(ts, 1_600_000_000, "per-message install timestamp");
+            assert_eq!(msg[48], expected, "dump PDU order preserved");
+        }
+
+        // 3. Live emission continues seamlessly after the dump.
+        event_tx
+            .send(BmpEvent::LocRibRouteMonitoring {
+                update_pdu: Bytes::from_static(&[0xF7; 23]),
+                timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            })
+            .await
+            .unwrap();
+        let live = c_rx.recv().await.unwrap();
+        assert_eq!(live[48], 0xF7);
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// A collector that does not monitor `loc_rib` gets neither the
+    /// Loc-RIB Peer Up nor a dump request on connect.
+    #[tokio::test]
+    async fn non_loc_rib_collector_connect_skips_dump() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, mut c_rx) = mpsc::channel(16);
+        let (dump_tx, mut dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), c_rx.recv())
+                .await
+                .is_err(),
+            "no Loc-RIB PeerUp for a non-loc_rib collector (empty PeerUp cache)"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), dump_rx.recv())
+                .await
+                .is_err(),
+            "no dump request for a non-loc_rib collector"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Shutdown sends the Loc-RIB Peer Down (reason 6 + table-name TLV)
+    /// to `loc_rib` collectors before the manager exits.
+    #[tokio::test]
+    async fn shutdown_emits_loc_rib_peer_down_reason_6() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, mut c_rx) = mpsc::channel(16);
+        let (dump_tx, _dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx, loc_rib_filter())],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        control_tx.send(BmpControlEvent::Shutdown).await.unwrap();
+        handle.await.unwrap();
+
+        let msg = c_rx.recv().await.unwrap();
+        assert_eq!(msg[5], 2, "PeerDown message type");
+        assert_eq!(msg[6], 3, "peer type 3");
+        assert_eq!(msg[48], 6, "reason 6: local system closed, TLV follows");
+        assert_eq!(&msg[msg.len() - 6..], b"global");
+
+        drop(event_tx);
     }
 
     #[tokio::test]

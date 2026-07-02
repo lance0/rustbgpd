@@ -1709,8 +1709,8 @@ set_med = 50
 
 ## `[bmp]`
 
-Optional. Configures BMP (BGP Monitoring Protocol, RFC 7854 + RFC 8671) export
-to external collectors. rustbgpd acts as a BMP client, initiating TCP
+Optional. Configures BMP (BGP Monitoring Protocol, RFC 7854 + RFC 8671 +
+RFC 9069) export to external collectors. rustbgpd acts as a BMP client, initiating TCP
 connections to each configured collector and streaming BGP state changes (peer
 up/down, route monitoring) as BMP messages.
 
@@ -1743,7 +1743,7 @@ monitor = ["rib_in_pre", "rib_out_post"]   # + RFC 8671 Adj-RIB-Out
 |----------------------|--------|----------|---------|--------------------------------------|
 | `address`            | string | yes      | --      | Collector `host:port` socket address  |
 | `reconnect_interval` | u64   | no       | 30      | Seconds between reconnect attempts    |
-| `monitor`            | array  | no       | `["rib_in_pre"]` | Route-monitoring streams: `rib_in_pre` (RFC 7854 pre-policy Adj-RIB-In) and/or `rib_out_post` (RFC 8671 post-policy Adj-RIB-Out) |
+| `monitor`            | array  | no       | `["rib_in_pre"]` | Route-monitoring streams: `rib_in_pre` (RFC 7854 pre-policy Adj-RIB-In), `rib_out_post` (RFC 8671 post-policy Adj-RIB-Out), and/or `loc_rib` (RFC 9069 Loc-RIB instance with collector-connect table sync) |
 
 ### What is streamed
 
@@ -1754,8 +1754,8 @@ BMP messages sent to collectors:
 | **Initiation** (Type 4) | On TCP connect to collector |
 | **Peer Up** (Type 3) | BGP session reaches Established (includes raw OPEN PDUs) |
 | **Peer Down** (Type 2) | BGP session leaves Established |
-| **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU); with `rib_out_post`, also every outbound UPDATE (post-policy Adj-RIB-Out, RFC 8671) |
-| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In count type 7; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17) |
+| **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU); with `rib_out_post`, also every outbound UPDATE (post-policy Adj-RIB-Out, RFC 8671); with `loc_rib`, every Loc-RIB best-path change plus the connect-time table dump (RFC 9069) |
+| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In count type 7; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17; with `loc_rib`, Loc-RIB gauges type 8 + per-AFI/SAFI type 10) |
 | **Termination** (Type 5) | On coordinated daemon shutdown (and on client channel shutdown) |
 
 Route Monitoring messages carry the original raw BGP UPDATE PDU bytes
@@ -1775,10 +1775,46 @@ the routes; the timestamp is the advertise time. Pre-policy Adj-RIB-Out
 Note: the rib-out stream is live-only. A collector that connects (or
 reconnects) mid-session receives Peer Up state replay but no synthesized
 table dump of already-advertised routes — the same limitation the rib-in
-stream has today. See `KNOWN_ISSUES.md`.
+stream has today. The `loc_rib` view below does not share this gap. See
+`KNOWN_ISSUES.md`.
+
+### RFC 9069 Loc-RIB monitoring
+
+With `monitor = ["loc_rib"]` (combinable with the other views), the daemon
+streams its post-best-path Loc-RIB attributed to an emulated *Loc-RIB
+instance peer* (peer type 3): zero-filled peer address, Peer Distinguisher 0
+(global instance), Peer AS = the local ASN, Peer BGP ID = the local
+router-id, and a per-message timestamp equal to the route's Loc-RIB install
+time. Route Monitoring PDUs are synthesized from the RIB with 4-octet-ASN
+encoding and no Add-Path. The Peer Up for the emulated peer carries a
+fabricated OPEN (4-octet-ASN capability plus one MP capability per streamed
+family; the received OPEN is a byte-identical repeat) and the VRF/Table Name
+Information TLV with the value `global`; on daemon shutdown the peer goes
+down with reason 6 and the TLV echoed. Periodic stats include type 8
+(Loc-RIB route total) and type 10 (per-AFI/SAFI counts).
+
+Streamed families (v1): IPv4/IPv6 unicast and VPNv4/VPNv6. Other Loc-RIB
+families (EVPN, BGP-LS, labeled-unicast, FlowSpec, RT-Constrain) are not yet
+synthesized and are deliberately absent from the fabricated OPEN; they land
+additively in a later slice.
+
+**Collector-connect table sync.** Unlike the rib-in/rib-out views, every
+collector (re)connect on a `loc_rib` collector triggers a full Loc-RIB dump:
+Peer Up for the emulated peer, then the current table as Route Monitoring
+messages (each stamped with its install time), closed by one End-of-RIB per
+streamed family, after which live updates continue seamlessly. Live changes
+racing the dump may be observed both in the dump and as live messages — the
+standard BMP overlap; collectors reconcile by prefix. The dump is paced to
+the collector's TCP drain rate and aborts (with a
+`bmp_collector_drops_total{phase="loc_rib_dump"}` increment) if the
+collector stalls for over 30 s; the next reconnect starts a fresh dump.
+
+All Loc-RIB messages — including the emulated peer's Peer Up/Down and stats
+— go only to collectors that monitor `loc_rib`.
 
 When BMP is not configured, overhead remains minimal: raw frame capture uses
-`Bytes` refcount clones (no message-data copy).
+`Bytes` refcount clones (no message-data copy). Loc-RIB PDU synthesis runs
+only when at least one collector monitors `loc_rib`.
 
 ---
 

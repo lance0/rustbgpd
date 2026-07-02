@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::SystemTime;
 
 use bytes::Bytes;
+use tokio::sync::mpsc;
 
 /// BMP event sent from transport to BMP manager.
 #[derive(Debug)]
@@ -51,6 +52,83 @@ pub enum BmpEvent {
         /// 15/17 are omitted rather than reported as a false zero.
         adj_rib_out_post: Option<Vec<(u16, u8, u64)>>,
     },
+    /// RFC 9069 Loc-RIB route monitoring: a synthesized UPDATE PDU for a
+    /// Loc-RIB best-path change, attributed to the emulated Loc-RIB
+    /// instance peer (peer type 3). The manager builds the per-peer
+    /// header from its [`BmpLocRibConfig`]; dropped when Loc-RIB
+    /// monitoring is not configured.
+    LocRibRouteMonitoring {
+        /// Synthesized BGP UPDATE PDU (including 19-byte BGP header),
+        /// 4-octet-ASN encoded per RFC 9069 §5.4.
+        update_pdu: Bytes,
+        /// Route install time (RFC 9069 per-peer header timestamp).
+        timestamp: SystemTime,
+    },
+    /// RFC 9069 Loc-RIB statistics: per-AFI/SAFI Loc-RIB route counts.
+    /// Encoded as stat type 10 entries plus their sum as type 8.
+    LocRibStats {
+        /// `(afi, safi, count)` for each monitored Loc-RIB family.
+        per_family: Vec<(u16, u8, u64)>,
+    },
+}
+
+/// Identity of the emulated RFC 9069 Loc-RIB instance peer (peer type 3).
+///
+/// Built once at startup; the manager uses it for every Loc-RIB per-peer
+/// header and for the fabricated Peer Up / Peer Down messages.
+#[derive(Debug, Clone)]
+pub struct BmpLocRibConfig {
+    /// Local (primary) BGP autonomous system number → Peer AS field.
+    pub local_asn: u32,
+    /// Local BGP router ID → Peer BGP ID field (global instance).
+    pub router_id: Ipv4Addr,
+    /// Fabricated BGP OPEN PDU (including 19-byte header) carrying the
+    /// 4-octet-ASN capability plus an MP capability for every AFI/SAFI
+    /// streamed on the Loc-RIB view (RFC 9069 §5.2.1). Used verbatim as
+    /// both the sent and received OPEN in the Peer Up notification.
+    pub open_pdu: Bytes,
+}
+
+/// RFC 9069 VRF/Table Name for the default (global) Loc-RIB instance.
+pub const LOC_RIB_TABLE_NAME: &str = "global";
+
+impl BmpLocRibConfig {
+    /// Per-peer header identity for the Loc-RIB instance peer at a given
+    /// timestamp: peer type 3, zero-filled peer address, distinguisher 0
+    /// (global instance), Peer AS = local AS, BGP ID = local router-id.
+    #[must_use]
+    pub fn peer_info(&self, timestamp: SystemTime) -> BmpPeerInfo {
+        BmpPeerInfo {
+            peer_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer_asn: self.local_asn,
+            peer_bgp_id: self.router_id,
+            peer_type: BmpPeerType::LocRib,
+            is_ipv6: false,
+            is_post_policy: false,
+            is_rib_out: false,
+            is_as4: true,
+            timestamp,
+        }
+    }
+}
+
+/// A Loc-RIB table-dump request from the BMP manager to the RIB manager,
+/// issued when a collector monitoring `loc_rib` (re)connects.
+///
+/// The RIB manager answers with bounded [`BmpDumpChunk`]s (synthesized
+/// UPDATE PDUs with per-route install timestamps, ending with one
+/// End-of-RIB PDU per dumped AFI/SAFI) and then drops the sender.
+#[derive(Debug)]
+pub struct BmpDumpRequest {
+    /// Chunk reply channel. Bounded — the dump producer paces on it.
+    pub reply: mpsc::Sender<BmpDumpChunk>,
+}
+
+/// One bounded chunk of a Loc-RIB table dump.
+#[derive(Debug)]
+pub struct BmpDumpChunk {
+    /// Synthesized UPDATE PDUs with their route install times.
+    pub messages: Vec<(Bytes, SystemTime)>,
 }
 
 /// Control-plane events sent from BMP clients to the BMP manager.
@@ -115,6 +193,8 @@ pub enum BmpPeerType {
     RdInstance = 1,
     /// Local Instance Peer.
     Local = 2,
+    /// Loc-RIB Instance Peer (RFC 9069).
+    LocRib = 3,
 }
 
 /// Reason for peer session going down (RFC 7854 §4.9).
@@ -140,6 +220,11 @@ pub struct BmpMonitorFilter {
     pub rib_in_pre: bool,
     /// Post-policy Adj-RIB-Out route monitoring (RFC 8671, O=1, L=1).
     pub rib_out_post: bool,
+    /// Loc-RIB instance monitoring (RFC 9069, peer type 3). Unlike the
+    /// other views, this also scopes the Loc-RIB pseudo-peer's Peer
+    /// Up/Down and Stats messages — a collector not monitoring
+    /// `loc_rib` never sees the emulated peer at all.
+    pub loc_rib: bool,
 }
 
 impl Default for BmpMonitorFilter {
@@ -148,6 +233,7 @@ impl Default for BmpMonitorFilter {
         Self {
             rib_in_pre: true,
             rib_out_post: false,
+            loc_rib: false,
         }
     }
 }

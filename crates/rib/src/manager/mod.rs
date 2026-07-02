@@ -247,6 +247,12 @@ pub struct RibManager {
     /// The binary installs an EHM-backed sink via
     /// [`Self::with_event_sink`] when `[event_history]` is enabled.
     event_sink: std::sync::Arc<dyn crate::event_sink::RibEventSink>,
+    /// RFC 9069 Loc-RIB BMP tap. When set, every Loc-RIB best-path
+    /// change on a streamed family (unicast + VPN) is synthesized into
+    /// an UPDATE PDU and sent as a `LocRibRouteMonitoring` event; `None`
+    /// (no collector monitors `loc_rib`) costs one `is_some()` check
+    /// per recompute.
+    bmp_tx: Option<mpsc::Sender<rustbgpd_bmp::BmpEvent>>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
     /// Priority channel for read-only queries (gRPC).
@@ -315,6 +321,8 @@ pub(super) struct LiveSessionRecord {
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
+/// Synthesized messages per RFC 9069 Loc-RIB dump chunk.
+const BMP_DUMP_CHUNK_SIZE: usize = 256;
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
@@ -611,6 +619,7 @@ impl RibManager {
             evpn_events_tx,
             evpn_route_event_history: VecDeque::with_capacity(EVPN_ROUTE_EVENT_HISTORY_CAPACITY),
             event_sink: std::sync::Arc::new(crate::event_sink::NoopRibEventSink),
+            bmp_tx: None,
             metrics,
             rx,
             query_rx,
@@ -653,6 +662,32 @@ impl RibManager {
     ) -> Self {
         self.event_sink = sink;
         self
+    }
+
+    /// Install the RFC 9069 Loc-RIB BMP tap. Called at startup by the
+    /// daemon binary when at least one BMP collector monitors the
+    /// `loc_rib` view; left `None` otherwise so non-monitored
+    /// deployments pay nothing for PDU synthesis.
+    #[must_use]
+    pub fn with_bmp_tx(mut self, bmp_tx: mpsc::Sender<rustbgpd_bmp::BmpEvent>) -> Self {
+        self.bmp_tx = Some(bmp_tx);
+        self
+    }
+
+    /// Emit an RFC 9069 Loc-RIB Route Monitoring event. `pdu = None`
+    /// (synthesis failure, already warned) is a no-op. Uses `try_send`
+    /// — monitoring must never backpressure the RIB task; drops are
+    /// surfaced with a warning.
+    fn emit_bmp_loc_rib(&self, pdu: Option<bytes::Bytes>, timestamp: std::time::SystemTime) {
+        let (Some(tx), Some(update_pdu)) = (self.bmp_tx.as_ref(), pdu) else {
+            return;
+        };
+        if let Err(e) = tx.try_send(rustbgpd_bmp::BmpEvent::LocRibRouteMonitoring {
+            update_pdu,
+            timestamp,
+        }) {
+            warn!(error = %e, "BMP event channel full or closed, dropping Loc-RIB route monitoring");
+        }
     }
 
     #[must_use]
@@ -1061,7 +1096,96 @@ impl RibManager {
             }
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
+            RibUpdate::QueryBmpLocRibDump { reply } => self.handle_query_bmp_loc_rib_dump(reply),
+            RibUpdate::QueryBmpLocRibStats { reply } => {
+                self.handle_query_bmp_loc_rib_stats(reply);
+            }
         }
+    }
+
+    /// RFC 9069 Loc-RIB table dump: synthesize one UPDATE PDU per
+    /// Loc-RIB best route (unicast + VPN) with its install-time
+    /// timestamp, append one End-of-RIB PDU per streamed family, and
+    /// stream the lot back in bounded chunks from a spawned drain task
+    /// — the RIB task never awaits the (slow-collector-paced) reply
+    /// channel.
+    ///
+    /// The whole table is synthesized up front in this handler; that is
+    /// the same O(table) burst the MRT snapshot query already takes.
+    // ponytail: full-table synthesis burst; switch to resumable per-chunk
+    // queries if dump CPU/memory at extreme scale ever bites.
+    fn handle_query_bmp_loc_rib_dump(&self, reply: mpsc::Sender<rustbgpd_bmp::BmpDumpChunk>) {
+        use crate::bmp_sync;
+        let now = std::time::SystemTime::now();
+        // Install time ≈ receive wall time, recovered from the monotonic
+        // receive instant (RFC 9069 per-peer header timestamp).
+        let install_time =
+            |received_at: std::time::Instant| now.checked_sub(received_at.elapsed()).unwrap_or(now);
+        let mut messages: Vec<(bytes::Bytes, std::time::SystemTime)> = Vec::with_capacity(
+            self.loc_rib.len() + self.loc_rib.vpn_len() + bmp_sync::LOC_RIB_FAMILIES.len(),
+        );
+        for route in self.loc_rib.iter() {
+            if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
+                messages.push((pdu, install_time(route.received_at)));
+            }
+        }
+        for route in self.loc_rib.iter_vpn() {
+            if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
+                messages.push((pdu, install_time(route.received_at)));
+            }
+        }
+        // End-of-RIB per family closes the dump; live emission continues
+        // seamlessly after (dump→EoR→live, with the standard BMP overlap
+        // race accepted).
+        for (afi, safi) in bmp_sync::LOC_RIB_FAMILIES {
+            if let Some(pdu) = bmp_sync::synthesize_end_of_rib(afi, safi) {
+                messages.push((pdu, now));
+            }
+        }
+        tokio::spawn(async move {
+            let mut iter = messages.into_iter().peekable();
+            while iter.peek().is_some() {
+                let chunk: Vec<_> = iter.by_ref().take(BMP_DUMP_CHUNK_SIZE).collect();
+                if reply
+                    .send(rustbgpd_bmp::BmpDumpChunk { messages: chunk })
+                    .await
+                    .is_err()
+                {
+                    debug!("BMP Loc-RIB dump consumer dropped, aborting dump");
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Per-AFI/SAFI Loc-RIB route counts for the RFC 9069 BMP stats
+    /// report (stat type 10; type 8 is the sum). Scoped to the streamed
+    /// Loc-RIB families — counting families absent from the fabricated
+    /// OPEN would advertise routes the collector can never receive.
+    fn handle_query_bmp_loc_rib_stats(
+        &self,
+        reply: tokio::sync::oneshot::Sender<Vec<(u16, u8, u64)>>,
+    ) {
+        let (mut v4, mut v6) = (0u64, 0u64);
+        for route in self.loc_rib.iter() {
+            match route.prefix {
+                Prefix::V4(_) => v4 += 1,
+                Prefix::V6(_) => v6 += 1,
+            }
+        }
+        let (mut vpnv4, mut vpnv6) = (0u64, 0u64);
+        for route in self.loc_rib.iter_vpn() {
+            match route.family() {
+                rustbgpd_wire::VpnAddressFamily::V4 => vpnv4 += 1,
+                rustbgpd_wire::VpnAddressFamily::V6 => vpnv6 += 1,
+            }
+        }
+        let _ = reply.send(vec![
+            (Afi::Ipv4 as u16, Safi::Unicast as u8, v4),
+            (Afi::Ipv6 as u16, Safi::Unicast as u8, v6),
+            (Afi::Ipv4 as u16, Safi::MplsVpn as u8, vpnv4),
+            (Afi::Ipv6 as u16, Safi::MplsVpn as u8, vpnv6),
+        ]);
     }
 
     fn handle_query_received_routes(

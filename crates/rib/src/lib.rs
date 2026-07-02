@@ -14,6 +14,8 @@ pub mod adj_rib_in;
 pub mod adj_rib_out;
 /// Best-path selection algorithm (RFC 4271 §9.1.2).
 pub mod best_path;
+/// RFC 9069 Loc-RIB BMP synthesis (UPDATE PDUs + fabricated OPEN).
+pub mod bmp_sync;
 /// Route change event types for broadcast subscribers.
 pub mod event;
 /// Sink boundary for handing route + EVPN events to an out-of-crate
