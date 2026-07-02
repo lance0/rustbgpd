@@ -12,6 +12,7 @@ pub mod engine;
 
 pub mod compile;
 pub mod ir;
+pub mod rpol;
 pub mod sets;
 
 mod eval;

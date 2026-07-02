@@ -341,6 +341,13 @@ enum ConfigAction {
 enum PolicyAction {
     /// List configured policies (names + statement counts)
     List,
+    /// Check an `.rpol` policy file locally: parse, typecheck, and run
+    /// its in-language `test` blocks. No daemon connection. Exit codes:
+    /// 0 clean, 1 diagnostics, 2 test failures.
+    Check {
+        /// Path to the `.rpol` file
+        file: String,
+    },
     /// Show one policy by name
     Get {
         /// Policy name
@@ -1167,6 +1174,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // `policy check` runs the .rpol frontend in-process — no daemon.
+    if let Command::Policy {
+        action: PolicyAction::Check { file },
+    } = &cli.command
+    {
+        std::process::exit(commands::policy::check_local(file, cli.json));
+    }
+
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -1901,6 +1916,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             tui::run(connection, interval).await
         }
         Command::Policy { action } => match action {
+            PolicyAction::Check { .. } => unreachable!("handled before connect"),
             PolicyAction::List => commands::policy::list(connection, json).await,
             PolicyAction::Get { name } => commands::policy::get(connection, &name, json).await,
             PolicyAction::Set { name, from_file } => {

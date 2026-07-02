@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The `.rpol` policy language frontend (ADR-0096 slice 2): lexer,
+  parser, typechecker, in-language tests, and `rbgp policy check`.**
+  `.rpol` source — `prefix-set`/`community-set` definitions (ge/le per
+  member; standard/large/RT/RO literals), `policy` blocks with named
+  terms and `u32` parameters, `if`/`else` guards over the full
+  route/peer context (prefix, the three community kinds, AS-path
+  len/contains/matches, local-pref/MED with the RFC 4271 implicit
+  defaults, next-hop, RPKI/ASPA state, route-type, EVPN route type,
+  peer address/ASN/group), `apply(policy)` composition (compile-time
+  DAG check, no recursion), and `accept`/`reject`/`set`/`add`/
+  `remove`/`prepend` actions — compiles into the existing public typed
+  IR with match data interned through the shared `SetStore`.
+  Parameterized policies are templates monomorphized at each use site;
+  term fallthrough (modify-and-continue) lowers through a new surgical
+  `TermAction::Continue` IR variant (the TOML frontend never emits
+  it). Diagnostics are ariadne-rendered with labeled spans,
+  multi-error recovery, and did-you-mean suggestions. In-language
+  `test` blocks (route/peer fixtures + verdict/attribute expectations)
+  run through the real IR evaluator; the new local-only
+  `rbgp policy check <file.rpol>` verb (exit codes 0 clean /
+  1 diagnostics / 2 test failures, `--json`) runs them with zero
+  daemon involvement. Language reference: `docs/rpol-language.md`.
+  Daemon integration (config wiring, `rbgp policy test --rib live`) is
+  the next slice — nothing consumes `.rpol` from configuration yet.
+  New policy-crate-only dependencies: `logos` (MIT OR Apache-2.0),
+  `ariadne` (MIT).
+
 - **Typed, compiled policy IR (ADR-0096 slice 1): indexed match sets
   behind the existing engine, zero behavior change.** TOML policy
   chains now lazily compile into a public, analyzable IR
