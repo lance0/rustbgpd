@@ -999,6 +999,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                     as_path_prepend_asn: None,
                     as_path_prepend_count: None,
                 }),
+                orr_vantage: String::new(),
+                orr_candidates: vec![],
             },
         ))
     }

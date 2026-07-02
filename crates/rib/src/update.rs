@@ -139,6 +139,30 @@ pub struct ExplainAdvertisedRoute {
     pub reasons: Vec<ExplainReason>,
     /// Export modifications that would be applied.
     pub modifications: rustbgpd_policy::RouteModifications,
+    /// RFC 9107 ORR vantage the target peer is bound to. `None` when
+    /// the peer has no *resolved* vantage — non-ORR explains are
+    /// byte-for-byte the pre-ORR shape.
+    pub orr_vantage: Option<IpAddr>,
+    /// Per-vantage candidate ranking behind an ORR explain, best
+    /// first — the same candidate set and order distribution would
+    /// use. Empty for non-ORR explains.
+    pub orr_candidates: Vec<OrrExplainCandidate>,
+}
+
+/// One candidate in an ORR (RFC 9107) advertised-route explanation.
+#[derive(Debug, Clone)]
+pub struct OrrExplainCandidate {
+    /// Adj-RIB-In source peer of this candidate path.
+    pub peer: IpAddr,
+    /// Add-Path identifier of the candidate in its Adj-RIB-In.
+    pub path_id: u32,
+    /// Candidate's `NEXT_HOP` — the input to the vantage cost lookup.
+    pub next_hop: IpAddr,
+    /// Vantage interior (SPF) cost to `next_hop`. `None` = unknown /
+    /// unreachable, ranked least preferred (RFC 9107 §3.1).
+    pub cost: Option<u64>,
+    /// True for the per-vantage winner (first in ORR best-path order).
+    pub selected: bool,
 }
 
 /// Final decision for an advertised-route explanation.

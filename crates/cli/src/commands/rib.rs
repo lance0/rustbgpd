@@ -2,6 +2,7 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
+    JsonOrrExplainCandidate,
 };
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
@@ -883,7 +884,23 @@ fn explain_to_json(
                 as_path_prepend_count: mods.as_path_prepend_count,
             },
         ),
+        orr_vantage: explain.orr_vantage.clone(),
+        orr_candidates: explain
+            .orr_candidates
+            .iter()
+            .map(|candidate| JsonOrrExplainCandidate {
+                peer_address: candidate.peer_address.clone(),
+                next_hop: candidate.next_hop.clone(),
+                cost: candidate.cost,
+                selected: candidate.selected,
+            })
+            .collect(),
     }
+}
+
+/// Render an ORR vantage cost for text output (`12` / `unreachable`).
+fn orr_cost_label(cost: Option<u64>) -> String {
+    cost.map_or_else(|| "unreachable".to_string(), |c| c.to_string())
 }
 
 fn print_explain_advertised(
@@ -918,6 +935,25 @@ fn print_explain_advertised(
     }
     if explain.path_id != 0 {
         println!("Path ID:    {}", explain.path_id);
+    }
+    if !explain.orr_vantage.is_empty() {
+        println!("ORR vantage: {}", explain.orr_vantage);
+    }
+    if !explain.orr_candidates.is_empty() {
+        println!("ORR candidates (per-vantage best first):");
+        for candidate in &explain.orr_candidates {
+            println!(
+                "- {} next-hop {} cost={}{}",
+                candidate.peer_address,
+                candidate.next_hop,
+                orr_cost_label(candidate.cost),
+                if candidate.selected {
+                    " (selected)"
+                } else {
+                    ""
+                }
+            );
+        }
     }
     if !explain.reasons.is_empty() {
         println!("Reasons:");
@@ -1845,6 +1881,55 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("invalid --peer address"));
+    }
+
+    #[test]
+    fn explain_advertised_json_maps_orr_fields() {
+        let resp = crate::proto::ExplainAdvertisedRouteResponse {
+            decision: ExplainDecision::Advertise as i32,
+            peer_address: "10.0.0.3".to_string(),
+            prefix: "198.51.100.0".to_string(),
+            prefix_length: 24,
+            next_hop: "10.0.2.1".to_string(),
+            orr_vantage: "10.0.1.1".to_string(),
+            orr_candidates: vec![
+                crate::proto::OrrExplainCandidate {
+                    peer_address: "192.0.2.2".to_string(),
+                    path_id: 0,
+                    next_hop: "10.0.2.1".to_string(),
+                    cost: Some(1),
+                    selected: true,
+                },
+                crate::proto::OrrExplainCandidate {
+                    peer_address: "192.0.2.1".to_string(),
+                    path_id: 0,
+                    next_hop: "203.0.113.99".to_string(),
+                    cost: None,
+                    selected: false,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(explain_to_json(&resp)).unwrap();
+        assert_eq!(value["orr_vantage"], "10.0.1.1");
+        assert_eq!(value["orr_candidates"][0]["peer_address"], "192.0.2.2");
+        assert_eq!(value["orr_candidates"][0]["cost"], 1);
+        assert_eq!(value["orr_candidates"][0]["selected"], true);
+        assert!(
+            value["orr_candidates"][1]["cost"].is_null(),
+            "unreachable cost serializes as null"
+        );
+        assert_eq!(value["orr_candidates"][1]["selected"], false);
+    }
+
+    #[test]
+    fn explain_advertised_json_omits_orr_fields_when_not_orr() {
+        // Non-ORR responses keep the pre-ORR JSON shape byte-for-byte.
+        let resp = crate::proto::ExplainAdvertisedRouteResponse::default();
+        let value = serde_json::to_value(explain_to_json(&resp)).unwrap();
+        assert!(value.get("orr_vantage").is_none());
+        assert!(value.get("orr_candidates").is_none());
     }
 
     #[test]

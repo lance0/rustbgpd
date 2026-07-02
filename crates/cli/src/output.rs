@@ -318,6 +318,21 @@ pub struct JsonExplainAdvertisedRoute {
     pub route_type: String,
     pub reasons: Vec<JsonExplainReason>,
     pub modifications: JsonExplainModifications,
+    /// RFC 9107 ORR vantage; both ORR fields are absent on non-ORR
+    /// explains so the pre-ORR JSON shape is unchanged.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub orr_vantage: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orr_candidates: Vec<JsonOrrExplainCandidate>,
+}
+
+#[derive(Serialize)]
+pub struct JsonOrrExplainCandidate {
+    pub peer_address: String,
+    pub next_hop: String,
+    /// Vantage interior cost to `next_hop`; `null` = unreachable.
+    pub cost: Option<u64>,
+    pub selected: bool,
 }
 
 fn is_zero(v: &u32) -> bool {

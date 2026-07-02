@@ -1350,6 +1350,130 @@ async fn route_refresh_replays_vantage_best() {
     );
 }
 
+/// `ExplainAdvertisedRoute` for an ORR-bound peer surfaces the vantage,
+/// every candidate with its interior cost (ranked per-vantage best
+/// first, unknown-cost last per RFC 9107 §3.1), and the decisive
+/// interior-cost reason with the compared costs.
+#[tokio::test]
+async fn explain_advertised_route_reports_orr_vantage_and_costs() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    announce_divergent_bests(&tx).await;
+    // A third source whose next-hop resolves nowhere in the topology —
+    // unknown cost, must rank least preferred.
+    let src_unknown = Ipv4Addr::new(192, 0, 2, 3);
+    let nh_unknown = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
+    announce_unicast(
+        &tx,
+        src_unknown,
+        vec![ibgp_route(orr_prefix(), src_unknown, nh_unknown)],
+    )
+    .await;
+
+    let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(
+        explain.next_hop,
+        Some(orr_nh_y()),
+        "vantage B's best exits via Y, not the Loc-RIB best via X"
+    );
+    assert_eq!(explain.orr_vantage, Some(vantage_at_node_b()));
+
+    let candidates = &explain.orr_candidates;
+    assert_eq!(candidates.len(), 3, "all surviving candidates listed");
+    assert_eq!(candidates[0].next_hop, orr_nh_y());
+    assert_eq!(candidates[0].cost, Some(1));
+    assert!(candidates[0].selected);
+    assert_eq!(candidates[1].next_hop, orr_nh_x());
+    assert_eq!(candidates[1].cost, Some(10));
+    assert!(!candidates[1].selected);
+    assert_eq!(
+        candidates[2].next_hop, nh_unknown,
+        "unknown-cost candidate ranks last (RFC 9107 §3.1)"
+    );
+    assert_eq!(candidates[2].cost, None);
+    assert!(!candidates[2].selected);
+
+    let orr_reason = explain
+        .reasons
+        .iter()
+        .find(|reason| reason.code == "orr_interior_cost")
+        .expect("interior-cost step decided the winner");
+    assert!(
+        orr_reason.message.contains("orr_cost 1 < 10"),
+        "compared vantage costs rendered: {}",
+        orr_reason.message
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: a peer with NO ORR vantage gets the pre-ORR explain
+/// shape in the same scenario — Loc-RIB best, no vantage, no candidate
+/// list, no ORR reason codes.
+#[tokio::test]
+async fn explain_advertised_route_non_orr_peer_unchanged() {
+    let (tx, handle) = orr_rr_manager().await;
+    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let _out = orr_client_peer_up(&tx, plain_client, None).await;
+
+    announce_divergent_bests(&tx).await;
+
+    let explain = query_explain_advertised_route(&tx, plain_client, Prefix::V4(orr_prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(
+        explain.next_hop,
+        Some(orr_nh_x()),
+        "non-ORR peer explains the Loc-RIB best"
+    );
+    assert_eq!(explain.orr_vantage, None);
+    assert!(explain.orr_candidates.is_empty());
+    assert!(
+        explain
+            .reasons
+            .iter()
+            .all(|reason| !reason.code.starts_with("orr")),
+        "no ORR reasons on a non-ORR explain"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// An ORR peer whose vantage-visible candidate set is empty (the only
+/// path came from the peer itself) explains as no-candidate instead of
+/// leaking the split-horizon-suppressed route.
+#[tokio::test]
+async fn explain_advertised_route_orr_no_surviving_candidate() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
+    let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    // The only path is client B's own announcement.
+    announce_unicast(
+        &tx,
+        client_b_v4,
+        vec![ibgp_route(orr_prefix(), client_b_v4, orr_nh_x())],
+    )
+    .await;
+
+    let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
+    assert_eq!(
+        explain.decision,
+        crate::update::ExplainDecision::NoBestRoute
+    );
+    assert_eq!(explain.orr_vantage, Some(vantage_at_node_b()));
+    assert!(explain.orr_candidates.is_empty());
+    assert_eq!(explain.reasons[0].code, "no_orr_candidate");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Split horizon and RFC 4456 reflection suppression run BEFORE the ORR
 /// ranking: a cost-0 candidate the target must not receive can never
 /// win.

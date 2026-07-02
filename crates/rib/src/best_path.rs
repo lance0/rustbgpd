@@ -58,7 +58,7 @@ pub enum BestPathReason {
     /// Step 5.3 (RFC 9107 ORR only): lower vantage interior cost to
     /// `NEXT_HOP` wins; a known cost beats an unknown one. Never produced
     /// by the Loc-RIB ladder (`best_path_cmp_with_reason` carries no
-    /// vantage costs) — it exists for ORR-path attribution and tests.
+    /// vantage costs) — only [`best_path_cmp_orr_with_reason`] yields it.
     OrrInteriorCost,
     /// Step 5.5: shorter `CLUSTER_LIST` wins (RFC 4456).
     ShorterClusterList,
@@ -71,23 +71,32 @@ pub enum BestPathReason {
     EvpnMacMobility,
 }
 
+impl BestPathReason {
+    /// Stable `snake_case` identifier for this step (the string behind
+    /// `Display` — usable where a `&'static str` code is required).
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::StalePreference => "stale_preference",
+            Self::RpkiPreference => "rpki_preference",
+            Self::AspaPreference => "aspa_preference",
+            Self::HigherLocalPref => "higher_local_pref",
+            Self::ShorterAsPath => "shorter_as_path",
+            Self::LowerOrigin => "lower_origin",
+            Self::LowerMed => "lower_med",
+            Self::EbgpOverIbgp => "ebgp_over_ibgp",
+            Self::OrrInteriorCost => "orr_interior_cost",
+            Self::ShorterClusterList => "shorter_cluster_list",
+            Self::LowerOriginatorId => "lower_originator_id",
+            Self::LowerPeerAddress => "lower_peer_address",
+            Self::EvpnMacMobility => "evpn_mac_mobility",
+        }
+    }
+}
+
 impl std::fmt::Display for BestPathReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::StalePreference => write!(f, "stale_preference"),
-            Self::RpkiPreference => write!(f, "rpki_preference"),
-            Self::AspaPreference => write!(f, "aspa_preference"),
-            Self::HigherLocalPref => write!(f, "higher_local_pref"),
-            Self::ShorterAsPath => write!(f, "shorter_as_path"),
-            Self::LowerOrigin => write!(f, "lower_origin"),
-            Self::LowerMed => write!(f, "lower_med"),
-            Self::EbgpOverIbgp => write!(f, "ebgp_over_ibgp"),
-            Self::OrrInteriorCost => write!(f, "orr_interior_cost"),
-            Self::ShorterClusterList => write!(f, "shorter_cluster_list"),
-            Self::LowerOriginatorId => write!(f, "lower_originator_id"),
-            Self::LowerPeerAddress => write!(f, "lower_peer_address"),
-            Self::EvpnMacMobility => write!(f, "evpn_mac_mobility"),
-        }
+        f.write_str(self.code())
     }
 }
 
@@ -151,6 +160,71 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
     }
 
     (a.peer.cmp(&b.peer), BestPathReason::LowerPeerAddress)
+}
+
+/// Compare two routes under RFC 9107 ORR and return the decisive reason.
+///
+/// Same ordering as [`best_path_cmp_orr`], derived by composition rather
+/// than a third hand-maintained ladder: the plain reason ladder decides
+/// unless its decisive step is one of the tiebreakers *below* the ORR
+/// interior-cost step (`CLUSTER_LIST`, `ORIGINATOR_ID`, peer address) —
+/// in that case the vantage cost gets first shot and, when decisive,
+/// yields [`BestPathReason::OrrInteriorCost`].
+#[must_use]
+pub fn best_path_cmp_orr_with_reason(
+    a: &Route,
+    b: &Route,
+    cost_a: Option<u64>,
+    cost_b: Option<u64>,
+) -> (Ordering, BestPathReason) {
+    let (ord, reason) = best_path_cmp_with_reason(a, b);
+    let below_orr_step = matches!(
+        reason,
+        BestPathReason::ShorterClusterList
+            | BestPathReason::LowerOriginatorId
+            | BestPathReason::LowerPeerAddress
+    );
+    if ord != Ordering::Equal && !below_orr_step {
+        return (ord, reason);
+    }
+    let cost_cmp = match (cost_a, cost_b) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    };
+    if cost_cmp != Ordering::Equal {
+        return (cost_cmp, BestPathReason::OrrInteriorCost);
+    }
+    (ord, reason)
+}
+
+/// Render an ORR vantage cost for explain output: the interior metric,
+/// or `unreachable` when the vantage has no known cost to the next-hop.
+fn orr_cost_str(cost: Option<u64>) -> String {
+    cost.map_or_else(|| "unreachable".to_string(), |c| c.to_string())
+}
+
+/// Render the compared vantage costs behind a decisive
+/// [`BestPathReason::OrrInteriorCost`], `a`'s cost on the left —
+/// e.g. `"orr_cost 12 < 40"` or `"orr_cost 12 < unreachable"` (RFC 9107
+/// §3.1: an unknown metric-to-next-hop is least preferred).
+///
+/// Explain-only, like [`best_path_reason_detail`] — the costs live on
+/// the ORR distribution path, not on [`Route`], so they are passed in.
+#[must_use]
+pub fn orr_interior_cost_detail(cost_a: Option<u64>, cost_b: Option<u64>) -> String {
+    let symbol = match (cost_a, cost_b) {
+        (Some(x), Some(y)) => cmp_symbol(&x, &y),
+        (Some(_), None) => "<",
+        (None, Some(_)) => ">",
+        (None, None) => "=",
+    };
+    format!(
+        "orr_cost {} {symbol} {}",
+        orr_cost_str(cost_a),
+        orr_cost_str(cost_b)
+    )
 }
 
 /// Relational symbol for a compared pair, read left-to-right:
@@ -238,7 +312,7 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
         BestPathReason::EvpnMacMobility => "mac_mobility_sequence".to_string(),
         // Not produced by `best_path_cmp_with_reason` either — the
         // vantage costs live on the ORR distribution path, not on
-        // `Route`, so there are no compared values to render here.
+        // `Route`; callers with costs use `orr_interior_cost_detail`.
         BestPathReason::OrrInteriorCost => "orr_interior_cost_to_next_hop".to_string(),
     }
 }
@@ -1101,6 +1175,108 @@ mod tests {
         assert_eq!(best_path_cmp_orr(&a, &b, None, None), Ordering::Less);
         // The fall-through outcome matches the plain comparator.
         assert_eq!(best_path_cmp_orr(&a, &b, None, None), best_path_cmp(&a, &b));
+    }
+
+    // --- RFC 9107 ORR reason ladder (best_path_cmp_orr_with_reason) ---
+
+    #[test]
+    fn orr_with_reason_winner_by_cost_yields_orr_interior_cost() {
+        // Attributes tie down to the cost step; the lower cost wins and
+        // the decisive reason is OrrInteriorCost with the right detail.
+        let a = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        let b = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, Some(12), Some(40));
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(reason, BestPathReason::OrrInteriorCost);
+        assert_eq!(
+            orr_interior_cost_detail(Some(12), Some(40)),
+            "orr_cost 12 < 40"
+        );
+
+        // Known beats unknown (RFC 9107 §3.1).
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, Some(12), None);
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(reason, BestPathReason::OrrInteriorCost);
+        assert_eq!(
+            orr_interior_cost_detail(Some(12), None),
+            "orr_cost 12 < unreachable"
+        );
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, None, Some(12));
+        assert_eq!(ord, Ordering::Greater);
+        assert_eq!(reason, BestPathReason::OrrInteriorCost);
+        assert_eq!(
+            orr_interior_cost_detail(None, Some(12)),
+            "orr_cost unreachable > 12"
+        );
+    }
+
+    #[test]
+    fn orr_with_reason_cost_tie_falls_through_to_next_step() {
+        // Equal (and both-unknown) costs fall through to CLUSTER_LIST —
+        // the same next step the plain ladder would use.
+        let a = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            vec![Ipv4Addr::new(10, 0, 0, 1)],
+        );
+        let b = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+        );
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, Some(7), Some(7));
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(reason, BestPathReason::ShorterClusterList);
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, None, None);
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(reason, BestPathReason::ShorterClusterList);
+    }
+
+    #[test]
+    fn orr_with_reason_steps_above_cost_still_decide() {
+        // A step above 5.3 (LOCAL_PREF) outranks even a wildly better
+        // cost, and the reason names that step.
+        let a = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, Some(1000), Some(0));
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(reason, BestPathReason::HigherLocalPref);
+    }
+
+    #[test]
+    fn orr_with_reason_ordering_matches_cmp_orr() {
+        // Drift guard: the composed reason ladder must agree with the
+        // hot-path ORR comparator at every cost combination over pairs
+        // that tie above, at, and below the cost step.
+        let pairs = [
+            (
+                base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            ),
+            (
+                with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200),
+                with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100),
+            ),
+            (
+                with_cluster_list(
+                    base_route(Ipv4Addr::new(1, 0, 0, 2)),
+                    vec![Ipv4Addr::new(10, 0, 0, 1)],
+                ),
+                with_cluster_list(
+                    base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                    vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+                ),
+            ),
+        ];
+        let costs = [None, Some(0_u64), Some(7), Some(1000)];
+        for (a, b) in &pairs {
+            for &ca in &costs {
+                for &cb in &costs {
+                    let (ord, _) = best_path_cmp_orr_with_reason(a, b, ca, cb);
+                    assert_eq!(ord, best_path_cmp_orr(a, b, ca, cb));
+                    let (rev, _) = best_path_cmp_orr_with_reason(b, a, cb, ca);
+                    assert_eq!(rev, best_path_cmp_orr(b, a, cb, ca));
+                }
+            }
+        }
     }
 
     // --- best_path_reason_detail (explain-only compared-values render) ---
