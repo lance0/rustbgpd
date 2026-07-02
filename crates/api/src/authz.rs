@@ -516,6 +516,18 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::SensitiveRead,
     ),
     method(
+        "rustbgpd.v1.RibService",
+        "ListTopologyNodes",
+        "/rustbgpd.v1.RibService/ListTopologyNodes",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
+        "ListTopologyLinks",
+        "/rustbgpd.v1.RibService/ListTopologyLinks",
+        AuthTier::SensitiveRead,
+    ),
+    method(
         "rustbgpd.v1.BfdService",
         "GetBfdSessions",
         "/rustbgpd.v1.BfdService/GetBfdSessions",
@@ -805,7 +817,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 92);
+        assert_eq!(METHODS.len(), 94);
     }
 
     #[test]
@@ -846,7 +858,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 50);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 52);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
@@ -859,6 +871,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one assertion per pinned tier decision; splitting would scatter the pins"
+    )]
     fn method_lookup_returns_expected_tiers() {
         assert_eq!(
             method_authz("/rustbgpd.v1.ControlService/GetHealth").map(|m| m.tier),
@@ -878,6 +894,14 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.RibService/ListRtcRoutes").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/ListTopologyNodes").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/ListTopologyLinks").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
         );
         assert_eq!(

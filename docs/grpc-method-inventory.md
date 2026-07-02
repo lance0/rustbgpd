@@ -123,7 +123,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (18 RPCs)
+### RibService (20 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -145,6 +145,8 @@ shape itself does not raise the tier.
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
 | `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
 | `ListRtcRoutes` | `sensitive_read` | RFC 4684 RT-Constrain membership NLRI — reveals which Route Targets each peer imports (VPN topology metadata). |
+| `ListTopologyNodes` | `sensitive_read` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union — discloses IGP node identity (AS, router-IDs). |
+| `ListTopologyLinks` | `sensitive_read` | RFC 9107 ORR topology links — discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
 
 ### BfdService (1 RPC)
 
@@ -211,13 +213,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 50 | 54.3% |
-| `mutating` | 19 | 20.7% |
-| `operator_only` | 23 | 25.0% |
-| **Total** | **92** | **100%** |
+| `sensitive_read` | 52 | 55.3% |
+| `mutating` | 19 | 20.2% |
+| `operator_only` | 23 | 24.5% |
+| **Total** | **94** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 92
-total is 88 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 94
+total is 90 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

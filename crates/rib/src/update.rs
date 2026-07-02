@@ -693,6 +693,13 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<RtcRibRoute>>,
     },
+    /// Query a snapshot of the RFC 9107 ORR topology graph, built on
+    /// demand from every peer's BGP-LS Adj-RIB-In (NOT the Loc-RIB —
+    /// the SPF wants the union view across peers).
+    QueryOrrTopology {
+        /// Response channel.
+        reply: oneshot::Sender<crate::orr::OrrTopologySnapshot>,
+    },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {
         /// Response channel.

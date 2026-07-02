@@ -20,6 +20,7 @@ smallvec.workspace = true
 rustc-hash.workspace = true
 prefix-trie.workspace = true
 ipnet.workspace = true
+lru.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -33,6 +34,7 @@ tokio-stream.workspace = true
 bench-internals = []
 
 [dev-dependencies]
+bytes.workspace = true
 proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true

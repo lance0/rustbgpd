@@ -122,6 +122,12 @@ enum Command {
         large_community: Vec<String>,
     },
 
+    /// Show the RFC 9107 ORR topology graph derived from BGP-LS
+    Topology {
+        #[command(subcommand)]
+        action: TopologyAction,
+    },
+
     /// Manage FlowSpec routes
     Flowspec {
         #[command(subcommand)]
@@ -705,6 +711,14 @@ enum RibAction {
         #[arg(long)]
         path_id: Option<u32>,
     },
+}
+
+#[derive(Subcommand)]
+enum TopologyAction {
+    /// List topology nodes (BGP-LS node identities across all peers)
+    Nodes,
+    /// List usable directed topology links (with IGP metrics)
+    Links,
 }
 
 #[derive(Subcommand)]
@@ -1544,6 +1558,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         }
 
+        Command::Topology { action } => match action {
+            TopologyAction::Nodes => commands::topology::nodes(connection, json).await,
+            TopologyAction::Links => commands::topology::links(connection, json).await,
+        },
         Command::Watch { address, family } => {
             let family_val = resolve_family(&family)?;
             commands::watch::run(connection, address, family_val, json).await

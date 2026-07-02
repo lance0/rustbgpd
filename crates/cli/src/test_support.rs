@@ -51,6 +51,8 @@ pub(crate) struct MockState {
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
+    pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
+    pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
@@ -1105,6 +1107,39 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                     path_id: 0,
                 },
             ],
+        }))
+    }
+
+    async fn list_topology_nodes(
+        &self,
+        request: Request<server_proto::ListTopologyNodesRequest>,
+    ) -> Result<Response<server_proto::ListTopologyNodesResponse>, Status> {
+        *self.state.last_list_topology_nodes.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListTopologyNodesResponse {
+            nodes: vec![server_proto::TopologyNodeEntry {
+                key: "02aabb".to_string(),
+                asn: 64512,
+                bgp_ls_id: 0,
+                router_id: "000000000001".to_string(),
+                link_count: 2,
+            }],
+        }))
+    }
+
+    async fn list_topology_links(
+        &self,
+        request: Request<server_proto::ListTopologyLinksRequest>,
+    ) -> Result<Response<server_proto::ListTopologyLinksResponse>, Status> {
+        *self.state.last_list_topology_links.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListTopologyLinksResponse {
+            links: vec![server_proto::TopologyLinkEntry {
+                local_key: "02aabb".to_string(),
+                local_router_id: "000000000001".to_string(),
+                remote_key: "02ccdd".to_string(),
+                remote_router_id: "000000000002".to_string(),
+                cost: 10,
+                addresses: vec!["10.0.8.1".to_string()],
+            }],
         }))
     }
 

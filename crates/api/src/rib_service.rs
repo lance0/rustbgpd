@@ -13,7 +13,8 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType, RtcRibRoute, VpnRibRoute,
+    ExplainDecision, FlowSpecRoute, OrrLinkSnapshot, OrrNodeSnapshot, OrrTopologySnapshot,
+    RibUpdate, Route, RouteEventType, RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -176,6 +177,17 @@ impl RibService {
         self.access_mode = access_mode;
         self.fib_table_control = fib_table_control;
         self
+    }
+
+    async fn query_orr_topology(&self) -> Result<OrrTopologySnapshot, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryOrrTopology { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
     }
 
     async fn query_routes(&self, peer: Option<IpAddr>) -> Result<Vec<Route>, Status> {
@@ -1586,6 +1598,26 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListRtcRoutesResponse { routes }))
     }
 
+    async fn list_topology_nodes(
+        &self,
+        _request: Request<proto::ListTopologyNodesRequest>,
+    ) -> Result<Response<proto::ListTopologyNodesResponse>, Status> {
+        let snapshot = self.query_orr_topology().await?;
+        Ok(Response::new(proto::ListTopologyNodesResponse {
+            nodes: snapshot.nodes.iter().map(topology_node_to_proto).collect(),
+        }))
+    }
+
+    async fn list_topology_links(
+        &self,
+        _request: Request<proto::ListTopologyLinksRequest>,
+    ) -> Result<Response<proto::ListTopologyLinksResponse>, Status> {
+        let snapshot = self.query_orr_topology().await?;
+        Ok(Response::new(proto::ListTopologyLinksResponse {
+            links: snapshot.links.iter().map(topology_link_to_proto).collect(),
+        }))
+    }
+
     async fn set_fib_table(
         &self,
         request: Request<proto::SetFibTableRequest>,
@@ -2005,6 +2037,27 @@ pub(crate) fn rtc_route_to_proto(route: &RtcRibRoute) -> proto::RtcRouteEntry {
     }
 }
 
+pub(crate) fn topology_node_to_proto(node: &OrrNodeSnapshot) -> proto::TopologyNodeEntry {
+    proto::TopologyNodeEntry {
+        key: node.key_hex.clone(),
+        asn: node.asn.unwrap_or(0),
+        bgp_ls_id: node.bgp_ls_id.unwrap_or(0),
+        router_id: node.router_id_hex.clone(),
+        link_count: node.link_count,
+    }
+}
+
+pub(crate) fn topology_link_to_proto(link: &OrrLinkSnapshot) -> proto::TopologyLinkEntry {
+    proto::TopologyLinkEntry {
+        local_key: link.local_key_hex.clone(),
+        local_router_id: link.local_router_id_hex.clone(),
+        remote_key: link.remote_key_hex.clone(),
+        remote_router_id: link.remote_router_id_hex.clone(),
+        cost: link.cost,
+        addresses: link.addresses.clone(),
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "EVPN route conversion keeps per-route-type field mapping in one audited place"
@@ -2376,6 +2429,65 @@ mod tests {
         assert_eq!(entry.route_target, "");
         assert_eq!(entry.prefix_len, 0);
         assert_eq!(entry.peer_address, "0.0.0.0");
+    }
+
+    /// `ListTopologyNodes`/`ListTopologyLinks` round-trip: the service
+    /// queries the manager channel and maps the snapshot to proto entries.
+    #[tokio::test]
+    async fn list_topology_nodes_and_links_round_trip_snapshot() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = RibService::new(tx);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::QueryOrrTopology { reply } = update else {
+                    panic!("unexpected RIB update");
+                };
+                let _ = reply.send(OrrTopologySnapshot {
+                    nodes: vec![OrrNodeSnapshot {
+                        key_hex: "02aabb".to_string(),
+                        asn: Some(64512),
+                        bgp_ls_id: None,
+                        router_id_hex: "000000000001".to_string(),
+                        link_count: 2,
+                    }],
+                    links: vec![OrrLinkSnapshot {
+                        local_key_hex: "02aabb".to_string(),
+                        local_router_id_hex: "000000000001".to_string(),
+                        remote_key_hex: "02ccdd".to_string(),
+                        remote_router_id_hex: String::new(),
+                        cost: 10,
+                        addresses: vec!["10.0.8.1".to_string()],
+                    }],
+                    prefixes: vec![],
+                });
+            }
+        });
+
+        let nodes = svc
+            .list_topology_nodes(Request::new(proto::ListTopologyNodesRequest {}))
+            .await
+            .expect("nodes query succeeds")
+            .into_inner()
+            .nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].key, "02aabb");
+        assert_eq!(nodes[0].asn, 64512);
+        assert_eq!(nodes[0].bgp_ls_id, 0, "absent BGP-LS id flattens to 0");
+        assert_eq!(nodes[0].router_id, "000000000001");
+        assert_eq!(nodes[0].link_count, 2);
+
+        let links = svc
+            .list_topology_links(Request::new(proto::ListTopologyLinksRequest {}))
+            .await
+            .expect("links query succeeds")
+            .into_inner()
+            .links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].local_key, "02aabb");
+        assert_eq!(links[0].remote_key, "02ccdd");
+        assert_eq!(links[0].remote_router_id, "");
+        assert_eq!(links[0].cost, 10);
+        assert_eq!(links[0].addresses, ["10.0.8.1"]);
     }
 
     #[tokio::test]
