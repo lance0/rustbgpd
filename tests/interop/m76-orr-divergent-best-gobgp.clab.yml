@@ -1,0 +1,98 @@
+# Containerlab topology: GoBGP LS source + 2 GoBGP PEs ↔ rustbgpd RR ↔ 2 GoBGP clients
+# (M76 — RFC 9107 Optimal Route Reflection divergent-best receipt)
+#
+# Validates: rustbgpd computes PER-CLIENT best paths from an injected BGP-LS
+# topology. gobgp-src (linkstate only) injects a 4-link square (A→X=1, A→Y=10,
+# B→X=10, B→Y=1); pe1/pe2 announce the SAME prefix with next-hops that resolve
+# to X and Y; c1 (vantage A) and c2 (vantage B) must receive DIFFERENT best
+# paths for the same prefix, flip on a topology metric change, and fall back
+# to one identical standard best when the topology is withdrawn.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   containerlab deploy -t tests/interop/m76-orr-divergent-best-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
+#   containerlab destroy -t tests/interop/m76-orr-divergent-best-gobgp.clab.yml
+
+name: m76-orr-divergent-best-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m76-orr-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.3.1/24 dev eth4
+        - ip link set eth4 up
+        - ip addr add 10.0.4.1/24 dev eth5
+        - ip link set eth5 up
+      env:
+        RUST_LOG: info
+
+    gobgp-src:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m76-src.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-pe1:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m76-pe1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-pe2:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m76-pe2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-c1:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m76-c1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.3.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-c2:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m76-c2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.4.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-src:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-pe1:eth1"]
+    - endpoints: ["rustbgpd:eth3", "gobgp-pe2:eth1"]
+    - endpoints: ["rustbgpd:eth4", "gobgp-c1:eth1"]
+    - endpoints: ["rustbgpd:eth5", "gobgp-c2:eth1"]

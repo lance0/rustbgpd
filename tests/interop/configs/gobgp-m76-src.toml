@@ -1,0 +1,13 @@
+[global.config]
+as = 65001
+router-id = "10.0.0.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.0.1"
+peer-as = 65001
+description = "rustbgpd-orr-rr"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ls"
