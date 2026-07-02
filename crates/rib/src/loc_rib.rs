@@ -734,6 +734,34 @@ fn bgpls_originator_id(route: &BgpLsRibRoute) -> Option<std::net::Ipv4Addr> {
 }
 
 fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
+    vpn_cmp_chain(a, b, None)
+}
+
+/// Compare two VPN routes under RFC 9107 Optimal Route Reflection.
+///
+/// The standard [`vpn_tiebreak`] chain with one extra step between the
+/// eBGP/iBGP step and `CLUSTER_LIST` — the same slot as
+/// [`crate::best_path::best_path_cmp_orr`]: the configured vantage's
+/// interior (SPF) cost to each route's `NEXT_HOP`. Lower cost wins; a
+/// known cost beats an unknown one (RFC 9107 §3.1); equal or
+/// both-unknown falls through.
+pub(crate) fn vpn_tiebreak_orr(
+    a: &VpnRibRoute,
+    b: &VpnRibRoute,
+    cost_a: Option<u64>,
+    cost_b: Option<u64>,
+) -> Ordering {
+    vpn_cmp_chain(a, b, Some((cost_a, cost_b)))
+}
+
+/// The shared decision chain behind [`vpn_tiebreak`] (`orr_costs = None`,
+/// the Loc-RIB selection — byte-identical to the pre-ORR chain) and
+/// [`vpn_tiebreak_orr`] (`orr_costs = Some(..)`, per-vantage staging).
+fn vpn_cmp_chain(
+    a: &VpnRibRoute,
+    b: &VpnRibRoute,
+    orr_costs: Option<(Option<u64>, Option<u64>)>,
+) -> Ordering {
     let cmp = vpn_stale_rank(a).cmp(&vpn_stale_rank(b));
     if cmp != Ordering::Equal {
         return cmp;
@@ -764,6 +792,22 @@ fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
     let cmp = b.is_ebgp().cmp(&a.is_ebgp());
     if cmp != Ordering::Equal {
         return cmp;
+    }
+
+    // RFC 9107 ORR interior cost to NEXT_HOP — only when the caller
+    // supplies vantage costs (the Loc-RIB never does). Lower cost wins;
+    // Some beats None (unknown metric MUST be least preferred); equal
+    // or both-None falls through.
+    if let Some((cost_a, cost_b)) = orr_costs {
+        let cmp = match (cost_a, cost_b) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
     }
 
     let cmp = vpn_cluster_list_len(a).cmp(&vpn_cluster_list_len(b));
@@ -1122,6 +1166,91 @@ mod tests {
             !loc.recompute_vpn(key, empty.into_iter()),
             "removing an absent key returns false"
         );
+    }
+
+    /// Oracle: the public `vpn_tiebreak` chain is byte-identical to the
+    /// pre-ORR behavior — `vpn_tiebreak_orr` with equal or both-unknown
+    /// costs yields the same ordering across a matrix of pairs that
+    /// exercise every decision step.
+    #[test]
+    fn vpn_tiebreak_unchanged_without_orr() {
+        let nlri = vpn_nlri([10, 0, 3, 0], 24, 100);
+        let base = make_vpn_route(nlri.clone(), 1, 100);
+        let higher_lp = make_vpn_route(nlri.clone(), 2, 200);
+        let mut stale = make_vpn_route(nlri.clone(), 3, 100);
+        stale.is_stale = true;
+        let mut longer_path = make_vpn_route(nlri.clone(), 4, 100);
+        Arc::make_mut(&mut longer_path.attributes).push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+        }));
+        let mut clustered = make_vpn_route(nlri.clone(), 5, 100);
+        Arc::make_mut(&mut clustered.attributes).push(PathAttribute::ClusterList(vec![
+            Ipv4Addr::new(10, 255, 0, 1),
+            Ipv4Addr::new(10, 255, 0, 2),
+        ]));
+        let peer_tiebreak = make_vpn_route(nlri, 6, 100);
+        let routes = [
+            base,
+            higher_lp,
+            stale,
+            longer_path,
+            clustered,
+            peer_tiebreak,
+        ];
+
+        for a in &routes {
+            for b in &routes {
+                let plain = vpn_tiebreak(a, b);
+                assert_eq!(vpn_tiebreak_orr(a, b, None, None), plain);
+                assert_eq!(vpn_tiebreak_orr(a, b, Some(7), Some(7)), plain);
+            }
+        }
+    }
+
+    /// The ORR interior-cost step decides ONLY at its slot — below the
+    /// eBGP/iBGP step (`LOCAL_PREF` etc. still win first) and above
+    /// `CLUSTER_LIST` / peer-address (which it overrides on a tie).
+    #[test]
+    fn vpn_orr_cost_only_breaks_ties_below_ebgp_step() {
+        let nlri = vpn_nlri([10, 0, 4, 0], 24, 100);
+        // LOCAL_PREF outranks a better interior cost.
+        let preferred = make_vpn_route(nlri.clone(), 1, 200);
+        let closer = make_vpn_route(nlri.clone(), 2, 100);
+        assert_eq!(
+            vpn_tiebreak_orr(&preferred, &closer, Some(1000), Some(0)),
+            Ordering::Less,
+            "LOCAL_PREF wins before the interior-cost step"
+        );
+        // On a full upper-chain tie, the lower cost beats the lower peer
+        // address (route 1 would win the final tiebreak).
+        let a = make_vpn_route(nlri.clone(), 1, 100);
+        let b = make_vpn_route(nlri, 2, 100);
+        assert_eq!(
+            vpn_tiebreak_orr(&a, &b, Some(10), Some(5)),
+            Ordering::Greater
+        );
+        assert_eq!(vpn_tiebreak_orr(&a, &b, Some(5), Some(10)), Ordering::Less);
+        // Equal costs fall through to the peer-address tiebreak.
+        assert_eq!(vpn_tiebreak_orr(&a, &b, Some(5), Some(5)), Ordering::Less);
+    }
+
+    /// RFC 9107 §3.1: an unknown metric-to-next-hop MUST be least
+    /// preferred — a known cost beats None regardless of magnitude.
+    #[test]
+    fn vpn_orr_unknown_cost_least_preferred() {
+        let nlri = vpn_nlri([10, 0, 5, 0], 24, 100);
+        let a = make_vpn_route(nlri.clone(), 1, 100);
+        let b = make_vpn_route(nlri, 2, 100);
+        assert_eq!(
+            vpn_tiebreak_orr(&a, &b, Some(u64::MAX), None),
+            Ordering::Less
+        );
+        assert_eq!(
+            vpn_tiebreak_orr(&a, &b, None, Some(u64::MAX)),
+            Ordering::Greater
+        );
+        // Both unknown falls through (peer address decides).
+        assert_eq!(vpn_tiebreak_orr(&a, &b, None, None), Ordering::Less);
     }
 
     #[test]

@@ -660,6 +660,7 @@ impl RibManager {
             if !vpn_keys.is_empty() {
                 Self::stage_vpn_routes(
                     loc_rib,
+                    &self.ribs,
                     &refresh_view,
                     &self.peer_is_rr_client,
                     &vpn_keys,
@@ -671,6 +672,7 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     rtc_filter.as_ref(),
+                    orr_ctx,
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,

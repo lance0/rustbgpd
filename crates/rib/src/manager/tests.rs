@@ -21068,3 +21068,544 @@ fn vpn_peer_down_during_refresh_clears_stale_state() {
         "peer-down must drop the peer's refresh-stale counters"
     );
 }
+
+// --- RFC 9107 VPN-ORR: per-vantage best selection for SAFI 128 ---
+
+/// Sendable families for a VPNv6-only test peer.
+fn vpn6_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::Ipv6, Safi::MplsVpn)]
+}
+
+/// A `VPNv4` route from `peer` with an explicit next-hop (identical
+/// attributes across sources so only the ORR interior-cost step and the
+/// final peer-address tiebreak can decide).
+fn vpn_route_at(peer: Ipv4Addr, next_hop: IpAddr, prefix_octet: u8) -> VpnRibRoute {
+    let mut route = make_vpn_rib_route(peer, prefix_octet, 100, 100);
+    route.next_hop = next_hop;
+    route
+}
+
+/// A `VPNv6` route from `peer` with an explicit next-hop.
+fn vpn6_route_at(peer: Ipv4Addr, next_hop: IpAddr, segment: u16) -> VpnRibRoute {
+    let mut route = make_vpn6_rib_route_with_rts(peer, segment, vec![]);
+    route.next_hop = next_hop;
+    route
+}
+
+/// Bring up an iBGP VPN-capable peer with the given ORR vantage and
+/// RR-client flag, draining the initial-table `EoR`.
+async fn vpn_orr_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    vantage: Option<IpAddr>,
+    sendable_families: Vec<(Afi, Safi)>,
+    route_reflector_client: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: false,
+        route_reflector_client,
+        orr_vantage: vantage,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+/// Announce VPN routes from `peer` through the normal receive path.
+async fn announce_vpn(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announced: Vec<VpnRibRoute>) {
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced,
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// The VPN divergence scenario: the SAME RD+prefix key from two iBGP
+/// PEs with next-hops at node X and node Y, followed by a sync point.
+/// Returns the contested key.
+async fn announce_divergent_vpn_bests(
+    tx: &mpsc::Sender<RibUpdate>,
+    prefix_octet: u8,
+) -> crate::route::VpnRibRouteKey {
+    let route_x = vpn_route_at(ORR_SRC_X, orr_nh_x(), prefix_octet);
+    let key = route_x.key();
+    announce_vpn(tx, ORR_SRC_X, vec![route_x]).await;
+    announce_vpn(
+        tx,
+        ORR_SRC_Y,
+        vec![vpn_route_at(ORR_SRC_Y, orr_nh_y(), prefix_octet)],
+    )
+    .await;
+    let _ = query_vpn_routes(tx).await;
+    key
+}
+
+/// Drain every queued outbound update and fold to the final advertised
+/// VPN state: key → the last announced route.
+fn drain_final_vpn(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> HashMap<crate::route::VpnRibRouteKey, VpnRibRoute> {
+    let mut state = HashMap::new();
+    while let Ok(update) = rx.try_recv() {
+        for route in &update.vpn_announce {
+            state.insert(route.key(), route.clone());
+        }
+        for key in &update.vpn_withdraw {
+            state.remove(key);
+        }
+    }
+    state
+}
+
+/// The composed differentiators: two RR clients bound to different
+/// vantages receive DIVERGENT VPN bests for the same RD+prefix — each
+/// exits via the PE closest to its own IGP location, not the RR's.
+#[tokio::test]
+async fn two_vpn_clients_different_vantages_receive_divergent_bests() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_a = vpn_orr_peer_up(
+        &tx,
+        client_a,
+        Some(vantage_at_node_a()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+
+    let key = announce_divergent_vpn_bests(&tx, 80).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_vpn(&mut out_a);
+    let final_b = drain_final_vpn(&mut out_b);
+    assert_eq!(
+        final_a.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "client at A exits via X (cost 1 < 10)"
+    );
+    assert_eq!(
+        final_b.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "client at B exits via Y (cost 1 < 10)"
+    );
+}
+
+/// `VPNv6` divergence — the candidate handling is family-agnostic, so
+/// the same scenario over SAFI 128 IPv6 keys diverges identically.
+#[tokio::test]
+async fn two_vpn6_clients_different_vantages_receive_divergent_bests() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_a = vpn_orr_peer_up(
+        &tx,
+        client_a,
+        Some(vantage_at_node_a()),
+        vpn6_sendable(),
+        true,
+    )
+    .await;
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        vpn6_sendable(),
+        true,
+    )
+    .await;
+
+    let route_x = vpn6_route_at(ORR_SRC_X, orr_nh_x(), 0x60);
+    let key = route_x.key();
+    announce_vpn(&tx, ORR_SRC_X, vec![route_x]).await;
+    announce_vpn(
+        &tx,
+        ORR_SRC_Y,
+        vec![vpn6_route_at(ORR_SRC_Y, orr_nh_y(), 0x60)],
+    )
+    .await;
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_vpn(&mut out_a);
+    let final_b = drain_final_vpn(&mut out_b);
+    assert_eq!(final_a.get(&key).map(|r| r.next_hop), Some(orr_nh_x()));
+    assert_eq!(final_b.get(&key).map(|r| r.next_hop), Some(orr_nh_y()));
+}
+
+/// A topology metric flip re-stages ONLY the peers bound to the vantage
+/// whose SPF surface changed: the affected client's VPN best flips,
+/// while the other vantage's client and a non-ORR client see zero
+/// messages.
+#[tokio::test]
+async fn vpn_orr_topology_metric_flip_moves_only_affected_client() {
+    use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_a = vpn_orr_peer_up(
+        &tx,
+        client_a,
+        Some(vantage_at_node_a()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+    let mut out_c = vpn_orr_peer_up(&tx, client_c, None, vpn_sendable(), true).await;
+
+    let key = announce_divergent_vpn_bests(&tx, 81).await;
+    // Steady state reached — empty every channel before the flip.
+    let _ = drain_final_vpn(&mut out_a);
+    let _ = drain_final_vpn(&mut out_b);
+    let _ = drain_final_vpn(&mut out_c);
+
+    // Flip A→X to metric 100: from A the SPF now prefers Y (10 < 100).
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![link_route(
+            ORR_FEED,
+            A,
+            X,
+            Some(100),
+            &[
+                v4_interface(Ipv4Addr::new(10, 0, A, X)),
+                v4_neighbor(Ipv4Addr::new(10, 0, X, A)),
+            ],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_vpn(&mut out_a);
+    assert_eq!(
+        final_a.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "affected client's VPN best flips to Y (cost 10 < 100)"
+    );
+    assert!(
+        out_b.try_recv().is_err(),
+        "unaffected vantage's client must see zero messages"
+    );
+    assert!(
+        out_c.try_recv().is_err(),
+        "non-ORR client must see zero messages"
+    );
+}
+
+/// A vantage that does not resolve to a topology node silently falls
+/// back to the standard Loc-RIB best: the ORR client's VPN
+/// advertisement is identical to a vantage-less peer's.
+#[tokio::test]
+async fn vpn_orr_unresolved_vantage_falls_back_to_loc_rib_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let orr_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let mut out_orr = vpn_orr_peer_up(&tx, orr_client, Some(outside), vpn_sendable(), true).await;
+    let mut out_plain = vpn_orr_peer_up(&tx, plain_client, None, vpn_sendable(), true).await;
+
+    let key = announce_divergent_vpn_bests(&tx, 82).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_orr = drain_final_vpn(&mut out_orr);
+    let final_plain = drain_final_vpn(&mut out_plain);
+    let unresolved = final_orr
+        .get(&key)
+        .expect("unresolved-vantage client is advertised the key");
+    let plain = final_plain
+        .get(&key)
+        .expect("vantage-less client is advertised the key");
+    assert_eq!(unresolved.next_hop, orr_nh_x(), "the Loc-RIB best");
+    assert_eq!(unresolved.next_hop, plain.next_hop);
+    assert_eq!(unresolved.attributes, plain.attributes);
+    assert_eq!(unresolved.peer, plain.peer);
+    assert_eq!(unresolved.nlri, plain.nlri);
+}
+
+/// Regression guard: a VPN peer with NO ORR vantage keeps the exact
+/// pre-ORR behavior in the divergence scenario — the Loc-RIB best, with
+/// no re-advertisement when the losing candidate arrives.
+#[tokio::test]
+async fn non_orr_vpn_peer_unchanged() {
+    let (tx, handle) = orr_rr_manager().await;
+    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let mut out = vpn_orr_peer_up(&tx, plain_client, None, vpn_sendable(), true).await;
+
+    let key = announce_divergent_vpn_bests(&tx, 83).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let mut announces = 0;
+    let mut last = None;
+    while let Ok(update) = out.try_recv() {
+        for route in &update.vpn_announce {
+            announces += 1;
+            last = Some(route.clone());
+        }
+        assert!(update.vpn_withdraw.is_empty());
+    }
+    assert_eq!(
+        announces, 1,
+        "the second candidate must not re-stage a non-ORR peer"
+    );
+    let last = last.unwrap();
+    assert_eq!(last.key(), key);
+    assert_eq!(last.next_hop, orr_nh_x(), "the Loc-RIB best");
+}
+
+/// RFC 4684 composes with VPN-ORR on the WINNER: the RT-Constrain
+/// membership gate applies to the vantage winner's Route Targets — the
+/// route actually being advertised — not the Loc-RIB best's.
+#[tokio::test]
+async fn vpn_orr_rtc_filter_applies_to_vantage_winner() {
+    let (tx, handle) = orr_rr_manager().await;
+
+    // Same key from two PEs: the Loc-RIB best (X, lower peer address)
+    // carries RT 100; the vantage-B winner (Y, cost 1 < 10) carries
+    // RT 200.
+    let mut route_x = make_vpn_rib_route_with_rts(ORR_SRC_X, 84, vec![rt(100)]);
+    route_x.next_hop = orr_nh_x();
+    let key = route_x.key();
+    let mut route_y = make_vpn_rib_route_with_rts(ORR_SRC_Y, 84, vec![rt(200)]);
+    route_y.next_hop = orr_nh_y();
+    announce_vpn(&tx, ORR_SRC_X, vec![route_x]).await;
+    announce_vpn(&tx, ORR_SRC_Y, vec![route_y]).await;
+    let _ = query_vpn_routes(&tx).await;
+
+    // An iBGP RR client at vantage B that negotiated VPNv4 + RTC.
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv4, Safi::RtConstrain)],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    assert!(
+        drain_final_vpn(&mut out_rx).is_empty(),
+        "strict RFC 4684: empty membership withholds every VPN route"
+    );
+
+    // Interest in the LOC-RIB BEST's RT only: the vantage winner (RT
+    // 200) misses the gate, so nothing may be advertised — gating on
+    // the Loc-RIB best's RT 100 would wrongly announce here.
+    send_rtc_interest(&tx, Ipv4Addr::new(10, 0, 0, 3), &[100]).await;
+    let _ = query_vpn_routes(&tx).await;
+    assert!(
+        !drain_final_vpn(&mut out_rx).contains_key(&key),
+        "the gate must apply to the vantage winner's RTs, not the Loc-RIB best's"
+    );
+
+    // Interest in the WINNER's RT: the vantage best flows.
+    send_rtc_interest(&tx, Ipv4Addr::new(10, 0, 0, 3), &[200]).await;
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+    let advertised = drain_final_vpn(&mut out_rx);
+    assert_eq!(
+        advertised.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "matching the winner's RT admits the vantage best"
+    );
+}
+
+/// Split horizon and RFC 4456 reflection suppression run BEFORE the ORR
+/// ranking: a cost-0 VPN candidate the target must not receive can
+/// never win.
+#[tokio::test]
+async fn vpn_orr_split_horizon_and_rr_suppression_before_ranking() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+    // A non-client iBGP peer bound to the same vantage (the RIB layer
+    // trusts PeerUp; the suppression seam must hold regardless).
+    let peer_d = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_d = vpn_orr_peer_up(
+        &tx,
+        peer_d,
+        Some(vantage_at_node_b()),
+        vpn_sendable(),
+        false,
+    )
+    .await;
+
+    // key1 — split-horizon probe: client B's OWN route has interior
+    // cost 0 (next-hop at its vantage node); a non-client source offers
+    // cost 10 via NH-X.
+    let own = vpn_route_at(client_b_v4, vantage_at_node_b(), 85);
+    let key1 = own.key();
+    announce_vpn(&tx, client_b_v4, vec![own]).await;
+    announce_vpn(
+        &tx,
+        ORR_SRC_X,
+        vec![vpn_route_at(ORR_SRC_X, orr_nh_x(), 85)],
+    )
+    .await;
+
+    // key2 — RR-suppression probe: the cost-0 candidate comes from a
+    // NON-client (never reflectable to the non-client target D); client
+    // B offers cost 10 via NH-X (client routes reflect to everyone).
+    let non_client_route = vpn_route_at(ORR_SRC_Y, vantage_at_node_b(), 86);
+    let key2 = non_client_route.key();
+    announce_vpn(&tx, ORR_SRC_Y, vec![non_client_route]).await;
+    announce_vpn(
+        &tx,
+        client_b_v4,
+        vec![vpn_route_at(client_b_v4, orr_nh_x(), 86)],
+    )
+    .await;
+
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_vpn(&mut out_b);
+    assert_eq!(
+        final_b.get(&key1).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "the target's own cost-0 route is split-horizoned before ranking"
+    );
+    let final_d = drain_final_vpn(&mut out_d);
+    assert_eq!(
+        final_d.get(&key2).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "the cost-0 non-client candidate is RR-suppressed before ranking"
+    );
+}
+
+/// A client that establishes AFTER the VPN routes and topology are in
+/// place gets its per-vantage best in the initial table dump.
+#[tokio::test]
+async fn vpn_orr_initial_dump_gets_vantage_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let key = announce_divergent_vpn_bests(&tx, 87).await;
+
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (out_tx, mut out_b) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: client_b,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_vpn(&mut out_b);
+    assert_eq!(
+        final_b.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "initial dump carries the vantage best, not the Loc-RIB best"
+    );
+}
+
+/// A ROUTE-REFRESH replay re-derives the same per-vantage VPN best the
+/// live distribution path sent.
+#[tokio::test]
+async fn vpn_orr_route_refresh_replays_vantage_best() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        vpn_sendable(),
+        true,
+    )
+    .await;
+
+    let key = announce_divergent_vpn_bests(&tx, 88).await;
+    let _ = drain_final_vpn(&mut out_b);
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: client_b,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_b = drain_final_vpn(&mut out_b);
+    assert_eq!(
+        final_b.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "the replay is the vantage best"
+    );
+}
