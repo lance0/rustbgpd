@@ -124,6 +124,9 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::BgpLs, Safi::BgpLsVpn) => "bgpls_vpn",
         (Afi::Ipv4, Safi::MplsVpn) => "l3vpn_ipv4_unicast",
         (Afi::Ipv6, Safi::MplsVpn) => "l3vpn_ipv6_unicast",
+        // ADR-0077 §8 / OpenConfig identity names.
+        (Afi::Ipv4, Safi::LabeledUnicast) => "ipv4_labeled_unicast",
+        (Afi::Ipv6, Safi::LabeledUnicast) => "ipv6_labeled_unicast",
         (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
         (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
         (Afi::Ipv4, Safi::RtConstrain) => "rtc",
@@ -131,7 +134,7 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
         | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
         | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
-        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn)
+        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn | Safi::LabeledUnicast)
         // RT-Constrain is AFI 1 only (RFC 4684 §7).
         | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => "unsupported",
     }

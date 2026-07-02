@@ -9,8 +9,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
-    VpnRibRoute, VpnRibRouteKey,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, LabeledRibRouteKey,
+    Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
@@ -37,6 +37,13 @@ pub struct AdjRibOut {
     /// (the SAFI 128 analog of `prefix_path_ids`). `SmallVec<[u32; 1]>` inlines
     /// the single-best case (`path_id=0`) without heap allocation.
     vpn_key_path_ids: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    /// Labeled-unicast routes advertised to this peer, keyed by prefix +
+    /// path-id identity. Deliberately separate from the unicast `routes` map
+    /// (ADR-0077 §2).
+    labeled_routes: HashMap<LabeledRibRouteKey, LabeledRibRoute>,
+    /// Secondary index: labeled prefix → advertised Add-Path path IDs (the
+    /// SAFI 4 analog of `vpn_key_path_ids`).
+    labeled_key_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes advertised to this peer, keyed by RFC 4684 identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
@@ -63,6 +70,8 @@ impl AdjRibOut {
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
             vpn_key_path_ids: HashMap::default(),
+            labeled_routes: HashMap::default(),
+            labeled_key_path_ids: HashMap::default(),
             rtc_routes: HashMap::default(),
         }
     }
@@ -131,7 +140,7 @@ impl AdjRibOut {
     }
 
     /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
-    /// VPN, and RTC — and the secondary prefix index.
+    /// VPN, labeled-unicast, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
@@ -140,6 +149,8 @@ impl AdjRibOut {
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
+        self.labeled_routes.clear();
+        self.labeled_key_path_ids.clear();
         self.rtc_routes.clear();
     }
 
@@ -323,6 +334,58 @@ impl AdjRibOut {
         self.vpn_routes.len()
     }
 
+    // --- Labeled-unicast methods (ADR-0077 outbound reflection substrate) ---
+
+    /// Insert or replace an advertised labeled route.
+    pub fn insert_labeled(&mut self, route: LabeledRibRoute) {
+        let key = route.key();
+        if self.labeled_routes.insert(key, route).is_none() {
+            let ids = self.labeled_key_path_ids.entry(key.prefix).or_default();
+            if !ids.contains(&key.path_id) {
+                ids.push(key.path_id);
+            }
+        }
+    }
+
+    /// Remove an advertised labeled route by key. Returns `true` if it
+    /// existed.
+    pub fn remove_labeled(&mut self, key: &LabeledRibRouteKey) -> bool {
+        let removed = self.labeled_routes.remove(key).is_some();
+        if removed && let Some(ids) = self.labeled_key_path_ids.get_mut(&key.prefix) {
+            ids.retain(|id| *id != key.path_id);
+            if ids.is_empty() {
+                self.labeled_key_path_ids.remove(&key.prefix);
+            }
+        }
+        removed
+    }
+
+    /// Return all Add-Path path IDs currently advertised for a labeled
+    /// prefix identity (the SAFI 4 analog of [`Self::path_ids_for_prefix`]).
+    #[must_use]
+    pub fn labeled_path_ids_for_key(&self, prefix: &Prefix) -> &[u32] {
+        self.labeled_key_path_ids
+            .get(prefix)
+            .map_or(&[], SmallVec::as_slice)
+    }
+
+    /// Look up an advertised labeled route by key.
+    #[must_use]
+    pub fn get_labeled(&self, key: &LabeledRibRouteKey) -> Option<&LabeledRibRoute> {
+        self.labeled_routes.get(key)
+    }
+
+    /// Iterate over all advertised labeled routes.
+    pub fn iter_labeled(&self) -> impl Iterator<Item = &LabeledRibRoute> {
+        self.labeled_routes.values()
+    }
+
+    /// Return the number of advertised labeled routes.
+    #[must_use]
+    pub fn labeled_len(&self) -> usize {
+        self.labeled_routes.len()
+    }
+
     // --- RT-Constrain methods (RFC 4684 outbound reflection substrate) ---
 
     /// Insert or replace an advertised RTC route.
@@ -455,6 +518,76 @@ mod tests {
         assert!(rib.remove_vpn(&key));
         assert_eq!(rib.vpn_len(), 0);
         assert!(!rib.remove_vpn(&key));
+    }
+
+    fn make_labeled_route(addr: [u8; 4], len: u8, path_id: u32, peer_oct: u8) -> LabeledRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        LabeledRibRoute {
+            nlri: rustbgpd_wire::LabeledNlri {
+                labels: vec![MplsLabelEntry::try_new(100, 0, true).unwrap()],
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(addr), len)),
+            },
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id,
+        }
+    }
+
+    #[test]
+    fn labeled_insert_remove_iter_isolated_from_unicast_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        // Same prefix as prefix_a() to prove the tables cannot collide.
+        let route = make_labeled_route([10, 0, 0, 0], 24, 0, 1);
+        let key = route.key();
+
+        rib.insert_labeled(route);
+        assert_eq!(rib.labeled_len(), 1);
+        assert_eq!(rib.iter_labeled().count(), 1);
+        assert_eq!(rib.len(), 0);
+        assert_eq!(rib.vpn_len(), 0);
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+
+        // Same prefix + path_id replaces in place.
+        rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 0, 2));
+        assert_eq!(rib.labeled_len(), 1, "same key should replace");
+        assert_eq!(
+            rib.get_labeled(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+
+        assert!(rib.remove_labeled(&key));
+        assert_eq!(rib.labeled_len(), 0);
+        assert!(!rib.remove_labeled(&key));
+    }
+
+    #[test]
+    fn labeled_index_tracks_add_path_multiple_ids() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let prefix = prefix_a();
+
+        assert!(rib.labeled_path_ids_for_key(&prefix).is_empty());
+        rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 1, 1));
+        rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 2, 1));
+        rib.insert_labeled(make_labeled_route([10, 0, 0, 0], 24, 3, 1));
+
+        let mut ids = rib.labeled_path_ids_for_key(&prefix).to_vec();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3]);
+
+        rib.remove_labeled(&LabeledRibRouteKey { prefix, path_id: 2 });
+        let mut ids = rib.labeled_path_ids_for_key(&prefix).to_vec();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 3]);
+
+        rib.remove_labeled(&LabeledRibRouteKey { prefix, path_id: 1 });
+        rib.remove_labeled(&LabeledRibRouteKey { prefix, path_id: 3 });
+        assert!(rib.labeled_path_ids_for_key(&prefix).is_empty());
     }
 
     fn make_rtc_route(local_admin: u32, peer_oct: u8) -> RtcRibRoute {

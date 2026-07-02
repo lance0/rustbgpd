@@ -27,8 +27,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute,
-    RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute,
+    LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
@@ -69,6 +69,12 @@ pub struct AdjRibIn {
     /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
     /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
     vpn_key_index: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
+    /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
+    labeled_routes: HashMap<LabeledRibRouteKey, LabeledRibRoute>,
+    /// Secondary index: labeled prefix → Add-Path path IDs stored for it
+    /// (the SAFI 4 analog of `vpn_key_index`).
+    labeled_key_index: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
@@ -82,6 +88,9 @@ pub struct AdjRibIn {
     /// VPN route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
     vpn_llgr_stale_local_tags: HashSet<VpnRibRouteKey>,
+    /// Labeled-unicast route keys where `LLGR_STALE` was injected locally
+    /// (see `evpn_llgr_stale_local_tags`).
+    labeled_llgr_stale_local_tags: HashSet<LabeledRibRouteKey>,
     /// RTC route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
     rtc_llgr_stale_local_tags: HashSet<RtcRibRouteKey>,
@@ -115,10 +124,13 @@ impl AdjRibIn {
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
             vpn_key_index: HashMap::default(),
+            labeled_routes: HashMap::default(),
+            labeled_key_index: HashMap::default(),
             rtc_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             bgpls_llgr_stale_local_tags: HashSet::default(),
             vpn_llgr_stale_local_tags: HashSet::default(),
+            labeled_llgr_stale_local_tags: HashSet::default(),
             rtc_llgr_stale_local_tags: HashSet::default(),
             attr_intern: HashSet::with_capacity_and_hasher(
                 route_capacity.clamp(16, 64),
@@ -175,9 +187,10 @@ impl AdjRibIn {
     }
 
     /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
-    /// BGP-LS, VPN, and RTC — plus all secondary indices, stale tags, and the
-    /// attribute intern table. Used when the per-peer Adj-RIB-In needs to be
-    /// wiped without also dropping the [`AdjRibIn`] struct itself.
+    /// BGP-LS, VPN, labeled-unicast, and RTC — plus all secondary indices,
+    /// stale tags, and the attribute intern table. Used when the per-peer
+    /// Adj-RIB-In needs to be wiped without also dropping the [`AdjRibIn`]
+    /// struct itself.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_index.clear();
@@ -186,12 +199,15 @@ impl AdjRibIn {
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
         self.vpn_key_index.clear();
+        self.labeled_routes.clear();
+        self.labeled_key_index.clear();
         self.rtc_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
         self.evpn_llgr_stale_local_tags.clear();
         self.bgpls_llgr_stale_local_tags.clear();
         self.vpn_llgr_stale_local_tags.clear();
+        self.labeled_llgr_stale_local_tags.clear();
         self.rtc_llgr_stale_local_tags.clear();
         self.attr_intern.clear();
     }
@@ -1320,6 +1336,315 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
     }
 
+    /// Insert or replace a labeled-unicast route, interning its attribute set.
+    ///
+    /// Returns `true` if an existing route at the same prefix + path-id was
+    /// replaced (RFC 8277 §2.3 implicit-replace: a relabel of the same prefix
+    /// lands on the same key). A replacement may strand the previous route's
+    /// interned attribute set; labeled batch callers run
+    /// [`Self::gc_intern_table`] once after any replacement or real
+    /// withdrawal, after Loc-RIB recomputation has dropped any selected-route
+    /// clone.
+    pub fn insert_labeled(&mut self, mut route: LabeledRibRoute) -> bool {
+        let key = route.key();
+        // Mirror unicast `insert` / `insert_vpn`: a re-advertised key drops
+        // any record that *we* locally injected LLGR_STALE on its prior
+        // version, so a later EoR never strips a peer-originated community.
+        self.labeled_llgr_stale_local_tags.remove(&key);
+        if let Some(existing) = self.attr_intern.get(&route.attributes) {
+            route.attributes = existing.clone();
+        } else {
+            self.attr_intern.insert(route.attributes.clone());
+        }
+        let ids = self.labeled_key_index.entry(key.prefix).or_default();
+        if !ids.contains(&key.path_id) {
+            ids.push(key.path_id);
+        }
+        self.labeled_routes.insert(key, route).is_some()
+    }
+
+    /// Withdraw a labeled-unicast route. Returns `true` if it existed.
+    pub fn withdraw_labeled(&mut self, key: &LabeledRibRouteKey) -> bool {
+        self.remove_labeled_entry(key)
+    }
+
+    /// Shared labeled removal: drops the route, its locally-injected LLGR
+    /// tag, and its `labeled_key_index` entry. Every labeled removal path
+    /// (withdraw and the GR/LLGR stale sweeps) must route through here so
+    /// the secondary index never dangles.
+    fn remove_labeled_entry(&mut self, key: &LabeledRibRouteKey) -> bool {
+        // A removed key can no longer carry a locally-injected LLGR_STALE tag.
+        self.labeled_llgr_stale_local_tags.remove(key);
+        let removed = self.labeled_routes.remove(key).is_some();
+        if removed && let Some(ids) = self.labeled_key_index.get_mut(&key.prefix) {
+            ids.retain(|id| *id != key.path_id);
+            if ids.is_empty() {
+                self.labeled_key_index.remove(&key.prefix);
+            }
+        }
+        removed
+    }
+
+    /// Iterate the labeled routes stored for one prefix identity across all
+    /// Add-Path path IDs (the SAFI 4 analog of `iter_vpn_for_nlri`).
+    pub fn iter_labeled_for_prefix<'a>(
+        &'a self,
+        prefix: &'a Prefix,
+    ) -> impl Iterator<Item = &'a LabeledRibRoute> + 'a {
+        self.labeled_key_index
+            .get(prefix)
+            .into_iter()
+            .flat_map(move |ids| {
+                ids.iter().filter_map(move |path_id| {
+                    self.labeled_routes.get(&LabeledRibRouteKey {
+                        prefix: *prefix,
+                        path_id: *path_id,
+                    })
+                })
+            })
+    }
+
+    /// Withdraw all labeled-unicast routes from this Adj-RIB-In.
+    ///
+    /// Labeled GR/LLGR stale preservation is not wired into GR entry yet (the
+    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
+    /// helper to make the conservative exclusion explicit instead of
+    /// accidentally retaining stale labeled routes as live.
+    pub fn withdraw_all_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
+        let keys: Vec<_> = self.labeled_routes.keys().copied().collect();
+        self.labeled_routes.clear();
+        self.labeled_key_index.clear();
+        self.labeled_llgr_stale_local_tags.clear();
+        keys
+    }
+
+    /// Look up a labeled route by prefix + path-id key.
+    #[must_use]
+    pub fn get_labeled(&self, key: &LabeledRibRouteKey) -> Option<&LabeledRibRoute> {
+        self.labeled_routes.get(key)
+    }
+
+    /// Iterate over all labeled routes in this Adj-RIB-In.
+    pub fn iter_labeled(&self) -> impl Iterator<Item = &LabeledRibRoute> {
+        self.labeled_routes.values()
+    }
+
+    /// Return the number of labeled routes stored.
+    #[must_use]
+    pub fn labeled_len(&self) -> usize {
+        self.labeled_routes.len()
+    }
+
+    // --- Labeled-unicast GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
+    //
+    // Follows the VPN pattern: LabeledRibRoute attributes are
+    // Arc<Vec<PathAttribute>>, so community injection goes through
+    // Arc::make_mut to preserve the intern-table sharing invariant.
+    //
+    // Like VPN, labeled-unicast spans two family tuples — (Ipv4,
+    // LabeledUnicast) and (Ipv6, LabeledUnicast) — which the GR capability
+    // lists separately, so every helper filters by the exact tuple via
+    // LabeledRibRoute::afi_safi(). All of this is inert substrate until the
+    // receive slice wires GR entry for SAFI 4.
+
+    /// Mark labeled routes of the given family tuple as stale (RFC 4724 §4.1
+    /// helper retention on session drop).
+    ///
+    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
+    /// survived a previous restart without ever being refreshed and is deleted
+    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
+    /// across consecutive restarts). Returns the deleted keys so the caller
+    /// can withdraw them downstream.
+    pub fn mark_stale_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
+        if family.1 != Safi::LabeledUnicast {
+            return Vec::new();
+        }
+        let already_stale: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.afi_safi() == family)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &already_stale {
+            self.remove_labeled_entry(key);
+        }
+        for route in self.labeled_routes.values_mut() {
+            if route.afi_safi() == family {
+                route.is_stale = true;
+            }
+        }
+        already_stale
+    }
+
+    /// Clear the stale flag on labeled routes of the given family tuple (both
+    /// `is_stale` and `is_llgr_stale`), stripping any locally-injected
+    /// `LLGR_STALE` community. Peer-originated `LLGR_STALE` communities are
+    /// preserved. Called when the session re-establishes (RFC 4724 §4.1).
+    pub fn clear_stale_labeled(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::LabeledUnicast {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.labeled_routes {
+            if route.afi_safi() == family {
+                route.is_stale = false;
+                route.is_llgr_stale = false;
+                if self.labeled_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(*key);
+                }
+            }
+        }
+        self.clear_local_llgr_stale_labeled_community(&clear_local_llgr);
+    }
+
+    /// Remove all stale labeled routes (both tuples), returning their keys.
+    /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
+    /// restart timer expires or `EoR` sweeps).
+    pub fn sweep_stale_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
+        let stale: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.remove_labeled_entry(key);
+        }
+        stale
+    }
+
+    /// Remove stale labeled routes of the given family tuple, returning their
+    /// keys. Used when a family was in GR but not in the peer's LLGR
+    /// capability.
+    pub fn sweep_stale_family_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
+        if family.1 != Safi::LabeledUnicast {
+            return Vec::new();
+        }
+        let stale: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.remove_labeled_entry(key);
+        }
+        stale
+    }
+
+    /// Promote GR-stale labeled routes of the given family tuple to
+    /// LLGR-stale (RFC 9494 §4.2/§4.3).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///
+    /// Returns keys affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_labeled(
+        &mut self,
+        family: (Afi, Safi),
+    ) -> Vec<LabeledRibRouteKey> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+
+        if family.1 != Safi::LabeledUnicast {
+            return Vec::new();
+        }
+
+        // First pass: remove routes carrying NO_LLGR
+        let no_llgr_keys: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| {
+                r.is_stale && r.afi_safi() == family && r.communities().contains(&COMMUNITY_NO_LLGR)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        let mut affected: Vec<LabeledRibRouteKey> = no_llgr_keys.clone();
+        for key in &no_llgr_keys {
+            self.remove_labeled_entry(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.labeled_routes.values_mut() {
+            if route.is_stale && route.afi_safi() == family {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                        self.labeled_llgr_stale_local_tags.insert(route.key());
+                    }
+                } else {
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.labeled_llgr_stale_local_tags.insert(route.key());
+                }
+                affected.push(route.key());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale labeled routes, returning their keys
+    /// (RFC 9494 §4.3: LLGR timer expiry).
+    pub fn sweep_llgr_stale_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
+        let stale: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.remove_labeled_entry(key);
+        }
+        stale
+    }
+
+    /// Remove LLGR-stale labeled routes of the given family tuple, returning
+    /// their keys. `EoR` during the LLGR phase deletes what was not
+    /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    pub fn sweep_llgr_stale_family_labeled(
+        &mut self,
+        family: (Afi, Safi),
+    ) -> Vec<LabeledRibRouteKey> {
+        if family.1 != Safi::LabeledUnicast {
+            return Vec::new();
+        }
+        let stale: Vec<LabeledRibRouteKey> = self
+            .labeled_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale && r.afi_safi() == family)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.remove_labeled_entry(key);
+        }
+        stale
+    }
+
+    /// Clear the LLGR-stale flag on labeled routes of the given family tuple,
+    /// stripping only locally-injected `LLGR_STALE` communities. Called when
+    /// `EoR` is received during the LLGR phase (RFC 9494 §4.2).
+    pub fn clear_llgr_stale_labeled(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::LabeledUnicast {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.labeled_routes {
+            if route.afi_safi() == family {
+                route.is_llgr_stale = false;
+                if self.labeled_llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(*key);
+                }
+            }
+        }
+        self.clear_local_llgr_stale_labeled_community(&clear_local_llgr);
+    }
+
     /// Insert or replace an RT-Constrain route, interning its attribute set.
     ///
     /// Returns `true` if an existing route at the same NLRI + path-id was
@@ -1828,6 +2153,15 @@ impl AdjRibIn {
         }
     }
 
+    fn clear_local_llgr_stale_labeled_community(&mut self, keys: &[LabeledRibRouteKey]) {
+        for key in keys {
+            if let Some(route) = self.labeled_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+            }
+            self.labeled_llgr_stale_local_tags.remove(key);
+        }
+    }
+
     fn clear_local_llgr_stale_rtc_community(&mut self, keys: &[RtcRibRouteKey]) {
         for key in keys {
             if let Some(route) = self.rtc_routes.get_mut(key) {
@@ -1869,8 +2203,8 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, MplsLabelEntry, Origin, PathAttribute,
-        RouteDistinguisher, RtcNlri, Safi, VpnNlri, VpnPrefix,
+        Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, LabeledNlri, MplsLabelEntry, Origin,
+        PathAttribute, RouteDistinguisher, RtcNlri, Safi, VpnNlri, VpnPrefix,
     };
 
     use super::*;
@@ -3051,6 +3385,8 @@ mod tests {
 
     const VPN_V4: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
     const VPN_V6: (Afi, Safi) = (Afi::Ipv6, Safi::MplsVpn);
+    const LU_V4: (Afi, Safi) = (Afi::Ipv4, Safi::LabeledUnicast);
+    const LU_V6: (Afi, Safi) = (Afi::Ipv6, Safi::LabeledUnicast);
     const LS_BASE: (Afi, Safi) = (Afi::BgpLs, Safi::BgpLs);
     const LS_VPN: (Afi, Safi) = (Afi::BgpLs, Safi::BgpLsVpn);
     const RTC_FAM: (Afi, Safi) = (Afi::Ipv4, Safi::RtConstrain);
@@ -3278,6 +3614,416 @@ mod tests {
 
         assert!(rib.withdraw_vpn(&key));
         assert!(!rib.vpn_llgr_stale_local_tags.contains(&key));
+    }
+
+    fn labeled_nlri(addr: [u8; 4], len: u8, label: u32) -> LabeledNlri {
+        LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            prefix: rustbgpd_wire::Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(addr), len)),
+        }
+    }
+
+    fn labeled_nlri_v6(seg: u16, len: u8, label: u32) -> LabeledNlri {
+        LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            prefix: rustbgpd_wire::Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, seg, 0, 0, 0, 0, 0),
+                len,
+            )),
+        }
+    }
+
+    fn make_labeled_route(nlri: LabeledNlri, peer_oct: u8) -> LabeledRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        LabeledRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    fn insert_labeled_with(
+        rib: &mut AdjRibIn,
+        nlri: LabeledNlri,
+        attrs: Vec<PathAttribute>,
+    ) -> LabeledRibRouteKey {
+        let mut route = make_labeled_route(nlri, 1);
+        route.attributes = Arc::new(attrs);
+        let key = route.key();
+        rib.insert_labeled(route);
+        key
+    }
+
+    #[test]
+    fn labeled_insert_get_replace_withdraw_round_trip() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let key = LabeledRibRouteKey {
+            prefix: nlri.key(),
+            path_id: 0,
+        };
+
+        assert!(!rib.insert_labeled(make_labeled_route(nlri.clone(), 1)));
+        assert_eq!(rib.labeled_len(), 1);
+        assert_eq!(rib.iter_labeled().count(), 1);
+        assert_eq!(
+            rib.get_labeled(&key).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+
+        // Same prefix with a *different label* is the same key (labels are
+        // route data, not identity — RFC 8277 §2.3 implicit replace).
+        let relabeled = labeled_nlri([10, 0, 1, 0], 24, 999);
+        assert_eq!(
+            LabeledRibRouteKey {
+                prefix: relabeled.key(),
+                path_id: 0
+            },
+            key
+        );
+        assert!(rib.insert_labeled(make_labeled_route(relabeled, 2)));
+        assert_eq!(rib.labeled_len(), 1, "same key should replace");
+        assert_eq!(
+            rib.get_labeled(&key).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+        assert_eq!(rib.get_labeled(&key).unwrap().nlri.labels[0].label, 999);
+
+        assert!(rib.withdraw_labeled(&key));
+        assert_eq!(rib.labeled_len(), 0);
+        assert!(!rib.withdraw_labeled(&key));
+    }
+
+    #[test]
+    fn labeled_path_ids_are_distinct_keys_and_iterable_per_prefix() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+
+        let mut path1 = make_labeled_route(nlri.clone(), 1);
+        path1.path_id = 1;
+        let mut path2 = make_labeled_route(nlri.clone(), 2);
+        path2.path_id = 2;
+        assert!(!rib.insert_labeled(path1));
+        assert!(!rib.insert_labeled(path2), "distinct path_id is a new key");
+        assert_eq!(rib.labeled_len(), 2);
+
+        let prefix = nlri.key();
+        let mut peers: Vec<_> = rib
+            .iter_labeled_for_prefix(&prefix)
+            .map(|r| r.peer)
+            .collect();
+        peers.sort();
+        assert_eq!(
+            peers,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ]
+        );
+
+        // Removing one path leaves the other reachable via the index.
+        assert!(rib.withdraw_labeled(&LabeledRibRouteKey { prefix, path_id: 1 }));
+        assert_eq!(rib.iter_labeled_for_prefix(&prefix).count(), 1);
+        assert!(rib.withdraw_labeled(&LabeledRibRouteKey { prefix, path_id: 2 }));
+        assert_eq!(rib.iter_labeled_for_prefix(&prefix).count(), 0);
+    }
+
+    #[test]
+    fn labeled_withdraw_all_returns_keys_and_empties_table() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let a = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let b = labeled_nlri([10, 0, 2, 0], 24, 200);
+        rib.insert_labeled(make_labeled_route(a.clone(), 1));
+        rib.insert_labeled(make_labeled_route(b.clone(), 1));
+        assert_eq!(rib.labeled_len(), 2);
+
+        let mut keys = rib.withdraw_all_labeled();
+        keys.sort_by_key(|k| k.prefix.to_string());
+        assert_eq!(
+            keys,
+            vec![
+                LabeledRibRouteKey {
+                    prefix: a.key(),
+                    path_id: 0
+                },
+                LabeledRibRouteKey {
+                    prefix: b.key(),
+                    path_id: 0
+                },
+            ]
+        );
+        assert_eq!(rib.labeled_len(), 0);
+    }
+
+    #[test]
+    fn labeled_insert_reports_replacement_for_intern_gc() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+
+        assert!(!rib.insert_labeled(make_labeled_route(nlri.clone(), 1)));
+        assert_eq!(rib.intern_len(), 1);
+
+        let mut replacement = make_labeled_route(nlri, 2);
+        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+
+        assert!(rib.insert_labeled(replacement));
+        assert_eq!(
+            rib.intern_len(),
+            2,
+            "replacement strands the previous interned attribute set before GC"
+        );
+
+        rib.gc_intern_table();
+        assert_eq!(rib.intern_len(), 1);
+    }
+
+    #[test]
+    fn labeled_storage_is_isolated_from_unicast_and_vpn_tables() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+
+        // Unicast route at the *same prefix* as the labeled route: the two
+        // tables must not collide (ADR-0077 §2).
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 9, 0), 24);
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+        rib.insert_labeled(make_labeled_route(labeled_nlri([10, 0, 9, 0], 24, 100), 1));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 9, 0], 24, 100), 1));
+
+        assert_eq!(rib.labeled_len(), 1);
+        assert_eq!(rib.len(), 1, "labeled storage must not touch unicast count");
+        assert_eq!(rib.vpn_len(), 1, "labeled storage must not touch VPN count");
+
+        // Withdrawing the labeled route leaves unicast and VPN intact.
+        let key = LabeledRibRouteKey {
+            prefix: rustbgpd_wire::Prefix::V4(prefix),
+            path_id: 0,
+        };
+        assert!(rib.withdraw_labeled(&key));
+        assert_eq!(rib.len(), 1);
+        assert_eq!(rib.vpn_len(), 1);
+
+        rib.clear();
+        assert_eq!(rib.labeled_len(), 0);
+        assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn mark_stale_labeled_scopes_to_family_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
+
+        // Wrong SAFI: no-op
+        assert!(
+            rib.mark_stale_labeled((Afi::Ipv4, Safi::Unicast))
+                .is_empty()
+        );
+        assert!(!rib.labeled_routes[&v4_key].is_stale);
+
+        // IPv4 labeled: only the v4-tuple route becomes stale
+        assert!(rib.mark_stale_labeled(LU_V4).is_empty());
+        assert!(rib.labeled_routes[&v4_key].is_stale);
+        assert!(
+            !rib.labeled_routes[&v6_key].is_stale,
+            "v6 tuple must be untouched"
+        );
+    }
+
+    #[test]
+    fn mark_stale_labeled_deletes_already_stale_routes_on_consecutive_restart() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let gr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let llgr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 2, 0], 24, 200), vec![]);
+
+        // First session drop: both routes go GR-stale; one then enters LLGR.
+        rib.mark_stale_labeled(LU_V4);
+        let llgr_route = rib.labeled_routes.get_mut(&llgr_key).unwrap();
+        llgr_route.is_stale = false;
+        llgr_route.is_llgr_stale = true;
+        // Second session drop before any refresh: both already-stale routes
+        // (GR-stale and LLGR-stale) are deleted, not re-marked.
+        let mut deleted = rib.mark_stale_labeled(LU_V4);
+        deleted.sort_by_key(|k| k.prefix.to_string());
+        assert_eq!(deleted, vec![gr_key, llgr_key]);
+        assert_eq!(rib.labeled_len(), 0);
+    }
+
+    #[test]
+    fn clear_stale_labeled_strips_local_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+
+        rib.mark_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
+        let promoted = &rib.labeled_routes[&key];
+        assert!(promoted.is_llgr_stale);
+        assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
+        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+
+        rib.clear_stale_labeled(LU_V4);
+        let route = &rib.labeled_routes[&key];
+        assert!(!route.is_stale);
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_stale_labeled_preserves_peer_originated_llgr_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
+        let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), peer_attrs);
+
+        rib.mark_stale_labeled(LU_V4);
+        rib.clear_stale_labeled(LU_V4);
+        let route = &rib.labeled_routes[&key];
+        assert!(!route.is_stale);
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn sweep_stale_family_labeled_sweeps_only_matching_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
+        rib.mark_stale_labeled(LU_V4);
+        rib.mark_stale_labeled(LU_V6);
+
+        let swept = rib.sweep_stale_family_labeled(LU_V4);
+        assert_eq!(swept, vec![v4_key]);
+        assert_eq!(
+            rib.labeled_len(),
+            1,
+            "v6 stale route must survive a v4 sweep"
+        );
+
+        // Whole-table sweep purges the remaining stale route.
+        let swept = rib.sweep_stale_labeled();
+        assert_eq!(swept, vec![v6_key]);
+        assert_eq!(rib.labeled_len(), 0);
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_labeled_drops_no_llgr_and_scopes_to_tuple() {
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let keep_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        let no_llgr_key = insert_labeled_with(
+            &mut rib,
+            labeled_nlri([10, 0, 2, 0], 24, 200),
+            vec![PathAttribute::Communities(vec![COMMUNITY_NO_LLGR])],
+        );
+        let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 300), vec![]);
+
+        rib.mark_stale_labeled(LU_V4);
+        rib.mark_stale_labeled(LU_V6);
+        let affected = rib.promote_to_llgr_stale_labeled(LU_V4);
+
+        // NO_LLGR route removed entirely (RFC 9494 §4.3)
+        assert!(!rib.labeled_routes.contains_key(&no_llgr_key));
+        // Other v4 route promoted, community injected, local tag recorded
+        assert!(rib.labeled_routes[&keep_key].is_llgr_stale);
+        assert!(!rib.labeled_routes[&keep_key].is_stale);
+        assert!(
+            rib.labeled_routes[&keep_key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(rib.labeled_llgr_stale_local_tags.contains(&keep_key));
+        assert!(affected.contains(&keep_key));
+        assert!(affected.contains(&no_llgr_key));
+        // v6 tuple untouched: still GR-stale, not promoted
+        assert!(rib.labeled_routes[&v6_key].is_stale);
+        assert!(!rib.labeled_routes[&v6_key].is_llgr_stale);
+        assert!(!affected.contains(&v6_key));
+
+        // LLGR expiry sweep removes only the promoted route; the family
+        // variant is exercised by the EoR path below.
+        let swept = rib.sweep_llgr_stale_labeled();
+        assert_eq!(swept, vec![keep_key]);
+        assert_eq!(rib.labeled_len(), 1);
+    }
+
+    #[test]
+    fn sweep_llgr_stale_family_labeled_scopes_to_tuple() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
+        rib.mark_stale_labeled(LU_V4);
+        rib.mark_stale_labeled(LU_V6);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V6);
+
+        let swept = rib.sweep_llgr_stale_family_labeled(LU_V4);
+        assert_eq!(swept, vec![v4_key]);
+        assert_eq!(
+            rib.labeled_len(),
+            1,
+            "v6 LLGR-stale route must survive a v4 EoR sweep"
+        );
+    }
+
+    #[test]
+    fn insert_labeled_clears_llgr_stale_local_tag_on_readvertise() {
+        // Regression mirror of insert_vpn_clears_llgr_stale_local_tag_on_readvertise:
+        // a re-advertised key must drop our local-injection record so a later
+        // EoR does not strip a peer-originated LLGR_STALE community.
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let key = insert_labeled_with(&mut rib, nlri.clone(), vec![]);
+
+        rib.mark_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
+        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+
+        // Peer re-advertises the same key, itself carrying LLGR_STALE.
+        let readvertised = insert_labeled_with(
+            &mut rib,
+            nlri,
+            vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+        );
+        assert_eq!(readvertised, key);
+        assert!(!rib.labeled_llgr_stale_local_tags.contains(&key));
+
+        // EoR: the peer-originated LLGR_STALE must survive.
+        rib.clear_llgr_stale_labeled(LU_V4);
+        assert!(
+            rib.labeled_routes[&key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+    }
+
+    #[test]
+    fn withdraw_labeled_clears_llgr_stale_local_tag() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        rib.mark_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
+        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+
+        assert!(rib.withdraw_labeled(&key));
+        assert!(!rib.labeled_llgr_stale_local_tags.contains(&key));
     }
 
     #[test]
@@ -3626,20 +4372,25 @@ mod tests {
         insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_vpn(VPN_V4);
         rib.mark_stale_bgpls(LS_BASE);
         rib.mark_stale_rtc(RTC_FAM);
+        rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_vpn(VPN_V4);
         rib.promote_to_llgr_stale_bgpls(LS_BASE);
         rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
         assert!(!rib.vpn_llgr_stale_local_tags.is_empty());
         assert!(!rib.bgpls_llgr_stale_local_tags.is_empty());
         assert!(!rib.rtc_llgr_stale_local_tags.is_empty());
+        assert!(!rib.labeled_llgr_stale_local_tags.is_empty());
 
         rib.clear();
         assert!(rib.vpn_llgr_stale_local_tags.is_empty());
         assert!(rib.bgpls_llgr_stale_local_tags.is_empty());
         assert!(rib.rtc_llgr_stale_local_tags.is_empty());
+        assert!(rib.labeled_llgr_stale_local_tags.is_empty());
     }
 
     #[test]
@@ -3649,18 +4400,23 @@ mod tests {
         insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_vpn(VPN_V4);
         rib.mark_stale_bgpls(LS_BASE);
         rib.mark_stale_rtc(RTC_FAM);
+        rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_vpn(VPN_V4);
         rib.promote_to_llgr_stale_bgpls(LS_BASE);
         rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
 
         rib.withdraw_all_vpn();
         rib.withdraw_all_bgpls();
         rib.withdraw_all_rtc();
+        rib.withdraw_all_labeled();
         assert!(rib.vpn_llgr_stale_local_tags.is_empty());
         assert!(rib.bgpls_llgr_stale_local_tags.is_empty());
         assert!(rib.rtc_llgr_stale_local_tags.is_empty());
+        assert!(rib.labeled_llgr_stale_local_tags.is_empty());
     }
 }

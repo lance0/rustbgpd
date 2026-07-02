@@ -231,12 +231,20 @@ fn classify_mp_nlri_family(
         // RT-Constrain is AFI 1 only (RFC 4684 §7); (Ipv6, RtConstrain)
         // stays rejected below.
         (Afi::Ipv4, Safi::RtConstrain) => Ok(MpNlriFamily::Rtc),
+        // Labeled-unicast (SAFI 4, RFC 8277) is wire-codec substrate only
+        // today (ADR-0077 §3a): the family stays rejected here until the
+        // receive slice promotes it to a dispatched vertical.
         (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::Multicast | Safi::BgpLs | Safi::BgpLsVpn)
-        | (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
-        | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn)
+        | (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn | Safi::LabeledUnicast)
+        | (Afi::L2Vpn, Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn | Safi::LabeledUnicast)
         | (
             Afi::BgpLs,
-            Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec | Safi::MplsVpn,
+            Safi::Unicast
+            | Safi::Multicast
+            | Safi::Evpn
+            | Safi::FlowSpec
+            | Safi::MplsVpn
+            | Safi::LabeledUnicast,
         )
         | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => {
             Err(unsupported_mp_nlri_family(attribute, afi, safi))
@@ -4167,6 +4175,45 @@ mod tests {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
                     detail.contains("unsupported AFI/SAFI 2/70"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+    #[test]
+    fn mp_reach_and_unreach_reject_labeled_unicast_safi_at_family_gate() {
+        // ADR-0077 §3a guardrail: the SAFI 4 codec in `crate::labeled` is
+        // substrate only — MP dispatch must keep rejecting labeled-unicast
+        // before NLRI parsing until the receive slice promotes the family.
+        let reach = vec![
+            0x00, 0x01, // AFI = Ipv4
+            4,    // SAFI = LabeledUnicast
+            4, 192, 0, 2, 1, // NH len + NH
+            0, // reserved
+            48, 0x00, 0x06, 0x41, 10, 0, 1, // valid RFC 8277 NLRI shape
+        ];
+        let err = decode_mp_reach_nlri(&reach, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 1/4"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+
+        let unreach = vec![
+            0x00, 0x02, // AFI = Ipv6
+            4,    // SAFI = LabeledUnicast
+            24, 0x80, 0x00, 0x00, // withdraw-mode compatibility field, /0
+        ];
+        let err = decode_mp_unreach_nlri(&unreach, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("unsupported AFI/SAFI 2/4"),
                     "unexpected detail: {detail}"
                 );
             }
