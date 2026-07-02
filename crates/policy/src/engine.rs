@@ -2,12 +2,16 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::OnceLock;
 
 use regex::Regex;
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix,
-    LargeCommunity, PathAttribute, Prefix, RpkiValidation,
+    AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, LargeCommunity, PathAttribute,
+    Prefix, RpkiValidation,
 };
+
+use crate::ir::CompiledChain;
+use crate::sets::SetStore;
 
 /// Implicit `LOCAL_PREF` used when a route arrives without the
 /// attribute (e.g. eBGP-received with no `LOCAL_PREF` on the wire).
@@ -359,7 +363,8 @@ impl CommunityMatch {
         }
     }
 
-    fn matches_route_communities(&self, ctx: &RouteContext<'_>) -> bool {
+    #[inline]
+    pub(crate) fn matches_route_communities(&self, ctx: &RouteContext<'_>) -> bool {
         match self {
             CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => ctx
                 .extended_communities
@@ -730,53 +735,9 @@ impl PolicyStatement {
     }
 
     fn matches_prefix(&self, entry_prefix: Prefix, candidate: Prefix) -> bool {
-        match (entry_prefix, candidate) {
-            (Prefix::V4(entry), Prefix::V4(cand)) => self.matches_v4(entry, cand),
-            (Prefix::V6(entry), Prefix::V6(cand)) => self.matches_v6(entry, cand),
-            _ => false,
-        }
-    }
-
-    fn matches_v4(&self, entry: Ipv4Prefix, candidate: Ipv4Prefix) -> bool {
-        let entry_bits = u32::from(entry.addr);
-        let cand_bits = u32::from(candidate.addr);
-
-        if entry.len > 0 {
-            let mask = !((1u32 << (32 - entry.len)) - 1);
-            if (entry_bits & mask) != (cand_bits & mask) {
-                return false;
-            }
-        }
-
-        let (min_len, max_len) = match (self.ge, self.le) {
-            (None, None) => (entry.len, entry.len),
-            (Some(ge), None) => (ge, 32),
-            (None, Some(le)) => (entry.len, le),
-            (Some(ge), Some(le)) => (ge, le),
-        };
-
-        candidate.len >= min_len && candidate.len <= max_len
-    }
-
-    fn matches_v6(&self, entry: Ipv6Prefix, candidate: Ipv6Prefix) -> bool {
-        let entry_bits = u128::from(entry.addr);
-        let cand_bits = u128::from(candidate.addr);
-
-        if entry.len > 0 {
-            let mask = !((1u128 << (128 - entry.len)) - 1);
-            if (entry_bits & mask) != (cand_bits & mask) {
-                return false;
-            }
-        }
-
-        let (min_len, max_len) = match (self.ge, self.le) {
-            (None, None) => (entry.len, entry.len),
-            (Some(ge), None) => (ge, 128),
-            (None, Some(le)) => (entry.len, le),
-            (Some(ge), Some(le)) => (ge, le),
-        };
-
-        candidate.len >= min_len && candidate.len <= max_len
+        // Single scalar implementation shared with the IR evaluator's
+        // `PrefixEq` node and the indexed `PrefixSet`.
+        crate::sets::prefix_entry_matches(entry_prefix, self.ge, self.le, candidate)
     }
 }
 
@@ -886,10 +847,52 @@ pub struct PolicyEvaluation {
 /// continues to the next policy. If a policy returns `Deny`, the route
 /// is rejected immediately. After all policies, the route is permitted
 /// with the accumulated modifications.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub struct PolicyChain {
     /// Policies evaluated in order; modifications accumulate across permits.
     pub policies: Vec<NamedPolicy>,
+    /// Lazily-compiled IR (ADR-0096), built on first evaluation and
+    /// reused for every route thereafter. Deliberately excluded from
+    /// `PartialEq`/`Clone`/`Debug`: chain identity is the configured
+    /// `policies` (the ADR-0076 planner diffs chains structurally),
+    /// and the cache is derived state. Invariant: `policies` must not
+    /// be mutated after the first evaluation — config construction
+    /// finishes all mutation (including the implicit gshut/blackhole
+    /// appends) before a chain ever sees a route.
+    compiled: OnceLock<Box<CompiledChain>>,
+}
+
+impl Clone for PolicyChain {
+    fn clone(&self) -> Self {
+        // The clone gets a fresh cache: cloning is a construction-time
+        // operation (config resolve, per-session distribution), and a
+        // shared cache would leak stale IR into clones whose
+        // `policies` are still being edited.
+        Self {
+            policies: self.policies.clone(),
+            compiled: OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for PolicyChain {
+    fn eq(&self, other: &Self) -> bool {
+        self.policies == other.policies
+    }
+}
+
+impl Eq for PolicyChain {}
+
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the compiled-IR cache is derived state, not chain identity"
+)]
+impl fmt::Debug for PolicyChain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PolicyChain")
+            .field("policies", &self.policies)
+            .finish()
+    }
 }
 
 impl PolicyChain {
@@ -901,13 +904,32 @@ impl PolicyChain {
     pub fn new(policies: Vec<Policy>) -> Self {
         Self {
             policies: policies.into_iter().map(NamedPolicy::from).collect(),
+            compiled: OnceLock::new(),
         }
     }
 
     /// Create a chain from a list of already-named policies.
     #[must_use]
     pub fn from_named(policies: Vec<NamedPolicy>) -> Self {
-        Self { policies }
+        Self {
+            policies,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    /// The compiled IR backing this chain (ADR-0096), compiled on
+    /// first use. Each chain compiles through its own private
+    /// [`SetStore`], so sets dedupe across the chain's policies;
+    /// cross-chain sharing arrives when the config resolver compiles
+    /// eagerly through one store (a later ADR-0096 slice —
+    /// `crate::compile::compile_chain` already takes the store).
+    #[must_use]
+    pub fn compiled(&self) -> &CompiledChain {
+        // Boxed so an uncompiled chain stays pointer-sized — chains are
+        // embedded in config/session structs (and api event enums) that
+        // mostly never evaluate routes themselves.
+        self.compiled
+            .get_or_init(|| Box::new(crate::compile::compile_chain(self, &mut SetStore::new())))
     }
 
     /// Whether evaluating this chain needs the rendered `AS_PATH` string.
@@ -920,9 +942,7 @@ impl PolicyChain {
     /// is otherwise allocated per (route × peer) for nothing.
     #[must_use]
     pub fn requires_as_path_string(&self) -> bool {
-        self.policies
-            .iter()
-            .any(|np| np.policy.entries.iter().any(|e| e.match_as_path.is_some()))
+        self.compiled().requires_as_path_string()
     }
 
     /// Whether evaluating this chain depends on RPKI origin-validation state.
@@ -933,23 +953,13 @@ impl PolicyChain {
     /// be refreshed.
     #[must_use]
     pub fn requires_rpki_validation(&self) -> bool {
-        self.policies.iter().any(|np| {
-            np.policy
-                .entries
-                .iter()
-                .any(|e| e.match_rpki_validation.is_some())
-        })
+        self.compiled().requires_rpki_validation()
     }
 
     /// Whether evaluating this chain depends on ASPA path-validation state.
     #[must_use]
     pub fn requires_aspa_validation(&self) -> bool {
-        self.policies.iter().any(|np| {
-            np.policy
-                .entries
-                .iter()
-                .any(|e| e.match_aspa_validation.is_some())
-        })
+        self.compiled().requires_aspa_validation()
     }
 
     /// Whether evaluating this chain depends on any external validation cache.
@@ -974,6 +984,20 @@ impl PolicyChain {
     /// `PolicyResult.action`.
     #[must_use]
     pub fn evaluate_with_attribution(
+        &self,
+        ctx: &RouteContext<'_>,
+    ) -> (PolicyResult, PolicyEvaluation) {
+        self.compiled().evaluate_with_attribution(ctx)
+    }
+
+    /// The pre-IR chain walker, kept intact as the oracle for the
+    /// golden decision-compatibility corpus
+    /// (`engine/tests/ir_parity.rs`) and the `set_heavy` benchmark
+    /// contrast. Not public API; deleted in a later ADR-0096 slice
+    /// once the corpus has soaked.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn evaluate_with_attribution_legacy(
         &self,
         ctx: &RouteContext<'_>,
     ) -> (PolicyResult, PolicyEvaluation) {

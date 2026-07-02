@@ -11,6 +11,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Typed, compiled policy IR (ADR-0096 slice 1): indexed match sets
+  behind the existing engine, zero behavior change.** TOML policy
+  chains now lazily compile into a public, analyzable IR
+  (`rustbgpd_policy::ir` — typed guard expressions, named terms,
+  `CompiledPolicy`/`CompiledChain`) evaluated by a tree-walk engine
+  behind the unchanged `evaluate_chain_with_attribution` choke point;
+  all 14 import/export seams are untouched and existing configs behave
+  identically. Match *data* compiles out of the expression tree into
+  `Arc`-shared, content-deduplicated indexed structures
+  (`rustbgpd_policy::sets`): prefix sets with ge/le ranges resolved in
+  one hash probe per distinct member length, community/RT/RO/large
+  criteria sets, and interned AS-path regexes — the OpenBGPd lesson
+  that set-heavy policy cost lives in the index layer. In-repo
+  measurement of the ADR's headline (`policy_eval.rs` `set_heavy`
+  group): a 1,000-prefix list costs ~3.8 µs as a statement chain but
+  ~14 ns as one IR set-match — ~270×. Realistic single/short-chain and
+  short-circuit shapes improved 20-50% (the IR walks only configured
+  predicates instead of checking ~18 optional fields per statement);
+  the one measured step backwards is the walk-every-statement long
+  chain (~5.2 → ~7.2 ns/statement, `policy_chain_eval/32` +27%), the
+  tree-walk's And-children indirection — the ADR's deferred
+  linearized-bytecode pass is the recovery path if that shape ever
+  dominates a profile. The `requires_as_path_string` /
+  `requires_rpki_validation` / `requires_aspa_validation` hot-path
+  gates are reimplemented as IR analyses with identical results.
+  Decision compatibility is pinned by a golden corpus
+  (`engine/tests/ir_parity.rs`, ~4,500 chain×route cases asserting the
+  legacy walker and the IR path return byte-identical `PolicyResult`
+  *and* `PolicyEvaluation`); the legacy walker stays in-tree as the
+  oracle until a later slice deletes it. The `.rpol` language frontend
+  (lexer/parser/typechecker, `rbgp policy test`) arrives in later
+  ADR-0096 slices — this slice is the IR substrate that makes them
+  surface work.
+
 - **IPv4/IPv6 labeled-unicast (RFC 8277, SAFI 4) route reflection — the
   ADR-0077 quartet is complete.** The last family of the ADR-0077 scope
   (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast) ships as one complete

@@ -4,12 +4,17 @@
 //! UPDATE (and per route on export distribution), so its cost scales the
 //! whole control plane under churn.
 //!
-//! Two benchmark groups:
+//! Three benchmark groups:
 //!
 //! - `policy_chain_eval` — the dominant shape, a community-filter chain
 //!   walked statement-by-statement at a few chain lengths, plus the
 //!   early-terminate (first-statement deny) contrast that bounds the best
-//!   case. This is the cross-ref regression baseline (it should stay flat).
+//!   case. This is the cross-ref regression baseline. Known step (ADR-0096):
+//!   the IR tree-walk costs ~7.2 ns/statement on this walk-everything shape
+//!   vs ~5.2 for the old flat-struct matcher (the And-children `Vec` is one
+//!   dependent load per statement) while every other shape below improved
+//!   20-50%; the ADR's deferred linearized-bytecode pass is the recovery
+//!   path if a fully-walked long chain ever dominates a profile.
 //! - `policy_predicate_eval` — characterizes the cost-ordered short-circuit
 //!   matcher. The `regex_heavy` and `community_heavy` arms each pair an
 //!   `evaluated` case (the expensive predicate runs) against a `skipped`
@@ -21,6 +26,9 @@
 //!   `prefix_heavy` walks a chain whose statements all run a full prefix
 //!   evaluation (mask + ge/le bounds) — its absolute cost gates whether a
 //!   build-time prefix-mask precompute is worth pursuing.
+//! - `set_heavy` — the ADR-0096 set-index claim measured in-repo: a
+//!   1,000-prefix list as a statement chain (legacy walker and IR term
+//!   walk) vs one indexed `PrefixInSet` IR term. See `bench_set_heavy`.
 //!
 //! Run: `cargo bench -p rustbgpd-policy --bench policy_eval`
 //! Compare across refs: `bench/compare-criterion.sh --package
@@ -30,6 +38,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use rustbgpd_policy::ir::{
+    CompiledChain, CompiledPolicy, MatchExpr, PolicySource, SetId, Term, TermAction,
+};
+use rustbgpd_policy::sets::{PrefixSetEntry, SetStore};
 use rustbgpd_policy::{
     AsPathRegex, CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
     RouteModifications, evaluate_chain_with_attribution,
@@ -359,5 +371,100 @@ fn bench_policy_predicate_eval(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_policy_eval, bench_policy_predicate_eval);
+/// The ADR-0096 headline measurement: a 1,000-prefix customer list
+/// expressed the only way TOML chains allow (1,000 statements) versus
+/// a single indexed set-match IR term. Three arms over the same
+/// non-member route — the worst case, where every statement (or the
+/// one set probe) runs to completion:
+///
+/// - `legacy_1000_stmts` — the pre-IR statement walker (the corpus
+///   oracle), i.e. what this cost *was*.
+/// - `ir_1000_terms` — the same 1,000-statement chain through the IR
+///   term walk: what existing TOML configs get automatically.
+/// - `ir_prefix_set` — one `PrefixInSet` term over the interned set:
+///   what the `.rpol` frontend (and any set-aware frontend) emits.
+fn bench_set_heavy(c: &mut Criterion) {
+    let prefixes: Vec<Prefix> = (0..1000u32)
+        .map(|i| {
+            Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(10, u8::try_from(i / 256).unwrap(), (i % 256) as u8, 0),
+                24,
+            ))
+        })
+        .collect();
+
+    let statements: Vec<PolicyStatement> = prefixes
+        .iter()
+        .map(|p| {
+            let mut s = blank_permit();
+            s.prefix = Some(*p);
+            s
+        })
+        .collect();
+    let stmt_chain = PolicyChain::new(vec![Policy {
+        entries: statements,
+        default_action: PolicyAction::Deny,
+    }]);
+
+    let entries: Vec<PrefixSetEntry> = prefixes
+        .iter()
+        .map(|p| PrefixSetEntry {
+            prefix: *p,
+            ge: None,
+            le: None,
+        })
+        .collect();
+    let mut store = SetStore::new();
+    let set = store.prefix_set(&entries);
+    let set_chain = CompiledChain {
+        policies: vec![CompiledPolicy {
+            name: None,
+            terms: vec![Term {
+                name: None,
+                guard: MatchExpr::PrefixInSet(SetId(0)),
+                action: TermAction::Permit(RouteModifications::default()),
+            }],
+            default_action: PolicyAction::Deny,
+            source: PolicySource::Toml,
+        }],
+        prefix_sets: vec![set],
+        community_sets: Vec::new(),
+        as_path_regexes: Vec::new(),
+    };
+
+    // 172.16.0.0/24 is in no member's 10.x.y.0/24 — full walk / probe miss.
+    let miss = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 24));
+    let communities: Vec<u32> = Vec::new();
+    let as_path_str = String::new();
+    let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let ctx = predicate_ctx(miss, &communities, &as_path_str, peer_ip);
+
+    let mut group = c.benchmark_group("set_heavy");
+    group.bench_function("legacy_1000_stmts", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&stmt_chain).evaluate_with_attribution_legacy(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("ir_1000_terms", |b| {
+        b.iter(|| {
+            let r = evaluate_chain_with_attribution(Some(std::hint::black_box(&stmt_chain)), &ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("ir_prefix_set", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&set_chain).evaluate_with_attribution(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_policy_eval,
+    bench_policy_predicate_eval,
+    bench_set_heavy
+);
 criterion_main!(benches);
