@@ -218,7 +218,7 @@ gRPC request
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
 | Policy evaluation | `crates/policy/src/engine.rs` |
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
-| Route distribution | `crates/rib/src/manager/distribution.rs` |
+| Route distribution | `crates/rib/src/manager/distribution/` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
 | FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/mod.rs` — `handle_query_fib_install_candidates` |
