@@ -43,9 +43,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-establish (no strict-empty blackout); and an ORR topology source's
   restart no longer unresolves vantages mid-window. The new families
   implement the RFC-strict consecutive-restart deletion and EoR sweep of
-  non-readvertised stale routes; three pre-existing legacy gaps in the
-  unicast/FlowSpec/EVPN paths are documented in KNOWN_ISSUES rather than
-  silently changed. M77 is the live peer-restart interop receipt.
+  non-readvertised stale routes; the pre-existing unicast/FlowSpec/EVPN
+  paths were brought in line afterwards (see Fixed below), leaving only
+  the LLGR-stale export restriction documented in KNOWN_ISSUES. M77 is
+  the live peer-restart interop receipt.
 
 - **Optimal Route Reflection (RFC 9107, ADR-0095) — per-client best paths
   via BGP-LS-sourced SPF.** A route reflector normally reflects *its own*
@@ -130,6 +131,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no-dataplane-install against a GoBGP source and sink.
 
 ### Fixed
+
+- **Unicast, FlowSpec, and EVPN GR/LLGR semantics brought in line with
+  RFC 4724/9494.** The legacy families now match the strict semantics the
+  RR families (VPN/BGP-LS/RTC) shipped with: a route still stale from a
+  previous restart is deleted — not re-marked in place — when the peer
+  enters graceful restart again (RFC 4724 §4.1: no retention across
+  consecutive restarts), and End-of-RIB removes routes still marked
+  stale or LLGR-stale for that family instead of only clearing flags
+  (RFC 4724 §4.1 / RFC 9494 §4.2), withdrawing them downstream. The EoR
+  sweep is family-scoped (IPv4 and IPv6 unicast/FlowSpec are independent)
+  and also covers the re-establish-during-LLGR path for every family,
+  including the typed ones. The remaining legacy gap — no LLGR-stale
+  export restriction toward non-LLGR peers — stays documented in
+  KNOWN_ISSUES.
 
 - **Audit-tail hardening for BGP-LS, durable cursors, and GR/LLGR intern GC.**
   BGP-LS known-NLRI descriptor TLV ordering errors now discard only the
