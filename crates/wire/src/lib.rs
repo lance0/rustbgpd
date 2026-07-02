@@ -47,6 +47,8 @@ pub mod flowspec;
 pub mod header;
 /// KEEPALIVE message encoding and validation.
 pub mod keepalive;
+/// IPv4/IPv6 labeled-unicast NLRI codec substrate (RFC 8277, SAFI 4).
+pub mod labeled;
 /// Top-level BGP message enum and codec dispatch.
 pub mod message;
 /// NLRI prefix types and codec (IPv4, IPv6, Add-Path).
@@ -81,6 +83,10 @@ pub use capability::{
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use error::{DecodeError, EncodeError};
 pub use header::{BgpHeader, MessageType, peek_message_length};
+pub use labeled::{
+    LabeledAddressFamily, LabeledNlri, decode_labeled_nlri, decode_labeled_withdraw_nlri,
+    encode_labeled_nlri, encode_labeled_withdraw_nlri,
+};
 pub use message::{Message, decode_message, encode_message, encode_message_with_limit};
 pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;

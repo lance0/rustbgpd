@@ -216,6 +216,7 @@ impl RibManager {
                         Safi::Unicast => "unicast",
                         Safi::FlowSpec => "flowspec",
                         Safi::Multicast => "multicast",
+                        Safi::LabeledUnicast => "labeled_unicast",
                         Safi::Evpn => "evpn",
                         Safi::BgpLs => "bgpls",
                         Safi::BgpLsVpn => "bgpls_vpn",

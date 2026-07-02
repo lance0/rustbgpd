@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
-    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation, RtcNlri, Safi,
-    VpnAddressFamily, VpnNlri, VpnRouteKey,
+    FlowSpecRule, LabeledNlri, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+    RtcNlri, Safi, VpnAddressFamily, VpnNlri, VpnRouteKey,
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
@@ -623,6 +623,107 @@ impl VpnRibRoute {
             .iter()
             .find_map(|attr| match attr {
                 PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+}
+
+/// IPv4/IPv6 labeled-unicast (RFC 8277, SAFI 4) route identity for the RIB.
+///
+/// Route identity is the IP prefix plus Add-Path path-id; the MPLS label
+/// stack is route *data*, not identity (RFC 8277 §2.3 implicit-replace is
+/// per-prefix), matching the SAFI 128 VPN decision. The key deliberately
+/// wraps the unicast [`Prefix`] in a labeled-specific struct so the labeled
+/// table can never be confused with the unicast RIB maps (ADR-0077 §2).
+/// `path_id` is reserved for a future Add-Path-enabled slice and is always
+/// zero until negotiation grows that capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LabeledRibRouteKey {
+    /// The IP prefix (route identity within SAFI 4).
+    pub prefix: Prefix,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl LabeledRibRouteKey {
+    /// The wire AFI/SAFI pair for this key (`Ipv4`/`Ipv6` +
+    /// `LabeledUnicast`), derived from the prefix family.
+    #[must_use]
+    pub const fn afi_safi(&self) -> (Afi, Safi) {
+        let afi = match self.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        (afi, Safi::LabeledUnicast)
+    }
+}
+
+/// A single IPv4/IPv6 labeled-unicast route stored by the ADR-0077
+/// route-reflector slice.
+///
+/// rustbgpd reflects labeled routes as a route reflector only: it preserves
+/// the MPLS label stack and next-hop unchanged and never allocates,
+/// rewrites, or programs labels (ADR-0077 §4/§6).
+#[derive(Debug, Clone)]
+pub struct LabeledRibRoute {
+    /// Full NLRI: prefix + MPLS label stack (preserved verbatim).
+    pub nlri: LabeledNlri,
+    /// Next-hop from `MP_REACH_NLRI`.
+    pub next_hop: IpAddr,
+    /// The peer that advertised this route.
+    pub peer: IpAddr,
+    /// BGP path attributes.
+    pub attributes: Arc<Vec<PathAttribute>>,
+    /// When this route was received (monotonic clock).
+    pub received_at: Instant,
+    /// How this route was learned (eBGP, iBGP, or local).
+    pub origin_type: RouteOrigin,
+    /// BGP router-id of the advertising peer.
+    pub peer_router_id: Ipv4Addr,
+    /// Whether this route is stale due to graceful restart.
+    pub is_stale: bool,
+    /// Whether this route is in LLGR stale phase (RFC 9494).
+    pub is_llgr_stale: bool,
+    /// Add-Path path identifier. Zero means no Add-Path.
+    pub path_id: u32,
+}
+
+impl LabeledRibRoute {
+    /// The wire AFI/SAFI pair for this route (`Ipv4`/`Ipv6` +
+    /// `LabeledUnicast`).
+    #[must_use]
+    pub const fn afi_safi(&self) -> (Afi, Safi) {
+        let afi = match self.nlri.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        (afi, Safi::LabeledUnicast)
+    }
+
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
+    }
+
+    /// Identity key suitable for labeled Adj-RIB-In, Loc-RIB, and
+    /// Adj-RIB-Out maps.
+    #[must_use]
+    pub const fn key(&self) -> LabeledRibRouteKey {
+        LabeledRibRouteKey {
+            prefix: self.nlri.key(),
+            path_id: self.path_id,
+        }
+    }
+
+    /// Extract COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::Communities(values) => Some(values.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[])

@@ -13,8 +13,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::best_path_cmp;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
-    VpnRibRoute,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, Route, RtcRibRoute,
+    RtcRibRouteKey, VpnRibRoute,
 };
 
 /// The local RIB storing the best route per prefix.
@@ -31,6 +31,11 @@ pub struct LocRib {
     /// selection collapses Add-Path path IDs — the winning route's own
     /// `path_id` records which received path won.
     vpn_routes: HashMap<rustbgpd_wire::VpnRouteKey, VpnRibRoute>,
+    /// Labeled-unicast Loc-RIB: best route per prefix identity, collapsing
+    /// Add-Path path IDs like `vpn_routes` — the winning route's own
+    /// `path_id` records which received path won. Deliberately separate from
+    /// the unicast `routes` map (ADR-0077 §2).
+    labeled_routes: HashMap<Prefix, LabeledRibRoute>,
     /// RT-Constrain Loc-RIB: best route per RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
@@ -51,6 +56,7 @@ impl LocRib {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            labeled_routes: HashMap::default(),
             rtc_routes: HashMap::default(),
         }
     }
@@ -373,6 +379,69 @@ impl LocRib {
     /// Remove the selected VPN route for a key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &rustbgpd_wire::VpnRouteKey) -> bool {
         self.vpn_routes.remove(key).is_some()
+    }
+
+    /// Recompute the best labeled-unicast route for `key` from the
+    /// candidates.
+    ///
+    /// Uses the same family-agnostic BGP preference chain as VPN: stale rank,
+    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
+    /// originator ID, then peer address. The MPLS label stack is route data,
+    /// not a selection input; a same-peer relabel is caught by the `nlri`
+    /// change check so the reflected label stays current.
+    pub fn recompute_labeled<'a>(
+        &mut self,
+        key: Prefix,
+        candidates: impl Iterator<Item = &'a LabeledRibRoute>,
+    ) -> bool {
+        let best = candidates.min_by(|a, b| labeled_tiebreak(a, b)).cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self.labeled_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.path_id != new_best.path_id
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.nlri != new_best.nlri
+                        || old.attributes != new_best.attributes
+                });
+                if changed {
+                    self.labeled_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.labeled_routes.remove(&key).is_some(),
+        }
+    }
+
+    /// Insert or replace the selected labeled route for a key.
+    pub fn insert_labeled(&mut self, route: LabeledRibRoute) {
+        self.labeled_routes.insert(route.nlri.key(), route);
+    }
+
+    /// Look up the selected labeled route for a prefix identity.
+    #[must_use]
+    pub fn get_labeled(&self, key: &Prefix) -> Option<&LabeledRibRoute> {
+        self.labeled_routes.get(key)
+    }
+
+    /// Iterate over all selected labeled routes.
+    pub fn iter_labeled(&self) -> impl Iterator<Item = &LabeledRibRoute> {
+        self.labeled_routes.values()
+    }
+
+    /// Return the number of selected labeled routes.
+    #[must_use]
+    pub fn labeled_len(&self) -> usize {
+        self.labeled_routes.len()
+    }
+
+    /// Remove the selected labeled route for a key. Returns `true` if it
+    /// existed.
+    pub fn remove_labeled(&mut self, key: &Prefix) -> bool {
+        self.labeled_routes.remove(key).is_some()
     }
 
     /// Recompute the best RT-Constrain route for `key` from the candidates.
@@ -894,6 +963,175 @@ fn vpn_originator_id(route: &VpnRibRoute) -> Option<std::net::Ipv4Addr> {
     })
 }
 
+pub(crate) fn labeled_tiebreak(a: &LabeledRibRoute, b: &LabeledRibRoute) -> Ordering {
+    labeled_cmp_chain(a, b, None)
+}
+
+/// Compare two labeled-unicast routes under RFC 9107 Optimal Route
+/// Reflection.
+///
+/// The standard [`labeled_tiebreak`] chain with one extra step between the
+/// eBGP/iBGP step and `CLUSTER_LIST` — the same slot as
+/// [`crate::best_path::best_path_cmp_orr`]: the configured vantage's
+/// interior (SPF) cost to each route's `NEXT_HOP`. Lower cost wins; a
+/// known cost beats an unknown one (RFC 9107 §3.1); equal or
+/// both-unknown falls through.
+// Tests exercise the ORR oracle today; the labeled receive/reflect slice
+// (mirroring `manager/distribution/vpn.rs` Add-Path staging) is the first
+// non-test consumer.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "inert ADR-0077 substrate until the labeled receive slice lands"
+    )
+)]
+pub(crate) fn labeled_tiebreak_orr(
+    a: &LabeledRibRoute,
+    b: &LabeledRibRoute,
+    cost_a: Option<u64>,
+    cost_b: Option<u64>,
+) -> Ordering {
+    labeled_cmp_chain(a, b, Some((cost_a, cost_b)))
+}
+
+/// The shared decision chain behind [`labeled_tiebreak`] (`orr_costs =
+/// None`, the Loc-RIB selection) and [`labeled_tiebreak_orr`] (`orr_costs =
+/// Some(..)`, per-vantage staging), mirroring `vpn_cmp_chain`.
+fn labeled_cmp_chain(
+    a: &LabeledRibRoute,
+    b: &LabeledRibRoute,
+    orr_costs: Option<(Option<u64>, Option<u64>)>,
+) -> Ordering {
+    let cmp = labeled_stale_rank(a).cmp(&labeled_stale_rank(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = labeled_local_pref(b).cmp(&labeled_local_pref(a));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let a_len = labeled_as_path(a).map_or(0, AsPath::len);
+    let b_len = labeled_as_path(b).map_or(0, AsPath::len);
+    let cmp = a_len.cmp(&b_len);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = labeled_origin(a).cmp(&labeled_origin(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = labeled_med(a).cmp(&labeled_med(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // RFC 9107 ORR interior cost to NEXT_HOP — only when the caller
+    // supplies vantage costs (the Loc-RIB never does). Lower cost wins;
+    // Some beats None (unknown metric MUST be least preferred); equal
+    // or both-None falls through.
+    if let Some((cost_a, cost_b)) = orr_costs {
+        let cmp = match (cost_a, cost_b) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    let cmp = labeled_cluster_list_len(a).cmp(&labeled_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    if let (Some(a_oid), Some(b_oid)) = (labeled_originator_id(a), labeled_originator_id(b)) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    cmp_ipaddr(&a.peer, &b.peer)
+}
+
+fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
+fn labeled_local_pref(route: &LabeledRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(100)
+}
+
+fn labeled_as_path(route: &LabeledRibRoute) -> Option<&AsPath> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::AsPath(path) => Some(path),
+        _ => None,
+    })
+}
+
+fn labeled_origin(route: &LabeledRibRoute) -> Origin {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Origin(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(Origin::Incomplete)
+}
+
+fn labeled_med(route: &LabeledRibRoute) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn labeled_cluster_list_len(route: &LabeledRibRoute) -> usize {
+    route
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::ClusterList(ids) => Some(ids.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn labeled_originator_id(route: &LabeledRibRoute) -> Option<std::net::Ipv4Addr> {
+    route.attributes.iter().find_map(|attr| match attr {
+        PathAttribute::OriginatorId(id) => Some(*id),
+        _ => None,
+    })
+}
+
 fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
     let cmp = rtc_stale_rank(a).cmp(&rtc_stale_rank(b));
     if cmp != Ordering::Equal {
@@ -1032,8 +1270,8 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
-        MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher, RtcNlri, VpnNlri,
-        VpnPrefix,
+        LabeledNlri, MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher,
+        RtcNlri, VpnNlri, VpnPrefix,
     };
 
     use super::*;
@@ -1255,6 +1493,214 @@ mod tests {
         assert_eq!(loc.vpn_len(), 1);
         assert_eq!(loc.len(), 0);
         assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
+    }
+
+    fn labeled_nlri(addr: [u8; 4], len: u8, label: u32) -> LabeledNlri {
+        LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(addr), len)),
+        }
+    }
+
+    fn make_labeled_route(nlri: LabeledNlri, peer_oct: u8, local_pref: u32) -> LabeledRibRoute {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        LabeledRibRoute {
+            nlri,
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::LocalPref(local_pref),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn recompute_labeled_higher_local_pref_wins() {
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let key = nlri.key();
+        let r1 = make_labeled_route(nlri.clone(), 1, 100);
+        let r2 = make_labeled_route(nlri, 2, 200);
+        let mut loc = LocRib::new();
+
+        assert!(loc.recompute_labeled(key, [&r1, &r2].into_iter()));
+        assert_eq!(loc.labeled_len(), 1);
+        assert_eq!(
+            loc.get_labeled(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+    }
+
+    #[test]
+    fn recompute_labeled_stale_demoted_despite_higher_local_pref() {
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let key = nlri.key();
+        let mut r_stale = make_labeled_route(nlri.clone(), 1, 200);
+        r_stale.is_stale = true;
+        let r_fresh = make_labeled_route(nlri, 2, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_labeled(key, [&r_stale, &r_fresh].into_iter());
+        assert_eq!(
+            loc.get_labeled(&key).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "fresh route must beat GR-stale despite lower LOCAL_PREF"
+        );
+    }
+
+    #[test]
+    fn recompute_labeled_same_peer_relabel_triggers_change() {
+        // The label stack is route data, not identity: a same-peer relabel of
+        // the same prefix must still report a change (nlri differs) so the
+        // reflected label stays current.
+        let key = labeled_nlri([10, 0, 1, 0], 24, 100).key();
+        let r1 = make_labeled_route(labeled_nlri([10, 0, 1, 0], 24, 100), 1, 100);
+        let r2 = make_labeled_route(labeled_nlri([10, 0, 1, 0], 24, 999), 1, 100);
+        let mut loc = LocRib::new();
+
+        assert!(loc.recompute_labeled(key, [&r1].into_iter()));
+        assert!(
+            loc.recompute_labeled(key, [&r2].into_iter()),
+            "relabel must be a change"
+        );
+        assert_eq!(loc.get_labeled(&key).unwrap().nlri.labels[0].label, 999);
+        assert!(
+            !loc.recompute_labeled(key, [&r2].into_iter()),
+            "identical candidate must not be a change"
+        );
+    }
+
+    #[test]
+    fn recompute_labeled_empty_candidates_removes_existing_key() {
+        let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let key = nlri.key();
+        let route = make_labeled_route(nlri, 1, 100);
+        let mut loc = LocRib::new();
+
+        loc.recompute_labeled(key, [&route].into_iter());
+        assert_eq!(loc.labeled_len(), 1);
+
+        let empty: [&LabeledRibRoute; 0] = [];
+        assert!(
+            loc.recompute_labeled(key, empty.into_iter()),
+            "removal is a change"
+        );
+        assert_eq!(loc.labeled_len(), 0);
+        assert!(loc.get_labeled(&key).is_none());
+
+        let empty: [&LabeledRibRoute; 0] = [];
+        assert!(
+            !loc.recompute_labeled(key, empty.into_iter()),
+            "removing an absent key is not a change"
+        );
+    }
+
+    /// Oracle: the public `labeled_tiebreak` chain is byte-identical to the
+    /// plain (no-ORR) behavior — `labeled_tiebreak_orr` with equal or
+    /// both-unknown costs must agree with `labeled_tiebreak` on every pair,
+    /// including the stale-rank step.
+    #[test]
+    fn labeled_tiebreak_unchanged_without_orr() {
+        let nlri = labeled_nlri([10, 0, 3, 0], 24, 100);
+        let base = make_labeled_route(nlri.clone(), 1, 100);
+        let higher_lp = make_labeled_route(nlri.clone(), 2, 200);
+        let mut stale = make_labeled_route(nlri.clone(), 3, 100);
+        stale.is_stale = true;
+        let mut llgr_stale = make_labeled_route(nlri.clone(), 4, 100);
+        llgr_stale.is_llgr_stale = true;
+        let mut longer_path = make_labeled_route(nlri.clone(), 5, 100);
+        Arc::make_mut(&mut longer_path.attributes).push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+        }));
+        let mut clustered = make_labeled_route(nlri.clone(), 6, 100);
+        Arc::make_mut(&mut clustered.attributes).push(PathAttribute::ClusterList(vec![
+            Ipv4Addr::new(10, 255, 0, 1),
+            Ipv4Addr::new(10, 255, 0, 2),
+        ]));
+        let peer_tiebreak = make_labeled_route(nlri, 7, 100);
+        let routes = [
+            base,
+            higher_lp,
+            stale,
+            llgr_stale,
+            longer_path,
+            clustered,
+            peer_tiebreak,
+        ];
+
+        for a in &routes {
+            for b in &routes {
+                let plain = labeled_tiebreak(a, b);
+                assert_eq!(labeled_tiebreak_orr(a, b, None, None), plain);
+                assert_eq!(labeled_tiebreak_orr(a, b, Some(7), Some(7)), plain);
+            }
+        }
+    }
+
+    /// The ORR interior-cost step decides ONLY at its slot — below the
+    /// eBGP/iBGP step (`LOCAL_PREF` etc. still win first) and above
+    /// `CLUSTER_LIST` / peer-address (which it overrides on a tie), with a
+    /// known cost beating an unknown one (RFC 9107 §3.1).
+    #[test]
+    fn labeled_orr_cost_only_breaks_ties_below_ebgp_step() {
+        let nlri = labeled_nlri([10, 0, 4, 0], 24, 100);
+        // LOCAL_PREF outranks a better interior cost.
+        let preferred = make_labeled_route(nlri.clone(), 1, 200);
+        let closer = make_labeled_route(nlri.clone(), 2, 100);
+        assert_eq!(
+            labeled_tiebreak_orr(&preferred, &closer, Some(1000), Some(0)),
+            Ordering::Less,
+            "LOCAL_PREF must outrank interior cost"
+        );
+
+        // On an otherwise-tied pair, cost decides before the peer address.
+        let a = make_labeled_route(nlri.clone(), 1, 100);
+        let b = make_labeled_route(nlri, 2, 100);
+        assert_eq!(
+            labeled_tiebreak_orr(&a, &b, Some(10), Some(5)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            labeled_tiebreak_orr(&a, &b, Some(5), Some(10)),
+            Ordering::Less
+        );
+        // Equal costs fall through to the peer-address step.
+        assert_eq!(
+            labeled_tiebreak_orr(&a, &b, Some(5), Some(5)),
+            Ordering::Less
+        );
+        // Known beats unknown regardless of magnitude.
+        assert_eq!(
+            labeled_tiebreak_orr(&a, &b, Some(u64::MAX), None),
+            Ordering::Less
+        );
+        assert_eq!(
+            labeled_tiebreak_orr(&a, &b, None, Some(u64::MAX)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn labeled_loc_rib_is_isolated_from_unicast_best_routes() {
+        let mut loc = LocRib::new();
+        loc.insert_labeled(make_labeled_route(
+            labeled_nlri([10, 0, 2, 0], 24, 100),
+            1,
+            100,
+        ));
+
+        assert_eq!(loc.labeled_len(), 1);
+        assert_eq!(loc.len(), 0);
+        assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
+
+        assert!(loc.remove_labeled(&labeled_nlri([10, 0, 2, 0], 24, 100).key()));
+        assert_eq!(loc.labeled_len(), 0);
     }
 
     fn rtc_test_nlri(local_admin: u32) -> RtcNlri {

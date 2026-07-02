@@ -802,10 +802,14 @@ fn decode_one_vpn_nlri(
     })
 }
 
-fn decode_label_stack(
+/// Decode a BOS-terminated RFC 8277 label stack from the front of `value`,
+/// returning `(labels, consumed_octets, consumed_bits)`. Shared by the SAFI
+/// 128 (VPN) and SAFI 4 (labeled-unicast) announce-mode decoders; `family`
+/// is display-only, for error messages.
+pub(crate) fn decode_label_stack(
     value: &[u8],
     total_len_bits: u8,
-    family: VpnAddressFamily,
+    family: impl fmt::Display + Copy,
     field_start: &[u8],
 ) -> Result<(Vec<MplsLabelEntry>, usize, u8), DecodeError> {
     let mut labels = Vec::new();
@@ -890,14 +894,7 @@ fn encode_one_vpn_nlri(
         value: total_bits.to_string(),
     })?;
     buf.push(total_bits_u8);
-
-    for label in &entry.labels {
-        let raw = label.raw_value()?;
-        buf.push(((raw >> 16) & 0xFF) as u8);
-        buf.push(((raw >> 8) & 0xFF) as u8);
-        buf.push((raw & 0xFF) as u8);
-    }
-
+    encode_label_stack(&entry.labels, buf)?;
     buf.extend_from_slice(&entry.route_distinguisher.0);
     let prefix_octets = entry.prefix.wire_octets();
     let prefix_byte_count = usize::from(entry.prefix.len().div_ceil(8));
@@ -905,10 +902,28 @@ fn encode_one_vpn_nlri(
     Ok(())
 }
 
-fn validate_label_stack(labels: &[MplsLabelEntry]) -> Result<(), EncodeError> {
+/// Encode an RFC 8277 label stack as raw 3-octet entries. Shared by the
+/// SAFI 128 (VPN) and SAFI 4 (labeled-unicast) announce-mode encoders.
+pub(crate) fn encode_label_stack(
+    labels: &[MplsLabelEntry],
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    for label in labels {
+        let raw = label.raw_value()?;
+        buf.push(((raw >> 16) & 0xFF) as u8);
+        buf.push(((raw >> 8) & 0xFF) as u8);
+        buf.push((raw & 0xFF) as u8);
+    }
+    Ok(())
+}
+
+/// Validate an RFC 8277 label stack for encoding: non-empty, in-range
+/// values, and exactly one bottom-of-stack marker on the final entry.
+/// Shared by the SAFI 128 (VPN) and SAFI 4 (labeled-unicast) encoders.
+pub(crate) fn validate_label_stack(labels: &[MplsLabelEntry]) -> Result<(), EncodeError> {
     if labels.is_empty() {
         return Err(EncodeError::ValueOutOfRange {
-            field: "VPN label stack",
+            field: "MPLS label stack",
             value: "empty".to_string(),
         });
     }
@@ -917,14 +932,14 @@ fn validate_label_stack(labels: &[MplsLabelEntry]) -> Result<(), EncodeError> {
         validate_traffic_class(label.traffic_class)?;
         if label.bottom_of_stack && index + 1 != labels.len() {
             return Err(EncodeError::ValueOutOfRange {
-                field: "VPN label stack",
+                field: "MPLS label stack",
                 value: "bottom-of-stack before final label".to_string(),
             });
         }
     }
     if !labels.last().is_some_and(|label| label.bottom_of_stack) {
         return Err(EncodeError::ValueOutOfRange {
-            field: "VPN label stack",
+            field: "MPLS label stack",
             value: "missing bottom-of-stack".to_string(),
         });
     }

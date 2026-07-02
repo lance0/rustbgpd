@@ -39,6 +39,9 @@ pub enum Safi {
     Unicast = 1,
     /// Multicast forwarding (SAFI 2).
     Multicast = 2,
+    /// RFC 8277 labeled-unicast — only valid with [`Afi::Ipv4`] /
+    /// [`Afi::Ipv6`].
+    LabeledUnicast = 4,
     /// RFC 7432 EVPN — only valid with [`Afi::L2Vpn`].
     Evpn = 70,
     /// RFC 9552 BGP-LS — only valid with [`Afi::BgpLs`].
@@ -61,6 +64,7 @@ impl Safi {
         match value {
             1 => Some(Self::Unicast),
             2 => Some(Self::Multicast),
+            4 => Some(Self::LabeledUnicast),
             70 => Some(Self::Evpn),
             71 => Some(Self::BgpLs),
             72 => Some(Self::BgpLsVpn),

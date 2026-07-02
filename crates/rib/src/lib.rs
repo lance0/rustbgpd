@@ -51,8 +51,8 @@ pub use orr::{
 };
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
-    FibInstallNextHop, FlowSpecRoute, NextHopScope, Route, RouteOrigin, RtcRibRoute,
-    RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    FibInstallNextHop, FlowSpecRoute, LabeledRibRoute, LabeledRibRouteKey, NextHopScope, Route,
+    RouteOrigin, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
