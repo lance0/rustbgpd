@@ -1,12 +1,16 @@
-# The rustbgpd policy language (`.rpol`) — reference draft
+# The rustbgpd policy language (`.rpol`) — reference
 
-Status: **integrated** (ADR-0096 slices 2–3). The frontend — lexer,
-parser, typechecker, in-language tests, and `rbgp policy check` — and
-the daemon integration — `[policy] rpol_files` config references,
-mixed TOML/rpol chains, SIGHUP hot-apply, and the `rbgp policy test`
-live-RIB dry run — are complete (see "Using policies in the daemon"
-below). Explain-surface traces for `.rpol` terms ship in the next
-slice.
+Status: **shipped** (ADR-0096, complete). The frontend — lexer,
+parser, typechecker, in-language tests, and `rbgp policy check` — the
+daemon integration — `[policy] rpol_files` config references, mixed
+TOML/rpol chains, SIGHUP hot-apply, and the `rbgp policy test`
+live-RIB dry run — and the explain surfaces — per-term statement
+traces in `rbgp policy explain` / `rbgp rib advertised --explain` and
+live per-term hit counters via `rbgp policy stats` — are all live
+(see "Using policies in the daemon" below). The M80 interop lab
+proves route-for-route parity against FRR route-maps expressing the
+same intent, plus `.rpol`-edit-under-traffic hot-apply with Route
+Refresh scoped to the peers whose chains changed.
 
 `.rpol` compiles to the same public typed IR (`rustbgpd_policy::ir`)
 that TOML policy chains compile to, and is evaluated by the same
@@ -294,8 +298,8 @@ length is the whitespace-word count of the string form.
 lists), `prepend as ASN COUNT`.
 
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
-involvement. Testing a *candidate* policy against a live RIB
-(`rbgp policy test --rib live`) is the later ADR-0096 slice.
+involvement. Testing a *candidate* policy against a live RIB is
+`rbgp policy test` (below).
 
 ## Grammar sketch
 
@@ -473,6 +477,33 @@ $ rbgp policy stats --peer 10.0.0.2
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.
 - `--json` emits the rows structurally.
+
+## Positioning — how `.rpol` differs from BIRD filters and route-maps
+
+- **vs FRR/Cisco route-maps:** a route-map is an ordered list of
+  numbered entries over external prefix-lists / community-lists /
+  as-path access-lists, with `on-match next` for fallthrough. `.rpol`
+  expresses the same decisions (the M80 lab proves outcome parity
+  route for route) but sets are declared next to the policies that
+  use them, terms have names instead of sequence numbers, guards are
+  composable boolean expressions rather than implicit ANDs of match
+  clauses, and policies take parameters — one `customer-in(peer_lp)`
+  replaces a route-map per peer. Route-maps have no unit tests and no
+  dry run; `.rpol` has both.
+- **vs BIRD filters:** BIRD's filter language is a general-purpose
+  interpreter — variables, arbitrary control flow, user-defined
+  functions. `.rpol` is deliberately smaller: no loops, no variables,
+  no user types, so every policy terminates by construction and
+  compiles to an indexed IR (a 1,000-member set is one hash probe,
+  not a linear scan). What BIRD can't do: test a candidate policy
+  read-only against the *running* daemon's RIB (`rbgp policy test`),
+  trace which term decided a live route (`rbgp policy explain`), or
+  read per-term live hit counters (`rbgp policy stats`).
+- **vs GoBGP/OpenConfig statements (and rustbgpd's own TOML):** the
+  same evaluation engine underneath — `.rpol` and TOML policies
+  compile to one IR and mix freely in chains — so `.rpol` is a
+  frontend upgrade, not a fork: named sets, parameters, composition,
+  and tests on top of chain semantics that behave exactly as before.
 
 ## Deliberate V1 exclusions
 

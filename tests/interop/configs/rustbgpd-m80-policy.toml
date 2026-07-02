@@ -1,0 +1,38 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# All policy comes from the .rpol file (ADR-0096). The topology
+# stages it at /etc/rustbgpd/policies/core.rpol; the path here is
+# relative to this config file's directory.
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-src"
+hold_time = 90
+# customer-in instantiated with LP 200; src-default is the policy the
+# SIGHUP phase edits (referenced by this peer only).
+import_policy_chain = ["customer-in(200)", "src-default"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr-down"
+hold_time = 90
+# The second instantiation of the same parameterized policy — LP 300.
+import_policy_chain = ["customer-in(300)"]
+export_policy_chain = ["edge-out"]
+
+[security.grpc]
+enforcement = "legacy"

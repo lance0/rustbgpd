@@ -239,3 +239,68 @@ data, refreshing only peers whose policies reference that set.
   unbounded-loop hang, private IR — verified 0.11.0).
 - Benchmark crate: scratchpad `policy-bench-spike/` (re-runnable,
   decision-tally-asserted across all six evaluators).
+
+## Amendment (2026-07-02): implementation record — the arc shipped
+
+The five staged PRs landed as four code slices plus the interop/docs
+closer, one day, plan-to-main:
+
+- **#654 — IR + indexed sets + IR-backed evaluator** (staged PR 1).
+  TOML chains lazily compile to the public typed IR behind the
+  unchanged `evaluate_chain_with_attribution` choke point; golden
+  decision-parity corpus (~4,500 chain×route cases) pins the legacy
+  walker and the IR path byte-identical; `requires_*` hot-path gates
+  reimplemented as IR analyses. Measured headline: the set-heavy shape
+  (1,000-prefix list) went ~3.8 µs → ~14 ns per route — **~270×**,
+  above the ADR's projected 51×; realistic single/short-chain shapes
+  20-50% faster; the one regression is the walk-every-statement long
+  chain (+27%, the tree-walk And-indirection — the deferred
+  linearized-bytecode pass remains the recovery path).
+- **#655 — the `.rpol` frontend** (staged PR 2). Lexer (logos), parser,
+  typechecker, ariadne diagnostics with multi-error recovery and
+  did-you-mean, in-language `test` blocks through the real IR
+  evaluator, `rbgp policy check` (exit 0/1/2). One surgical IR
+  addition the ADR text didn't spell out: **`TermAction::Continue`**,
+  the lowering target for modify-and-fallthrough terms (Junos-style
+  modify-then-continue); the TOML frontend never emits it, so the
+  parity corpus was unaffected.
+- **#656 — daemon integration** (staged PR 3). `[policy] rpol_files`
+  (compile-at-load, load-error diagnostics, one namespace with
+  `[policy.definitions]`), call-form chain references monomorphized at
+  load, SIGHUP hot-apply through `SyncRpolPolicies` with chain
+  identity = compiled content (an unchanged file reloads as a no-op;
+  a changed policy refreshes exactly the referencing peers),
+  transactions fail closed on `.rpol` content (out-of-band files), and
+  `rbgp policy test` / `TestPolicy` — the Decision 6 differentiator —
+  evaluating candidate source read-only over a live RIB snapshot.
+  The planned `--rib live` flag shipped as the default (and only)
+  behavior; the write-time cost estimate from the Decision 6 sketch
+  was dropped as speculative.
+- **#658 — explain + live hit counters** (staged PR 4). Per-term
+  statement traces in `ExplainImportPolicy` (guards pretty-printed
+  back to `.rpol` syntax, sets by source name), `<chain-ref>:<term>`
+  attribution in `ExplainAdvertisedRoute`, and Decision 3.3's live
+  per-term counters via `GetPolicyStats` / `rbgp policy stats`
+  (relaxed atomics; since-chain-install). A performance fix rode
+  along: RIB distribution passes now take `PolicyChain::share()`
+  handles instead of `Clone`, so evaluations land in the installed
+  chain's counters and the IR compiles once per install instead of
+  once per pass. **Follow-up on record:** import-side counters
+  accumulate but have no read surface yet (`--direction import`
+  returns `Unimplemented` saying so).
+- **M80 — the parity receipt** (staged PR 5). 4-node containerlab:
+  rustbgpd running `customer-in(peer_lp)` / `src-default` / `edge-out`
+  from an `.rpol` file vs an FRR node running route-maps /
+  prefix-lists / community-lists with the same intent, both fed one
+  route matrix. 29/29: route-for-route import + export agreement
+  (prefix-set ge/le boundary, community add/remove, LP set, as-path
+  regex reject, modify-then-continue, the same parameterized policy
+  instantiated twice), `policy check` exit 0, a `customer-in(500)`
+  live-RIB dry run (counts + term hits + diffs), live stats, and an
+  `.rpol` edit under traffic: no flap, Route Refresh observed on the
+  wire at exactly the one peer whose resolved chain changed, LP
+  re-imported. `tests/interop/m80-rpol-policy-parity-frr.clab.yml`.
+
+Still deferred, unchanged from the Deferred section: Luau tier,
+bytecode VM, loops/maps/user types, `as-path-set`, gNMI paths for
+`.rpol` content (gNMI Set remains TOML-surface-only).

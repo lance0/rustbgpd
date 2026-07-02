@@ -1,0 +1,90 @@
+# M80 — rpol policies whose intent mirrors the FRR route-maps in
+# frr-bgpd-m80-parity.conf (RPOL-IN / RPOL-OUT). The interop script
+# asserts route-for-route parity between the two engines.
+#
+# The companion rustbgpd-m80-policy-lp150.rpol is identical except
+# src-default sets local-pref 150 — the SIGHUP hot-apply fixture.
+
+# 10.10.2.0/27 deliberately falls outside `le 26`.
+prefix-set customers { 10.10.0.0/16 ge 24 le 26, 192.168.1.0/24 }
+community-set tagged { 65000:100, 65000:200 }
+community-set scrub-marks { 65000:666 }
+
+# Import: parameterized — the src peer instantiates customer-in(200),
+# the down peer customer-in(300).
+policy customer-in(peer_lp: u32) {
+    # FRR: route-map RPOL-IN deny 10 (match as-path TRANSIT)
+    term transit-guard {
+        if route.as-path matches "_65500_" { reject }
+    }
+    # Modify-and-continue (no verdict): scrub the mark, zero MED,
+    # keep walking. FRR: permit 20 + on-match next.
+    term med-scrub {
+        if route.communities in scrub-marks {
+            set med 0;
+            remove community 65000:666
+        }
+    }
+    # FRR: permit 30 (prefix-list CUSTOMERS + community TAGGED).
+    term customer-routes {
+        if route.prefix in customers && route.communities in tagged {
+            set local-pref peer_lp;
+            add community 65001:999;
+            accept
+        }
+    }
+    # FRR: permit 40 (catch-all).
+    term default-accept { accept }
+}
+
+# Only the src peer's chain references this policy — the SIGHUP phase
+# edits its LP and asserts that only src gets a Route Refresh.
+policy src-default {
+    term baseline {
+        if route.prefix == 198.51.100.0/24 { set local-pref 150 }
+    }
+}
+
+# Export toward the down peer. FRR: route-map RPOL-OUT on parity.
+policy edge-out {
+    term no-leak {
+        if route.prefix == 198.51.100.0/24 { reject }
+    }
+    term tag-and-med {
+        set med 50;
+        add community 65001:777;
+        accept
+    }
+}
+
+# In-language tests — run by `rbgp policy check` (M80 asserts exit 0).
+
+test customer-in-tags-and-sets-lp {
+    route { prefix 10.10.1.0/24; communities [65000:100] }
+    expect customer-in(200) == accept with local-pref 200, community 65001:999
+}
+
+test customer-in-rejects-transit-aspath {
+    route { prefix 203.0.113.0/24; as-path "65002 65500" }
+    expect customer-in(200) == reject
+}
+
+test customer-in-scrubs-then-continues {
+    route { prefix 192.168.1.0/24; communities [65000:100, 65000:666]; med 300 }
+    expect customer-in(300) == accept with local-pref 300, med 0, community 65001:999
+}
+
+test long-prefix-falls-outside-le {
+    route { prefix 10.10.2.0/27; communities [65000:100] }
+    expect customer-in(200) == accept
+}
+
+test edge-out-denies-no-leak {
+    route { prefix 198.51.100.0/24 }
+    expect edge-out == reject
+}
+
+test edge-out-tags-and-sets-med {
+    route { prefix 10.10.1.0/24 }
+    expect edge-out == accept with med 50, community 65001:777
+}

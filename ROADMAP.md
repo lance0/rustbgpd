@@ -46,6 +46,7 @@ those.
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
 | ASPA verification | Shipped | RTR v2, role-aware upstream/downstream verification, policy match |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
+| Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
 | BFD single-hop async + RFC 5882 coupling | Shipped | M51 |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
@@ -121,8 +122,10 @@ software-diversity funding). Two findings converge:
    drafts) is the live collector-side interop partner.
 2. **Explainability is the demand signal.** GoBGP's top-voted open
    feature request is export-side "why is this route not advertised to
-   peer X" — rustbgpd is one slice from finishing a moat (import explain,
-   policy dry-run, ORR explain, per-term traces) no competitor has
+   peer X" — with the ADR-0096 policy-language arc shipped (import
+   explain, live-RIB policy dry-run, ORR explain, per-term traces +
+   live hit counters; M80 parity receipt), export-side explain
+   completion is the one slice left in a moat no competitor has
    started.
 
 **The BMP arc (next anchor)**: RFC 8671 Adj-RIB-Out + RFC 9069 Loc-RIB on
@@ -182,7 +185,20 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ### Recently shipped (2026-07-01/02, condensed — details in CHANGELOG/ADRs)
 
-- **Optimal Route Reflection (RFC 9107, ADR-0095)** — per-client best paths
+- **The `.rpol` typed compiled policy language (ADR-0096, #654–#658 +
+  M80)** — public typed IR with indexed match sets behind the unchanged
+  engine (set-heavy matching ~270× faster; golden decision-parity corpus
+  vs the legacy walker), the `.rpol` frontend (named prefix/community
+  sets, parameterized policies monomorphized at load, `apply()`
+  composition, in-language `test` blocks, ariadne diagnostics), daemon
+  integration (`[policy] rpol_files`, mixed TOML/rpol chains, SIGHUP
+  hot-apply scoped to peers whose resolved chains changed), and the
+  explain surfaces (per-term traces in `policy explain`, the
+  `rbgp policy test` live-RIB dry run, `rbgp policy stats` live per-term
+  hit counters). M80 proves route-for-route parity against FRR
+  route-maps expressing the same intent, plus refresh-scoping on an
+  `.rpol` edit under traffic. Follow-up: an import-side read surface for
+  the (already-accumulating) import hit counters. — per-client best paths
   via SPF over the BGP-LS-sourced topology; typed topology accessors, graph +
   hand-rolled Dijkstra + NH-cost resolution, `orr_vantage` config, the
   interior-cost tiebreak at RFC 4271's step-(e) slot, `rbgp topology`/`rbgp

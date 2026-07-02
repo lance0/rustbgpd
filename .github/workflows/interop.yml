@@ -16,6 +16,15 @@ name: Interop
 #   - M15 (~10 s test): Route Refresh (RFC 2918 + RFC 7313) via
 #     gRPC SoftResetIn. Companion to M34 — together they pin both
 #     ends of the contract (gRPC-driven and SIGHUP-driven refresh).
+#   - M80 (~60 s test): rpol policy parity (ADR-0096) — rustbgpd
+#     runs its policy from an `.rpol` file while an FRR parity node
+#     expresses the same intent as route-maps / prefix-lists /
+#     community-lists; asserts route-for-route import + export
+#     agreement (prefix-set ge/le, community add/remove, LP, as-path
+#     regex reject, modify-then-continue, a parameterized policy
+#     instantiated twice), `rbgp policy check` / `policy test` /
+#     `policy stats`, and an .rpol edit + SIGHUP hot-apply whose
+#     Route Refresh is scoped to the one peer whose chain changed.
 #
 # Address-family + topology tier — MP-BGP, RR, multi-path:
 #   - M10 (~10 s test): IPv6 dual-stack via MP_REACH_NLRI /
@@ -188,6 +197,43 @@ jobs:
           label: M13
           topology: tests/interop/m13-policy-frr.clab.yml
           script: tests/interop/scripts/test-m13-policy-frr.sh
+
+  m80:
+    name: M80 — rpol policy parity (ADR-0096, FRR 10.3.1, 4-node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        # jq drives the parity tuple comparisons (rustbgpd gRPC JSON
+        # vs FRR vtysh JSON) and the policy test/stats assertions.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Run M80 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M80
+          topology: tests/interop/m80-rpol-policy-parity-frr.clab.yml
+          script: tests/interop/scripts/test-m80-rpol-policy-parity-frr.sh
 
   m15:
     name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.3.1)

@@ -1,0 +1,91 @@
+# Containerlab topology: rustbgpd + 3× FRR (M80 — rpol policy parity)
+#
+# ADR-0096 arc closer. rustbgpd runs its policy from an `.rpol` file
+# ([policy] rpol_files); an FRR "parity" node expresses the SAME
+# intent as classic route-maps / prefix-lists / community-lists. Both
+# receive the same route matrix from a source and export to the same
+# downstream — the test asserts route-for-route agreement, then
+# exercises `rbgp policy check` / `policy test` / `policy stats` and
+# an .rpol-edit + SIGHUP hot-apply under traffic (m34 pattern).
+#
+#   src (AS 65002) ──── rustbgpd (AS 65001) ──── down (AS 65003)
+#      └────────────── parity (AS 65011) ──────────┘
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m80-rpol-policy-parity-frr.clab.yml
+#   bash tests/interop/scripts/test-m80-rpol-policy-parity-frr.sh
+#   containerlab destroy -t tests/interop/m80-rpol-policy-parity-frr.clab.yml --cleanup
+
+name: m80-rpol-policy-parity-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m80-policy.toml:/etc/rustbgpd/config.toml:ro
+        # Both .rpol variants land at fixed read-only paths; the exec
+        # below copies the initial one onto the working path the
+        # config references, and the test script copies the lp150
+        # variant over it mid-test before SIGHUP (m34 pattern).
+        - ./configs/rustbgpd-m80-policy.rpol:/etc/rustbgpd/core.initial.rpol:ro
+        - ./configs/rustbgpd-m80-policy-lp150.rpol:/etc/rustbgpd/core.lp150.rpol:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - mkdir -p /etc/rustbgpd/policies
+        - cp /etc/rustbgpd/core.initial.rpol /etc/rustbgpd/policies/core.rpol
+      env:
+        RUST_LOG: info
+
+    src:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m80-src.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.2/24 dev eth2
+        - ip link set eth2 up
+
+    parity:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m80-parity.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.2.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.3.1/24 dev eth2
+        - ip link set eth2 up
+
+    down:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m80-down.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.3.2/24 dev eth2
+        - ip link set eth2 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "src:eth1"]
+    - endpoints: ["rustbgpd:eth2", "down:eth1"]
+    - endpoints: ["src:eth2", "parity:eth1"]
+    - endpoints: ["parity:eth2", "down:eth2"]
+
+# 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ src    (10.0.0.2, AS 65002)
+# 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ down   (10.0.1.2, AS 65003)
+# 10.0.2.0/24 — parity   (10.0.2.1) ↔ src    (10.0.2.2)
+# 10.0.3.0/24 — parity   (10.0.3.1) ↔ down   (10.0.3.2)

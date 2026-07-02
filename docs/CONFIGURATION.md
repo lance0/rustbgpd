@@ -1383,13 +1383,14 @@ import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
   for materially changed import chains — same mechanism as
   `[policy.definitions]` edits). `rbgp config diff` reports the change
   under the policy section.
-- **Scope notes:** config *transactions* cannot stage `.rpol` file
-  content (the files live outside the candidate TOML) — a candidate
-  whose `rpol_files` list changed is rejected as unsupported; apply
+- **Scope notes:** config *transactions* fail closed on `.rpol`
+  content: the files live outside the candidate TOML, so a candidate
+  whose `rpol_files` list changed is rejected as unsupported — apply
   `.rpol` changes via SIGHUP. gNMI Set likewise edits only the TOML
   surface, not `.rpol` file content. `rbgp policy explain` statement
-  traces for `.rpol` chain members arrive with the ADR-0096 explain
-  slice.
+  traces cover `.rpol` chain members at term granularity, and
+  `rbgp policy stats` reads the installed chains' live per-term hit
+  counters (see [`rpol-language.md`](rpol-language.md)).
 
 Test `.rpol` policies without touching the daemon
 (`rbgp policy check file.rpol` — runs the file's in-language `test`

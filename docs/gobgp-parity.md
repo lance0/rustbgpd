@@ -86,12 +86,15 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
 | Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
+| Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
+| Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
+| Live per-term policy hit counters | No | Yes | `rbgp policy stats` / `GetPolicyStats` — since-chain-install counters on the installed export chains (import read surface is a follow-up) |
 
 ## gRPC API
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 90 | 86 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 98 | 94 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML when started with `--config`); overlapping ranges resolve by longest-prefix-match |
@@ -180,8 +183,8 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Address families | 15 | 4 | ~27% |
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
-| Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 90 | 100%+ (86 `rustbgpd.v1` RPCs plus gNMI) |
+| Policy engine | 18 | 21 | 100%+ (`.rpol` language, live-RIB dry run, per-term hit counters are rustbgpd-only) |
+| gRPC RPCs | ~55 | 98 | 100%+ (94 `rustbgpd.v1` RPCs plus gNMI) |
 | Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |
