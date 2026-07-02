@@ -1756,9 +1756,15 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         .unwrap();
     assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::42".parse().unwrap()));
 }
+/// RFC 9494 §4.6 intra-AS exception: an LLGR-stale route advertised to
+/// an iBGP peer that did NOT advertise the LLGR capability carries
+/// `NO_EXPORT` and `LOCAL_PREF` zero — and keeps the `LLGR_STALE`
+/// community, which "MUST NOT be removed when the route is further
+/// advertised". (eBGP peers without LLGR never see the route: the RIB
+/// export gate suppresses it at staging.)
 #[test]
-fn non_llgr_peer_strips_llgr_stale_community() {
-    let session = make_test_session(65001, 65002);
+fn llgr_stale_to_non_llgr_ibgp_peer_carries_no_export_and_lpref_zero() {
+    let session = make_test_session(65001, 65001);
     let route = Route {
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1766,18 +1772,73 @@ fn non_llgr_peer_strips_llgr_stale_community() {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(100),
             PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]),
         ]),
         ..make_route(100)
     };
-    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    let attrs =
+        session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
+    let comms = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::Communities(comms) => Some(comms),
+            _ => None,
+        })
+        .expect("communities attribute present");
+    assert!(
+        comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+        "LLGR_STALE must not be removed on re-advertisement"
+    );
+    assert!(
+        comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT),
+        "§4.6 requires NO_EXPORT toward a non-LLGR iBGP peer"
+    );
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::LocalPref(0))),
+        "§4.6 requires LOCAL_PREF zero toward a non-LLGR iBGP peer"
+    );
+    // Everything else rides through untouched.
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::Origin(Origin::Igp)))
+    );
+}
+
+/// A fresh (non-LLGR-stale) route toward the same non-LLGR iBGP peer is
+/// untouched by the §4.6 rewrite: no `NO_EXPORT`, `LOCAL_PREF` preserved.
+#[test]
+fn fresh_route_to_non_llgr_ibgp_peer_unmodified() {
+    let session = make_test_session(65001, 65001);
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(100),
+            PathAttribute::Communities(vec![0x0001_0001]),
+        ]),
+        ..make_route(100)
+    };
+    let attrs =
+        session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
     assert!(!attrs.iter().any(|a| {
         matches!(
             a,
             PathAttribute::Communities(comms)
-                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+                if comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT)
         )
     }));
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::LocalPref(100)))
+    );
 }
 #[test]
 fn llgr_peer_keeps_llgr_stale_community() {

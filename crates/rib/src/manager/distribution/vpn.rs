@@ -84,6 +84,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         rtc_filter: Option<&crate::manager::RtcMembership>,
         orr_ctx: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
         add_path_send_max: u32,
@@ -166,6 +167,19 @@ impl RibManager {
                 for candidate in &candidates {
                     if (next_rank as usize) > limit {
                         break;
+                    }
+
+                    // RFC 9494 §4.4, per candidate — an LLGR-stale path
+                    // must not occupy an Add-Path rank toward a non-LLGR
+                    // eBGP peer. See `llgr_stale_export_suppressed`.
+                    if super::llgr_stale_export_suppressed(
+                        candidate.is_llgr_stale,
+                        candidate.communities(),
+                        family,
+                        target_is_ebgp,
+                        llgr,
+                    ) {
+                        continue;
                     }
 
                     // RFC 4684 outbound gate, per candidate — the route
@@ -295,6 +309,19 @@ impl RibManager {
                 };
                 best
             };
+
+            // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+            // suppressed. See `llgr_stale_export_suppressed`.
+            if super::llgr_stale_export_suppressed(
+                best.is_llgr_stale,
+                best.communities(),
+                family,
+                target_is_ebgp,
+                llgr,
+            ) {
+                withdraw_existing(vpn_withdraw, existing_path_ids);
+                continue;
+            }
 
             // RFC 4684 outbound gate: a peer that negotiated RT-Constrain
             // only receives VPN routes whose Route Targets fall inside its
@@ -471,6 +498,7 @@ impl RibManager {
                 &changed_keys
             };
             let sendable = self.peer_sendable_families.get(&peer).cloned();
+            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             if !staged_keys.iter().any(|key| {
                 sendable
                     .as_ref()
@@ -520,6 +548,7 @@ impl RibManager {
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 rtc_filter.as_ref(),
                 orr_ctx,
                 add_path_send_max,

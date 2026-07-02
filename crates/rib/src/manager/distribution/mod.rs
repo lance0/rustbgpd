@@ -36,6 +36,32 @@ mod rtc;
 mod unicast;
 mod vpn;
 
+/// RFC 9494 §4.4 export restriction: an LLGR-stale route "SHOULD NOT be
+/// advertised to any neighbor from which the Long-Lived Graceful Restart
+/// Capability has not been received". For an eBGP target that means
+/// suppression (withdraw-if-present, the standard ineligibility shape at
+/// staging). iBGP targets are NOT suppressed here — the §4.6 intra-AS
+/// exception permits advertising to them with `NO_EXPORT` attached and
+/// `LOCAL_PREF` zero, a per-peer attribute form applied in transport's
+/// `prepare_outbound_attributes_*` beside the other per-peer rewrites
+/// (`ORIGINATOR_ID`/`CLUSTER_LIST`, `GShut`).
+///
+/// Staleness is the locally-promoted `is_llgr_stale` flag OR a carried
+/// `LLGR_STALE` community: promotion sets both, but a route *received*
+/// already tagged by an upstream helper only carries the community
+/// (which "MUST NOT be removed when the route is further advertised").
+fn llgr_stale_export_suppressed(
+    is_llgr_stale: bool,
+    communities: &[u32],
+    family: (Afi, Safi),
+    target_is_ebgp: bool,
+    llgr: Option<&Vec<(Afi, Safi)>>,
+) -> bool {
+    target_is_ebgp
+        && !llgr.is_some_and(|families| families.contains(&family))
+        && (is_llgr_stale || communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
+}
+
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
     match origin {
         crate::route::RouteOrigin::Local => RouteType::Local,
@@ -726,6 +752,7 @@ impl RibManager {
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
             let export_pol = self.export_policy_for(peer).cloned();
             let sendable = self.peer_sendable_families.get(&peer).cloned();
+            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
             let target_peer_asn = self.peer_asn.get(&peer).copied();
@@ -800,6 +827,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
                         orr_ctx,
@@ -830,6 +858,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
                         &metrics,
@@ -856,6 +885,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
                         &metrics,
@@ -884,6 +914,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -906,6 +937,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -929,6 +961,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -953,6 +986,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     rtc_filter.as_ref(),
                     orr_ctx,
                     peer_add_path_send_max,
@@ -980,6 +1014,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,

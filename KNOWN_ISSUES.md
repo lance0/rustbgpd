@@ -237,11 +237,12 @@ resolved.
   amendment). GR/LLGR stale preservation now covers all of these RR
   families (RFC 4724 helper retention + RFC 9494 two-phase LLGR, M77
   receipt), and the pre-existing unicast/FlowSpec/EVPN paths implement
-  the same RFC-strict consecutive-restart deletion and End-of-RIB sweep
-  of non-readvertised stale routes (RFC 4724 §4.1 / RFC 9494 §4.2). One
-  legacy gap remains across all families: no LLGR-stale export
-  restriction toward non-LLGR peers (RFC 9494 SHOULD; the intra-AS
-  NO_EXPORT + LOCAL_PREF-0 exception also unbuilt). Other families such
+  the same RFC-strict consecutive-restart deletion, End-of-RIB sweep
+  of non-readvertised stale routes (RFC 4724 §4.1 / RFC 9494 §4.2), and
+  the RFC 9494 §4.4 export restriction (LLGR-stale routes are withheld
+  from eBGP peers that didn't advertise the LLGR capability; non-LLGR
+  iBGP peers receive them per the §4.6 intra-AS exception with NO_EXPORT
+  and LOCAL_PREF 0, LLGR_STALE community intact). Other families such
   as labeled-unicast (SAFI 4)
   and VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is

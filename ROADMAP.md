@@ -107,9 +107,10 @@ has it, no broad performance sprints without profile evidence.
   blackout at RR-client re-establish, ORR vantages survive a topology
   source restart. The new families implement RFC-strict
   consecutive-restart deletion and EoR sweeps; the pre-existing
-  unicast/FlowSpec/EVPN paths have since been brought in line (gaps 1+2
-  of the legacy tech-debt item below), leaving only the LLGR-stale
-  export restriction open.
+  unicast/FlowSpec/EVPN paths have since been brought in line, and the
+  RFC 9494 export restriction (gap 3) now gates LLGR-stale routes on the
+  receiver's LLGR capability repo-wide — the legacy tech-debt item below
+  is fully resolved.
 - **RR-composition follow-ons** *(queued behind the GR arc, in order)*:
   `distribution.rs` module split (three arcs of growth; pure relocation);
   ORR explainability (`rbgp explain` answering "why did client X get path
@@ -1114,18 +1115,22 @@ Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
 
-- [ ] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN.** The RR families
-  (VPN/BGP-LS/RTC, #636–#638) implement the strict semantics; the
-  pre-existing paths had three documented divergences. Two are now
-  resolved: (1) consecutive-restart deletes already-stale routes instead
-  of re-marking them in place (RFC 4724 §4.1), and (2) the EoR arms sweep
-  non-readvertised stale/LLGR-stale routes before clearing flags on the
-  re-advertised remainder (RFC 4724 §4.1 / RFC 9494 §4.2) — including the
-  re-establish-during-LLGR path, closed for all families. Remaining:
-  (3) no LLGR-stale export restriction toward peers that didn't advertise
-  LLGR (RFC 9494 SHOULD; the intra-AS NO_EXPORT + LOCAL_PREF-0 exception
-  also unbuilt) — repo-wide, needs a distribution-layer gate at the
-  per-peer Adj-RIB-Out staging point.
+- [x] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN — RESOLVED.**
+  The RR families (VPN/BGP-LS/RTC, #636–#638) implement the strict
+  semantics; the pre-existing paths had three documented divergences,
+  all now closed: (1) consecutive-restart deletes already-stale routes
+  instead of re-marking them in place (RFC 4724 §4.1); (2) the EoR arms
+  sweep non-readvertised stale/LLGR-stale routes before clearing flags
+  on the re-advertised remainder (RFC 4724 §4.1 / RFC 9494 §4.2) —
+  including the re-establish-during-LLGR path, all families; and
+  (3) the RFC 9494 §4.4 LLGR-stale export restriction, repo-wide: every
+  family's Adj-RIB-Out staging suppresses (withdraw-if-present)
+  LLGR-stale routes toward eBGP peers that didn't advertise the LLGR
+  capability for the family (receiver capabilities plumbed from session
+  negotiation via `PeerUp`), while non-LLGR iBGP peers take the §4.6
+  intra-AS exception — NO_EXPORT attached and LOCAL_PREF zeroed in
+  transport's per-peer attribute rewrite, LLGR_STALE community riding
+  unchanged.
 
 - [x] **EVPN origination cross-actor seam audit — RESOLVED** (2026-06-12,
   PR #477). The seam inventory (drain vs. replay, withdrawal ordering,

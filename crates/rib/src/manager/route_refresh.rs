@@ -548,6 +548,7 @@ impl RibManager {
         let mut rtc_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
         let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
@@ -613,6 +614,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -640,6 +642,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -669,6 +672,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -714,6 +718,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     rtc_filter.as_ref(),
                     orr_ctx,
                     peer_add_path_send_max,
@@ -746,6 +751,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,
@@ -779,6 +785,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         orr_ctx,
@@ -809,6 +816,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         &metrics,
@@ -835,6 +843,7 @@ impl RibManager {
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
+                        llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         &metrics,

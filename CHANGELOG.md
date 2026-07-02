@@ -11,6 +11,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 9494 LLGR-stale export gate (closes the last legacy GR/LLGR
+  gap).** LLGR-stale routes are no longer advertised to eBGP peers that
+  didn't advertise the Long-Lived Graceful Restart capability for the
+  route's family (§4.4: stale routes "SHOULD NOT be advertised to any
+  neighbor from which the Long-Lived Graceful Restart Capability has not
+  been received") — every family's Adj-RIB-Out staging (unicast
+  single-best/multipath/ORR, FlowSpec, EVPN, BGP-LS, VPNv4/v6 including
+  each Add-Path candidate individually, RT-Constrain, plus the initial
+  dump and route-refresh replay) suppresses them with the standard
+  withdraw-if-present shape. Non-LLGR **iBGP** peers take the §4.6
+  intra-AS exception instead: the route is advertised with NO_EXPORT
+  attached and LOCAL_PREF set to zero — applied in transport's per-peer
+  attribute rewrite — and the LLGR_STALE community rides through
+  unchanged ("MUST NOT be removed when the route is further
+  advertised"). This replaces the previous non-compliant behavior of
+  stripping LLGR_STALE toward non-LLGR peers while still advertising
+  the route. Receiver LLGR capabilities are plumbed from session
+  negotiation into the RIB via `PeerUp`. LLGR-capable peers and all
+  fresh-route advertisement are unchanged.
+
 - **Add-Path (RFC 7911) for VPNv4/VPNv6 (SAFI 128).** The family-blind
   `add_path` knobs now cover the VPN families: negotiation advertises
   Add-Path for configured `l3vpn_ipv4_unicast` / `l3vpn_ipv6_unicast`
@@ -44,9 +64,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart no longer unresolves vantages mid-window. The new families
   implement the RFC-strict consecutive-restart deletion and EoR sweep of
   non-readvertised stale routes; the pre-existing unicast/FlowSpec/EVPN
-  paths were brought in line afterwards (see Fixed below), leaving only
-  the LLGR-stale export restriction documented in KNOWN_ISSUES. M77 is
-  the live peer-restart interop receipt.
+  paths were brought in line afterwards (see Fixed below), and the
+  LLGR-stale export restriction is closed by the RFC 9494 export gate
+  above. M77 is the live peer-restart interop receipt.
 
 - **Optimal Route Reflection (RFC 9107, ADR-0095) — per-client best paths
   via BGP-LS-sourced SPF.** A route reflector normally reflects *its own*
@@ -142,9 +162,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (RFC 4724 §4.1 / RFC 9494 §4.2), withdrawing them downstream. The EoR
   sweep is family-scoped (IPv4 and IPv6 unicast/FlowSpec are independent)
   and also covers the re-establish-during-LLGR path for every family,
-  including the typed ones. The remaining legacy gap — no LLGR-stale
-  export restriction toward non-LLGR peers — stays documented in
-  KNOWN_ISSUES.
+  including the typed ones. The then-remaining legacy gap — no LLGR-stale
+  export restriction toward non-LLGR peers — is closed by the RFC 9494
+  export gate under Added above.
 
 - **Audit-tail hardening for BGP-LS, durable cursors, and GR/LLGR intern GC.**
   BGP-LS known-NLRI descriptor TLV ordering errors now discard only the
