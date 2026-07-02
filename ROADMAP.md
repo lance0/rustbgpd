@@ -98,8 +98,46 @@ has it, no broad performance sprints without profile evidence.
 
 ### Next
 
-- **Config transaction coverage + OpenConfig bridge** *(highest priority,
-  ADR-0076 foundation shipped).* Native gRPC now has validate-only planning,
+- **GR/LLGR stale preservation for the RR families (VPN, BGP-LS, RTC)**
+  *(current anchor arc).* Today a graceful restart conservatively withdraws
+  the entire VPNv4/v6, BGP-LS, and RT-Constrain tables — correct-but-blunt
+  first-slice posture every family arc deferred with a pointer. Restart-safe
+  stale preservation (RFC 4724 marking + RFC 9494 LLGR two-phase demotion,
+  per-family scoping in the GR/LLGR capability negotiation, stale sweeps on
+  the existing three-tier best-path demotion) is what makes the RR role
+  production-real: a reflector that dumps its table on restart defeats GR
+  for every client behind it. Template: the unicast/EVPN stale machinery
+  (`graceful_restart_preserves_family`, `is_stale`/`is_llgr_stale`,
+  GR/LLGR sweeps). Exit: a restarting RR peer's families survive as stale
+  through the GR window, LLGR demotes rather than drops, EoR/timer sweeps
+  clean up, and an interop receipt proves it against a real peer restart.
+- **RR-composition follow-ons** *(queued behind the GR arc, in order)*:
+  `distribution.rs` module split (three arcs of growth; pure relocation);
+  ORR explainability (`rbgp explain` answering "why did client X get path
+  Y" with the per-vantage cost breakdown — the `OrrInteriorCost` reason
+  variant is the hook); VPN-ORR (vantage ranking for SAFI 128, ADR-0095
+  deferral); Add-Path for the new families (rejected at negotiation today;
+  RFC 9107 requires inter-RR Add-Path for multi-cluster ORR).
+
+### Recently shipped (2026-07-01/02, condensed — details in CHANGELOG/ADRs)
+
+- **Optimal Route Reflection (RFC 9107, ADR-0095)** — per-client best paths
+  via SPF over the BGP-LS-sourced topology; typed topology accessors, graph +
+  hand-rolled Dijkstra + NH-cost resolution, `orr_vantage` config, the
+  interior-cost tiebreak at RFC 4271's step-(e) slot, `rbgp topology`/`rbgp
+  orr`. M76 proves live divergent bests, topology-driven flips with zero
+  churn to unaffected clients, and clean fallback. **No other open-source
+  BGP daemon ships ORR.** The M76 lab also surfaced and fixed a latent
+  negotiation bug: implicit IPv4 unicast was added against explicit MP
+  capability sets, leaking classic NLRI onto linkstate/VPN/RTC-only
+  sessions (#632; capability-less-legacy-peers-only now).
+- **RT-Constrain (RFC 4684)** and **VPNv4/v6 route-reflection (RFC
+  4364/4659)** — see the address-family arc below and the ADR-0077
+  amendment (M74/M75 receipts; strict per-peer VPN filtering; the M75 lab
+  caught the missing-AS_PATH default-origination bug pre-CI).
+
+- **Config transaction coverage + OpenConfig bridge** *(complete —
+  ADR-0076).* Native gRPC now has validate-only planning,
   optimistic snapshot tokens, commit/apply/confirm/abort/status, persistence
   acknowledgement, and rollback for the v1 committable families. **Done:**
   established dynamic peers now keep the canonical longest-prefix-match range
@@ -905,21 +943,11 @@ has it, no broad performance sprints without profile evidence.
   right default (most readiness consumers want "is the BGP control plane up",
   and folding a slow or optional dataplane actor into the default gate risks
   flapping pods), so the stricter probe should be opt-in, not a redefinition.
-- **Optimal Route Reflection (RFC 9107).** Lets a route reflector pick each
-  client's best path from the *client's* topological vantage point instead of the
-  RR's own — an on-identity RR feature. Heavily gated, though: RFC 9107 §3.1
-  admits only an IGP or BGP-LS as the topology source for the per-client SPF, and
-  rustbgpd runs no IGP (and won't). So ORR remains more than today's BGP-LS
-  reflection slice: it needs an in-daemon link-state DB + SPF engine, and then a
-  per-client best-path dimension (with Add-Path to
-  distribute the multiple bests), touching the
-  single-best-path RIB core. No open-source peer ships it (FRR's request has sat
-  open since 2018; BIRD / GoBGP / OpenBGPd lack it; only Cisco / Juniper / Nokia
-  do). Not yet an open-source parity gap — but it is drawing renewed attention in
-  the SONiC / DC-NOS ecosystem rustbgpd competes in (where the NOS's FRR can
-  already source the IGP topology ORR needs), so track it as a possible future
-  DC-fabric RR baseline rather than dismiss it. Revisit when a semantic
-  LSDB/SPF substrate is plausible and the demand signal firms.
+- ~~**Optimal Route Reflection (RFC 9107).**~~ **Shipped 2026-07-02**
+  (ADR-0095, M76) — see "Recently shipped" under Next. The remaining ORR
+  tail (backup vantages, inter-RR Add-Path for multi-cluster, VPN-ORR,
+  TE/multi-topology metrics, §3.2 per-policy Decision Processes) is
+  recorded in ADR-0095's deferral register with un-defer triggers.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.
