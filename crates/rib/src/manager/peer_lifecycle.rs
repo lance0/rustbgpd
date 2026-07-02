@@ -247,7 +247,9 @@ impl RibManager {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            rtc_announce: vec![],
             vpn_withdraw: vec![],
+            rtc_withdraw: vec![],
             request_refresh_all_negotiated: true,
         };
         if record.outbound_tx.try_send(update).is_err() {
@@ -332,6 +334,8 @@ impl RibManager {
             .collect();
         let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
             rib.iter_vpn().map(crate::route::VpnRibRoute::key).collect();
+        let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
+            rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect();
         debug!(%peer, cleared = count, "peer adj-rib-in cleared");
         self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
         self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
@@ -355,6 +359,10 @@ impl RibManager {
         // VPNv4/VPNv6 routes — same stranding hazard as BGP-LS above.
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
+        }
+        // And for the departed peer's RT-Constrain routes.
+        if !rtc_affected.is_empty() {
+            self.recompute_rtc_keys(&rtc_affected);
         }
     }
 
@@ -574,6 +582,18 @@ impl RibManager {
             info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
         }
 
+        // RFC 4684 decision: lazily self-originate the default (wildcard)
+        // RTC NLRI the first time an RTC-capable peer comes up — rustbgpd
+        // has no VRFs, so its own RT interest is "everything"; without
+        // advertising that, RTC-filtering peers (e.g. GoBGP PEs) would
+        // suppress their VPN routes toward us. Runs BEFORE the outbound
+        // registration below so the recompute doesn't race the initial
+        // dump: this peer receives the default exactly once, in
+        // `send_initial_table`.
+        if sendable_families.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
+            self.ensure_default_rtc_originated();
+        }
+
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
@@ -592,6 +612,50 @@ impl RibManager {
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
         self.send_initial_table(peer);
+    }
+
+    /// Insert the local default RT-Constrain NLRI into the `LOCAL_PEER`
+    /// Adj-RIB-In (lazy + idempotent) and run the RTC recompute so it flows
+    /// to any already-established RTC peers. Never withdrawn — harmless if
+    /// no RTC peer remains. No config knob by design.
+    fn ensure_default_rtc_originated(&mut self) {
+        use rustbgpd_wire::{Origin, PathAttribute, RtcNlri};
+
+        use super::helpers::LOCAL_PEER;
+        use crate::adj_rib_in::AdjRibIn;
+        use crate::route::{RouteOrigin, RtcRibRoute, RtcRibRouteKey};
+
+        let key = RtcRibRouteKey {
+            nlri: RtcNlri::DEFAULT,
+            path_id: 0,
+        };
+        if self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get_rtc(&key).is_some())
+        {
+            return;
+        }
+        let route = RtcRibRoute {
+            nlri: RtcNlri::DEFAULT,
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer: LOCAL_PEER,
+            attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: std::time::Instant::now(),
+            origin_type: RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        self.ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER))
+            .insert_rtc(route);
+        info!("originated default RT-Constrain NLRI (local wildcard RT interest, RFC 4684)");
+        let mut affected = HashSet::new();
+        affected.insert(key);
+        self.recompute_rtc_keys(&affected);
     }
 
     pub(super) fn handle_set_peer_policy_context(
@@ -627,6 +691,8 @@ impl RibManager {
         let mut bgpls_withdraw = Vec::new();
         let mut vpn_announce = Vec::new();
         let mut vpn_withdraw = Vec::new();
+        let mut rtc_announce = Vec::new();
+        let mut rtc_withdraw = Vec::new();
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
@@ -855,6 +921,37 @@ impl RibManager {
             );
         }
 
+        // RT-Constrain initial dump — a peer that joins after RTC state has
+        // converged (incl. the locally-originated default) must receive it
+        // before EoR. Mirrors the VPN staging block.
+        let all_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
+            .loc_rib
+            .iter_rtc()
+            .map(crate::route::RtcRibRoute::key)
+            .collect();
+        if !all_rtc_keys.is_empty() {
+            Self::stage_rtc_routes(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_rtc_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
+                &mut rtc_announce,
+                &mut rtc_withdraw,
+                false, // initial dump — equality check is correct
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let mut eor_families = self
             .peer_sendable_families
@@ -895,7 +992,9 @@ impl RibManager {
             || !bgpls_announce.is_empty()
             || !bgpls_withdraw.is_empty()
             || !vpn_announce.is_empty()
-            || !vpn_withdraw.is_empty();
+            || !vpn_withdraw.is_empty()
+            || !rtc_announce.is_empty()
+            || !rtc_withdraw.is_empty();
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update(
                 peer,
@@ -912,6 +1011,8 @@ impl RibManager {
                 bgpls_withdraw,
                 vpn_announce,
                 vpn_withdraw,
+                rtc_announce,
+                rtc_withdraw,
             );
         if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
@@ -945,7 +1046,9 @@ impl RibManager {
                 bgpls_announce: vec![],
                 bgpls_withdraw: vec![],
                 vpn_announce: vec![],
+                rtc_announce: vec![],
                 vpn_withdraw: vec![],
+                rtc_withdraw: vec![],
                 request_refresh_all_negotiated: false,
             };
             if tx.try_send(eor).is_err() {

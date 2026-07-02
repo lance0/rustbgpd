@@ -9,8 +9,8 @@ use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
     ExplainDecision, FibRouteState, ListBgpLsRequest, ListBlackholeDiscardsRequest,
-    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, ListVpnRoutesRequest, Route,
-    VpnRouteEntry,
+    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, ListRtcRoutesRequest,
+    ListVpnRoutesRequest, Route, RtcRouteEntry, VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -249,6 +249,102 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
         }
     }
     Ok(())
+}
+
+fn print_rtc_routes(routes: &[RtcRouteEntry], json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&JsonRtcRoutes(routes))?;
+    } else if routes.is_empty() {
+        println!("No RTC routes");
+    } else {
+        println!(
+            "{:<10} {:<20} {:<5} {:<18} From-Peer",
+            "Origin-AS", "Route-Target", "Len", "Next-Hop"
+        );
+        println!("{}", "-".repeat(76));
+        for route in routes {
+            let (origin_as, route_target) = if route.is_default {
+                ("-".to_string(), "default".to_string())
+            } else {
+                (route.origin_as.to_string(), route.route_target.clone())
+            };
+            println!(
+                "{:<10} {:<20} {:<5} {:<18} {}",
+                origin_as,
+                route_target,
+                route.prefix_len,
+                route.next_hop,
+                rtc_from_peer(route)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The locally-originated default RTC NLRI carries the `LOCAL_PEER`
+/// sentinel (unspecified address); render it as `local`.
+fn rtc_from_peer(route: &RtcRouteEntry) -> &str {
+    if route.peer_address == "0.0.0.0" {
+        "local"
+    } else {
+        &route.peer_address
+    }
+}
+
+struct JsonRtcRoutes<'a>(&'a [RtcRouteEntry]);
+
+impl Serialize for JsonRtcRoutes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for route in self.0 {
+            seq.serialize_element(&JsonRtcRouteRef(route))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonRtcRouteRef<'a>(&'a RtcRouteEntry);
+
+impl Serialize for JsonRtcRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut len = 8;
+        if route.path_id != 0 {
+            len += 1;
+        }
+        if route.stale {
+            len += 1;
+        }
+        if route.llgr_stale {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("is_default", &route.is_default)?;
+        map.serialize_entry("origin_as", &route.origin_as)?;
+        map.serialize_entry("route_target", &route.route_target)?;
+        map.serialize_entry("prefix_len", &route.prefix_len)?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("peer_address", &route.peer_address)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("communities", &route.communities)?;
+        if route.path_id != 0 {
+            map.serialize_entry("path_id", &route.path_id)?;
+        }
+        if route.stale {
+            map.serialize_entry("stale", &route.stale)?;
+        }
+        if route.llgr_stale {
+            map.serialize_entry("llgr_stale", &route.llgr_stale)?;
+        }
+        map.end()
+    }
 }
 
 fn vpn_route_targets(route: &VpnRouteEntry) -> Vec<&str> {
@@ -1226,6 +1322,18 @@ pub async fn vpn(
     print_vpn_routes(&resp.routes, json)
 }
 
+pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_rtc_routes(ListRtcRoutesRequest {
+            peer_filter: peer.unwrap_or_default(),
+        })
+        .await?
+        .into_inner();
+    print_rtc_routes(&resp.routes, json)
+}
+
 pub async fn received(
     connection: Connection,
     address: &str,
@@ -1528,6 +1636,57 @@ mod tests {
             .expect("VPN request captured");
         assert_eq!(req.afi_safi, "l3vpn_ipv4_unicast");
         assert_eq!(req.peer_filter, "198.51.100.1");
+    }
+
+    #[tokio::test]
+    async fn rtc_sends_peer_filter_and_renders_default_and_local_rows() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        rtc(connection, Some("198.51.100.1".to_string()), true)
+            .await
+            .unwrap();
+
+        let req = server
+            .state
+            .last_list_rtc
+            .lock()
+            .await
+            .clone()
+            .expect("RTC request captured");
+        assert_eq!(req.peer_filter, "198.51.100.1");
+
+        // Row rendering: the default row shows `default` and the locally
+        // originated entry (peer 0.0.0.0) renders FROM-PEER as `local`.
+        let default_row = RtcRouteEntry {
+            is_default: true,
+            origin_as: 0,
+            route_target: String::new(),
+            prefix_len: 0,
+            next_hop: "0.0.0.0".to_string(),
+            peer_address: "0.0.0.0".to_string(),
+            as_path: vec![],
+            communities: vec![],
+            stale: false,
+            llgr_stale: false,
+            path_id: 0,
+        };
+        assert_eq!(rtc_from_peer(&default_row), "local");
+        let full_row = RtcRouteEntry {
+            is_default: false,
+            origin_as: 65001,
+            route_target: "RT:65001:100".to_string(),
+            prefix_len: 96,
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "198.51.100.1".to_string(),
+            as_path: vec![64512],
+            communities: vec![],
+            stale: false,
+            llgr_stale: false,
+            path_id: 0,
+        };
+        assert_eq!(rtc_from_peer(&full_row), "198.51.100.1");
+        print_rtc_routes(&[default_row, full_row], false).unwrap();
     }
 
     #[test]

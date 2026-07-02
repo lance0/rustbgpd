@@ -93,6 +93,7 @@ impl RibManager {
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
         let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // EVPN has a single family tuple, so the inner mark_stale_evpn
@@ -131,6 +132,19 @@ impl RibManager {
                 );
             }
             vpn_affected.extend(withdrawn_l3vpn);
+            // RT-Constrain is conservatively withdrawn on GR entry. No
+            // rib-side family filter is needed: the fsm GR allowlist
+            // (`graceful_restart_preserves_family`) already excludes SAFI
+            // 132, so `gr_families` can never contain it.
+            let withdrawn_rtc = rib.withdraw_all_rtc();
+            if !withdrawn_rtc.is_empty() {
+                info!(
+                    %peer,
+                    count = withdrawn_rtc.len(),
+                    "withdrew RT-Constrain routes on GR entry; stale preservation is not implemented for RTC"
+                );
+            }
+            rtc_affected.extend(withdrawn_rtc);
             // EVPN has a single family tuple; sweep all EVPN routes if
             // the peer didn't advertise GR for (L2Vpn, Evpn).
             if !gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
@@ -200,6 +214,13 @@ impl RibManager {
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
+            // Same recompute-then-gc ordering rationale as BGP-LS above.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+        }
+        if !rtc_affected.is_empty() {
+            self.recompute_rtc_keys(&rtc_affected);
             // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();

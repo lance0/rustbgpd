@@ -2,8 +2,9 @@ use super::{
     Afi, AsPath, AsPathSegment, BgpLsRibRoute, BgpLsRouteKey, BgpRole, EvpnRibRoute, EvpnRoute,
     EvpnRouteKey, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
     Ipv6Addr, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute,
-    PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi,
-    UpdateMessage, VpnRibRoute, debug, info, is_ipv6_link_local, is_private_asn, warn,
+    PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype,
+    RtcRibRoute, Safi, UpdateMessage, VpnRibRoute, debug, info, is_ipv6_link_local, is_private_asn,
+    warn,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -368,6 +369,7 @@ impl PeerSession {
                         evpn_withdrawn: vec![],
                         bgpls_withdrawn: vec![],
                         vpn_withdrawn: vec![],
+                        rtc_withdrawn: vec![],
                     })];
                     UpdateMessage::build(
                         &[],
@@ -406,6 +408,7 @@ impl PeerSession {
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
                 vpn_withdrawn: vec![],
+                rtc_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -562,6 +565,7 @@ impl PeerSession {
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
                     vpn_announced: vec![],
+                    rtc_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -733,6 +737,7 @@ impl PeerSession {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -785,6 +790,7 @@ impl PeerSession {
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
                     vpn_withdrawn: vec![],
+                    rtc_withdrawn: vec![],
                 })];
                 let msg = UpdateMessage::build(
                     &[],
@@ -897,6 +903,21 @@ impl PeerSession {
                 {
                     return;
                 }
+            }
+        }
+        // Send RT-Constrain withdrawals via MP_UNREACH_NLRI. One codec for
+        // both directions (RFC 4684 has no withdraw-mode split); single
+        // family tuple (AFI 1 only).
+        if !update.rtc_withdraw.is_empty()
+            && self
+                .negotiated_families
+                .contains(&(Afi::Ipv4, Safi::RtConstrain))
+        {
+            let routes: Vec<rustbgpd_wire::RtcNlri> =
+                update.rtc_withdraw.iter().map(|key| key.nlri).collect();
+            let max_len = usize::from(self.max_message_len());
+            if !self.send_rtc_unreach_chunked(&routes, four_octet_as, max_len) {
+                return;
             }
         }
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
@@ -1021,6 +1042,41 @@ impl PeerSession {
                 }
             }
         }
+        // Send RT-Constrain announcements via MP_REACH_NLRI, grouped by
+        // (next-hop, attributes) and chunked. The stored next-hop passes
+        // through reflection unchanged; the one exception is the locally-
+        // originated default NLRI, whose next-hop is stored unspecified and
+        // emitted as the session-local address (mirroring next-hop-self).
+        if !update.rtc_announce.is_empty()
+            && self
+                .negotiated_families
+                .contains(&(Afi::Ipv4, Safi::RtConstrain))
+        {
+            let mut rtc_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<rustbgpd_wire::RtcNlri>)> =
+                Vec::new();
+            for rtc_route in &update.rtc_announce {
+                let attrs = self.prepare_outbound_attributes_rtc(rtc_route, is_ebgp);
+                let nh = if rtc_route.next_hop.is_unspecified() {
+                    local_addr.unwrap_or(IpAddr::V4(local_ipv4))
+                } else {
+                    rtc_route.next_hop
+                };
+                if let Some(group) = rtc_groups
+                    .iter_mut()
+                    .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
+                {
+                    group.2.push(rtc_route.nlri);
+                } else {
+                    rtc_groups.push((nh, attrs, vec![rtc_route.nlri]));
+                }
+            }
+            let max_len = usize::from(self.max_message_len());
+            for (next_hop, attrs, routes) in rtc_groups {
+                if !self.send_rtc_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len) {
+                    return;
+                }
+            }
+        }
         // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (AFI, attributes)
         if !update.flowspec_announce.is_empty() {
             let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
@@ -1046,6 +1102,7 @@ impl PeerSession {
                     evpn_announced: vec![],
                     bgpls_announced: vec![],
                     vpn_announced: vec![],
+                    rtc_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -1116,6 +1173,7 @@ impl PeerSession {
                     evpn_withdrawn: vec![],
                     bgpls_withdrawn: vec![],
                     vpn_withdrawn: vec![],
+                    rtc_withdrawn: vec![],
                 })];
                 UpdateMessage::build(
                     &[],
@@ -1167,6 +1225,7 @@ impl PeerSession {
                 evpn_announced: routes[idx..end].to_vec(),
                 bgpls_announced: vec![],
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1230,6 +1289,7 @@ impl PeerSession {
                 evpn_withdrawn: routes[idx..end].to_vec(),
                 bgpls_withdrawn: vec![],
                 vpn_withdrawn: vec![],
+                rtc_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -1289,6 +1349,7 @@ impl PeerSession {
                 evpn_announced: vec![],
                 bgpls_announced: routes[idx..end].to_vec(),
                 vpn_announced: vec![],
+                rtc_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1344,6 +1405,7 @@ impl PeerSession {
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: routes[idx..end].to_vec(),
                 vpn_withdrawn: vec![],
+                rtc_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -1412,6 +1474,7 @@ impl PeerSession {
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
                 vpn_announced: routes[idx..end].to_vec(),
+                rtc_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -1468,6 +1531,7 @@ impl PeerSession {
                 evpn_withdrawn: vec![],
                 bgpls_withdrawn: vec![],
                 vpn_withdrawn: routes[idx..end].to_vec(),
+                rtc_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -1494,6 +1558,123 @@ impl PeerSession {
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN withdrawal UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+    /// Send a batch of RT-Constrain announcements as one or more
+    /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
+    /// `max_len` bytes. Mirrors the VPN sender minus label handling.
+    fn send_rtc_reach_chunked(
+        &mut self,
+        next_hop: IpAddr,
+        base_attrs: &[PathAttribute],
+        routes: &[rustbgpd_wire::RtcNlri],
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::RtConstrain,
+                next_hop,
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: routes[idx..end].to_vec(),
+            }));
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single RTC route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send RTC announce UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+    /// Send a batch of RT-Constrain withdrawals as one or more
+    /// `MP_UNREACH_NLRI` UPDATEs, splitting so each encoded message fits
+    /// `max_len` bytes.
+    fn send_rtc_unreach_chunked(
+        &mut self,
+        routes: &[rustbgpd_wire::RtcNlri],
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::RtConstrain,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
+                vpn_withdrawn: vec![],
+                rtc_withdrawn: routes[idx..end].to_vec(),
+            })];
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single RTC withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send RTC withdrawal UPDATE");
                 return false;
             }
             self.updates_sent += 1;
@@ -1987,6 +2168,102 @@ impl PeerSession {
     pub(super) fn prepare_outbound_attributes_vpn(
         &self,
         route: &VpnRibRoute,
+        is_ebgp: bool,
+    ) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+        for attr in route.attributes.iter() {
+            match attr {
+                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
+                                }
+                            }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
+                        }
+                    }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
+                }
+                PathAttribute::NextHop(_)
+                | PathAttribute::MpReachNlri(_)
+                | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+        if is_ebgp
+            && !self.config.route_server_client
+            && !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
+        {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            if !attrs
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
+        }
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
+        self.strip_llgr_stale_if_needed(&mut attrs, route.afi_safi());
+        attrs
+    }
+
+    /// Prepare outbound attributes for a reflected RT-Constrain route.
+    /// Mirrors the VPN version: RFC 4456 `ORIGINATOR_ID`/`CLUSTER_LIST`
+    /// reflection semantics are identical, and the next-hop lives in
+    /// `MP_REACH_NLRI` (chosen by the caller), never in the attribute set.
+    pub(super) fn prepare_outbound_attributes_rtc(
+        &self,
+        route: &RtcRibRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();

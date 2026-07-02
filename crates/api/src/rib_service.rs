@@ -13,7 +13,7 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType, VpnRibRoute,
+    ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType, RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -1560,6 +1560,32 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListVpnRoutesResponse { routes }))
     }
 
+    async fn list_rtc_routes(
+        &self,
+        request: Request<proto::ListRtcRoutesRequest>,
+    ) -> Result<Response<proto::ListRtcRoutesResponse>, Status> {
+        let req = request.into_inner();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryRtcRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let peer_filter = req.peer_filter;
+        let routes = all_routes
+            .iter()
+            .filter(|route| peer_filter.is_empty() || route.peer.to_string() == peer_filter)
+            .map(rtc_route_to_proto)
+            .collect();
+
+        Ok(Response::new(proto::ListRtcRoutesResponse { routes }))
+    }
+
     async fn set_fib_table(
         &self,
         request: Request<proto::SetFibTableRequest>,
@@ -1937,6 +1963,48 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
     }
 }
 
+pub(crate) fn rtc_route_to_proto(route: &RtcRibRoute) -> proto::RtcRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+
+    for attr in route.attributes.iter() {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => {
+                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            }
+            _ => {}
+        }
+    }
+
+    let route_target = if route.nlri.is_default() {
+        String::new()
+    } else {
+        rustbgpd_wire::ExtendedCommunity::new(route.nlri.route_target_bits).to_string()
+    };
+
+    proto::RtcRouteEntry {
+        is_default: route.nlri.is_default(),
+        origin_as: route.nlri.origin_as,
+        route_target,
+        prefix_len: u32::from(route.nlri.prefix_len),
+        next_hop: route.next_hop.to_string(),
+        peer_address: route.peer.to_string(),
+        as_path,
+        communities,
+        stale: route.is_stale,
+        llgr_stale: route.is_llgr_stale,
+        path_id: route.path_id,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "EVPN route conversion keeps per-route-type field mapping in one audited place"
@@ -2256,6 +2324,58 @@ mod tests {
         assert!(entry.stale);
         assert!(!entry.llgr_stale);
         assert_eq!(entry.path_id, 0);
+    }
+
+    #[test]
+    fn rtc_route_to_proto_renders_default_and_full_nlri() {
+        let full = RtcRibRoute {
+            // RT:65001:100 from origin AS 65001, /96.
+            nlri: rustbgpd_wire::RtcNlri::new(65001, 0x0002_FDE9_0000_0064, 96).unwrap(),
+            next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
+            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            attributes: Arc::new(vec![
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
+                }),
+                PathAttribute::Communities(vec![0x0001_0002]),
+            ]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: true,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let entry = rtc_route_to_proto(&full);
+        assert!(!entry.is_default);
+        assert_eq!(entry.origin_as, 65001);
+        assert_eq!(entry.route_target, "RT:65001:100");
+        assert_eq!(entry.prefix_len, 96);
+        assert_eq!(entry.next_hop, "192.0.2.1");
+        assert_eq!(entry.peer_address, "192.0.2.2");
+        assert_eq!(entry.as_path, [64512, 64513]);
+        assert_eq!(entry.communities, ["1:2"]);
+        assert!(entry.stale);
+        assert!(!entry.llgr_stale);
+
+        let default = RtcRibRoute {
+            nlri: rustbgpd_wire::RtcNlri::DEFAULT,
+            next_hop: Ipv4Addr::UNSPECIFIED.into(),
+            peer: Ipv4Addr::UNSPECIFIED.into(),
+            attributes: Arc::new(vec![]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let entry = rtc_route_to_proto(&default);
+        assert!(entry.is_default);
+        assert_eq!(entry.origin_as, 0);
+        assert_eq!(entry.route_target, "");
+        assert_eq!(entry.prefix_len, 0);
+        assert_eq!(entry.peer_address, "0.0.0.0");
     }
 
     #[tokio::test]

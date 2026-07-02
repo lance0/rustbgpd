@@ -14,7 +14,7 @@ use crate::best_path::BestPathReason;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate, FlowSpecRoute, Route,
-    VpnRibRoute, VpnRibRouteKey,
+    RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 
 /// Routes to be sent outbound to a peer.
@@ -48,6 +48,10 @@ pub struct OutboundRouteUpdate {
     pub vpn_announce: Vec<VpnRibRoute>,
     /// VPNv4/VPNv6 route keys to withdraw.
     pub vpn_withdraw: Vec<VpnRibRouteKey>,
+    /// RT-Constrain routes to announce (RFC 4684).
+    pub rtc_announce: Vec<RtcRibRoute>,
+    /// RT-Constrain route keys to withdraw.
+    pub rtc_withdraw: Vec<RtcRibRouteKey>,
     /// Ask the session task to send a ROUTE-REFRESH *request* toward the
     /// peer (RFC 2918) for **every negotiated family**, so the peer
     /// re-advertises its routes. Used by the RIB manager's
@@ -259,6 +263,17 @@ pub enum RibUpdate {
         announced: Vec<VpnRibRoute>,
         /// Withdrawn VPN route keys.
         withdrawn: Vec<VpnRibRouteKey>,
+    },
+    /// Peer session sent us RT-Constrain routes (RFC 4684).
+    RtcRoutesReceived {
+        /// Source peer address.
+        peer: IpAddr,
+        /// Transport session identity of the session that received these routes.
+        session_id: u64,
+        /// Newly announced RT-Constrain routes.
+        announced: Vec<RtcRibRoute>,
+        /// Withdrawn RT-Constrain route keys.
+        withdrawn: Vec<RtcRibRouteKey>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown {
@@ -672,6 +687,11 @@ pub enum RibUpdate {
     QueryVpnRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<VpnRibRoute>>,
+    },
+    /// Query RT-Constrain routes from the Loc-RIB (RFC 4684).
+    QueryRtcRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<RtcRibRoute>>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {

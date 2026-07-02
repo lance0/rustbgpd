@@ -19,7 +19,8 @@ use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope,
-    OutboundRouteUpdate, RibUpdate, Route, VpnRibRoute, VpnRibRouteKey,
+    OutboundRouteUpdate, RibUpdate, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
+    VpnRibRouteKey,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -208,6 +209,9 @@ pub(crate) struct PeerSession {
     /// Accepted VPNv4/VPNv6 routes from this peer (RFC 4364 / RFC 4659 keys).
     /// Counted toward max-prefix enforcement for the same reason.
     known_vpn: HashSet<VpnRibRouteKey>,
+    /// Accepted RT-Constrain routes from this peer (RFC 4684 keys). Counted
+    /// toward max-prefix enforcement for the same reason.
+    known_rtc: HashSet<RtcRibRouteKey>,
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
@@ -317,6 +321,7 @@ impl PeerSession {
             + self.known_evpn.len()
             + self.known_bgpls.len()
             + self.known_vpn.len()
+            + self.known_rtc.len()
     }
 
     fn remember_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
@@ -360,6 +365,7 @@ impl PeerSession {
         self.known_evpn.clear();
         self.known_bgpls.clear();
         self.known_vpn.clear();
+        self.known_rtc.clear();
     }
 
     fn link_local_next_hop_scope_from_config(config: &TransportConfig) -> Option<NextHopScope> {
@@ -471,6 +477,7 @@ impl PeerSession {
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
+            known_rtc: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -573,6 +580,7 @@ impl PeerSession {
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
+            known_rtc: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,

@@ -102,6 +102,37 @@ fn vpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::MplsVpn)]
 }
 
+fn rtc_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::Ipv4, Safi::RtConstrain)]
+}
+
+/// An RT-Constrain membership NLRI route from `peer`: interest in
+/// `RT:65001:<local_admin>` at /96, origin AS 65001.
+fn make_rtc_rib_route(
+    peer: Ipv4Addr,
+    local_admin: u16,
+    local_pref: u32,
+) -> crate::route::RtcRibRoute {
+    let nlri =
+        rustbgpd_wire::RtcNlri::new(65001, 0x0002_FDE9_0000_0000 | u64::from(local_admin), 96)
+            .unwrap();
+    crate::route::RtcRibRoute {
+        nlri,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+
 /// A `VPNv4` route from `peer` with a distinct prefix octet, MPLS label, and
 /// `LOCAL_PREF`. Same octet from two peers = same RIB key (labels are route
 /// data, not identity).
@@ -240,6 +271,14 @@ async fn query_bgpls_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<BgpLsRibRoute> 
 async fn query_vpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<VpnRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
+async fn query_rtc_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::RtcRibRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryRtcRoutes { reply: reply_tx })
         .await
         .unwrap();
     reply_rx.await.unwrap()
@@ -1452,6 +1491,562 @@ async fn route_refresh_vpn_re_advertises_routes() {
             (
                 Afi::Ipv4,
                 Safi::MplsVpn,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR
+            ),
+        ]
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Bring up a peer with RTC sendable and return its outbound receiver.
+/// Does NOT drain anything — the caller asserts the initial dump / `EoR`.
+async fn rtc_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    is_ebgp: bool,
+    rr_client: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: rtc_sendable(),
+        is_ebgp,
+        route_reflector_client: rr_client,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+/// Every peer-up with the RTC family triggers the lazy default origination,
+/// so the initial dump always carries at least the local default NLRI
+/// followed by the SAFI-132 `EoR`. Drain both.
+async fn drain_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+    let dump = out_rx.recv().await.unwrap();
+    assert!(
+        dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
+        "initial dump must carry the locally-originated default RTC NLRI"
+    );
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, rtc_sendable());
+}
+
+/// Received RTC routes land in the typed Adj-RIB-In / Loc-RIB and are
+/// queryable through `QueryRtcRoutes`.
+#[tokio::test]
+async fn rtc_routes_received_stored_and_queryable() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let stored = query_rtc_routes(&tx).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].nlri, route.nlri);
+    assert_eq!(stored[0].peer, source);
+    assert_eq!(stored[0].nlri.prefix_len, 96);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A withdraw for a stored RTC key removes it from the Loc-RIB.
+#[tokio::test]
+async fn rtc_withdraw_removes_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_rtc_routes(&tx).await.len(), 1);
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![key],
+    })
+    .await
+    .unwrap();
+    assert!(query_rtc_routes(&tx).await.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer-advertised default (zero-length) RTC NLRI is a valid route
+/// identity of its own.
+#[tokio::test]
+async fn rtc_default_nlri_stored() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let mut route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 0, 100);
+    route.nlri = rustbgpd_wire::RtcNlri::DEFAULT;
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let stored = query_rtc_routes(&tx).await;
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].nlri.is_default());
+    assert_eq!(stored[0].peer, source);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 4684 §3.2: RTC routes reflect between iBGP RR clients through the
+/// shared reflection machinery (`ORIGINATOR_ID` / `CLUSTER_LIST` are
+/// attached by transport's `prepare_outbound_attributes_rtc`, pinned in
+/// the transport tests).
+#[tokio::test]
+async fn rtc_route_reflects_between_ibgp_clients_with_originator_and_cluster_list() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut a_rx = rtc_peer_up(&tx, client_a, false, true).await;
+    drain_rtc_initial_dump(&mut a_rx).await;
+    let mut b_rx = rtc_peer_up(&tx, client_b, false, true).await;
+    drain_rtc_initial_dump(&mut b_rx).await;
+
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: client_a,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let reflected = b_rx.recv().await.unwrap();
+    assert_eq!(reflected.rtc_announce.len(), 1);
+    assert_eq!(reflected.rtc_announce[0].key(), key);
+    assert_eq!(
+        reflected.rtc_announce[0].nlri, route.nlri,
+        "membership NLRI must pass through reflection verbatim"
+    );
+    assert_eq!(
+        reflected.rtc_announce[0].peer_router_id,
+        route.peer_router_id
+    );
+    assert_eq!(
+        reflected.rtc_announce[0].origin_type,
+        crate::route::RouteOrigin::Ibgp,
+        "reflected route keeps iBGP origin so transport attaches ORIGINATOR_ID/CLUSTER_LIST"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Split horizon: an RTC route is never echoed back to its source.
+#[tokio::test]
+async fn rtc_route_not_reflected_to_source_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let mut source_rx = rtc_peer_up(&tx, source, false, true).await;
+    drain_rtc_initial_dump(&mut source_rx).await;
+
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let echo = tokio::time::timeout(Duration::from_millis(50), source_rx.recv()).await;
+    assert!(
+        echo.is_err(),
+        "RTC routes must not be reflected back to the source peer"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 4456: an iBGP route learned from a non-client is reflected to
+/// clients only — another non-client must not receive it.
+#[tokio::test]
+async fn rtc_route_suppressed_nonclient_to_nonclient() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let non_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut source_rx = rtc_peer_up(&tx, source, false, false).await;
+    drain_rtc_initial_dump(&mut source_rx).await;
+    let mut non_client_rx = rtc_peer_up(&tx, non_client, false, false).await;
+    drain_rtc_initial_dump(&mut non_client_rx).await;
+
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let echo = tokio::time::timeout(Duration::from_millis(50), non_client_rx.recv()).await;
+    assert!(
+        echo.is_err(),
+        "non-client iBGP RTC route must not be reflected to another non-client"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer that comes up after RTC state converged must receive the full
+/// SAFI-132 table (peer routes + local default) in its initial dump,
+/// followed by the SAFI-132 `EoR` — without any GR involvement (RFC 4684
+/// §5: RTC `EoR` SHOULD be sent regardless of GR).
+#[tokio::test]
+async fn send_initial_table_includes_rtc_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert!(
+        update.rtc_announce.iter().any(|r| r.key() == key),
+        "initial dump must carry the converged RTC table"
+    );
+    assert!(
+        update.rtc_announce.iter().any(|r| r.nlri.is_default()),
+        "initial dump must carry the locally-originated default"
+    );
+    assert!(update.rtc_withdraw.is_empty());
+
+    // EoR pin: emitted for (IPv4, RtConstrain) with no GR state at all.
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, rtc_sendable());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The first RTC-capable peer-up lazily originates the local default NLRI
+/// (wildcard RT interest) and delivers it in that peer's initial dump.
+#[tokio::test]
+async fn peer_up_with_rtc_family_originates_default_rtc_to_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
+
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(update.rtc_announce.len(), 1);
+    let default = &update.rtc_announce[0];
+    assert!(default.nlri.is_default());
+    assert_eq!(default.origin_type, crate::route::RouteOrigin::Local);
+    assert!(
+        default.next_hop.is_unspecified(),
+        "local default stores an unspecified next-hop; transport emits the session-local address"
+    );
+
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, rtc_sendable());
+
+    let stored = query_rtc_routes(&tx).await;
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].nlri.is_default());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer without the RTC family must not trigger default origination.
+#[tokio::test]
+async fn default_rtc_not_originated_to_non_rtc_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    assert!(
+        query_rtc_routes(&tx).await.is_empty(),
+        "default RTC origination is lazy: no RTC peer, no default"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Repeated RTC peer-ups (flap or additional peers) must not duplicate the
+/// local default NLRI.
+#[tokio::test]
+async fn default_rtc_origination_idempotent_across_peer_ups() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    // Same peer returns; a second RTC peer joins too.
+    let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+    let second = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut second_rx = rtc_peer_up(&tx, second, true, false).await;
+    drain_rtc_initial_dump(&mut second_rx).await;
+
+    let stored = query_rtc_routes(&tx).await;
+    assert_eq!(
+        stored.len(),
+        1,
+        "default origination must be idempotent across peer-ups"
+    );
+    assert!(stored[0].nlri.is_default());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Peer teardown removes the departed peer's RTC routes and withdraws them
+/// from remaining peers.
+#[tokio::test]
+async fn peer_down_withdraws_rtc_routes_from_other_peers() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.rtc_announce.len(), 1);
+
+    tx.send(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    let withdraw = out_rx.recv().await.unwrap();
+    assert!(withdraw.rtc_announce.is_empty());
+    assert_eq!(withdraw.rtc_withdraw, vec![key]);
+
+    // Only the local default survives (LOCAL_PEER is not a session).
+    let remaining = query_rtc_routes(&tx).await;
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].nlri.is_default());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RTC has no GR stale lifecycle in this slice (the fsm allowlist excludes
+/// SAFI 132 from preservation): GR entry conservatively withdraws the
+/// restarting peer's RTC routes instead of retaining them stale.
+#[tokio::test]
+async fn gr_entry_conservatively_withdraws_rtc() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(announced.rtc_announce.len(), 1);
+
+    // GR entry: the fsm allowlist can never hand the RIB an RTC family, so
+    // gr_families here carries only unicast.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let withdraw = out_rx.recv().await.unwrap();
+    assert_eq!(
+        withdraw.rtc_withdraw,
+        vec![key],
+        "GR entry must conservatively withdraw RTC routes"
+    );
+
+    let remaining = query_rtc_routes(&tx).await;
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the local default survives GR entry"
+    );
+    assert!(remaining[0].nlri.is_default());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A plain ROUTE-REFRESH request for (IPv4, `RtConstrain`) must replay the
+/// staged RTC routes between the BoRR/EoRR markers.
+#[tokio::test]
+async fn route_refresh_rtc_re_advertises_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(
+        update.rtc_announce.iter().any(|r| r.nlri.is_default()),
+        "refresh replay must re-send the local default"
+    );
+    assert_eq!(update.end_of_rib, rtc_sendable());
+    assert_eq!(
+        update.refresh_markers,
+        vec![
+            (
+                Afi::Ipv4,
+                Safi::RtConstrain,
+                rustbgpd_wire::RouteRefreshSubtype::BoRR
+            ),
+            (
+                Afi::Ipv4,
+                Safi::RtConstrain,
                 rustbgpd_wire::RouteRefreshSubtype::EoRR
             ),
         ]
@@ -4419,7 +5014,9 @@ async fn initial_dump_failure_resyncs_via_timer() {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            rtc_announce: vec![],
             vpn_withdraw: vec![],
+            rtc_withdraw: vec![],
             request_refresh_all_negotiated: false,
         })
         .await
