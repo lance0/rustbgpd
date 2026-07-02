@@ -792,7 +792,9 @@ impl RibManager {
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
-            let export_pol = self.export_policy_for(peer).cloned();
+            let export_pol = self
+                .export_policy_for(peer)
+                .map(rustbgpd_policy::PolicyChain::share);
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);

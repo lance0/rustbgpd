@@ -92,6 +92,20 @@ pub struct NeighborPolicyStats {
     pub export_policy_routes_denied: u64,
 }
 
+/// Per-term hit-counter snapshot for one installed export chain
+/// (`RibUpdate::QueryExportPolicyTermHits`).
+#[derive(Debug, Clone)]
+pub struct ExportPolicyTermHits {
+    /// Peer the chain is installed for; `None` = the shared global
+    /// fallback chain instance (peers evaluated against the fallback
+    /// before any per-peer install).
+    pub peer: Option<IpAddr>,
+    /// Routes evaluated through the chain since install.
+    pub evals: u64,
+    /// Per-term labeled hit counts, in chain walk order.
+    pub terms: Vec<rustbgpd_policy::TermHitRow>,
+}
+
 /// Typed error for API-visible RIB command replies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RibCommandError {
@@ -613,6 +627,16 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<NeighborPolicyStats>,
+    },
+    /// Query: snapshot the live per-term guard-hit counters of the
+    /// installed export chains (ADR-0096 Decision 3.3). Counters
+    /// accumulate since a chain instance was installed and reset when
+    /// it is replaced.
+    QueryExportPolicyTermHits {
+        /// Optional peer filter; `None` = every installed chain.
+        peer: Option<IpAddr>,
+        /// Response channel.
+        reply: oneshot::Sender<Vec<ExportPolicyTermHits>>,
     },
     /// Replace the effective export policy for a peer and resync outbound state.
     ReplacePeerExportPolicy {

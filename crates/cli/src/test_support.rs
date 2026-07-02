@@ -1531,6 +1531,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 action: "permit".to_string(),
                 matched_conditions: vec!["community 65001:100".to_string()],
                 modifications: vec!["local_pref 100 -> 200".to_string()],
+                term: String::new(),
+                term_traces: vec![],
             }],
         };
         // When the caller pins a path_id, return exactly that path;
@@ -1561,6 +1563,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                         action: "deny".to_string(),
                         matched_conditions: vec![],
                         modifications: vec![],
+                        term: String::new(),
+                        term_traces: vec![],
                     }],
                 },
             ],
@@ -1572,6 +1576,35 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             afi_safi: req.afi_safi,
             current_policy_generation: 3,
             matches,
+        }))
+    }
+
+    async fn get_policy_stats(
+        &self,
+        _request: Request<server_proto::GetPolicyStatsRequest>,
+    ) -> Result<Response<server_proto::GetPolicyStatsResponse>, Status> {
+        Ok(Response::new(server_proto::GetPolicyStatsResponse {
+            chains: vec![server_proto::PolicyChainStats {
+                peer_address: "10.0.0.2".to_string(),
+                direction: "export".to_string(),
+                routes_evaluated: 7,
+                terms: vec![
+                    server_proto::PolicyTermStat {
+                        policy_index: 0,
+                        policy: "customer-in(200)".to_string(),
+                        term_index: 0,
+                        term: "customer-routes".to_string(),
+                        hits: 5,
+                    },
+                    server_proto::PolicyTermStat {
+                        policy_index: 0,
+                        policy: "customer-in(200)".to_string(),
+                        term_index: 1,
+                        term: String::new(),
+                        hits: 2,
+                    },
+                ],
+            }],
         }))
     }
 

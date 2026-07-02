@@ -401,6 +401,18 @@ enum PolicyAction {
         #[command(subcommand)]
         action: PolicyChainAction,
     },
+    /// Show live per-term policy hit counters (ADR-0096): how many
+    /// routes matched each term of the installed export chains since
+    /// chain install. Counters reset when a chain is replaced (policy
+    /// reload / hot-apply). Import counters have no read surface yet.
+    Stats {
+        /// Restrict to one peer's installed chain
+        #[arg(long)]
+        peer: Option<String>,
+        /// Direction: export (default). import is reserved
+        #[arg(long, default_value = "export")]
+        direction: String,
+    },
     /// Explain the import-policy decision for a prefix on a neighbor
     /// (ADR-0073): why it was permitted / denied / withdrawn, or
     /// not-seen / evicted / stale. Reads the per-session decision
@@ -1978,6 +1990,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             PolicyAction::Delete { name } => {
                 commands::policy::delete(connection, &name, json).await
+            }
+            PolicyAction::Stats { peer, direction } => {
+                commands::policy::stats(connection, peer.as_deref(), &direction, json).await
             }
             PolicyAction::Explain {
                 neighbor,

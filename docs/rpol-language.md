@@ -412,6 +412,68 @@ Per-term hit counters answer "which term is doing the work" (the
 IOS-XR `show pcl` idea); a term lowered to several IR steps reports as
 `name.1`, `name.2`, ....
 
+### Explain — which term decided, and why
+
+`.rpol` policies are first-class citizens of the daemon's explain
+surfaces (ADR-0073 / ADR-0096 Decision 3.3):
+
+- **`rbgp policy explain --neighbor A --prefix P`** (import): when the
+  deciding chain member is an `.rpol` policy, the statement trace
+  names the deciding **term** and lists every evaluated term with its
+  guard rendered back to `.rpol` syntax and a matched / not-matched
+  verdict:
+
+  ```console
+  $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
+  import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3)
+    permit
+      policy:  customer-in(200)
+      statements:
+        [0] policy customer-in(200) term customer-routes permit  match: guard route.prefix in customers  set: local_pref 100 -> 200
+          term rpki-guard: route.rpki == invalid => reject [not matched]
+          term customer-routes: route.prefix in customers => set local-pref 200; accept [matched]
+  ```
+
+  Guards render with sets shown by their source name; terms after the
+  deciding one were never evaluated and carry no line. A term that
+  modified without a verdict shows as `... => set med 5; continue`.
+- **`rbgp rib advertised --explain`** (`ExplainAdvertisedRoute`,
+  export): the policy attribution extends to `<chain-ref>:<term>` when
+  the deciding member is `.rpol` — e.g.
+  `export policy "customer-in(200):transit-guard" denied this route`.
+  TOML members render unchanged.
+
+### `rbgp policy stats` — live per-term hit counters
+
+Where `policy test` counts hits over a one-shot dry run, `rbgp policy
+stats` reads the **live** counters of the chains actually installed on
+the daemon: every route evaluated on the export path bumps its matched
+terms' counters (relaxed atomics — no measurable eval cost), and the
+query snapshots them without resetting anything (`SensitiveRead`).
+
+```console
+$ rbgp policy stats --peer 10.0.0.2
+10.0.0.2 export chain — 1204 routes evaluated since install
+  POLICY                           TERM                     HITS
+  customer-in(200)                 rpki-guard               3
+  customer-in(200)                 customer-routes          990
+  bogon-filter                     bogons                   211
+```
+
+- Counters read as **since chain install**: replacing a peer's chain
+  (policy reload / hot-apply / gNMI Set) installs a fresh instance and
+  resets its counters to zero. A session flap does not reset the
+  RIB-side export counters (the chain instance survives).
+- TOML chain members count too; their unnamed statements report by
+  `term_index` (`statement 0`, `statement 1`, ...).
+- V1 surfaces the **export** direction (the RIB manager owns those
+  chains). Import-side counters accumulate identically inside each
+  session but have no read surface yet; `--direction import` says so
+  explicitly rather than guessing.
+- Explain queries and `policy test` dry runs never move these
+  counters — only live route evaluation counts.
+- `--json` emits the rows structurally.
+
 ## Deliberate V1 exclusions
 
 No loops, no user-defined types, no maps (safety is total by

@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`.rpol` explain + live hit counters (ADR-0096 slice 4): the
+  language is now fully explainable through the existing surfaces.**
+  `ExplainImportPolicy` statement traces cover `.rpol` chain members at
+  term granularity: the step names the deciding term and carries one
+  rendered line per evaluated term — `term NAME: GUARD => ACTION
+  [matched|not matched]` — with guards pretty-printed back to `.rpol`
+  surface syntax (sets by their source name; additive proto fields
+  `term` / `term_traces`, rendered by `rbgp policy explain`). Guard
+  evaluation is shared with the live evaluator and the trace is pinned
+  against both `evaluate_with_attribution` and the counting evaluator
+  by an rpol agreement matrix. `ExplainAdvertisedRoute` extends its
+  policy attribution to `<chain-ref>:<term>` when the deciding export
+  member is `.rpol` (TOML members unchanged). New **live per-term hit
+  counters** (ADR-0096 Decision 3.3, the IOS-XR `show pcl` idea):
+  every live evaluation bumps its matched terms' relaxed-atomic
+  counters on the chain instance, surfaced by `rbgp policy stats
+  [--peer ADDR] [--json]` via the new `GetPolicyStats` RPC
+  (`SensitiveRead`). Counters read as since-chain-install and reset
+  when a chain is replaced; explain queries and `policy test` dry runs
+  never move them. V1 reads the export direction (the RIB manager owns
+  those chains — and its distribution passes now share one compiled
+  IR + counter set per installed chain instead of recompiling per
+  pass); import-side counters accumulate but their read surface is a
+  follow-up. See the explain/stats chapter in `docs/rpol-language.md`.
+
 - **`.rpol` policies in the running daemon (ADR-0096 slice 3): config
   references, hot reload, and the `rbgp policy test` live-RIB dry
   run.** `[policy] rpol_files = ["policies/core.rpol"]` compiles every

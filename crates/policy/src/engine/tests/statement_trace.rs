@@ -519,3 +519,216 @@ fn statement_trace_agrees_with_live_evaluation_across_matrix() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// `.rpol` members (ADR-0096): per-term traces + agreement.
+// ---------------------------------------------------------------------
+
+const RPOL: &str = r"
+prefix-set customers { 10.10.0.0/16 ge 24 le 28 }
+
+policy customer-in(peer_lp: u32) {
+    term rpki-guard {
+        if route.rpki == invalid { reject }
+    }
+    term tag {
+        set med 5;
+    }
+    term customer-routes {
+        if route.prefix in customers { set local-pref peer_lp; accept }
+    }
+}
+";
+
+fn rpol_member(lp: u32) -> NamedPolicy {
+    let file = crate::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let mut store = crate::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("customer-in", &[lp], &mut store)
+        .expect("policy exists");
+    NamedPolicy::from_rpol(format!("customer-in({lp})"), std::sync::Arc::new(compiled))
+}
+
+#[test]
+fn rpol_member_traces_terms_with_matched_status_and_merged_mods() {
+    let chain = PolicyChain::from_named(vec![rpol_member(200)]);
+    // A customer route: rpki-guard misses, tag continues, customer-routes decides.
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 10, 3, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Permit);
+    assert_eq!(trace.steps.len(), 1);
+    let step = &trace.steps[0];
+    assert_eq!(step.policy_name.as_deref(), Some("customer-in(200)"));
+    assert_eq!(step.statement_index, Some(2));
+    assert_eq!(step.term_name.as_deref(), Some("customer-routes"));
+    assert_eq!(step.action, PolicyAction::Permit);
+    assert_eq!(
+        step.matched_conditions,
+        vec!["guard route.prefix in customers".to_string()]
+    );
+    // Continue mods merge under the deciding permit, rendered
+    // before -> after against the pre-policy route.
+    assert_eq!(
+        step.modifications,
+        vec![
+            "local_pref 100 -> 200".to_string(),
+            "med 0 -> 5".to_string()
+        ]
+    );
+    assert_eq!(
+        step.term_traces,
+        vec![
+            "term rpki-guard: route.rpki == invalid => reject [not matched]".to_string(),
+            "term tag: true => set med 5; continue [matched]".to_string(),
+            "term customer-routes: route.prefix in customers => set local-pref 200; accept [matched]"
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rpol_deny_term_stops_the_walk_and_claims_no_modifications() {
+    let chain = PolicyChain::from_named(vec![rpol_member(200)]);
+    let mut invalid = plain_ctx(v4_prefix([10, 10, 3, 0], 24));
+    invalid.validation_state = RpkiValidation::Invalid;
+    let trace = explain_chain_statements(Some(&chain), &invalid);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    let step = &trace.steps[0];
+    assert_eq!(step.statement_index, Some(0));
+    assert_eq!(step.term_name.as_deref(), Some("rpki-guard"));
+    assert_eq!(step.action, PolicyAction::Deny);
+    assert!(step.modifications.is_empty(), "a deny contributes nothing");
+    // Terms after the decider were never evaluated: one trace line.
+    assert_eq!(
+        step.term_traces,
+        vec!["term rpki-guard: route.rpki == invalid => reject [matched]".to_string()]
+    );
+}
+
+#[test]
+fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
+    let chain = PolicyChain::from_named(vec![rpol_member(200)]);
+    // Not a customer prefix: rpki-guard and customer-routes miss, tag
+    // continues, the policy's implicit permit default decides.
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([192, 0, 2, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let step = &trace.steps[0];
+    assert_eq!(step.statement_index, None, "fallthrough has no term");
+    assert_eq!(step.term_name, None);
+    assert_eq!(step.action, PolicyAction::Permit);
+    assert!(step.matched_conditions.is_empty());
+    assert_eq!(step.modifications, vec!["med 0 -> 5".to_string()]);
+    assert_eq!(step.term_traces.len(), 3, "every term was evaluated");
+    assert!(step.term_traces[2].ends_with("[not matched]"));
+}
+
+/// The rpol agreement matrix: mixed TOML + rpol chains, contexts that
+/// exercise deny terms, Continue accumulation, and fallthrough.
+fn rpol_agreement_chains() -> Vec<(&'static str, PolicyChain)> {
+    let toml_deny = || {
+        named(
+            "toml-deny",
+            policy(
+                vec![stmt(
+                    Some(v4_entry([192, 0, 2, 0], 24)),
+                    PolicyAction::Deny,
+                    vec![],
+                )],
+                PolicyAction::Permit,
+            ),
+        )
+    };
+    vec![
+        ("rpol_only", PolicyChain::from_named(vec![rpol_member(200)])),
+        (
+            "toml_then_rpol",
+            PolicyChain::from_named(vec![toml_deny(), rpol_member(300)]),
+        ),
+        (
+            "rpol_then_toml",
+            PolicyChain::from_named(vec![rpol_member(200), toml_deny()]),
+        ),
+    ]
+}
+
+fn rpol_agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {
+    let customer = plain_ctx(v4_prefix([10, 10, 3, 0], 24));
+    let mut invalid = plain_ctx(v4_prefix([10, 10, 4, 0], 24));
+    invalid.validation_state = RpkiValidation::Invalid;
+    let toml_blocked = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let fallthrough = plain_ctx(v4_prefix([203, 0, 113, 0], 24));
+    vec![
+        ("customer", customer),
+        ("rpki_invalid", invalid),
+        ("toml_blocked", toml_blocked),
+        ("fallthrough", fallthrough),
+    ]
+}
+
+/// The rpol extension of the agreement pin: over the rpol chain ×
+/// context matrix the trace must reach the live evaluator's terminal
+/// action / policy, its per-policy modifications must reproduce the
+/// live result's accumulated modifications (Continue-merge parity),
+/// and its matched-term view must equal `evaluate_recording_hits`'
+/// counted guards term by term.
+#[test]
+fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
+    for (chain_name, chain) in rpol_agreement_chains() {
+        for (ctx_name, ctx) in rpol_agreement_contexts() {
+            let (live, evaluation) =
+                super::super::evaluate_chain_with_attribution(Some(&chain), &ctx);
+            let trace = explain_chain_statements(Some(&chain), &ctx);
+            assert_eq!(
+                trace.action, live.action,
+                "action diverged for chain={chain_name} ctx={ctx_name}"
+            );
+            let last = trace.steps.last().expect("non-empty chains");
+            assert_eq!(
+                last.policy_name, evaluation.matched_policy,
+                "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
+            );
+
+            // Matched-term parity with the counting evaluator: a term
+            // counted a hit iff its trace line says [matched], and
+            // terms past the trace were never evaluated.
+            let compiled = chain.compiled();
+            let mut hits = compiled.zero_term_hits();
+            let recorded = compiled.evaluate_recording_hits(&ctx, &mut hits);
+            assert_eq!(recorded, live, "recording eval diverged");
+            for step in &trace.steps {
+                if step.term_traces.is_empty() {
+                    continue; // TOML member: no per-term trace.
+                }
+                let policy_hits = &hits[step.policy_index];
+                for (index, line) in step.term_traces.iter().enumerate() {
+                    let expected = u64::from(line.ends_with("[matched]"));
+                    assert_eq!(
+                        policy_hits[index], expected,
+                        "term hit diverged for chain={chain_name} ctx={ctx_name} \
+                         policy={:?} line={line:?}",
+                        step.policy_name
+                    );
+                }
+                for (index, hit) in policy_hits.iter().enumerate().skip(step.term_traces.len()) {
+                    assert_eq!(
+                        *hit, 0,
+                        "unevaluated term counted a hit for chain={chain_name} \
+                         ctx={ctx_name} term_index={index}"
+                    );
+                }
+                // The deciding term (when there is one) is the last
+                // matched line — the matched-term invariant.
+                if let Some(decider) = step.statement_index {
+                    assert!(
+                        step.term_traces[decider].ends_with("[matched]"),
+                        "decider not matched for chain={chain_name} ctx={ctx_name}"
+                    );
+                    assert_eq!(
+                        decider + 1,
+                        step.term_traces.len(),
+                        "walk continued past the decider for chain={chain_name} ctx={ctx_name}"
+                    );
+                }
+            }
+        }
+    }
+}

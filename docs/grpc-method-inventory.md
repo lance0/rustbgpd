@@ -88,7 +88,7 @@ shape itself does not raise the tier.
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (20 RPCs)
+### PolicyService (21 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -111,6 +111,7 @@ shape itself does not raise the tier.
 | `ClearNeighborImportChain` | `mutating` | Per-neighbor. |
 | `ExplainImportPolicy` | `sensitive_read` | ADR-0073. Reads the per-session import-decision cache to explain why a prefix was permitted / denied / withdrawn on import. Side-effect-free; no RIB or counter mutation. |
 | `TestPolicy` | `sensitive_read` | ADR-0096. Compiles a submitted .rpol policy server-side and dry-runs it read-only over a live-RIB snapshot (counts, per-term hits, before/after diffs). Side-effect-free; no RIB, session, or counter mutation. |
+| `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed export chains (since chain install; reset on chain replace). Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
 | `ClearNeighborExportChain` | `mutating` | Per-neighbor. |
 
 ### PeerGroupService (6 RPCs)
@@ -215,13 +216,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 55 | 56.7% |
-| `mutating` | 19 | 19.6% |
-| `operator_only` | 23 | 23.7% |
-| **Total** | **97** | **100%** |
+| `sensitive_read` | 56 | 57.1% |
+| `mutating` | 19 | 19.4% |
+| `operator_only` | 23 | 23.5% |
+| **Total** | **98** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 97
-total is 93 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 98
+total is 94 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

@@ -775,7 +775,9 @@ impl RibManager {
         let mut rtc_announce = Vec::new();
         let mut rtc_withdraw = Vec::new();
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
-        let export_pol = self.export_policy_for(peer).cloned();
+        let export_pol = self
+            .export_policy_for(peer)
+            .map(rustbgpd_policy::PolicyChain::share);
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
         let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());

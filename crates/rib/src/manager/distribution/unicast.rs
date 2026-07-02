@@ -255,11 +255,37 @@ impl RibManager {
         };
         // Explain is a one-shot operator query path: enrich the deny /
         // permit reason with the terminal-decision policy name but do
-        // NOT increment bgp_policy_routes_total here — the actual
-        // distribution path counts each route once, and double-counting
-        // explain calls would skew the metric.
-        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
-        let policy_label = evaluation.matched_policy.as_deref().unwrap_or("inline");
+        // NOT increment bgp_policy_routes_total or the ADR-0096
+        // per-term hit counters here — the actual distribution path
+        // counts each route once, and double-counting explain calls
+        // would skew both metrics (hence the IR-level non-counting
+        // evaluation instead of `PolicyChain::evaluate_with_attribution`).
+        let (result, evaluation) = match export_pol {
+            Some(chain) => chain.compiled().evaluate_with_attribution(&ctx),
+            None => (
+                rustbgpd_policy::PolicyResult::permit(),
+                rustbgpd_policy::PolicyEvaluation {
+                    action: PolicyAction::Permit,
+                    matched_policy: None,
+                },
+            ),
+        };
+        // When the deciding chain member is an .rpol policy, extend
+        // the label to `<chain-ref>:<term>` via the statement trace
+        // (explain-only re-walk, pinned to agree with the evaluation
+        // by the policy crate's agreement tests). TOML members carry
+        // no term name and render unchanged.
+        let term_suffix = rustbgpd_policy::explain_chain_statements(export_pol, &ctx)
+            .steps
+            .last()
+            .filter(|step| step.policy_name == evaluation.matched_policy)
+            .and_then(|step| step.term_name.as_deref())
+            .map(|term| format!(":{term}"))
+            .unwrap_or_default();
+        let policy_label = format!(
+            "{}{term_suffix}",
+            evaluation.matched_policy.as_deref().unwrap_or("inline")
+        );
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
             explain.reasons.push(ExplainReason {
