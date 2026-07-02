@@ -170,6 +170,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
@@ -196,6 +197,21 @@ impl RibManager {
                 }
                 continue;
             };
+
+            // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+            // suppressed. See `llgr_stale_export_suppressed`.
+            if super::llgr_stale_export_suppressed(
+                best.is_llgr_stale,
+                best.communities(),
+                evpn_family,
+                target_is_ebgp,
+                llgr,
+            ) {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
 
             // Split horizon: don't send an EVPN route back to its source peer.
             // Parallel to the unicast guard earlier in this module. Without
@@ -395,6 +411,7 @@ impl RibManager {
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
             let sendable = self.peer_sendable_families.get(&peer).cloned();
+            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             if !sendable.as_ref().is_some_and(|f| {
                 f.contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn))
             }) {
@@ -430,6 +447,7 @@ impl RibManager {
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,

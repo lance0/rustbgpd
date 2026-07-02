@@ -109,17 +109,51 @@ impl PeerSession {
                     .any(|f| (f.afi, f.safi) == family)
         })
     }
-    fn strip_llgr_stale_if_needed(&self, attrs: &mut Vec<PathAttribute>, family: (Afi, Safi)) {
-        if self.peer_accepts_llgr_stale(family) {
+    /// RFC 9494 §4.6 outbound form for an LLGR-stale route toward a peer
+    /// that did NOT advertise the LLGR capability for the family. The RIB
+    /// staging gate suppresses such routes toward eBGP peers entirely, so
+    /// the only LLGR-stale routes that legitimately arrive here for a
+    /// non-LLGR peer are iBGP — permitted by the §4.6 intra-AS exception
+    /// only with `NO_EXPORT` attached and `LOCAL_PREF` set to zero. The
+    /// `LLGR_STALE` community itself "MUST NOT be removed when the route
+    /// is further advertised", so it rides through unchanged (toward
+    /// LLGR peers too). This lives beside the other per-peer attribute
+    /// rewrites (eBGP `LOCAL_PREF` strip, `ORIGINATOR_ID`/`CLUSTER_LIST`,
+    /// `GShut` attach) rather than at RIB staging.
+    fn apply_llgr_stale_export_form(
+        &self,
+        attrs: &mut Vec<PathAttribute>,
+        family: (Afi, Safi),
+        is_ebgp: bool,
+    ) {
+        if is_ebgp || self.peer_accepts_llgr_stale(family) {
             return;
         }
-        attrs.retain_mut(|attr| match attr {
-            PathAttribute::Communities(comms) => {
-                comms.retain(|&c| c != rustbgpd_wire::COMMUNITY_LLGR_STALE);
-                !comms.is_empty()
-            }
-            _ => true,
+        let is_llgr_stale = attrs.iter().any(|attr| {
+            matches!(attr, PathAttribute::Communities(comms)
+                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
         });
+        if !is_llgr_stale {
+            return;
+        }
+        let mut has_local_pref = false;
+        for attr in attrs.iter_mut() {
+            match attr {
+                PathAttribute::LocalPref(local_pref) => {
+                    *local_pref = 0;
+                    has_local_pref = true;
+                }
+                PathAttribute::Communities(comms)
+                    if !comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT) =>
+                {
+                    comms.push(rustbgpd_wire::COMMUNITY_NO_EXPORT);
+                }
+                _ => {}
+            }
+        }
+        if !has_local_pref {
+            attrs.push(PathAttribute::LocalPref(0));
+        }
     }
     /// RFC 8326 initiator: when `advertise_graceful_shutdown` is set
     /// (via gRPC `SetGracefulShutdown`), ensure every outbound update
@@ -1912,7 +1946,7 @@ impl PeerSession {
             Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
         };
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, family);
+        self.apply_llgr_stale_export_form(&mut attrs, family, is_ebgp);
         attrs
     }
     /// Prepare path attributes for outbound `FlowSpec` advertisement.
@@ -2010,7 +2044,7 @@ impl PeerSession {
             }
         }
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, (route.afi, Safi::FlowSpec));
+        self.apply_llgr_stale_export_form(&mut attrs, (route.afi, Safi::FlowSpec), is_ebgp);
         attrs
     }
     /// Prepare outbound attributes for a reflected EVPN route. Mirrors
@@ -2108,7 +2142,7 @@ impl PeerSession {
             }
         }
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, (Afi::L2Vpn, Safi::Evpn));
+        self.apply_llgr_stale_export_form(&mut attrs, (Afi::L2Vpn, Safi::Evpn), is_ebgp);
         attrs
     }
     /// Prepare outbound attributes for a reflected BGP-LS route. Mirrors
@@ -2202,7 +2236,7 @@ impl PeerSession {
             }
         }
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, route.family.to_afi_safi());
+        self.apply_llgr_stale_export_form(&mut attrs, route.family.to_afi_safi(), is_ebgp);
         attrs
     }
 
@@ -2303,7 +2337,7 @@ impl PeerSession {
             }
         }
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, route.afi_safi());
+        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
         attrs
     }
 
@@ -2399,7 +2433,7 @@ impl PeerSession {
             }
         }
         self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.strip_llgr_stale_if_needed(&mut attrs, route.afi_safi());
+        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
         attrs
     }
 }

@@ -361,6 +361,13 @@ pub enum RibUpdate {
         /// entries (RFC 5291/5292). Initial advertisement for these families is
         /// gated until the peer sends a ROUTE-REFRESH (RFC 5291 §6).
         negotiated_orf_recv: Vec<(Afi, Safi)>,
+        /// Families for which the peer advertised the Long-Lived Graceful
+        /// Restart capability (RFC 9494). LLGR-stale routes must not be
+        /// advertised to an eBGP peer whose family is absent from this
+        /// list (RFC 9494 §4.4 export restriction); iBGP peers take the
+        /// §4.6 `NO_EXPORT` + `LOCAL_PREF`-0 form instead, applied in
+        /// transport.
+        negotiated_llgr_families: Vec<(Afi, Safi)>,
     },
     /// Peer pushed Address-Prefix ORF entries via ROUTE-REFRESH (RFC 5291).
     /// Install/update the per-peer outbound prefix filter for `(afi, safi)` and

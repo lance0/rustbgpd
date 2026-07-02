@@ -407,6 +407,7 @@ impl RibManager {
         self.adj_ribs_out.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
+        self.peer_advertised_llgr_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
         // The ORR vantage binding is per-registration: dropping the last
@@ -476,6 +477,7 @@ impl RibManager {
         add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         add_path_send_max: u32,
         negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
+        negotiated_llgr_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
     ) {
         // Two live sessions for one peer address can overlap during the
         // RFC 4271 §6.8 collision window. A `PeerUp` that finds a
@@ -523,6 +525,7 @@ impl RibManager {
             add_path_send_families,
             add_path_send_max,
             negotiated_orf_recv,
+            negotiated_llgr_families,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
@@ -569,6 +572,7 @@ impl RibManager {
         let add_path_send_families = record.add_path_send_families.clone();
         let add_path_send_max = record.add_path_send_max;
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
+        let negotiated_llgr_families = record.negotiated_llgr_families.clone();
 
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
@@ -650,6 +654,8 @@ impl RibManager {
         self.peer_export_policies
             .insert(peer, export_policy.or_else(|| self.export_policy.clone()));
         self.peer_sendable_families.insert(peer, sendable_families);
+        self.peer_advertised_llgr_families
+            .insert(peer, negotiated_llgr_families);
         self.peer_is_ebgp.insert(peer, is_ebgp);
         self.peer_is_rr_client.insert(peer, route_reflector_client);
         if let Some(vantage) = orr_vantage {
@@ -758,6 +764,7 @@ impl RibManager {
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
         let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
         // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
         // for families still awaiting the peer's first ROUTE-REFRESH. For a
@@ -830,6 +837,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
@@ -862,6 +870,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
@@ -890,6 +899,7 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
+                    llgr.as_ref(),
                     export_pol.as_ref(),
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
@@ -925,6 +935,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
@@ -956,6 +967,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
@@ -984,6 +996,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
@@ -1026,6 +1039,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 rtc_filter.as_ref(),
                 orr_ctx,
                 peer_add_path_send_max,
@@ -1061,6 +1075,7 @@ impl RibManager {
                 target_is_rr_client,
                 cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,

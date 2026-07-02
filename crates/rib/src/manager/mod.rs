@@ -97,6 +97,12 @@ pub struct RibManager {
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    /// Families for which each registered outbound peer advertised the
+    /// Long-Lived Graceful Restart capability (RFC 9494). Gates the
+    /// export of LLGR-stale routes: absent family + eBGP target =
+    /// suppress (§4.4); absent family + iBGP target = advertise with
+    /// `NO_EXPORT` and `LOCAL_PREF` 0, rewritten in transport (§4.6).
+    peer_advertised_llgr_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
     peer_is_ebgp: HashMap<IpAddr, bool>,
     /// Whether each registered outbound peer is a route reflector client.
@@ -302,6 +308,7 @@ pub(super) struct LiveSessionRecord {
     add_path_send_families: Vec<(Afi, Safi)>,
     add_path_send_max: u32,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
+    negotiated_llgr_families: Vec<(Afi, Safi)>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -555,6 +562,7 @@ impl RibManager {
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
+            peer_advertised_llgr_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
             peer_orr_vantage: HashMap::new(),
@@ -788,6 +796,7 @@ impl RibManager {
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
+                negotiated_llgr_families,
             } => self.handle_peer_up(
                 peer,
                 session_id,
@@ -802,6 +811,7 @@ impl RibManager {
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
+                negotiated_llgr_families,
             ),
             RibUpdate::PeerOrfUpdate {
                 peer,

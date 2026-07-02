@@ -494,6 +494,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
@@ -546,6 +547,18 @@ impl RibManager {
                     target_is_rr_client,
                     cluster_id,
                     peer_is_rr_client,
+                ) {
+                    return false;
+                }
+                // RFC 9494 §4.4: each staged candidate is gated
+                // individually — a stale candidate must not occupy an
+                // Add-Path rank toward a non-LLGR eBGP peer.
+                if super::llgr_stale_export_suppressed(
+                    route.is_llgr_stale,
+                    route.communities(),
+                    family,
+                    target_is_ebgp,
+                    llgr,
                 ) {
                     return false;
                 }
@@ -676,6 +689,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         metrics: &BgpMetrics,
@@ -721,6 +735,21 @@ impl RibManager {
         // Sendable family check
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // RFC 9494 §4.4: LLGR-stale best toward a non-LLGR eBGP peer is
+        // suppressed (withdraw-if-present). See `llgr_stale_export_suppressed`.
+        if super::llgr_stale_export_suppressed(
+            best.is_llgr_stale,
+            best.communities(),
+            family,
+            target_is_ebgp,
+            llgr,
+        ) {
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
@@ -858,6 +887,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         metrics: &BgpMetrics,
@@ -920,6 +950,23 @@ impl RibManager {
             }
             return;
         };
+
+        // RFC 9494 §4.4: a per-vantage winner can only be LLGR-stale when
+        // every surviving candidate is (stale ranks below fresh in the
+        // comparator), so gating the winner suppresses exactly the
+        // stale-only case toward a non-LLGR eBGP peer.
+        if super::llgr_stale_export_suppressed(
+            best.is_llgr_stale,
+            best.communities(),
+            family,
+            target_is_ebgp,
+            llgr,
+        ) {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
 
         // Export policy check — same tail as `distribute_single_best_prefix`.
         let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {

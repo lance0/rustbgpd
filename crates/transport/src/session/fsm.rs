@@ -461,6 +461,17 @@ impl PeerSession {
                                 .as_ref()
                                 .map(|n| n.negotiated_orf_recv.clone())
                                 .unwrap_or_default(),
+                            negotiated_llgr_families: self
+                                .negotiated
+                                .as_ref()
+                                .filter(|n| n.peer_llgr_capable)
+                                .map(|n| {
+                                    n.peer_llgr_families
+                                        .iter()
+                                        .map(|f| (f.afi, f.safi))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
                         })
                         .await;
                     let _ = self

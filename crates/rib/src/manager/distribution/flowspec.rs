@@ -178,6 +178,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
@@ -190,6 +191,21 @@ impl RibManager {
             if let Some(best) = loc_rib.get_flowspec(rule) {
                 let fs_family = (best.afi, Safi::FlowSpec);
                 if !sendable.is_some_and(|f| f.contains(&fs_family)) {
+                    if rib_out.get_flowspec(rule).is_some() {
+                        fs_withdraw.push(rule.clone());
+                    }
+                    continue;
+                }
+
+                // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+                // suppressed. See `llgr_stale_export_suppressed`.
+                if super::llgr_stale_export_suppressed(
+                    best.is_llgr_stale,
+                    best.communities(),
+                    fs_family,
+                    target_is_ebgp,
+                    llgr,
+                ) {
                     if rib_out.get_flowspec(rule).is_some() {
                         fs_withdraw.push(rule.clone());
                     }
@@ -308,6 +324,7 @@ impl RibManager {
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
             let sendable = self.peer_sendable_families.get(&peer).cloned();
+            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             let has_fs = sendable.as_ref().is_some_and(|families| {
                 families.contains(&(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec))
                     || families.contains(&(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec))
@@ -345,6 +362,7 @@ impl RibManager {
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),
+                llgr.as_ref(),
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
