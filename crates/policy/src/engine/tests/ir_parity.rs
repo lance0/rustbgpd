@@ -538,6 +538,7 @@ fn named(name: &str, policy: Policy) -> NamedPolicy {
     NamedPolicy {
         name: Some(name.to_string()),
         policy,
+        rpol: None,
     }
 }
 

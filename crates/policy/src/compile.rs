@@ -23,19 +23,35 @@ use crate::engine::{AsPathRegex, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
 };
-use crate::sets::{CommunitySet, SetStore};
+use crate::sets::{CommunitySet, PrefixSet, SetStore};
 
 /// Compile a TOML policy chain into the IR, interning match sets and
 /// regexes through `store` (identical set data across policies — or
 /// across chains compiled through the same store — shares one `Arc`'d
 /// structure).
+///
+/// `.rpol`-backed chain members (`NamedPolicy.rpol`) arrive
+/// pre-compiled from the config resolver; they are spliced into the
+/// combined chain with their set/regex ids remapped into the chain's
+/// merged tables (`Arc` identity dedupes tables shared across
+/// members compiled from the same file).
 #[must_use]
 pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain {
     let mut sets = ChainSets::default();
-    let policies = chain
-        .policies
-        .iter()
-        .map(|named| CompiledPolicy {
+    let mut policies = Vec::with_capacity(chain.policies.len());
+    for named in &chain.policies {
+        if let Some(rpol) = named.rpol.as_deref() {
+            for policy in &rpol.policies {
+                let mut spliced = splice_policy(policy, rpol, &mut sets);
+                // Attribute to the configured chain-reference name
+                // (e.g. `"customer-in(200)"`), matching how TOML
+                // members are labeled for metrics / explain.
+                spliced.name.clone_from(&named.name);
+                policies.push(spliced);
+            }
+            continue;
+        }
+        policies.push(CompiledPolicy {
             name: named.name.clone(),
             terms: named
                 .policy
@@ -45,13 +61,68 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
                 .collect(),
             default_action: named.policy.default_action,
             source: PolicySource::Toml,
-        })
-        .collect();
+        });
+    }
     CompiledChain {
         policies,
-        prefix_sets: Vec::new(),
+        prefix_sets: sets.prefix_sets,
         community_sets: sets.community_sets,
         as_path_regexes: sets.as_path_regexes,
+    }
+}
+
+/// Copy one pre-compiled `.rpol` policy into the combined chain,
+/// rewriting every `SetId` / `RegexId` from the donor chain's tables
+/// into the merged chain tables.
+fn splice_policy(
+    policy: &CompiledPolicy,
+    donor: &CompiledChain,
+    sets: &mut ChainSets,
+) -> CompiledPolicy {
+    let terms = policy
+        .terms
+        .iter()
+        .map(|term| Term {
+            name: term.name.clone(),
+            guard: remap_expr(&term.guard, donor, sets),
+            action: term.action.clone(),
+        })
+        .collect();
+    CompiledPolicy {
+        name: policy.name.clone(),
+        terms,
+        default_action: policy.default_action,
+        source: policy.source,
+    }
+}
+
+/// Rewrite set/regex table ids from `donor`'s tables into `sets`.
+/// Structure and semantics are otherwise preserved verbatim.
+fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> MatchExpr {
+    match expr {
+        MatchExpr::PrefixInSet(id) => {
+            MatchExpr::PrefixInSet(sets.prefix_set_id(donor.prefix_sets[id.0 as usize].clone()))
+        }
+        MatchExpr::CommunityInSet(id) => MatchExpr::CommunityInSet(
+            sets.community_set_id(donor.community_sets[id.0 as usize].clone()),
+        ),
+        MatchExpr::AsPathMatches(id) => {
+            MatchExpr::AsPathMatches(sets.regex_id(donor.as_path_regexes[id.0 as usize].clone()))
+        }
+        MatchExpr::And(children) => MatchExpr::And(
+            children
+                .iter()
+                .map(|child| remap_expr(child, donor, sets))
+                .collect(),
+        ),
+        MatchExpr::Or(children) => MatchExpr::Or(
+            children
+                .iter()
+                .map(|child| remap_expr(child, donor, sets))
+                .collect(),
+        ),
+        MatchExpr::Not(inner) => MatchExpr::Not(Box::new(remap_expr(inner, donor, sets))),
+        other => other.clone(),
     }
 }
 
@@ -151,11 +222,24 @@ fn compile_statement(
 /// table).
 #[derive(Default)]
 struct ChainSets {
+    prefix_sets: Vec<Arc<PrefixSet>>,
     community_sets: Vec<Arc<CommunitySet>>,
     as_path_regexes: Vec<Arc<AsPathRegex>>,
 }
 
 impl ChainSets {
+    fn prefix_set_id(&mut self, set: Arc<PrefixSet>) -> SetId {
+        let index = self
+            .prefix_sets
+            .iter()
+            .position(|existing| Arc::ptr_eq(existing, &set))
+            .unwrap_or_else(|| {
+                self.prefix_sets.push(set);
+                self.prefix_sets.len() - 1
+            });
+        SetId(u32::try_from(index).expect("set table fits u32"))
+    }
+
     fn community_set_id(&mut self, set: Arc<CommunitySet>) -> SetId {
         let index = self
             .community_sets
@@ -178,5 +262,208 @@ impl ChainSets {
                 self.as_path_regexes.len() - 1
             });
         RegexId(u32::try_from(index).expect("regex table fits u32"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    use rustbgpd_wire::{Ipv4Prefix, Prefix};
+
+    use crate::engine::{
+        NamedPolicy, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
+        RouteModifications,
+    };
+    use crate::ir::{MatchExpr, PolicySource};
+    use crate::rpol::RpolFile;
+    use crate::sets::SetStore;
+
+    const RPOL: &str = r#"
+prefix-set customers { 10.10.0.0/16 ge 24 le 28 }
+
+policy customer-in(peer_lp: u32) {
+    term customer-routes {
+        if route.prefix in customers { set local-pref peer_lp; accept }
+    }
+    term transit-guard {
+        if route.as-path matches "_65010_" { reject }
+    }
+}
+
+policy bogon-filter {
+    term bogons { if route.prefix == 127.0.0.0/8 { reject } }
+}
+"#;
+
+    fn ctx(prefix: Prefix, as_path_str: &str) -> RouteContext<'_> {
+        RouteContext {
+            prefix: Some(prefix),
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str,
+            as_path_len: 1,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        }
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> Prefix {
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(a, b, c, d), len))
+    }
+
+    /// A TOML deny statement for 192.0.2.0/24, to mix into the chain.
+    fn toml_deny_policy() -> NamedPolicy {
+        NamedPolicy {
+            name: Some("toml-deny".to_string()),
+            policy: Policy {
+                entries: vec![PolicyStatement {
+                    prefix: Some(v4(192, 0, 2, 0, 24)),
+                    ge: None,
+                    le: None,
+                    action: PolicyAction::Deny,
+                    match_community: vec![],
+                    match_as_path: None,
+                    match_neighbor_set: None,
+                    match_route_type: None,
+                    match_evpn_route_type: None,
+                    match_rpki_validation: None,
+                    match_aspa_validation: None,
+                    match_as_path_length_ge: None,
+                    match_as_path_length_le: None,
+                    match_local_pref_ge: None,
+                    match_local_pref_le: None,
+                    match_med_ge: None,
+                    match_med_le: None,
+                    match_next_hop: None,
+                    modifications: RouteModifications::default(),
+                }],
+                default_action: PolicyAction::Permit,
+            },
+            rpol: None,
+        }
+    }
+
+    /// Mixed TOML + monomorphized-rpol chain: the rpol member splices
+    /// pre-compiled with its set/regex ids remapped into the merged
+    /// chain tables, and evaluates with its instantiation argument.
+    #[test]
+    fn chain_splices_rpol_members_with_id_remap() {
+        let file = RpolFile::parse(RPOL).expect("clean rpol");
+        let mut store = SetStore::new();
+        let customer = file
+            .compile_policy("customer-in", &[200], &mut store)
+            .expect("policy exists");
+        let bogon = file
+            .compile_policy("bogon-filter", &[], &mut store)
+            .expect("policy exists");
+
+        let chain = PolicyChain::from_named(vec![
+            toml_deny_policy(),
+            NamedPolicy::from_rpol("customer-in(200)".to_string(), Arc::new(customer)),
+            NamedPolicy::from_rpol("bogon-filter".to_string(), Arc::new(bogon)),
+        ]);
+        let compiled = chain.compiled();
+        assert_eq!(compiled.policies.len(), 3);
+        assert_eq!(compiled.policies[0].source, PolicySource::Toml);
+        assert_eq!(compiled.policies[1].source, PolicySource::Rpol);
+        // Attribution uses the configured chain-reference name.
+        assert_eq!(
+            compiled.policies[1].name.as_deref(),
+            Some("customer-in(200)")
+        );
+        // Both rpol members came from one file compiled through one
+        // store: the (single) prefix set dedupes by Arc identity.
+        assert_eq!(compiled.prefix_sets.len(), 1);
+        assert_eq!(compiled.as_path_regexes.len(), 1);
+        // The remapped PrefixInSet id must index the merged table.
+        assert!(
+            compiled.policies[1].terms[0]
+                .guard
+                .any_node(&|expr| matches!(expr, MatchExpr::PrefixInSet(id) if id.0 == 0))
+        );
+
+        // Evaluation end-to-end through the merged chain:
+        // customer prefix → permit with the monomorphized local-pref.
+        let (result, eval) = chain.evaluate_with_attribution(&ctx(v4(10, 10, 3, 0, 24), ""));
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(result.modifications.set_local_pref, Some(200));
+        assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
+        // Transit AS in the path → the rpol regex guard denies.
+        let (result, eval) =
+            chain.evaluate_with_attribution(&ctx(v4(203, 0, 113, 0, 24), "65010 65020"));
+        assert_eq!(result.action, PolicyAction::Deny);
+        assert_eq!(eval.matched_policy.as_deref(), Some("customer-in(200)"));
+        // TOML member still denies its prefix first.
+        let (result, eval) = chain.evaluate_with_attribution(&ctx(v4(192, 0, 2, 0, 24), ""));
+        assert_eq!(result.action, PolicyAction::Deny);
+        assert_eq!(eval.matched_policy.as_deref(), Some("toml-deny"));
+    }
+
+    /// Chain identity (the ADR-0076 planner diff) is compiled content:
+    /// same source twice → equal; different instantiation or edited
+    /// source → unequal.
+    #[test]
+    fn rpol_member_partial_eq_is_compiled_content() {
+        let member = |source: &str, lp: u32| {
+            let file = RpolFile::parse(source).expect("clean rpol");
+            let mut store = SetStore::new();
+            NamedPolicy::from_rpol(
+                format!("customer-in({lp})"),
+                Arc::new(
+                    file.compile_policy("customer-in", &[lp], &mut store)
+                        .expect("policy exists"),
+                ),
+            )
+        };
+        assert_eq!(member(RPOL, 200), member(RPOL, 200));
+        assert_ne!(member(RPOL, 200), member(RPOL, 300));
+        let edited = RPOL.replace("ge 24 le 28", "ge 24 le 32");
+        assert_ne!(member(RPOL, 200), member(&edited, 200));
+    }
+
+    /// `requires_*` analyses see spliced rpol guards.
+    #[test]
+    fn requires_analyses_cover_rpol_members() {
+        let file = RpolFile::parse(RPOL).expect("clean rpol");
+        let mut store = SetStore::new();
+        let customer = file
+            .compile_policy("customer-in", &[200], &mut store)
+            .expect("policy exists");
+        let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "customer-in(200)".to_string(),
+            Arc::new(customer),
+        )]);
+        assert!(chain.requires_as_path_string());
+        assert!(!chain.requires_rpki_validation());
+    }
+
+    /// An rpol member's placeholder `policy` never reaches evaluation:
+    /// a Deny-defaulted placeholder must not leak a deny.
+    #[test]
+    fn rpol_member_placeholder_policy_is_ignored() {
+        let file = RpolFile::parse(RPOL).expect("clean rpol");
+        let mut store = SetStore::new();
+        let bogon = file
+            .compile_policy("bogon-filter", &[], &mut store)
+            .expect("policy exists");
+        let mut member = NamedPolicy::from_rpol("bogon-filter".to_string(), Arc::new(bogon));
+        member.policy = Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        };
+        let chain = PolicyChain::from_named(vec![member]);
+        let (result, _) = chain.evaluate_with_attribution(&ctx(v4(10, 0, 0, 0, 24), ""));
+        assert_eq!(result.action, PolicyAction::Permit);
     }
 }

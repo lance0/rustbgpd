@@ -161,10 +161,18 @@ pub(crate) async fn runtime_config_snapshot(
         .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
         .await
         .map_err(|e| format!("send to peer manager failed: {e}"))?;
-    let snapshot_toml = reply_rx
+    let snapshot = reply_rx
         .await
         .map_err(|e| format!("peer manager dropped runtime snapshot reply: {e}"))??;
-    Config::load_toml_with_diagnostics(&snapshot_toml, "runtime config snapshot")
+    let mut config = Config::load_toml_with_diagnostics(&snapshot.toml, "runtime config snapshot")?;
+    // Overlay the LIVE compiled `.rpol` registry (ADR-0096): loading
+    // the TOML recompiled the `.rpol` files from disk, which would
+    // mask exactly the disk edits a reload diff must detect (both
+    // sides would see the new content). The registry the daemon is
+    // actually running is the one the snapshot reply carries.
+    config.policy.rpol_files = snapshot.rpol_files;
+    config.policy.rpol = snapshot.rpol;
+    Ok(config)
 }
 
 fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapshot> {
@@ -687,6 +695,16 @@ pub(crate) async fn reload_config(
     // prior state" to "matching live state", which is the practical
     // step short of true rollback.
     let mut working_config = current.clone();
+    // `current` came from the runtime snapshot round-trip
+    // (`load_toml_with_diagnostics`), which never carries a
+    // `file_path`. The advanced in-memory config main.rs keeps after
+    // this reload must still know where the config file lives, or the
+    // NEXT SIGHUP reloads from an empty path and fails ("failed to
+    // read : No such file or directory"). Stamp it from the
+    // just-loaded desired config (which was read from `config_path`).
+    working_config
+        .file_path
+        .clone_from(&desired_config.file_path);
     // EVPN runtime edits are applied before the staged peer-manager/FIB
     // sequence. Carry their accepted-or-pinned state into partial snapshots
     // returned by halt_partial paths.
@@ -752,6 +770,54 @@ pub(crate) async fn reload_config(
                     error: "peer manager unavailable while syncing explain snapshot".to_string(),
                 },
             );
+        }
+    }
+
+    // ADR-0096: sync the compiled `.rpol` registry BEFORE any chain /
+    // neighbor / peer-group step below resolves policies — those
+    // resolve inside the peer manager against its `current_config`,
+    // which must already carry the new registry for chains that
+    // reference (new or edited) rpol policies. The command itself
+    // re-resolves every live peer's chains and Route-Refreshes the
+    // materially changed ones, so an rpol-content-only reload is fully
+    // applied by this single step.
+    if policy_diff.rpol_changed {
+        working_config
+            .policy
+            .rpol_files
+            .clone_from(&new_config.policy.rpol_files);
+        working_config.policy.rpol = new_config.policy.rpol.clone();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let send_failed = peer_mgr_tx
+            .send(PeerManagerCommand::SyncRpolPolicies {
+                rpol_files: new_config.policy.rpol_files.clone(),
+                rpol: new_config.policy.rpol.clone(),
+                reply: ack_tx,
+            })
+            .await
+            .is_err();
+        let result = if send_failed {
+            Err("peer manager unavailable while syncing rpol policies".to_string())
+        } else {
+            match ack_rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("peer manager dropped rpol sync reply".to_string()),
+            }
+        };
+        match result {
+            Ok(()) => info!("reload: rpol policy registry synced"),
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    &desired_config,
+                    ReloadStepFailure {
+                        bucket: "policy.rpol.sync",
+                        target: "[policy] rpol_files".to_string(),
+                        error,
+                    },
+                );
+            }
         }
     }
 
@@ -3536,6 +3602,9 @@ hold_time = 90
             } => {
                 format!("SyncExplainConfig(enabled={enabled},cache_size={cache_size})")
             }
+            PeerManagerCommand::SyncRpolPolicies { rpol, .. } => {
+                format!("SyncRpolPolicies({})", rpol.policies.len())
+            }
             PeerManagerCommand::SetFibTablesSnapshot { tables, .. } => {
                 format!("SetFibTablesSnapshot({})", tables.len())
             }
@@ -3576,7 +3645,8 @@ hold_time = 90
                     | PeerManagerCommand::SetGlobalImportChain { reply, .. }
                     | PeerManagerCommand::SetGlobalExportChain { reply, .. }
                     | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                    | PeerManagerCommand::ClearGlobalExportChain { reply }
+                    | PeerManagerCommand::SyncRpolPolicies { reply, .. } => {
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::SoftResetIn { reply, .. } => {
@@ -3609,6 +3679,94 @@ hold_time = 90
         let tags = mock.await.unwrap();
         std::fs::remove_file(&path).ok();
         (returned, tags)
+    }
+
+    /// ADR-0096: an rpol-content-only reload sends `SyncRpolPolicies`
+    /// (which re-resolves live chains in the manager) and adopts the
+    /// new registry into the returned snapshot; the TOML itself is
+    /// byte-identical, so no other command fires.
+    #[tokio::test]
+    async fn reload_rpol_content_change_syncs_registry() {
+        let rpol_path = unique_temp_path("reload-rpol-file");
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 150; accept } }",
+        )
+        .unwrap();
+        let toml = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\nimport_chain = [\"edge-in\"]\n",
+            baseline_toml(),
+            rpol_path.to_str().unwrap(),
+        );
+
+        let path = unique_temp_path("reload-rpol-config");
+        std::fs::write(&path, &toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        // Edit ONLY the .rpol file; the TOML is unchanged.
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 250; accept } }",
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
+                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            tags
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await;
+        drop(peer_mgr_tx);
+        let tags = mock.await.unwrap();
+        assert_eq!(tags, vec!["SyncRpolPolicies(1)".to_string()]);
+
+        // The returned snapshot resolves chains against the NEW
+        // compiled registry: the edited local-pref value evaluates.
+        let reloaded = returned.expect("reload completes");
+        let chain = reloaded
+            .import_chain()
+            .expect("chain resolves")
+            .expect("chain configured");
+        let ctx = rustbgpd_policy::RouteContext {
+            prefix: None,
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str: "",
+            as_path_len: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        };
+        let result = chain.evaluate(&ctx);
+        assert_eq!(result.modifications.set_local_pref, Some(250));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&rpol_path).ok();
     }
 
     fn baseline_toml() -> &'static str {

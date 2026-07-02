@@ -524,6 +524,19 @@ pub struct ResolvedPeerPolicy {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// Reply payload of [`PeerManagerCommand::RuntimeConfigSnapshot`]: the
+/// normalized runtime TOML plus the live compiled `.rpol` registry
+/// (which the TOML deliberately excludes — see the command docs).
+#[derive(Debug, Clone)]
+pub struct RuntimeConfigSnapshotReply {
+    /// Normalized TOML for the current runtime snapshot.
+    pub toml: String,
+    /// Live `[policy] rpol_files` list (absolute paths).
+    pub rpol_files: Vec<String>,
+    /// Live compiled `.rpol` policy registry.
+    pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -641,9 +654,15 @@ pub enum PeerManagerCommand {
     /// coordinator so reload diffing starts from the latest transaction-updated
     /// peer-manager snapshot, not from main.rs' process-local startup/reload
     /// copy.
+    ///
+    /// The reply also carries the LIVE compiled `.rpol` registry
+    /// (ADR-0096): the registry is derived state excluded from the
+    /// TOML, and re-loading the TOML would recompile the `.rpol` files
+    /// from disk — masking exactly the disk edits a SIGHUP diff must
+    /// detect. Callers overlay it onto the re-loaded snapshot config.
     RuntimeConfigSnapshot {
-        /// Reply returns normalized TOML for the current runtime snapshot.
-        reply: oneshot::Sender<Result<String, String>>,
+        /// Reply returns normalized TOML plus the live rpol registry.
+        reply: oneshot::Sender<Result<RuntimeConfigSnapshotReply, String>>,
     },
     /// Atomically apply resolved import/export policy chains to a set of live
     /// peer sessions, returning each peer's PRIOR chains for rollback.
@@ -849,6 +868,20 @@ pub enum PeerManagerCommand {
         cache_size: usize,
         /// Reply channel acknowledging the snapshot update.
         reply: oneshot::Sender<()>,
+    },
+    /// ADR-0096: replace the compiled `.rpol` policy registry
+    /// (SIGHUP reload of `[policy] rpol_files` or of a referenced
+    /// file's content) and re-resolve every live peer's chains
+    /// through it. Route Refresh fires for peers whose import chain
+    /// materially changed, via the same atomic resolved-policy
+    /// snapshot path as `[policy.definitions]` edits.
+    SyncRpolPolicies {
+        /// New `[policy] rpol_files` list (paths already absolute).
+        rpol_files: Vec<String>,
+        /// New compiled registry.
+        rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// List all named policy definitions.
     ListPolicies {

@@ -11339,3 +11339,265 @@ fn managed_netdevs_diff_marks_restart_required() {
     let text = format_config_diff(&diff);
     assert!(text.contains("[managed_netdevs] changed"));
 }
+
+// ── ADR-0096: `.rpol` policy files in config ─────────────────────────
+
+const RPOL_SOURCE: &str = r"
+prefix-set customers { 10.10.0.0/16 ge 24 le 28 }
+
+policy customer-in(peer_lp: u32) {
+    term customer-routes {
+        if route.prefix in customers { set local-pref peer_lp; accept }
+    }
+}
+
+policy bogon-filter {
+    term bogons { if route.prefix == 127.0.0.0/8 { reject } }
+}
+";
+
+/// Write a config dir: `config.toml` + `policies/core.rpol`
+/// (referenced by relative path), one neighbor with an rpol import
+/// chain and one TOML-only neighbor. Returns the tempdir (keep alive).
+fn rpol_config_dir(rpol_source: &str, chain: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), rpol_source).expect("write rpol");
+    let toml = format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[policy.definitions.toml-pass]
+default_action = "permit"
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = [{chain}]
+
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65003
+import_policy_chain = ["toml-pass"]
+"#,
+    );
+    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    dir
+}
+
+fn load_dir(dir: &tempfile::TempDir) -> Result<Config, String> {
+    Config::load_with_diagnostics(dir.path().join("config.toml").to_str().unwrap())
+}
+
+#[test]
+fn rpol_files_load_resolve_and_evaluate_in_chains() {
+    let dir = rpol_config_dir(
+        RPOL_SOURCE,
+        r#""customer-in(200)", "bogon-filter", "toml-pass""#,
+    );
+    let config = load_dir(&dir).expect("config with rpol files loads");
+
+    // Relative path rewritten absolute against the config dir.
+    assert_eq!(config.policy.rpol_files.len(), 1);
+    assert!(
+        Path::new(&config.policy.rpol_files[0]).is_absolute(),
+        "{:?}",
+        config.policy.rpol_files[0]
+    );
+    assert_eq!(config.policy.rpol.policies.len(), 2);
+
+    // Resolver equivalence: the neighbor's effective import chain
+    // carries pre-compiled rpol members mixed with the TOML policy,
+    // and routes flow / are denied per the policy through the same
+    // chain-eval seam sessions use.
+    let neighbor = &config.neighbors[0];
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(neighbor)
+        .expect("chains resolve");
+    let import = import.expect("import chain configured");
+    assert_eq!(import.policies.len(), 3);
+    assert_eq!(import.policies[0].name.as_deref(), Some("customer-in(200)"));
+    assert!(import.policies[0].rpol.is_some());
+    assert!(import.policies[2].rpol.is_none());
+
+    let ctx = |prefix: Prefix| rustbgpd_policy::RouteContext {
+        prefix: Some(prefix),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    let customer = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        "10.10.3.0".parse().unwrap(),
+        24,
+    ));
+    let bogon = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        "127.0.0.0".parse().unwrap(),
+        8,
+    ));
+    let (result, eval) =
+        rustbgpd_policy::evaluate_chain_with_attribution(Some(&import), &ctx(customer));
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert_eq!(eval.matched_policy.as_deref(), Some("toml-pass"));
+    let (result, eval) =
+        rustbgpd_policy::evaluate_chain_with_attribution(Some(&import), &ctx(bogon));
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Deny);
+    assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
+}
+
+#[test]
+fn rpol_compile_diagnostics_fail_config_load() {
+    let dir = rpol_config_dir(
+        "policy broken { term t { if route.nosuch == 1 { reject } } }",
+        r#""broken""#,
+    );
+    let error = load_dir(&dir).expect_err("bad rpol file must fail the load");
+    assert!(error.contains("core.rpol"), "{error}");
+    // The ariadne-rendered diagnostic is embedded in the error string.
+    assert!(
+        error.contains("route.nosuch") || error.contains("nosuch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rpol_missing_file_fails_config_load() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""bogon-filter""#);
+    fs::remove_file(dir.path().join("policies/core.rpol")).unwrap();
+    let error = load_dir(&dir).expect_err("missing rpol file must fail the load");
+    assert!(error.contains("failed to read"), "{error}");
+}
+
+#[test]
+fn rpol_name_collision_with_toml_definition_fails() {
+    let dir = rpol_config_dir("policy toml-pass { term t { reject } }", r#""toml-pass""#);
+    let error = load_dir(&dir).expect_err("collision must fail the load");
+    assert!(error.contains("toml-pass"), "{error}");
+    assert!(error.contains("policy.definitions"), "{error}");
+}
+
+#[test]
+fn rpol_name_collision_across_files_fails() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""bogon-filter""#);
+    fs::write(
+        dir.path().join("policies/dup.rpol"),
+        "policy bogon-filter { term t { reject } }",
+    )
+    .unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let toml = fs::read_to_string(&toml_path).unwrap().replace(
+        r#"rpol_files = ["policies/core.rpol"]"#,
+        r#"rpol_files = ["policies/core.rpol", "policies/dup.rpol"]"#,
+    );
+    fs::write(&toml_path, toml).unwrap();
+    let error = load_dir(&dir).expect_err("cross-file collision must fail the load");
+    assert!(error.contains("bogon-filter"), "{error}");
+    assert!(error.contains("already defined"), "{error}");
+}
+
+#[test]
+fn rpol_chain_reference_arity_and_argument_errors() {
+    // Missing required argument.
+    let error = load_dir(&rpol_config_dir(RPOL_SOURCE, r#""customer-in""#))
+        .expect_err("arity error must fail the load");
+    assert!(error.contains("takes 1 parameter(s), 0 given"), "{error}");
+    // Extra argument on a zero-param policy.
+    let error = load_dir(&rpol_config_dir(RPOL_SOURCE, r#""bogon-filter(1)""#))
+        .expect_err("arity error must fail the load");
+    assert!(error.contains("takes 0 parameter(s), 1 given"), "{error}");
+    // Non-u32 argument.
+    let error = load_dir(&rpol_config_dir(RPOL_SOURCE, r#""customer-in(high)""#))
+        .expect_err("argument type error must fail the load");
+    assert!(error.contains("is not a u32"), "{error}");
+    // Unknown policy.
+    let error = load_dir(&rpol_config_dir(RPOL_SOURCE, r#""nope(1)""#))
+        .expect_err("unknown policy must fail the load");
+    assert!(error.contains("undefined policy"), "{error}");
+}
+
+/// ADR-0076 planner classification: an edited `.rpol` file whose
+/// compiled content differs is a `policy_chain` impact for exactly the
+/// peers referencing it; reloading unchanged content is a no-op.
+#[test]
+fn rpol_edit_classifies_policy_chain_impact_for_referencing_peers_only() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)""#);
+    let old = load_dir(&dir).expect("initial load");
+
+    // Same content reloaded → no diff at all.
+    let same = load_dir(&dir).expect("reload");
+    let diff = diff_config(&old, &same);
+    assert!(!diff.policy.rpol_changed);
+    assert!(!diff.has_any_changes(), "{diff:?}");
+
+    // Edited file, materially different compiled content.
+    fs::write(
+        dir.path().join("policies/core.rpol"),
+        RPOL_SOURCE.replace("ge 24 le 28", "ge 24 le 32"),
+    )
+    .unwrap();
+    let new = load_dir(&dir).expect("reload after edit");
+    let diff = diff_config(&old, &new);
+    assert!(diff.policy.rpol_changed);
+    assert!(diff.has_reload_applied_changes());
+    // Exactly the referencing neighbor is impacted, as a pure
+    // policy-chain move (live-impact executor eligible).
+    assert_eq!(diff.effective_neighbor_impact.len(), 1);
+    let impact = &diff.effective_neighbor_impact[0];
+    assert_eq!(impact.address, "192.0.2.1");
+    assert!(impact.kind.is_policy_chain());
+    assert!(
+        impact
+            .reasons
+            .iter()
+            .any(|r| r == "rpol policy file changed"),
+        "{:?}",
+        impact.reasons
+    );
+    // v1 transactions cannot stage .rpol content — fail closed.
+    let class = classify_config_transaction_v1(&diff);
+    assert!(
+        class
+            .unsupported_sections
+            .iter()
+            .any(|s| s.contains("rpol_files")),
+        "{class:?}"
+    );
+
+    // Comment-only edits compile to identical content → the resolved
+    // chains compare equal, but the source-level registry diff still
+    // reports the file as changed (refresh is idempotent).
+    fs::write(
+        dir.path().join("policies/core.rpol"),
+        format!("# comment\n{RPOL_SOURCE}"),
+    )
+    .unwrap();
+    let commented = load_dir(&dir).expect("reload after comment edit");
+    let diff = diff_config(&old, &commented);
+    assert!(diff.policy.rpol_changed);
+    // No resolved chain moved, so no per-neighbor impact.
+    assert!(diff.effective_neighbor_impact.is_empty(), "{diff:?}");
+}

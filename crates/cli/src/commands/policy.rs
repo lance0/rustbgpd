@@ -240,6 +240,153 @@ pub fn check_local(path: &str, json: bool) -> i32 {
     }
 }
 
+/// Options for `rbgp policy test` (ADR-0096 live-RIB dry run).
+pub struct TestOptions<'a> {
+    /// Path to the local `.rpol` file (its text is sent to the daemon).
+    pub file: &'a str,
+    /// Policy selection: name or call-form (`"customer-in(200)"`).
+    pub policy: &'a str,
+    /// `"import"` or `"export"`.
+    pub direction: &'a str,
+    /// Optional peer scope / export target.
+    pub peer: Option<&'a str>,
+    /// Optional family filter (`ipv4_unicast`, `ipv6_unicast`).
+    pub family: Option<&'a str>,
+    /// Max routes evaluated (0 = all).
+    pub limit: u32,
+    /// Max before/after diff samples.
+    pub show_changes: u32,
+}
+
+/// `rbgp policy test` — send the local `.rpol` source to the daemon
+/// for a read-only dry run over a live-RIB snapshot.
+pub async fn test(
+    connection: Connection,
+    opts: TestOptions<'_>,
+    json: bool,
+) -> Result<(), CliError> {
+    let rpol_source = std::fs::read_to_string(opts.file)
+        .map_err(|error| CliError::Argument(format!("cannot read {}: {error}", opts.file)))?;
+    let afi_safi = match opts.family {
+        None => proto::AddressFamily::Unspecified,
+        Some("ipv4_unicast" | "ipv4") => proto::AddressFamily::Ipv4Unicast,
+        Some("ipv6_unicast" | "ipv6") => proto::AddressFamily::Ipv6Unicast,
+        Some(other) => {
+            return Err(CliError::Argument(format!(
+                "unsupported family {other:?}; expected ipv4_unicast or ipv6_unicast"
+            )));
+        }
+    };
+    let mut client =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .test_policy(proto::TestPolicyRequest {
+            rpol_source,
+            policy: opts.policy.to_string(),
+            direction: opts.direction.to_string(),
+            peer: opts.peer.unwrap_or_default().to_string(),
+            afi_safi: afi_safi as i32,
+            limit: opts.limit,
+            show_changes: opts.show_changes,
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        #[derive(Serialize)]
+        struct JsonTermHits<'a> {
+            term: &'a str,
+            hits: u64,
+        }
+        #[derive(Serialize)]
+        struct JsonDiff<'a> {
+            prefix: String,
+            peer: &'a str,
+            changes: &'a [String],
+        }
+        #[derive(Serialize)]
+        struct JsonTest<'a> {
+            file: &'a str,
+            policy: &'a str,
+            direction: &'a str,
+            compiled: bool,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            diagnostics: &'a str,
+            routes_evaluated: u64,
+            accepted: u64,
+            rejected: u64,
+            modified: u64,
+            term_hits: Vec<JsonTermHits<'a>>,
+            diffs: Vec<JsonDiff<'a>>,
+        }
+        output::print_json_pretty(&JsonTest {
+            file: opts.file,
+            policy: opts.policy,
+            direction: opts.direction,
+            compiled: resp.compiled,
+            diagnostics: &resp.diagnostics,
+            routes_evaluated: resp.routes_evaluated,
+            accepted: resp.accepted,
+            rejected: resp.rejected,
+            modified: resp.modified,
+            term_hits: resp
+                .term_hits
+                .iter()
+                .map(|t| JsonTermHits {
+                    term: &t.term,
+                    hits: t.hits,
+                })
+                .collect(),
+            diffs: resp
+                .diffs
+                .iter()
+                .map(|d| JsonDiff {
+                    prefix: format!("{}/{}", d.prefix, d.prefix_length),
+                    peer: &d.peer,
+                    changes: &d.changes,
+                })
+                .collect(),
+        })?;
+        if !resp.compiled {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if !resp.compiled {
+        eprint!("{}", resp.diagnostics);
+        eprintln!("{}: compile failed", opts.file);
+        std::process::exit(1);
+    }
+    println!(
+        "policy {:?} ({}) over {} route{}:",
+        opts.policy,
+        opts.direction,
+        resp.routes_evaluated,
+        if resp.routes_evaluated == 1 { "" } else { "s" }
+    );
+    println!(
+        "  accepted {}  rejected {}  modified {}",
+        resp.accepted, resp.rejected, resp.modified
+    );
+    if !resp.term_hits.is_empty() {
+        println!("Term hits:");
+        for t in &resp.term_hits {
+            println!("  {:<32} {}", t.term, t.hits);
+        }
+    }
+    if !resp.diffs.is_empty() {
+        println!("Changes (up to {}):", opts.show_changes);
+        for d in &resp.diffs {
+            println!("  {}/{} (from {}):", d.prefix, d.prefix_length, d.peer);
+            for change in &d.changes {
+                println!("    {change}");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -927,6 +1074,64 @@ mod tests {
         write!(tmp, "{content}").unwrap();
         tmp.flush().unwrap();
         tmp
+    }
+
+    #[tokio::test]
+    async fn test_sends_source_and_selection_and_renders() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let file = write_rpol("policy p { term t { reject } }");
+        test(
+            connection,
+            TestOptions {
+                file: file.path().to_str().unwrap(),
+                policy: "customer-in(200)",
+                direction: "import",
+                peer: Some("10.0.0.9"),
+                family: Some("ipv4_unicast"),
+                limit: 100,
+                show_changes: 5,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let captured = server.state.last_test_policy.lock().await.clone().unwrap();
+        assert_eq!(captured.rpol_source, "policy p { term t { reject } }");
+        assert_eq!(captured.policy, "customer-in(200)");
+        assert_eq!(captured.direction, "import");
+        assert_eq!(captured.peer, "10.0.0.9");
+        assert_eq!(
+            captured.afi_safi,
+            crate::proto::AddressFamily::Ipv4Unicast as i32
+        );
+        assert_eq!(captured.limit, 100);
+        assert_eq!(captured.show_changes, 5);
+    }
+
+    #[tokio::test]
+    async fn test_rejects_unknown_family_and_missing_file() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let file = write_rpol("policy p { term t { reject } }");
+        let opts = |file: &str, family: Option<&'static str>| TestOptions {
+            file: Box::leak(file.to_string().into_boxed_str()),
+            policy: "p",
+            direction: "import",
+            peer: None,
+            family,
+            limit: 0,
+            show_changes: 0,
+        };
+        let path = file.path().to_str().unwrap();
+        let err = test(connection.clone(), opts(path, Some("l2vpn_evpn")), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)), "{err:?}");
+        let err = test(connection, opts("/nonexistent/x.rpol", None), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)), "{err:?}");
     }
 
     #[test]

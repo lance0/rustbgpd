@@ -683,13 +683,19 @@ impl PeerManager {
                             }
                         }
                         PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                            let result = toml::to_string_pretty(&self.current_config).map_err(
-                                |error| {
+                            let result = toml::to_string_pretty(&self.current_config)
+                                .map_err(|error| {
                                     format!(
                                         "failed to serialize runtime config snapshot: {error}"
                                     )
-                                },
-                            );
+                                })
+                                .map(|toml| {
+                                    rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                        toml,
+                                        rpol_files: self.current_config.policy.rpol_files.clone(),
+                                        rpol: self.current_config.policy.rpol.clone(),
+                                    }
+                                });
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
@@ -770,6 +776,10 @@ impl PeerManager {
                             self.current_config.policy.explain.enabled = enabled;
                             self.current_config.policy.explain.cache_size = cache_size;
                             let _ = reply.send(());
+                        }
+                        PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, reply } => {
+                            let result = self.sync_rpol_policies(rpol_files, rpol).await;
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));

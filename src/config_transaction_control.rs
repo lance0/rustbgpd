@@ -2818,7 +2818,11 @@ peer_group = "edge"
                     let _ = reply.send(Ok(()));
                 }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
+                    let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                        toml: snapshot_toml.lock().await.clone(),
+                        rpol_files: Vec::new(),
+                        rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                    }));
                 }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
                     let mut peers = peers.lock().await;
@@ -2947,7 +2951,11 @@ peer_group = "edge"
                     let _ = reply.send(Ok(()));
                 }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
+                    let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                        toml: snapshot_toml.lock().await.clone(),
+                        rpol_files: Vec::new(),
+                        rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                    }));
                 }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
                     peers.lock().await.push(config);
@@ -3002,7 +3010,11 @@ peer_group = "edge"
                     let _ = reply.send(Ok(()));
                 }
                 PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
+                    let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                        toml: snapshot_toml.lock().await.clone(),
+                        rpol_files: Vec::new(),
+                        rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                    }));
                 }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
                     let mut peers = peers.lock().await;

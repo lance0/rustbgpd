@@ -280,6 +280,10 @@ pub struct PolicyService {
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
+    /// RIB query channel backing `TestPolicy`'s read-only snapshot
+    /// (ADR-0096 Decision 6). `None` when the service was built
+    /// without it — `TestPolicy` then reports `FAILED_PRECONDITION`.
+    rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
 }
 
 impl PolicyService {
@@ -317,7 +321,16 @@ impl PolicyService {
             config_tx,
             runtime_config_lock,
             config_mutation_gate,
+            rib_tx: None,
         }
+    }
+
+    /// Attach the RIB query channel that backs `TestPolicy`'s
+    /// read-only route snapshot.
+    #[must_use]
+    pub fn with_rib_query(mut self, rib_tx: mpsc::Sender<rustbgpd_rib::RibUpdate>) -> Self {
+        self.rib_tx = Some(rib_tx);
+        self
     }
 
     /// Run `body` under the ADR-0080 detached-task shield with the
@@ -1368,6 +1381,302 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             matches,
         }))
     }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear request-validate, compile, snapshot, evaluate pipeline; splitting would scatter the dry-run contract"
+    )]
+    async fn test_policy(
+        &self,
+        request: Request<proto::TestPolicyRequest>,
+    ) -> Result<Response<proto::TestPolicyResponse>, Status> {
+        use rustbgpd_policy::rpol::{RpolFile, parse_call_form};
+        use rustbgpd_policy::sets::SetStore;
+        use rustbgpd_rib::RibUpdate;
+
+        let req = request.into_inner();
+        let import = match req.direction.as_str() {
+            "import" => true,
+            "export" => false,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "direction must be \"import\" or \"export\", got {other:?}"
+                )));
+            }
+        };
+        let family_filter = match proto::AddressFamily::try_from(req.afi_safi) {
+            Ok(proto::AddressFamily::Unspecified) => None,
+            Ok(proto::AddressFamily::Ipv4Unicast) => Some(true),
+            Ok(proto::AddressFamily::Ipv6Unicast) => Some(false),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "TestPolicy v1 supports IPv4-unicast and IPv6-unicast only",
+                ));
+            }
+        };
+        let peer_filter: Option<IpAddr> = if req.peer.is_empty() {
+            None
+        } else {
+            Some(
+                req.peer
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid peer: {e}")))?,
+            )
+        };
+
+        // Compile the candidate source server-side. Diagnostics are a
+        // successful RPC with compiled=false — the dry run's answer.
+        let file = match RpolFile::parse(&req.rpol_source) {
+            Ok(file) => file,
+            Err(diagnostics) => {
+                return Ok(Response::new(proto::TestPolicyResponse {
+                    compiled: false,
+                    diagnostics: diagnostics.render("candidate.rpol", &req.rpol_source, false),
+                    ..Default::default()
+                }));
+            }
+        };
+        let (base, args) = parse_call_form(&req.policy).map_err(Status::invalid_argument)?;
+        let Some((_, params)) = file.policies().find(|(name, _)| *name == base) else {
+            let available: Vec<&str> = file.policies().map(|(name, _)| name).collect();
+            return Err(Status::invalid_argument(format!(
+                "policy {base:?} is not defined in the submitted source (available: {available:?})"
+            )));
+        };
+        if params != args.len() {
+            return Err(Status::invalid_argument(format!(
+                "policy {base:?} takes {params} parameter(s), {} given",
+                args.len()
+            )));
+        }
+        let mut store = SetStore::new();
+        let chain = file
+            .compile_policy(base, &args, &mut store)
+            .expect("existence checked above");
+
+        // Read-only route snapshot via the existing RIB query
+        // machinery. Import evaluates Adj-RIB-In (optionally one
+        // peer's); export evaluates Loc-RIB best routes.
+        let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
+            Status::failed_precondition("route snapshot runtime unavailable on this listener")
+        })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let query = if import {
+            RibUpdate::QueryReceivedRoutes {
+                peer: peer_filter,
+                reply: reply_tx,
+            }
+        } else {
+            RibUpdate::QueryBestRoutes { reply: reply_tx }
+        };
+        rib_tx
+            .send(query)
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        let routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        // Peer context (ASN / peer-group) so guards on peer.* fields
+        // see real values.
+        let (peers_tx, peers_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::ListPeers { reply: peers_tx })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let peer_context: std::collections::HashMap<IpAddr, (u32, Option<String>)> = peers_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .into_iter()
+            .map(|info| (info.address, (info.remote_asn, info.peer_group)))
+            .collect();
+
+        Ok(Response::new(run_test_policy(
+            &chain,
+            &routes,
+            &TestPolicyScope {
+                import,
+                target_peer: peer_filter,
+                family_filter,
+                limit: req.limit as usize,
+                show_changes: req.show_changes as usize,
+            },
+            &peer_context,
+        )))
+    }
+}
+
+/// Route selection scope for one `TestPolicy` dry run.
+struct TestPolicyScope {
+    /// Import (Adj-RIB-In snapshot, peer context from each route's
+    /// source peer) vs export (Loc-RIB snapshot, peer context from
+    /// `target_peer`).
+    import: bool,
+    /// Export evaluation target (also the import snapshot filter,
+    /// applied upstream by the RIB query).
+    target_peer: Option<IpAddr>,
+    /// `Some(true)` = IPv4 only, `Some(false)` = IPv6 only.
+    family_filter: Option<bool>,
+    /// Max routes evaluated; 0 = all.
+    limit: usize,
+    /// Max before/after diff samples returned.
+    show_changes: usize,
+}
+
+/// Evaluate the compiled candidate policy read-only over the route
+/// snapshot: counts, per-term hit counters, and up to
+/// `scope.show_changes` before/after diff samples. Pure function of
+/// its inputs — no daemon state is touched (ADR-0096 Decision 6).
+fn run_test_policy(
+    chain: &rustbgpd_policy::ir::CompiledChain,
+    routes: &[rustbgpd_rib::Route],
+    scope: &TestPolicyScope,
+    peer_context: &std::collections::HashMap<IpAddr, (u32, Option<String>)>,
+) -> proto::TestPolicyResponse {
+    use rustbgpd_policy::{PolicyAction, RouteContext, RouteType};
+    use rustbgpd_rib::RouteOrigin;
+
+    let needs_as_path_string = chain.requires_as_path_string();
+    let mut hits = chain.zero_term_hits();
+    let mut response = proto::TestPolicyResponse {
+        compiled: true,
+        ..Default::default()
+    };
+    for route in routes
+        .iter()
+        .filter(|route| {
+            scope
+                .family_filter
+                .is_none_or(|v4| matches!(route.prefix, Prefix::V4(_)) == v4)
+        })
+        .take(if scope.limit == 0 {
+            usize::MAX
+        } else {
+            scope.limit
+        })
+    {
+        let ctx_peer = if scope.import {
+            Some(route.peer)
+        } else {
+            scope.target_peer
+        };
+        let (peer_asn, peer_group) = ctx_peer
+            .and_then(|addr| peer_context.get(&addr))
+            .map_or((None, None), |(asn, group)| (Some(*asn), group.as_deref()));
+        let as_path_str = if needs_as_path_string {
+            route
+                .as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+        } else {
+            String::new()
+        };
+        let ctx = RouteContext {
+            prefix: Some(route.prefix),
+            next_hop: Some(route.next_hop),
+            extended_communities: route.extended_communities(),
+            communities: route.communities(),
+            large_communities: route.large_communities(),
+            as_path_str: &as_path_str,
+            as_path_len: route.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+            validation_state: route.validation_state,
+            aspa_state: route.aspa_state,
+            peer_address: ctx_peer,
+            peer_asn,
+            peer_group,
+            route_type: Some(match route.origin_type {
+                RouteOrigin::Ebgp => RouteType::External,
+                RouteOrigin::Ibgp => RouteType::Internal,
+                RouteOrigin::Local => RouteType::Local,
+            }),
+            evpn_route_type: None,
+            local_pref: route.local_pref_attr(),
+            med: route.med_attr(),
+        };
+        response.routes_evaluated += 1;
+        let result = chain.evaluate_recording_hits(&ctx, &mut hits);
+        if result.action == PolicyAction::Permit {
+            response.accepted += 1;
+            if !result.modifications.is_empty() {
+                response.modified += 1;
+                if response.diffs.len() < scope.show_changes {
+                    response.diffs.push(proto::TestPolicyDiff {
+                        prefix: route.prefix.addr_string(),
+                        prefix_length: u32::from(route.prefix.prefix_len()),
+                        peer: route.peer.to_string(),
+                        changes: render_modification_changes(route, &result.modifications),
+                    });
+                }
+            }
+        } else {
+            response.rejected += 1;
+        }
+    }
+    response.term_hits = chain
+        .policies
+        .iter()
+        .zip(&hits)
+        .flat_map(|(policy, policy_hits)| {
+            policy
+                .terms
+                .iter()
+                .zip(policy_hits)
+                .enumerate()
+                .map(|(index, (term, count))| proto::TestPolicyTermHits {
+                    term: term.name.clone().unwrap_or_else(|| format!("term {index}")),
+                    hits: *count,
+                })
+        })
+        .collect();
+    response
+}
+
+/// Render one modified route's attribute changes as human-readable
+/// before/after lines (the `TestPolicyDiff.changes` contract).
+fn render_modification_changes(
+    route: &rustbgpd_rib::Route,
+    mods: &rustbgpd_policy::RouteModifications,
+) -> Vec<String> {
+    let fmt_community = |value: u32| format!("{}:{}", value >> 16, value & 0xFFFF);
+    let fmt_opt = |value: Option<u32>| value.map_or_else(|| "unset".to_string(), |v| v.to_string());
+    let mut changes = Vec::new();
+    if let Some(after) = mods.set_local_pref {
+        changes.push(format!(
+            "local_pref {} -> {after}",
+            fmt_opt(route.local_pref_attr())
+        ));
+    }
+    if let Some(after) = mods.set_med {
+        changes.push(format!("med {} -> {after}", fmt_opt(route.med_attr())));
+    }
+    if let Some(next_hop) = mods.set_next_hop.as_ref() {
+        let after = match next_hop {
+            rustbgpd_policy::NextHopAction::Self_ => "self".to_string(),
+            rustbgpd_policy::NextHopAction::Specific(addr) => addr.to_string(),
+        };
+        changes.push(format!("next_hop {} -> {after}", route.next_hop));
+    }
+    for value in &mods.communities_add {
+        changes.push(format!("communities + {}", fmt_community(*value)));
+    }
+    for value in &mods.communities_remove {
+        changes.push(format!("communities - {}", fmt_community(*value)));
+    }
+    for lc in &mods.large_communities_add {
+        changes.push(format!("large_communities + {lc}"));
+    }
+    for lc in &mods.large_communities_remove {
+        changes.push(format!("large_communities - {lc}"));
+    }
+    for ec in &mods.extended_communities_add {
+        changes.push(format!("extended_communities + 0x{:016x}", ec.as_u64()));
+    }
+    for ec in &mods.extended_communities_remove {
+        changes.push(format!("extended_communities - 0x{:016x}", ec.as_u64()));
+    }
+    if let Some((asn, count)) = mods.as_path_prepend {
+        changes.push(format!("as_path prepend {asn} x{count}"));
+    }
+    changes
 }
 
 #[cfg(test)]
@@ -2095,5 +2404,199 @@ mod tests {
             ],
             "rollback must re-set the prior per-neighbor chain"
         );
+    }
+
+    // ── TestPolicy (ADR-0096 Decision 6) ────────────────────────────
+
+    const TEST_RPOL: &str = r"
+prefix-set customers { 10.10.0.0/16 ge 24 le 28 }
+
+policy customer-in(peer_lp: u32) {
+    term customer-routes {
+        if route.prefix in customers { set local-pref peer_lp; accept }
+    }
+    term everything-else { reject }
+}
+";
+
+    fn test_route(prefix: &str, len: u8) -> rustbgpd_rib::Route {
+        let addr: std::net::Ipv4Addr = prefix.parse().unwrap();
+        rustbgpd_rib::Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(addr, len)),
+            next_hop: "10.0.0.9".parse().unwrap(),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: "10.0.0.9".parse().unwrap(),
+            attributes: std::sync::Arc::new(Vec::new()),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        }
+    }
+
+    /// Fake daemon backends for `TestPolicy`: a RIB task answering
+    /// received/best route queries with the given snapshot, and a
+    /// peer manager answering `ListPeers` with an empty peer set.
+    fn test_policy_service(routes: Vec<rustbgpd_rib::Route>) -> PolicyService {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::ListPeers { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    rustbgpd_rib::RibUpdate::QueryReceivedRoutes { peer, reply } => {
+                        let filtered = routes
+                            .iter()
+                            .filter(|route| peer.is_none_or(|p| route.peer == p))
+                            .cloned()
+                            .collect();
+                        let _ = reply.send(filtered);
+                    }
+                    rustbgpd_rib::RibUpdate::QueryBestRoutes { reply } => {
+                        let _ = reply.send(routes.clone());
+                    }
+                    _ => panic!("unexpected RIB query"),
+                }
+            }
+        });
+        PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx)
+    }
+
+    #[tokio::test]
+    async fn test_policy_reports_counts_term_hits_and_diffs() {
+        let svc = test_policy_service(vec![
+            test_route("10.10.1.0", 24),
+            test_route("10.10.2.0", 24),
+            test_route("203.0.113.0", 24),
+        ]);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: TEST_RPOL.to_string(),
+                policy: "customer-in(200)".to_string(),
+                direction: "import".to_string(),
+                peer: String::new(),
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                limit: 0,
+                show_changes: 1,
+            }),
+        )
+        .await
+        .expect("dry run succeeds")
+        .into_inner();
+
+        assert!(resp.compiled, "{}", resp.diagnostics);
+        assert_eq!(resp.routes_evaluated, 3);
+        assert_eq!(resp.accepted, 2);
+        assert_eq!(resp.rejected, 1);
+        assert_eq!(resp.modified, 2);
+        // Per-term hit counters, named from the source.
+        assert_eq!(resp.term_hits.len(), 2);
+        assert_eq!(resp.term_hits[0].term, "customer-routes");
+        assert_eq!(resp.term_hits[0].hits, 2);
+        assert_eq!(resp.term_hits[1].term, "everything-else");
+        assert_eq!(resp.term_hits[1].hits, 1);
+        // Diff samples are capped by show_changes and render
+        // before/after values (LOCAL_PREF absent on the route).
+        assert_eq!(resp.diffs.len(), 1);
+        assert_eq!(resp.diffs[0].prefix, "10.10.1.0");
+        assert_eq!(resp.diffs[0].prefix_length, 24);
+        assert_eq!(resp.diffs[0].changes, vec!["local_pref unset -> 200"]);
+    }
+
+    #[tokio::test]
+    async fn test_policy_compile_diagnostics_come_back_in_response() {
+        let svc = test_policy_service(Vec::new());
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: "policy p { term t { if route.nosuch == 1 { reject } } }".to_string(),
+                policy: "p".to_string(),
+                direction: "import".to_string(),
+                peer: String::new(),
+                afi_safi: 0,
+                limit: 0,
+                show_changes: 0,
+            }),
+        )
+        .await
+        .expect("compile failure is a successful RPC")
+        .into_inner();
+        assert!(!resp.compiled);
+        assert!(
+            resp.diagnostics.contains("candidate.rpol"),
+            "{}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.routes_evaluated, 0);
+    }
+
+    #[tokio::test]
+    async fn test_policy_rejects_bad_selection_and_direction() {
+        let svc = test_policy_service(Vec::new());
+        let request = |policy: &str, direction: &str| proto::TestPolicyRequest {
+            rpol_source: TEST_RPOL.to_string(),
+            policy: policy.to_string(),
+            direction: direction.to_string(),
+            peer: String::new(),
+            afi_safi: 0,
+            limit: 0,
+            show_changes: 0,
+        };
+        for (policy, direction) in [
+            ("customer-in", "import"),  // arity
+            ("nope", "import"),         // unknown policy
+            ("customer-in(200)", "up"), // bad direction
+        ] {
+            let status =
+                PolicyServiceRpc::test_policy(&svc, Request::new(request(policy, direction)))
+                    .await
+                    .expect_err("must reject");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{policy}");
+        }
+    }
+
+    /// Export direction with a limit and an IPv4 family filter walks
+    /// Loc-RIB best routes.
+    #[tokio::test]
+    async fn test_policy_export_respects_limit() {
+        let svc = test_policy_service(vec![
+            test_route("10.10.1.0", 24),
+            test_route("10.10.2.0", 24),
+            test_route("10.10.3.0", 24),
+        ]);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: TEST_RPOL.to_string(),
+                policy: "customer-in(50)".to_string(),
+                direction: "export".to_string(),
+                peer: String::new(),
+                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+                limit: 2,
+                show_changes: 0,
+            }),
+        )
+        .await
+        .expect("dry run succeeds")
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, 2);
+        assert_eq!(resp.accepted, 2);
+        assert!(resp.diffs.is_empty());
     }
 }

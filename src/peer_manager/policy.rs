@@ -779,10 +779,61 @@ impl PeerManager {
                 });
             }
         }
+        // ADR-0096: TOML definitions and .rpol policies share one
+        // namespace; creating a TOML definition that shadows an .rpol
+        // policy would silently change every chain referencing it.
+        if let ConfigEvent::SetPolicy { name, .. } = &event
+            && let Some(entry) = self.current_config.policy.rpol.policies.get(name)
+        {
+            return Err(CatalogMutationError::internal(format!(
+                "policy {name:?} is defined by rpol file {:?}; \
+                 rpol and TOML policies share one namespace",
+                entry.path
+            )));
+        }
 
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
+        let applied = self
+            .refresh_policies_for_config(next_config, affected_peers)
+            .await?;
+        self.publish_policy_config_event(&event, applied);
+        Ok(())
+    }
+
+    /// ADR-0096: adopt a new compiled `.rpol` registry (SIGHUP reload
+    /// of `[policy] rpol_files` or of referenced file content) and
+    /// re-resolve every live peer's chains through it, using the same
+    /// atomic two-phase fan-out as catalog policy edits. Peers whose
+    /// import chain materially changed get a Route Refresh inside
+    /// `apply_resolved_policy_snapshot`.
+    pub(super) async fn sync_rpol_policies(
+        &mut self,
+        rpol_files: Vec<String>,
+        rpol: rustbgpd_policy::rpol::RpolPolicySet,
+    ) -> Result<(), CatalogMutationError> {
+        let mut next_config = self.current_config.clone();
+        next_config.policy.rpol_files = rpol_files;
+        next_config.policy.rpol = rpol;
+        let applied = self.refresh_policies_for_config(next_config, None).await?;
+        info!(
+            peers = applied,
+            "rpol policy registry replaced; live peer chains re-resolved"
+        );
+        Ok(())
+    }
+
+    /// Shared catalog-change fan-out: resolve every affected peer's
+    /// chains against `next_config`, commit them through the atomic
+    /// resolved-policy snapshot path, then adopt `next_config` as the
+    /// manager's snapshot. Returns the number of peers whose chains
+    /// were applied.
+    async fn refresh_policies_for_config(
+        &mut self,
+        next_config: Config,
+        affected_peers: Option<Vec<IpAddr>>,
+    ) -> Result<usize, CatalogMutationError> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
             || self.peers.keys().cloned().collect(),
             |peers| {
@@ -856,8 +907,7 @@ impl PeerManager {
             .map_err(CatalogMutationError::internal)?;
 
         self.current_config = next_config;
-        self.publish_policy_config_event(&event, applied.len());
-        Ok(())
+        Ok(applied.len())
     }
 
     pub(super) fn policy_resolution_neighbor(

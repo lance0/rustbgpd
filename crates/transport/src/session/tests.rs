@@ -4180,6 +4180,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
             entries: vec![deny_stmt, permit_stmt],
             default_action: PolicyAction::Permit,
         },
+        rpol: None,
     }]);
     let mut session = PeerSession::new(
         config,
