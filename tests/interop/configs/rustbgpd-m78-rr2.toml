@@ -1,0 +1,59 @@
+# M78 — RFC 9107 multi-cluster ORR receipt, RR for cluster 2.2.2.2.
+# Mirror of rustbgpd-m78-rr1.toml: clients are the BGP-LS source, pe2
+# (next-hop Y), and c2 (ORR vantage B); rr1 is the non-client inter-RR
+# Add-Path peer.
+
+[global]
+asn = 65001
+router_id = "2.2.2.2"
+listen_port = 179
+cluster_id = "2.2.2.2"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.5.2"
+remote_asn = 65001
+description = "bgpls-source"
+hold_time = 90
+route_reflector_client = true
+families = ["linkstate"]
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65001
+description = "pe2"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.4.2"
+remote_asn = 65001
+description = "client-2"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast"]
+orr_vantage = "10.0.8.2"
+
+# Inter-RR session: NOT a route-reflector client (RFC 4456 non-client
+# iBGP between reflectors of different clusters), Add-Path both ways.
+[[neighbors]]
+address = "10.0.12.1"
+remote_asn = 65001
+description = "rr1"
+hold_time = 90
+families = ["ipv4_unicast"]
+
+[neighbors.add_path]
+receive = true
+send = true
+send_max = 4
+
+[security.grpc]
+enforcement = "legacy"
