@@ -432,9 +432,10 @@ impl RibManager {
         self.peer_orf_filters.remove(&peer);
         self.peer_orf_pending.remove(&peer);
         // RT-Constrain membership is per-session too (RFC 4684 filters
-        // derive from the session's Adj-RIB-In, conservatively withdrawn on
-        // GR entry): `handle_peer_up` re-creates it empty-strict when the
-        // new session negotiates the family.
+        // derive from the session's Adj-RIB-In): `handle_peer_up` re-creates
+        // it when the new session negotiates the family — empty-strict
+        // normally, or re-derived from the GR-preserved (stale) RTC routes
+        // on a graceful-restart re-establish.
         self.peer_rt_membership.remove(&peer);
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
@@ -614,12 +615,23 @@ impl RibManager {
             self.ensure_default_rtc_originated();
             // RFC 4684 strict rule: a peer that negotiated SAFI 132 starts
             // with an EMPTY membership — no VPN routes are advertised
-            // (initial dump included) until its RT interest arrives. This
-            // also covers a GR re-establish: the previous session's
-            // membership was torn down, so the returning peer is strict
-            // until its RTC routes re-arrive.
-            self.peer_rt_membership
-                .insert(peer, super::RtcMembership::default());
+            // (initial dump included) until its RT interest arrives.
+            //
+            // A GR/LLGR re-establish is the exception: the previous
+            // session's RTC routes were preserved as stale in the
+            // Adj-RIB-In (RFC 4724 helper retention), so the returning
+            // peer's membership is re-derived from them — VPN routes flow
+            // in the initial dump immediately instead of stalling until
+            // the peer re-advertises its interest. Interest the peer does
+            // NOT re-advertise is swept at End-of-RIB (or timer expiry),
+            // which shrinks the membership and withdraws the uncovered
+            // VPN routes.
+            let membership = if self.gr_peers.contains_key(&peer) {
+                self.rtc_membership_from_rib(peer)
+            } else {
+                super::RtcMembership::default()
+            };
+            self.peer_rt_membership.insert(peer, membership);
         } else {
             // A replacement session that dropped the family must not
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).

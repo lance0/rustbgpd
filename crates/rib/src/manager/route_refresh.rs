@@ -91,7 +91,7 @@ impl RibManager {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "End-of-RIB handler covers GR and LLGR branches for all three families (unicast, FlowSpec, EVPN)"
+        reason = "End-of-RIB handler covers GR and LLGR branches across the per-family stale lifecycles (unicast, FlowSpec, EVPN, VPN, BGP-LS, RTC)"
     )]
     pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "received End-of-RIB");
@@ -129,10 +129,63 @@ impl RibManager {
                 HashSet::new()
             };
 
+            // Collect the typed-family keys BEFORE the sweep below removes
+            // the non-readvertised ones, so the recompute both withdraws
+            // swept keys downstream and re-promotes the retained ones.
+            let vpn_affected: HashSet<crate::route::VpnRibRouteKey> = if safi == Safi::MplsVpn {
+                self.ribs
+                    .get(&peer)
+                    .map(|rib| {
+                        rib.iter_vpn()
+                            .filter(|route| route.afi_safi() == (afi, safi))
+                            .map(crate::route::VpnRibRoute::key)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+            let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
+                if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+                    self.ribs
+                        .get(&peer)
+                        .map(|rib| {
+                            rib.iter_bgpls()
+                                .filter(|route| route.family == bgpls_family)
+                                .map(crate::route::BgpLsRibRoute::key)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
+            let rtc_affected: HashSet<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
+                self.ribs
+                    .get(&peer)
+                    .map(|rib| rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect())
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+
+            let mut rtc_swept = false;
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_stale((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
                 rib.clear_stale_evpn((afi, safi));
+                // Typed families (VPN, BGP-LS, RTC) implement the RFC 4724
+                // §4.1 End-of-RIB removal: a route still marked stale here
+                // was not re-advertised during the restart window and is
+                // deleted (re-advertised routes had their flag cleared on
+                // insert). The trailing clear is flag/LLGR-community
+                // hygiene for the retained routes. Each helper is a
+                // family-scoped no-op for non-matching tuples.
+                rib.sweep_stale_family_vpn((afi, safi));
+                rib.clear_stale_vpn((afi, safi));
+                rib.sweep_stale_family_bgpls((afi, safi));
+                rib.clear_stale_bgpls((afi, safi));
+                rtc_swept = !rib.sweep_stale_family_rtc((afi, safi)).is_empty();
+                rib.clear_stale_rtc((afi, safi));
             }
 
             let affected: HashSet<Prefix> = self
@@ -148,8 +201,23 @@ impl RibManager {
             if !evpn_affected.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn_affected);
             }
+            if !vpn_affected.is_empty() {
+                self.recompute_vpn_keys(&vpn_affected);
+            }
+            if !bgpls_affected.is_empty() {
+                self.recompute_bgpls_keys(&bgpls_affected);
+            }
+            if !rtc_affected.is_empty() {
+                self.recompute_rtc_keys(&rtc_affected);
+            }
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+            }
+            if rtc_swept {
+                // The EoR sweep removed RT interest the peer did not
+                // re-advertise: shrink its membership so no-longer-covered
+                // VPN routes are withdrawn from its Adj-RIB-Out.
+                self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
 
             let peer_label = peer.to_string();
@@ -157,6 +225,9 @@ impl RibManager {
                 rib.iter().filter(|r| r.is_stale).count()
                     + rib.iter_flowspec().filter(|r| r.is_stale).count()
                     + rib.iter_evpn().filter(|r| r.is_stale).count()
+                    + rib.iter_vpn().filter(|r| r.is_stale).count()
+                    + rib.iter_bgpls().filter(|r| r.is_stale).count()
+                    + rib.iter_rtc().filter(|r| r.is_stale).count()
             });
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(stale_count));

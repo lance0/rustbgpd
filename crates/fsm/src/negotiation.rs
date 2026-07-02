@@ -902,7 +902,9 @@ mod tests {
     }
 
     #[test]
-    fn graceful_restart_filters_bgpls_from_peer_open() {
+    fn graceful_restart_keeps_bgpls_from_peer_open() {
+        // BGP-LS has a wired GR/LLGR stale lifecycle, so a negotiated
+        // (BgpLs, BgpLs) family survives the GR and LLGR capability filters.
         let mut cfg = test_config();
         cfg.graceful_restart = true;
         cfg.llgr_stale_time = 3600;
@@ -948,19 +950,83 @@ mod tests {
 
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(neg.peer_gr_capable);
-        assert_eq!(neg.peer_gr_families.len(), 1);
+        let gr_families: Vec<(Afi, Safi)> = neg
+            .peer_gr_families
+            .iter()
+            .map(|f| (f.afi, f.safi))
+            .collect();
         assert_eq!(
-            (neg.peer_gr_families[0].afi, neg.peer_gr_families[0].safi),
-            (Afi::Ipv4, Safi::Unicast)
+            gr_families,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::BgpLs, Safi::BgpLs)]
         );
         assert!(neg.peer_llgr_capable);
-        assert_eq!(neg.peer_llgr_families.len(), 1);
+        let llgr_families: Vec<(Afi, Safi)> = neg
+            .peer_llgr_families
+            .iter()
+            .map(|f| (f.afi, f.safi))
+            .collect();
         assert_eq!(
-            (
-                neg.peer_llgr_families[0].afi,
-                neg.peer_llgr_families[0].safi
-            ),
-            (Afi::Ipv4, Safi::Unicast)
+            llgr_families,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::BgpLs, Safi::BgpLs)]
+        );
+    }
+
+    #[test]
+    fn graceful_restart_keeps_vpn_and_rtc_from_peer_open() {
+        // VPNv4/VPNv6 (SAFI 128) and RT-Constrain (SAFI 132) are in the GR
+        // preservation allowlist: negotiated tuples survive the capability
+        // filter, while a non-negotiated tuple (VPNv6 here) is still dropped.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::RtConstrain),
+            (Afi::Ipv4, Safi::Unicast),
+        ];
+
+        let mut open = peer_open();
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv4,
+            safi: Safi::MplsVpn,
+        });
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+        });
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 120,
+            families: vec![
+                GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::MplsVpn,
+                    forwarding_preserved: true,
+                },
+                GracefulRestartFamily {
+                    afi: Afi::Ipv6,
+                    safi: Safi::MplsVpn,
+                    forwarding_preserved: true,
+                },
+                GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::RtConstrain,
+                    forwarding_preserved: true,
+                },
+            ],
+        });
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.peer_gr_capable);
+        let gr_families: Vec<(Afi, Safi)> = neg
+            .peer_gr_families
+            .iter()
+            .map(|f| (f.afi, f.safi))
+            .collect();
+        assert_eq!(
+            gr_families,
+            vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv4, Safi::RtConstrain)],
+            "negotiated VPN/RTC tuples must survive; non-negotiated VPNv6 must not"
         );
     }
 
