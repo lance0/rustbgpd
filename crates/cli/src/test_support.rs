@@ -60,6 +60,7 @@ pub(crate) struct MockState {
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
     pub(crate) last_delete_policy: Mutex<Option<server_proto::DeletePolicyRequest>>,
     pub(crate) last_explain_import: Mutex<Option<server_proto::ExplainImportPolicyRequest>>,
+    pub(crate) last_test_policy: Mutex<Option<server_proto::TestPolicyRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
     pub(crate) last_add_dynamic_neighbor: Mutex<Option<server_proto::AddDynamicNeighborRequest>>,
@@ -1571,6 +1572,31 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             afi_safi: req.afi_safi,
             current_policy_generation: 3,
             matches,
+        }))
+    }
+
+    async fn test_policy(
+        &self,
+        request: Request<server_proto::TestPolicyRequest>,
+    ) -> Result<Response<server_proto::TestPolicyResponse>, Status> {
+        *self.state.last_test_policy.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::TestPolicyResponse {
+            compiled: true,
+            diagnostics: String::new(),
+            routes_evaluated: 3,
+            accepted: 2,
+            rejected: 1,
+            modified: 1,
+            term_hits: vec![server_proto::TestPolicyTermHits {
+                term: "customer-routes".to_string(),
+                hits: 2,
+            }],
+            diffs: vec![server_proto::TestPolicyDiff {
+                prefix: "10.10.1.0".to_string(),
+                prefix_length: 24,
+                peer: "10.0.0.9".to_string(),
+                changes: vec!["local_pref unset -> 200".to_string()],
+            }],
         }))
     }
 }

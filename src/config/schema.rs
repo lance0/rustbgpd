@@ -874,6 +874,23 @@ pub struct PolicyConfig {
     /// retention only — does not affect which routes are accepted.
     #[serde(default)]
     pub explain: PolicyExplainConfig,
+    /// `.rpol` policy-language files (ADR-0096) compiled at config
+    /// load. Relative paths resolve against the config file's
+    /// directory and are rewritten to absolute paths after load (so
+    /// runtime config snapshots and transaction candidates stay
+    /// loadable regardless of the daemon's working directory).
+    /// Compile diagnostics are config load errors. The policies they
+    /// define share one namespace with `[policy.definitions]`; chains
+    /// reference them by name, parameterized policies by call-form
+    /// (`"customer-in(200)"`).
+    #[serde(default)]
+    pub rpol_files: Vec<String>,
+    /// Compiled `.rpol` policy registry (populated at load, not
+    /// serialized). `PartialEq` is source-content-based, so config
+    /// diffs see an edited `.rpol` file as a policy change and an
+    /// unchanged reload as a no-op.
+    #[serde(skip)]
+    pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
 }
 
 /// Tuning for the per-session import-decision cache that backs
@@ -1618,4 +1635,6 @@ pub enum ConfigError {
     InvalidFibTable { reason: String },
     #[error("invalid BFD config: {reason}")]
     InvalidBfd { reason: String },
+    #[error("rpol policy file {path:?}: {reason}")]
+    InvalidRpolFile { path: String, reason: String },
 }

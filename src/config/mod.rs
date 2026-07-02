@@ -7,6 +7,7 @@ mod validation;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rustbgpd_evpn::{
     BridgeVlan, DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
@@ -41,8 +42,12 @@ impl Config {
             .map_err(|err| format!("interface {interface:?} does not exist or is invalid: {err}"))
     }
 
-    fn load_from_toml_source(content: &str, source_name: &str) -> Result<Self, String> {
-        let config: Config = match toml::from_str(content) {
+    fn load_from_toml_source(
+        content: &str,
+        source_name: &str,
+        base_dir: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
+        let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
                 let error = ConfigError::Parse(e);
@@ -50,11 +55,89 @@ impl Config {
                     .unwrap_or_else(|| format!("error: {error}")));
             }
         };
+        // Compile referenced .rpol files before validation: chain
+        // references resolve against the combined TOML + rpol policy
+        // namespace, and rpol compile diagnostics (already
+        // ariadne-rendered against the .rpol source) are config load
+        // errors in their own right.
+        if let Err(error) = config.load_rpol_files(base_dir) {
+            return Err(match &error {
+                ConfigError::InvalidRpolFile { .. } => format!("error: {error}"),
+                other => diagnostic::render_diagnostic(content, source_name, other)
+                    .unwrap_or_else(|| format!("error: {other}")),
+            });
+        }
         if let Err(error) = config.validate() {
             return Err(diagnostic::render_diagnostic(content, source_name, &error)
                 .unwrap_or_else(|| format!("error: {error}")));
         }
         Ok(config)
+    }
+
+    /// Read, parse, and typecheck every `[policy] rpol_files` entry
+    /// (ADR-0096), populating the compiled registry and rewriting
+    /// relative paths to absolute against `base_dir` (the config
+    /// file's directory when known, the process working directory
+    /// otherwise). Name collisions — with `[policy.definitions]` or
+    /// across `.rpol` files — are load errors naming both sources.
+    fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
+        use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry};
+
+        let mut owner_by_name: HashMap<String, String> = HashMap::new();
+        for entry in &mut self.policy.rpol_files {
+            let mut path = PathBuf::from(&*entry);
+            if path.is_relative()
+                && let Some(base) = base_dir
+            {
+                path = base.join(path);
+            }
+            let display = path.display().to_string();
+            let source =
+                std::fs::read_to_string(&path).map_err(|e| ConfigError::InvalidRpolFile {
+                    path: display.clone(),
+                    reason: format!("failed to read: {e}"),
+                })?;
+            let file = match RpolFile::parse(&source) {
+                Ok(file) => Arc::new(file),
+                Err(diagnostics) => {
+                    return Err(ConfigError::InvalidRpolFile {
+                        path: display.clone(),
+                        reason: format!(
+                            "compile failed\n{}",
+                            diagnostics.render(&display, &source, false)
+                        ),
+                    });
+                }
+            };
+            for (name, params) in file.policies() {
+                if self.policy.definitions.contains_key(name) {
+                    return Err(ConfigError::InvalidRpolFile {
+                        path: display.clone(),
+                        reason: format!(
+                            "policy {name:?} is already defined in [policy.definitions.{name}]; \
+                             rpol and TOML policies share one namespace"
+                        ),
+                    });
+                }
+                if let Some(previous) = owner_by_name.get(name) {
+                    return Err(ConfigError::InvalidRpolFile {
+                        path: display.clone(),
+                        reason: format!("policy {name:?} is already defined in {previous:?}"),
+                    });
+                }
+                owner_by_name.insert(name.to_string(), display.clone());
+                self.policy.rpol.policies.insert(
+                    name.to_string(),
+                    RpolPolicyEntry {
+                        file: Arc::clone(&file),
+                        params,
+                        path: display.clone(),
+                    },
+                );
+            }
+            *entry = display;
+        }
+        Ok(())
     }
 
     /// Load config from TOML text and render diagnostics against `source_name`.
@@ -64,7 +147,11 @@ impl Config {
     /// not expose a `file_path`.
     pub fn load_toml_with_diagnostics(content: &str, source_name: &str) -> Result<Self, String> {
         let content = test_only_inject_legacy_grpc_security(content);
-        Self::load_from_toml_source(content.as_ref(), source_name)
+        // No config-file directory here: relative `rpol_files` paths
+        // resolve against the process working directory. Initial load
+        // rewrites them absolute, so snapshots / candidates derived
+        // from a running config are unaffected.
+        Self::load_from_toml_source(content.as_ref(), source_name, None)
     }
 
     /// Load config and, on failure, render a diagnostic with source context.
@@ -78,7 +165,8 @@ impl Config {
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
         let content = test_only_inject_legacy_grpc_security(&content);
-        let mut config = Self::load_from_toml_source(content.as_ref(), path)?;
+        let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
+        let mut config = Self::load_from_toml_source(content.as_ref(), path, base_dir.as_deref())?;
         config.file_path = Some(PathBuf::from(path));
         Ok(config)
     }
@@ -261,6 +349,7 @@ impl Config {
             let chain = resolve_chain(
                 &self.policy.import_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
@@ -282,6 +371,7 @@ impl Config {
             resolve_chain(
                 &self.policy.export_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )
@@ -388,6 +478,10 @@ impl Config {
     /// receiver rule. iBGP is intentionally exempt — these are EBGP-edge
     /// receiver behaviors, and re-applying them per iBGP hop would overwrite
     /// values or scoping set legitimately upstream at the EBGP edge.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear inheritance resolution (global, group, neighbor, implicit tails); splitting would hide the precedence order"
+    )]
     pub fn effective_policy_chains_for_neighbor(
         &self,
         neighbor: &Neighbor,
@@ -408,6 +502,7 @@ impl Config {
                 resolve_chain(
                     &group.import_policy_chain,
                     &self.policy.definitions,
+                    &self.policy.rpol,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                 )?
@@ -427,6 +522,7 @@ impl Config {
                 resolve_chain(
                     &group.export_policy_chain,
                     &self.policy.definitions,
+                    &self.policy.rpol,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                 )?
@@ -450,6 +546,7 @@ impl Config {
             resolve_chain(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?
@@ -470,6 +567,7 @@ impl Config {
             resolve_chain(
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?
@@ -1585,6 +1683,11 @@ pub struct PolicyDiff {
     pub export_changed: bool,
     pub import_chain_changed: bool,
     pub export_chain_changed: bool,
+    /// The `[policy] rpol_files` list or any referenced `.rpol` file's
+    /// compiled content changed (ADR-0096). Reload-applied: chains
+    /// referencing rpol policies re-resolve and hot-swap through the
+    /// same live-policy path as `[policy.definitions]` edits.
+    pub rpol_changed: bool,
 }
 
 impl PolicyDiff {
@@ -1599,6 +1702,7 @@ impl PolicyDiff {
             || self.export_changed
             || self.import_chain_changed
             || self.export_chain_changed
+            || self.rpol_changed
     }
 }
 
@@ -1856,6 +1960,7 @@ impl ConfigDiff {
             || !self.policy.neighbor_sets_changed.is_empty()
             || self.policy.import_chain_changed
             || self.policy.export_chain_changed
+            || self.policy.rpol_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_changed
@@ -2099,6 +2204,15 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .unsupported_sections
             .push("mixed transaction families".to_string());
     }
+    if diff.policy.rpol_changed {
+        // No v1 transaction executor owns the .rpol file catalog — the
+        // files live outside the candidate TOML, so a transaction
+        // cannot atomically stage their content. Apply .rpol changes
+        // via SIGHUP reload (which re-reads and hot-swaps them).
+        class
+            .unsupported_sections
+            .push("[policy] rpol_files (apply .rpol changes via SIGHUP reload)".to_string());
+    }
     if diff.honor_graceful_shutdown_changed {
         class
             .unsupported_sections
@@ -2289,6 +2403,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
             "import_chain_changed": diff.policy.import_chain_changed,
             "export_chain_changed": diff.policy.export_chain_changed,
+            "rpol_changed": diff.policy.rpol_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_changed,
@@ -2383,7 +2498,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         || !p.neighbor_sets_removed.is_empty()
         || !p.neighbor_sets_changed.is_empty()
         || p.import_chain_changed
-        || p.export_chain_changed;
+        || p.export_chain_changed
+        || p.rpol_changed;
 
     if diff.has_reload_applied_changes() {
         let _ = writeln!(out, "{}\n", style.reload_header);
@@ -2453,6 +2569,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             }
             if p.export_chain_changed {
                 let _ = writeln!(out, "    {} export_chain", style.change_marker);
+            }
+            if p.rpol_changed {
+                let _ = writeln!(
+                    out,
+                    "    {} rpol_files / .rpol content",
+                    style.change_marker
+                );
             }
             out.push('\n');
         }
@@ -3768,6 +3891,12 @@ fn attribute_chain_move_reasons(
             reasons.push(entry);
         }
     }
+    if policy.rpol_changed {
+        let entry = "rpol policy file changed".to_string();
+        if !reasons.contains(&entry) {
+            reasons.push(entry);
+        }
+    }
 }
 
 /// Walk neighbors that exist in both configs and surface those whose
@@ -4164,6 +4293,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         export_changed: old.export != new.export,
         import_chain_changed: old.import_chain != new.import_chain,
         export_chain_changed: old.export_chain != new.export_chain,
+        rpol_changed: old.rpol_files != new.rpol_files || old.rpol != new.rpol,
     }
 }
 

@@ -1134,7 +1134,8 @@ async fn run_tcp_listener(
             config_tx.clone(),
             config_mutation_gate.clone(),
             runtime_config_lock,
-        ),
+        )
+        .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
@@ -1336,7 +1337,8 @@ async fn run_uds_listener(
             config_tx.clone(),
             config_mutation_gate.clone(),
             runtime_config_lock,
-        ),
+        )
+        .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(

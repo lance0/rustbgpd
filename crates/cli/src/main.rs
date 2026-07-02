@@ -348,6 +348,36 @@ enum PolicyAction {
         /// Path to the `.rpol` file
         file: String,
     },
+    /// Dry-run a candidate `.rpol` policy against the daemon's live
+    /// RIB (ADR-0096): the file compiles server-side and evaluates
+    /// read-only over a route snapshot — counts, per-term hit
+    /// counters, and before/after attribute diffs. No route state or
+    /// session is touched. Exit codes: 0 ran, 1 compile diagnostics.
+    Test {
+        /// Path to the `.rpol` file
+        file: String,
+        /// Policy to evaluate: a name, or a call-form with u32
+        /// arguments for parameterized policies, e.g. "customer-in(200)"
+        #[arg(long)]
+        policy: String,
+        /// Evaluation direction: import (Adj-RIB-In) or export
+        /// (Loc-RIB best routes)
+        #[arg(long)]
+        direction: String,
+        /// Peer address: restricts the import snapshot to one peer's
+        /// Adj-RIB-In, or sets the export evaluation target peer
+        #[arg(long)]
+        peer: Option<String>,
+        /// Address family filter (ipv4_unicast, ipv6_unicast)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+        /// Maximum routes to evaluate (0 = all)
+        #[arg(long, default_value_t = 0)]
+        limit: u32,
+        /// Maximum before/after attribute diffs to show
+        #[arg(long, default_value_t = 10)]
+        show_changes: u32,
+    },
     /// Show one policy by name
     Get {
         /// Policy name
@@ -1917,6 +1947,30 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         }
         Command::Policy { action } => match action {
             PolicyAction::Check { .. } => unreachable!("handled before connect"),
+            PolicyAction::Test {
+                file,
+                policy,
+                direction,
+                peer,
+                family,
+                limit,
+                show_changes,
+            } => {
+                commands::policy::test(
+                    connection,
+                    commands::policy::TestOptions {
+                        file: &file,
+                        policy: &policy,
+                        direction: &direction,
+                        peer: peer.as_deref(),
+                        family: family.as_deref(),
+                        limit,
+                        show_changes,
+                    },
+                    json,
+                )
+                .await
+            }
             PolicyAction::List => commands::policy::list(connection, json).await,
             PolicyAction::Get { name } => commands::policy::get(connection, &name, json).await,
             PolicyAction::Set { name, from_file } => {

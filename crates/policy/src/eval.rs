@@ -88,6 +88,85 @@ impl CompiledChain {
         )
     }
 
+    /// A zeroed per-term hit-counter grid shaped like this chain, for
+    /// [`evaluate_recording_hits`](Self::evaluate_recording_hits).
+    #[must_use]
+    pub fn zero_term_hits(&self) -> Vec<Vec<u64>> {
+        self.policies
+            .iter()
+            .map(|policy| vec![0; policy.terms.len()])
+            .collect()
+    }
+
+    /// Evaluate recording per-term guard hits — the `rbgp policy test`
+    /// backend (ADR-0096 Decision 6). Decision semantics are identical
+    /// to [`evaluate_with_attribution`](Self::evaluate_with_attribution)
+    /// (same walk, same merge rules); additionally `hits[p][t]` is
+    /// incremented whenever policy `p`'s term `t`'s guard matches
+    /// during the walk (`Continue` terms included; terms after the
+    /// deciding term are not evaluated, mirroring first-match-wins).
+    ///
+    /// # Panics
+    ///
+    /// If `hits` is not shaped like `policies` (one counter per term).
+    #[must_use]
+    pub fn evaluate_recording_hits(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: &mut [Vec<u64>],
+    ) -> PolicyResult {
+        assert_eq!(hits.len(), self.policies.len(), "hits shaped like chain");
+        let mut accumulated = RouteModifications::default();
+        for (policy, policy_hits) in self.policies.iter().zip(hits.iter_mut()) {
+            assert_eq!(policy_hits.len(), policy.terms.len());
+            let mut continued: Option<RouteModifications> = None;
+            // `Some(None)` = permit with no deciding-term mods;
+            // `None` after the loop = fell through to default_action.
+            let mut permit_mods: Option<Option<&RouteModifications>> = None;
+            let mut denied = false;
+            for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
+                if self.eval_expr(&term.guard, ctx) {
+                    *hit += 1;
+                    match &term.action {
+                        TermAction::Permit(mods) => {
+                            permit_mods = Some(Some(mods));
+                            break;
+                        }
+                        TermAction::Deny => {
+                            denied = true;
+                            break;
+                        }
+                        TermAction::Continue(mods) => {
+                            continued
+                                .get_or_insert_with(RouteModifications::default)
+                                .merge_from(mods.clone());
+                        }
+                    }
+                }
+            }
+            if permit_mods.is_none() && !denied {
+                match policy.default_action {
+                    PolicyAction::Permit => permit_mods = Some(None),
+                    PolicyAction::Deny => denied = true,
+                }
+            }
+            if denied {
+                return PolicyResult::deny();
+            }
+            let mut merged = continued.unwrap_or_default();
+            if let Some(Some(mods)) = permit_mods {
+                merged.merge_from(mods.clone());
+            }
+            if !merged.is_empty() {
+                accumulated.merge_from(merged);
+            }
+        }
+        PolicyResult {
+            action: PolicyAction::Permit,
+            modifications: accumulated,
+        }
+    }
+
     /// First-match-wins term walk; the policy's default action decides
     /// on fallthrough. [`TermAction::Continue`] terms are the one
     /// exception to first-match-wins: a matched Continue applies its
@@ -280,6 +359,81 @@ mod tests {
                 "guard {guard:?}"
             );
         }
+    }
+
+    /// `evaluate_recording_hits` must be decision-identical to
+    /// `evaluate_with_attribution` while counting matched guards —
+    /// including Continue terms and terms skipped after the decider.
+    #[test]
+    fn recording_hits_matches_plain_evaluation_and_counts() {
+        use crate::ir::CompiledPolicy;
+
+        let hit = MatchExpr::PrefixEq {
+            prefix: v4([10, 0, 0, 0], 8),
+            ge: Some(8),
+            le: Some(32),
+        };
+        let chain = CompiledChain {
+            policies: vec![CompiledPolicy {
+                name: Some("p".to_string()),
+                terms: vec![
+                    Term {
+                        name: Some("tag".to_string()),
+                        guard: hit.clone(),
+                        action: TermAction::Continue(RouteModifications {
+                            set_med: Some(5),
+                            ..RouteModifications::default()
+                        }),
+                    },
+                    Term {
+                        name: Some("accept-10".to_string()),
+                        guard: hit.clone(),
+                        action: TermAction::Permit(RouteModifications {
+                            set_local_pref: Some(200),
+                            ..RouteModifications::default()
+                        }),
+                    },
+                    Term {
+                        name: Some("unreached".to_string()),
+                        guard: MatchExpr::True,
+                        action: TermAction::Deny,
+                    },
+                ],
+                default_action: PolicyAction::Deny,
+                source: PolicySource::Toml,
+            }],
+            prefix_sets: Vec::new(),
+            community_sets: Vec::new(),
+            as_path_regexes: Vec::new(),
+        };
+
+        let mut hits = chain.zero_term_hits();
+        assert_eq!(hits, vec![vec![0, 0, 0]]);
+        for (route, expect_permit) in [
+            (ctx(Some(v4([10, 1, 0, 0], 24))), true),
+            (ctx(Some(v4([10, 2, 0, 0], 24))), true),
+            (ctx(Some(v4([192, 0, 2, 0], 24))), false),
+        ] {
+            let recorded = chain.evaluate_recording_hits(&route, &mut hits);
+            let (plain, _) = chain.evaluate_with_attribution(&route);
+            assert_eq!(recorded, plain);
+            assert_eq!(
+                recorded.action,
+                if expect_permit {
+                    PolicyAction::Permit
+                } else {
+                    PolicyAction::Deny
+                }
+            );
+            if expect_permit {
+                // Continue mods merged under the deciding permit.
+                assert_eq!(recorded.modifications.set_med, Some(5));
+                assert_eq!(recorded.modifications.set_local_pref, Some(200));
+            }
+        }
+        // Two 10/8 routes hit tag + accept-10; the miss hits only the
+        // unconditional deny (terms after a decider are not evaluated).
+        assert_eq!(hits, vec![vec![2, 2, 1]]);
     }
 
     #[test]

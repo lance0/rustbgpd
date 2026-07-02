@@ -637,7 +637,8 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         .await
         .unwrap();
     let snapshot_toml = reply_rx.await.unwrap().unwrap();
-    let snapshot = Config::load_toml_with_diagnostics(&snapshot_toml, "runtime snapshot").unwrap();
+    let snapshot =
+        Config::load_toml_with_diagnostics(&snapshot_toml.toml, "runtime snapshot").unwrap();
     assert_eq!(snapshot.dynamic_neighbors.len(), 1);
     assert_eq!(snapshot.dynamic_neighbors[0].prefix, "10.30.0.0/16");
     assert_eq!(snapshot.dynamic_neighbors[0].remote_asn, 65030);
@@ -3577,6 +3578,113 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
 
     assert_eq!(eth0.query_state.load(Ordering::SeqCst), 1);
     assert_eq!(eth1.query_state.load(Ordering::SeqCst), 1);
+    drop(mgr);
+    rib_drainer.await.unwrap();
+}
+
+/// ADR-0096: `sync_rpol_policies` adopts the new compiled registry,
+/// re-resolves live chains through it (Route Refresh for the material
+/// import change), and `SetPolicy` cannot shadow an rpol-defined name.
+#[tokio::test]
+async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
+    use rustbgpd_api::peer_types::NamedPolicyDefinition;
+    use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
+
+    fn registry(source: &str) -> RpolPolicySet {
+        let file = std::sync::Arc::new(RpolFile::parse(source).expect("clean rpol"));
+        let mut set = RpolPolicySet::default();
+        set.policies.insert(
+            "edge-in".to_string(),
+            RpolPolicyEntry {
+                file,
+                params: 0,
+                path: "policies/core.rpol".to_string(),
+            },
+        );
+        set
+    }
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        acking_counted_policy_handle(peer, counters.clone()),
+        false,
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["edge-in".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+    mgr.current_config.policy.rpol =
+        registry("policy edge-in { term all { set local-pref 150; accept } }");
+
+    // New registry content: chains re-resolve and the peer's import
+    // policy now carries the edited compiled body.
+    mgr.sync_rpol_policies(
+        vec!["policies/core.rpol".to_string()],
+        registry("policy edge-in { term all { set local-pref 250; accept } }"),
+    )
+    .await
+    .expect("sync succeeds");
+    let managed = mgr.peers.values().next().expect("peer present");
+    let chain = managed.import_policy.as_ref().expect("import chain set");
+    assert!(chain.policies[0].rpol.is_some());
+    let ctx = rustbgpd_policy::RouteContext {
+        prefix: None,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(250));
+
+    // The rpol name cannot be shadowed by a TOML SetPolicy.
+    let err = mgr
+        .apply_policy_change(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "permit".to_string(),
+                    statements: vec![],
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await
+        .expect_err("shadowing an rpol policy must be rejected");
+    assert!(err.to_string().contains("rpol"), "{err}");
+
     drop(mgr);
     rib_drainer.await.unwrap();
 }

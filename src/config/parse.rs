@@ -295,29 +295,81 @@ pub(super) fn parse_named_policy(
 /// tagged with its configured name so the chain-eval attribution path
 /// (used by `bgp_policy_routes_total` and the explain surface) can
 /// report which named policy made the decision.
+///
+/// Names resolve against the combined namespace: `[policy.definitions]`
+/// TOML policies and `.rpol` policies from `[policy] rpol_files`
+/// (ADR-0096). Parameterized `.rpol` policies are referenced by
+/// call-form — `"customer-in(200)"` — and monomorphized here; the
+/// resulting chain member carries its pre-compiled IR, so evaluation
+/// and the ADR-0076 planner's structural diff both see the compiled
+/// content. Every `.rpol` member of one chain compiles through one
+/// `SetStore`, so identical set data dedupes within the chain.
 pub(super) fn resolve_chain(
     names: &[String],
     definitions: &HashMap<String, NamedPolicyConfig>,
+    rpol: &rustbgpd_policy::rpol::RpolPolicySet,
     neighbor_sets: &HashMap<String, NeighborSetConfig>,
     peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Option<PolicyChain>, ConfigError> {
     if names.is_empty() {
         return Ok(None);
     }
+    let mut store = rustbgpd_policy::sets::SetStore::new();
     let policies = names
         .iter()
         .map(|name| {
-            definitions
-                .get(name.as_str())
-                .ok_or_else(|| ConfigError::UndefinedPolicy { name: name.clone() })
-                .and_then(|cfg| parse_named_policy(name, cfg, neighbor_sets, peer_groups))
-                .map(|policy| rustbgpd_policy::NamedPolicy {
-                    name: Some(name.clone()),
-                    policy,
-                })
+            if let Some(cfg) = definitions.get(name.as_str()) {
+                return parse_named_policy(name, cfg, neighbor_sets, peer_groups).map(|policy| {
+                    rustbgpd_policy::NamedPolicy {
+                        name: Some(name.clone()),
+                        policy,
+                        rpol: None,
+                    }
+                });
+            }
+            resolve_rpol_chain_ref(name, rpol, &mut store)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(PolicyChain::from_named(policies)))
+}
+
+/// Resolve one `.rpol` chain reference — `"name"` or a call-form
+/// `"name(arg, ...)"` with `u32` arguments — into a pre-compiled chain
+/// member. Arity is checked against the policy's declaration.
+fn resolve_rpol_chain_ref(
+    reference: &str,
+    rpol: &rustbgpd_policy::rpol::RpolPolicySet,
+    store: &mut rustbgpd_policy::sets::SetStore,
+) -> Result<rustbgpd_policy::NamedPolicy, ConfigError> {
+    let (base, args) = rustbgpd_policy::rpol::parse_call_form(reference).map_err(|detail| {
+        ConfigError::InvalidPolicyEntry {
+            reason: format!("invalid chain reference: {detail}"),
+        }
+    })?;
+    let Some(entry) = rpol.policies.get(base) else {
+        return Err(ConfigError::UndefinedPolicy {
+            name: reference.to_string(),
+        });
+    };
+    if args.len() != entry.params {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "chain reference {reference:?}: policy {base:?} (defined in {:?}) takes {} \
+                 parameter(s), {} given",
+                entry.path,
+                entry.params,
+                args.len()
+            ),
+        });
+    }
+    let compiled = entry
+        .file
+        .compile_policy(base, &args, store)
+        .expect("registry entry names a policy defined in its file");
+    Ok(rustbgpd_policy::NamedPolicy::from_rpol(
+        reference.to_string(),
+        std::sync::Arc::new(compiled),
+    ))
 }
 
 fn resolve_neighbor_set(

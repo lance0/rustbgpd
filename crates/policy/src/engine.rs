@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use rustbgpd_wire::{
@@ -794,13 +794,44 @@ pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> Polic
 pub struct NamedPolicy {
     /// Configured policy name (`None` for inline / anonymous policies).
     pub name: Option<String>,
-    /// The policy itself.
+    /// The policy itself. For an `.rpol`-backed member (`rpol` is
+    /// `Some`) this is an empty placeholder — the chain compiler
+    /// splices the pre-compiled body instead of reading `entries`.
     pub policy: Policy,
+    /// Pre-compiled `.rpol` body (ADR-0096): a single-policy
+    /// [`CompiledChain`] plus the set tables its guards reference,
+    /// produced by the config resolver. `None` for TOML policies.
+    ///
+    /// Participates in `PartialEq`, so chain identity — what the
+    /// ADR-0076 planner diffs — is the *compiled content*: two loads
+    /// of the same `.rpol` source compare equal, an edited file
+    /// compares unequal.
+    pub rpol: Option<Arc<CompiledChain>>,
+}
+
+impl NamedPolicy {
+    /// An `.rpol`-backed chain member: `compiled` must be a
+    /// single-policy chain from `RpolFile::compile_policy`.
+    #[must_use]
+    pub fn from_rpol(name: String, compiled: Arc<CompiledChain>) -> Self {
+        Self {
+            name: Some(name),
+            policy: Policy {
+                entries: Vec::new(),
+                default_action: PolicyAction::Permit,
+            },
+            rpol: Some(compiled),
+        }
+    }
 }
 
 impl From<Policy> for NamedPolicy {
     fn from(policy: Policy) -> Self {
-        Self { name: None, policy }
+        Self {
+            name: None,
+            policy,
+            rpol: None,
+        }
     }
 }
 

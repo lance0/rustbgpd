@@ -11,6 +11,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`.rpol` policies in the running daemon (ADR-0096 slice 3): config
+  references, hot reload, and the `rbgp policy test` live-RIB dry
+  run.** `[policy] rpol_files = ["policies/core.rpol"]` compiles every
+  referenced file at config load (paths relative to the config file,
+  rewritten absolute; ariadne-rendered compile diagnostics are load
+  errors); the policies join the same namespace as
+  `[policy.definitions]` (collisions are load errors naming both
+  sources) and mix freely with TOML policies in chains, with
+  parameterized policies referenced by call-form —
+  `import_policy_chain = ["customer-in(200)", "bogon-filter"]` —
+  arity- and type-checked at load and monomorphized into pre-compiled
+  chain members. Chain identity for the ADR-0076 planner is compiled
+  content: an edited `.rpol` file classifies as a `policy_chain`
+  live-impact for exactly the referencing peers, and SIGHUP hot-applies
+  it through a new `SyncRpolPolicies` peer-manager step (same atomic
+  resolved-policy fan-out + Route Refresh as `[policy.definitions]`
+  edits); reloading unchanged content is a no-op. Config transactions
+  cannot stage `.rpol` file content (out-of-band files) — such
+  candidates are rejected as unsupported, and gNMI Set remains
+  TOML-surface-only. The differentiator verb: `rbgp policy test
+  <file.rpol> --policy name(args) --direction import|export [--peer]
+  [--family] [--limit] [--show-changes] [--json]` sends the candidate
+  source to the daemon (new `PolicyService.TestPolicy` RPC,
+  `SensitiveRead`), compiles it server-side, and evaluates it
+  read-only over a live Adj-RIB-In / Loc-RIB snapshot — accepted/
+  rejected/modified counts, per-term hit counters, and before/after
+  attribute diff samples, with zero route/session/counter impact
+  (V1 scope: IPv4/IPv6 unicast). Docs: `docs/rpol-language.md`
+  ("Using policies in the daemon"), `docs/CONFIGURATION.md`.
+
 - **The `.rpol` policy language frontend (ADR-0096 slice 2): lexer,
   parser, typechecker, in-language tests, and `rbgp policy check`.**
   `.rpol` source — `prefix-set`/`community-set` definitions (ge/le per
@@ -33,8 +63,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp policy check <file.rpol>` verb (exit codes 0 clean /
   1 diagnostics / 2 test failures, `--json`) runs them with zero
   daemon involvement. Language reference: `docs/rpol-language.md`.
-  Daemon integration (config wiring, `rbgp policy test --rib live`) is
-  the next slice — nothing consumes `.rpol` from configuration yet.
+  Daemon integration (config wiring, `rbgp policy test`) ships in the
+  slice-3 entry above.
   New policy-crate-only dependencies: `logos` (MIT OR Apache-2.0),
   `ariadne` (MIT).
 

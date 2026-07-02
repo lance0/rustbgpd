@@ -1,10 +1,12 @@
 # The rustbgpd policy language (`.rpol`) — reference draft
 
-Status: **draft** (ADR-0096 slice 2). The frontend — lexer, parser,
-typechecker, in-language tests, and `rbgp policy check` — is complete;
-daemon integration (referencing `.rpol` policies from configuration,
-`rbgp policy test --rib live`) ships in a later slice. Nothing in this
-document is wired into a running daemon yet.
+Status: **integrated** (ADR-0096 slices 2–3). The frontend — lexer,
+parser, typechecker, in-language tests, and `rbgp policy check` — and
+the daemon integration — `[policy] rpol_files` config references,
+mixed TOML/rpol chains, SIGHUP hot-apply, and the `rbgp policy test`
+live-RIB dry run — are complete (see "Using policies in the daemon"
+below). Explain-surface traces for `.rpol` terms ship in the next
+slice.
 
 `.rpol` compiles to the same public typed IR (`rustbgpd_policy::ir`)
 that TOML policy chains compile to, and is evaluated by the same
@@ -342,6 +344,73 @@ Error: unknown prefix-set `custmers`
    │ Note: did you mean `customers`?
 ───╯
 ```
+
+## Using policies in the daemon
+
+`.rpol` files become live daemon policy through `[policy] rpol_files`
+in the config (full reference:
+[`CONFIGURATION.md`](CONFIGURATION.md)):
+
+```toml
+[policy]
+rpol_files = ["policies/core.rpol"]        # relative to the config file
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+import_policy_chain = ["customer-in(200)", "bogon-filter"]
+```
+
+Every file compiles (parse + typecheck) at config load; diagnostics
+are load errors. Policies join the same namespace as
+`[policy.definitions]` TOML policies — chains mix both freely, and
+parameterized policies are instantiated by call-form (`u32` arguments,
+arity-checked at load). Editing a referenced file + SIGHUP hot-applies
+the change to exactly the peers whose resolved chains moved, with
+Route Refresh for materially changed import policy.
+
+### `rbgp policy test` — dry-run against the live RIB
+
+`rbgp policy check` runs a file's own `test` blocks locally (CI-able,
+no daemon). `rbgp policy test` goes further: it sends the candidate
+source to a running daemon, which compiles it server-side and
+evaluates the selected policy **read-only over a snapshot of the live
+RIB** — no route state changes, no session impact, no policy counters
+move (`SensitiveRead` authorization).
+
+```console
+$ rbgp policy test policies/core.rpol --policy "customer-in(200)" \
+    --direction import --peer 10.0.0.2 --show-changes 2
+policy "customer-in(200)" (import) over 1204 routes:
+  accepted 990  rejected 214  modified 990
+Term hits:
+  rpki-guard                       3
+  customer-routes                  990
+  bogon-guard                      211
+Changes (up to 2):
+  10.10.1.0/24 (from 10.0.0.2):
+    local_pref 100 -> 200
+    communities + 65001:999
+  10.10.2.0/24 (from 10.0.0.2):
+    local_pref 100 -> 200
+    communities + 65001:999
+```
+
+- `--direction import` evaluates Adj-RIB-In routes (all peers, or one
+  with `--peer`); `--direction export` evaluates Loc-RIB best routes,
+  with `--peer` setting the peer context guards see (`peer.address`,
+  `peer.asn`, `peer.group`).
+- `--family ipv4_unicast|ipv6_unicast` filters the snapshot; V1 scope
+  is IPv4/IPv6 unicast routes (other families are not walked).
+- `--limit N` caps how many routes are evaluated; `--show-changes N`
+  caps the before/after attribute diff samples.
+- Compile diagnostics come back rendered exactly as `policy check`
+  prints them (exit code 1); a clean run exits 0.
+- `--json` emits the counts, per-term hits, and diffs structurally.
+
+Per-term hit counters answer "which term is doing the work" (the
+IOS-XR `show pcl` idea); a term lowered to several IR steps reports as
+`name.1`, `name.2`, ....
 
 ## Deliberate V1 exclusions
 

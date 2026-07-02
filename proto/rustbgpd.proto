@@ -489,6 +489,20 @@ service PolicyService {
   // Side-effect free read. Does not touch RIB, does not increment
   // any policy counter, does not log a new policy decision.
   rpc ExplainImportPolicy(ExplainImportPolicyRequest) returns (ExplainImportPolicyResponse);
+
+  // TestPolicy — dry-run a candidate .rpol policy against a snapshot
+  // of the live RIB (ADR-0096 Decision 6). The daemon compiles the
+  // submitted source server-side (compile diagnostics are returned in
+  // the response instead of routes), snapshots matching routes through
+  // the existing RIB query machinery, evaluates the selected policy
+  // read-only, and reports accepted / rejected / modified counts,
+  // per-term hit counters, and up to show_changes before/after
+  // attribute diffs.
+  //
+  // Side-effect free: no route state is touched, no session is
+  // affected, no policy counters increment. V1 scope is IPv4 / IPv6
+  // unicast routes.
+  rpc TestPolicy(TestPolicyRequest) returns (TestPolicyResponse);
 }
 
 service PeerGroupService {
@@ -928,6 +942,67 @@ message ExplainImportPolicyResponse {
   // when it does not, every matching path_id appears (Add-Path
   // disambiguation).
   repeated ImportExplainMatch matches = 6;
+}
+
+message TestPolicyRequest {
+  // Full .rpol source text; compiled server-side. Compile diagnostics
+  // fail the dry run with compiled=false and rendered diagnostics.
+  string rpol_source = 1;
+  // Which policy in the file to evaluate. Bare name for zero-parameter
+  // policies; call-form with u32 arguments for parameterized ones,
+  // e.g. "customer-in(200)".
+  string policy = 2;
+  // "import" evaluates over Adj-RIB-In routes (optionally one peer's);
+  // "export" evaluates over Loc-RIB best routes.
+  string direction = 3;
+  // Optional peer address. For import: restrict the snapshot to this
+  // peer's Adj-RIB-In. For export: evaluate as if advertising to this
+  // peer (peer context fields in guards see its address).
+  string peer = 4;
+  // Address family filter. UNSPECIFIED evaluates IPv4 + IPv6 unicast;
+  // only the unicast families are supported in V1.
+  AddressFamily afi_safi = 5;
+  // Maximum routes to evaluate; 0 = the whole snapshot.
+  uint32 limit = 6;
+  // Maximum before/after attribute diffs to return (routes the policy
+  // accepted with modifications). 0 = none.
+  uint32 show_changes = 7;
+}
+
+// Per-term guard-hit counter (the IOS-XR "show pcl" idea): how many
+// evaluated routes matched this term during the walk.
+message TestPolicyTermHits {
+  // Term name from the .rpol source (multi-step terms are suffixed
+  // ".1", ".2", ... by the compiler).
+  string term = 1;
+  uint64 hits = 2;
+}
+
+// One before/after sample for a route the policy modified.
+message TestPolicyDiff {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  // Source peer of the route (import) / snapshot origin (export).
+  string peer = 3;
+  // Human-readable attribute changes, e.g. "local_pref 100 - 200" or
+  // "communities + 65001:999".
+  repeated string changes = 4;
+}
+
+message TestPolicyResponse {
+  // False when the source failed to compile or the policy selection
+  // was invalid; diagnostics carries the rendered error report and the
+  // route counts are all zero.
+  bool compiled = 1;
+  string diagnostics = 2;
+  uint64 routes_evaluated = 3;
+  uint64 accepted = 4;
+  uint64 rejected = 5;
+  // Accepted routes whose attributes the policy changed.
+  uint64 modified = 6;
+  repeated TestPolicyTermHits term_hits = 7;
+  // Up to request.show_changes samples, in snapshot order.
+  repeated TestPolicyDiff diffs = 8;
 }
 
 // ---------------------------------------------------------------------------

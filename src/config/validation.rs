@@ -228,6 +228,7 @@ impl Config {
                 name,
                 group,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
@@ -242,12 +243,14 @@ impl Config {
         let _global_import_chain = resolve_chain(
             &self.policy.import_chain,
             &self.policy.definitions,
+            &self.policy.rpol,
             &self.policy.neighbor_sets,
             &self.peer_groups,
         )?;
         resolve_chain(
             &self.policy.export_chain,
             &self.policy.definitions,
+            &self.policy.rpol,
             &self.policy.neighbor_sets,
             &self.peer_groups,
         )?;
@@ -624,12 +627,14 @@ impl Config {
             let _neighbor_import_chain = resolve_chain(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
             resolve_chain(
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
+                &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
@@ -1665,6 +1670,7 @@ fn validate_peer_group(
     name: &str,
     group: &PeerGroupConfig,
     definitions: &std::collections::HashMap<String, super::NamedPolicyConfig>,
+    rpol: &rustbgpd_policy::rpol::RpolPolicySet,
     neighbor_sets: &std::collections::HashMap<String, super::NeighborSetConfig>,
     peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
 ) -> Result<(), ConfigError> {
@@ -1772,12 +1778,14 @@ fn validate_peer_group(
     let _group_import_chain = resolve_chain(
         &group.import_policy_chain,
         definitions,
+        rpol,
         neighbor_sets,
         peer_groups,
     )?;
     resolve_chain(
         &group.export_policy_chain,
         definitions,
+        rpol,
         neighbor_sets,
         peer_groups,
     )?;

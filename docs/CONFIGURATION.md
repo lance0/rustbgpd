@@ -1343,6 +1343,59 @@ chain.
 **Mutual exclusion:** Inline policy and policy chain cannot both be set for the
 same direction on the same neighbor. This is a config validation error.
 
+### `.rpol` policy files (`rpol_files`, ADR-0096)
+
+Policies written in the rustbgpd policy language
+([`rpol-language.md`](rpol-language.md)) load from files referenced in
+`[policy]`:
+
+```toml
+[policy]
+rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
+```
+
+- **Paths** are relative to the config file's directory (absolute paths
+  work too). After a successful load the daemon carries them as
+  absolute paths, so runtime config snapshots and transaction
+  candidates stay loadable regardless of working directory.
+- **Compile-at-load:** every file is parsed and typechecked at config
+  load; any diagnostic (rendered with source excerpts, like
+  `rbgp policy check`) is a config load error — a broken `.rpol` file
+  never half-loads.
+- **One namespace:** `.rpol` policies and `[policy.definitions]` TOML
+  policies share the named-policy namespace. A name defined by both —
+  or by two `.rpol` files — is a load error naming both sources.
+- **Chain references:** chains mix TOML and `.rpol` policies freely.
+  Parameterized `.rpol` policies are referenced in call-form with
+  `u32` arguments, monomorphized at load:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
+```
+
+  Unknown names, wrong arity, and non-`u32` arguments are load errors.
+- **Reload:** editing a referenced `.rpol` file and sending SIGHUP
+  recompiles it and hot-applies the changed chains to exactly the
+  peers whose resolved policy actually changed (Route Refresh fires
+  for materially changed import chains — same mechanism as
+  `[policy.definitions]` edits). `rbgp config diff` reports the change
+  under the policy section.
+- **Scope notes:** config *transactions* cannot stage `.rpol` file
+  content (the files live outside the candidate TOML) — a candidate
+  whose `rpol_files` list changed is rejected as unsupported; apply
+  `.rpol` changes via SIGHUP. gNMI Set likewise edits only the TOML
+  surface, not `.rpol` file content. `rbgp policy explain` statement
+  traces for `.rpol` chain members arrive with the ADR-0096 explain
+  slice.
+
+Test `.rpol` policies without touching the daemon
+(`rbgp policy check file.rpol` — runs the file's in-language `test`
+blocks locally) or against the daemon's live RIB read-only
+(`rbgp policy test` — see [`rpol-language.md`](rpol-language.md)).
+
 ### Import-decision explain (`[policy.explain]`)
 
 Optional. Controls the per-session import-decision cache that backs
