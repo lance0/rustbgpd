@@ -1,0 +1,58 @@
+# M77 — GR/LLGR RR-family stale-preservation receipt.
+#
+# iBGP route reflector with three clients: a restartable VPNv4+RTC PE, a
+# VPNv4+RTC client bound to an ORR vantage, and a linkstate-only BGP-LS
+# source. GR helper timers:
+#   - The GR stale window uses the PEER's advertised restart-time
+#     (RFC 4724 §4.2): 60 s on the PE, 30 s on the LS source.
+#   - gr_stale_routes_time bounds the post-re-establish End-of-RIB wait.
+#   - llgr_stale_time > 0 on the PE advertises LLGR (RFC 9494); the
+#     effective LLGR stale time is min(local 120, peer per-family 30) = 30 s.
+#   - The LS source has NO llgr_stale_time: its GR expiry purges outright,
+#     which is what un-resolves the ORR vantage in the never-returns arm.
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "vpnv4-rtc-pe"
+hold_time = 90
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast", "rtc"]
+graceful_restart = true
+gr_stale_routes_time = 60
+llgr_stale_time = 120
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "vpnv4-rtc-client"
+hold_time = 90
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast", "rtc"]
+orr_vantage = "10.0.8.1"
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65001
+description = "bgpls-source"
+hold_time = 90
+route_reflector_client = true
+families = ["linkstate"]
+graceful_restart = true
+gr_stale_routes_time = 60
+
+[security.grpc]
+enforcement = "legacy"

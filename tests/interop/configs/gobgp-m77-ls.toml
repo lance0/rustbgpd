@@ -1,0 +1,27 @@
+# M77 BGP-LS source: linkstate only, plain GR (restart-time 30), NO LLGR.
+# The script kills it and never brings it back: the RR must keep the
+# injected topology (and the ORR vantage resolution) alive as stale through
+# the 30 s window, then purge at GR-timer expiry — un-resolving the vantage.
+
+[global.config]
+as = 65001
+router-id = "10.0.2.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.2.1"
+peer-as = 65001
+description = "rustbgpd-gr-rr"
+
+[neighbors.timers.config]
+connect-retry = 5
+
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 30
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ls"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true

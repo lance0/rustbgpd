@@ -1,0 +1,70 @@
+# M77 client: receives the reflected VPN routes per its RTC membership.
+# VRF blue (unique RD 65001:101, RT 65001:100) both derives the blue RTC
+# membership and originates one VPN route of its own — the route the
+# restarted PE must re-receive immediately from its GR-preserved
+# membership. VRF red-import (import-only RT 65001:200, exports nothing)
+# derives the red membership IN CONFIG rather than via `gobgp global rib
+# add -a rtc`: a CLI-injected RTC path carries ORIGIN incomplete while the
+# VRF-derived ones carry IGP, and that ORIGIN asymmetry would hand the
+# RR's best-path tiebreak for the dual-originated red /96 to the PE — whose
+# GR-stale demotion at the kill would then flip the best and put one
+# reflected-interest withdraw on the client's wire during the GR window.
+# Config-derived membership keeps both dual-originated /96s origin-equal,
+# the lower-address client copy always wins, and the client's wire stays
+# provably silent at GR entry.
+#
+# graceful-restart + long-lived-enabled make the client advertise the LLGR
+# capability for both families: rustbgpd strips the LLGR_STALE community
+# toward LLGR-incapable peers (strip_llgr_stale_if_needed), so observing
+# the community on the client's copy during the LLGR phase requires the
+# capability. The client itself never restarts in this test.
+
+[global.config]
+as = 65001
+router-id = "10.0.0.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.0.1"
+peer-as = 65001
+description = "rustbgpd-gr-rr"
+
+[neighbors.timers.config]
+connect-retry = 5
+
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 60
+long-lived-enabled = true
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv4-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 120
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "rtc"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 120
+
+[[vrfs]]
+[vrfs.config]
+name = "blue"
+id = 1
+rd = "65001:101"
+both-rt-list = ["65001:100"]
+
+[[vrfs]]
+[vrfs.config]
+name = "red-import"
+id = 2
+rd = "65001:102"
+import-rt-list = ["65001:200"]

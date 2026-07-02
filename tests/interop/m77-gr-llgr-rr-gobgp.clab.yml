@@ -1,0 +1,95 @@
+# Containerlab topology: GoBGP PE + GoBGP client + GoBGP LS source ↔ rustbgpd RR
+# (M77 — GR/LLGR stale preservation for the RR families, RFC 4724 / RFC 9494)
+#
+# Validates: rustbgpd (receiving speaker) preserves a restarting peer's
+# VPNv4 (SAFI 128), RT-Constrain (SAFI 132), and BGP-LS (AFI 16388) routes
+# as stale through the GR window, keeps reflecting them to the client (no
+# withdraws on the wire), sweeps exactly the not-re-advertised route at the
+# peer's End-of-RIB, promotes to the LLGR stale phase (LLGR_STALE community
+# toward the client) when the peer never returns, and keeps ORR vantages
+# resolved through the LS source's restart window.
+#
+# gobgp-pe: VRFs blue (RD 65001:100) + red (RD 65001:200) from the CONFIG
+# FILE (so RTC membership survives a daemon relaunch); VPN routes are
+# CLI-injected. GR restart-time 60 + LLGR per-family restart-time 30 for
+# l3vpn-ipv4-unicast and rtc.
+# gobgp-client: VRF blue (RD 65001:101, RT 65001:100) + a red-import VRF
+# for the red RTC membership; receives the reflected VPN routes. It
+# advertises GR+LLGR (never restarts — the capability exists so rustbgpd
+# does not strip the LLGR_STALE community toward it in the LLGR phase).
+# gobgp-ls: linkstate only, GR restart-time 30, no LLGR; injects the M76
+# 4-link square that resolves the RR's ORR vantage.
+#
+# Addressing is deliberate: the CLIENT holds the LOWER address (10.0.0.2)
+# so its fresh copies of the dual-originated blue/red RTC /96 NLRIs always
+# win the RR's best-path tiebreak. If the PE's copies were best, GR-stale
+# demotion at the kill would flip the best to the client's copy, the RR
+# would withdraw the previously reflected PE copy from the client (RFC
+# 4456 — a client's own route is not reflected back), and GoBGP's
+# processRTCMembership withdraw path would then withdraw the client's VPN
+# routes toward the RR without checking that the RR's default RTC NLRI
+# still covers them (upstream quirk, gobgp v4.6.0 server.go) — emptying
+# the very table this receipt asserts on.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
+#   containerlab destroy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
+
+name: m77-gr-llgr-rr-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m77-gr-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    gobgp-pe:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m77-pe.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-client:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m77-client.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-ls:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m77-ls.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-client:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-pe:eth1"]
+    - endpoints: ["rustbgpd:eth3", "gobgp-ls:eth1"]
