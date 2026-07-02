@@ -172,6 +172,18 @@ pub enum TermAction {
     /// Reject the route (terminates chain evaluation; contributes no
     /// modifications).
     Deny,
+    /// The guard matched: apply these modifications and continue to the
+    /// next term of the *same* policy (Junos-style modify-and-continue).
+    ///
+    /// This is the `.rpol` frontend's term-fallthrough carrier — a term
+    /// body that executes `set`/`add`/`remove` actions but ends without
+    /// an `accept`/`reject` verdict lowers to `Continue`. Continue
+    /// modifications accumulate policy-locally and are merged into the
+    /// policy's eventual `Permit` decision (its own modifications win
+    /// on scalar conflicts, matching chain merge semantics); a later
+    /// `Deny` discards them. The TOML frontend never emits this
+    /// variant.
+    Continue(RouteModifications),
 }
 
 /// One guarded action inside a [`CompiledPolicy`] — the compiled form
@@ -193,6 +205,9 @@ pub struct Term {
 pub enum PolicySource {
     /// Compiled from a TOML `PolicyStatement` chain.
     Toml,
+    /// Compiled from `.rpol` source (the language frontend,
+    /// [`crate::rpol`]).
+    Rpol,
 }
 
 /// One compiled policy: ordered terms with first-match-wins semantics

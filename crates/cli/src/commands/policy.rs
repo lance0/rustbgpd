@@ -140,6 +140,106 @@ struct JsonChains {
     export_policy_names: Vec<String>,
 }
 
+/// `rbgp policy check <file.rpol>` — run the `.rpol` frontend
+/// in-process (parse, typecheck, in-language tests); no daemon.
+///
+/// Returns the process exit code: 0 clean, 1 diagnostics (or an
+/// unreadable file), 2 test failures. Diagnostics render to stderr,
+/// results to stdout.
+pub fn check_local(path: &str, json: bool) -> i32 {
+    use std::io::IsTerminal;
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("Error: cannot read {path}: {error}");
+            return 1;
+        }
+    };
+    let report = rustbgpd_policy::rpol::check_rpol(&source);
+
+    if json {
+        #[derive(Serialize)]
+        struct JsonFailure<'a> {
+            name: &'a str,
+            message: &'a str,
+        }
+        #[derive(Serialize)]
+        struct JsonCheck<'a> {
+            file: &'a str,
+            ok: bool,
+            diagnostics: Vec<String>,
+            tests_total: usize,
+            tests_passed: usize,
+            failures: Vec<JsonFailure<'a>>,
+        }
+        let out = JsonCheck {
+            file: path,
+            ok: report.is_ok(),
+            diagnostics: report
+                .diagnostics
+                .0
+                .iter()
+                .map(|diag| diag.message.clone())
+                .collect(),
+            tests_total: report.tests.as_ref().map_or(0, |t| t.total),
+            tests_passed: report
+                .tests
+                .as_ref()
+                .map_or(0, rustbgpd_policy::rpol::TestReport::passed),
+            failures: report.tests.as_ref().map_or_else(Vec::new, |t| {
+                t.failures
+                    .iter()
+                    .map(|f| JsonFailure {
+                        name: &f.name,
+                        message: &f.message,
+                    })
+                    .collect()
+            }),
+        };
+        if output::print_json_pretty(&out).is_err() {
+            return 1;
+        }
+    } else if !report.diagnostics.is_empty() {
+        let color = std::io::stderr().is_terminal();
+        eprint!("{}", report.diagnostics.render(path, &source, color));
+        eprintln!(
+            "{path}: {} error{}",
+            report.diagnostics.len(),
+            if report.diagnostics.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    } else if let Some(tests) = &report.tests {
+        if tests.total == 0 {
+            println!("{path}: ok (no tests)");
+        } else {
+            for failure in &tests.failures {
+                eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
+            }
+            println!(
+                "{path}: {} passed, {} failed",
+                tests.passed(),
+                tests.failures.len()
+            );
+        }
+    }
+
+    if !report.diagnostics.is_empty() {
+        1
+    } else if report
+        .tests
+        .as_ref()
+        .is_some_and(|tests| !tests.all_passed())
+    {
+        2
+    } else {
+        0
+    }
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -821,6 +921,46 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use std::io::Write;
+
+    fn write_rpol(content: &str) -> tempfile::NamedTempFile {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{content}").unwrap();
+        tmp.flush().unwrap();
+        tmp
+    }
+
+    #[test]
+    fn check_local_clean_file_exits_zero() {
+        let tmp = write_rpol(
+            "policy p { term t { if route.rpki == invalid { reject } } }
+             test rejects-invalid {
+                 route { prefix 10.0.0.0/24; rpki invalid }
+                 expect p == reject
+             }",
+        );
+        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 0);
+        assert_eq!(check_local(tmp.path().to_str().unwrap(), true), 0);
+    }
+
+    #[test]
+    fn check_local_diagnostics_exit_one() {
+        let tmp = write_rpol("policy p { term t { if route.zzz == 1 { accept } } }");
+        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 1);
+        // Unreadable file is also exit 1.
+        assert_eq!(check_local("/nonexistent/nope.rpol", false), 1);
+    }
+
+    #[test]
+    fn check_local_failing_test_exits_two() {
+        let tmp = write_rpol(
+            "policy p { term t { reject } }
+             test should-fail {
+                 route { prefix 10.0.0.0/24 }
+                 expect p == accept
+             }",
+        );
+        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 2);
+    }
 
     #[tokio::test]
     async fn list_renders_empty() {

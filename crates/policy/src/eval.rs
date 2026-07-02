@@ -21,9 +21,13 @@ use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, TermAction};
 use crate::sets::prefix_entry_matches;
 
 /// A policy's disposition of the route, borrowing the matched term's
-/// modifications (cloned only if merged).
+/// modifications (cloned only if merged). `PermitOwned` carries
+/// modifications accumulated from `Continue` terms merged with the
+/// deciding term's own — only policies that actually hit a `Continue`
+/// term (an `.rpol`-only construct) pay the clone.
 enum PolicyDecision<'a> {
     Permit(Option<&'a RouteModifications>),
+    PermitOwned(RouteModifications),
     Deny,
 }
 
@@ -61,6 +65,11 @@ impl CompiledChain {
                     accumulated.merge_from(mods.clone());
                 }
                 PolicyDecision::Permit(_) => {}
+                PolicyDecision::PermitOwned(mods) => {
+                    if !mods.is_empty() {
+                        accumulated.merge_from(mods);
+                    }
+                }
             }
         }
         // All policies permitted (including an empty chain). Attribute
@@ -80,23 +89,43 @@ impl CompiledChain {
     }
 
     /// First-match-wins term walk; the policy's default action decides
-    /// on fallthrough.
+    /// on fallthrough. [`TermAction::Continue`] terms are the one
+    /// exception to first-match-wins: a matched Continue applies its
+    /// modifications policy-locally and the walk keeps going; the
+    /// eventual Permit merges them (the deciding term's own
+    /// modifications winning scalar conflicts, mirroring chain-level
+    /// merge), while a Deny — matched term or default — discards them.
     fn evaluate_policy<'a>(
         &self,
         policy: &'a CompiledPolicy,
         ctx: &RouteContext<'_>,
     ) -> PolicyDecision<'a> {
+        let mut continued: Option<RouteModifications> = None;
         for term in &policy.terms {
             if self.eval_expr(&term.guard, ctx) {
-                return match &term.action {
-                    TermAction::Permit(mods) => PolicyDecision::Permit(Some(mods)),
-                    TermAction::Deny => PolicyDecision::Deny,
-                };
+                match &term.action {
+                    TermAction::Permit(mods) => {
+                        return match continued {
+                            Some(mut acc) => {
+                                acc.merge_from(mods.clone());
+                                PolicyDecision::PermitOwned(acc)
+                            }
+                            None => PolicyDecision::Permit(Some(mods)),
+                        };
+                    }
+                    TermAction::Deny => return PolicyDecision::Deny,
+                    TermAction::Continue(mods) => {
+                        continued
+                            .get_or_insert_with(RouteModifications::default)
+                            .merge_from(mods.clone());
+                    }
+                }
             }
         }
-        match policy.default_action {
-            PolicyAction::Permit => PolicyDecision::Permit(None),
-            PolicyAction::Deny => PolicyDecision::Deny,
+        match (policy.default_action, continued) {
+            (PolicyAction::Permit, Some(acc)) => PolicyDecision::PermitOwned(acc),
+            (PolicyAction::Permit, None) => PolicyDecision::Permit(None),
+            (PolicyAction::Deny, _) => PolicyDecision::Deny,
         }
     }
 

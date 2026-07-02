@@ -12,6 +12,9 @@ description = "Minimal policy engine — prefix allow/deny, max-prefix enforceme
 readme = "README.md"
 
 [dependencies]
+# `.rpol` frontend: lexer + diagnostics (logos: MIT OR Apache-2.0; ariadne: MIT).
+ariadne = "0.6"
+logos = "0.16"
 regex = "1"
 rustc-hash.workspace = true
 rustbgpd-wire.workspace = true
