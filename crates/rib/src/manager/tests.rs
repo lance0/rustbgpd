@@ -2798,6 +2798,203 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
     handle.await.unwrap();
 }
 
+/// RFC 7911 VPN receive: distinct path IDs for the same RD+prefix are
+/// distinct Adj-RIB-In entries, and a withdraw keyed by path ID removes
+/// only that one — the surviving path takes over the Loc-RIB best.
+#[tokio::test]
+async fn vpn_addpath_ingest_distinct_path_ids_stored_and_withdrawn_independently() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let mut path_1 = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 200);
+    path_1.path_id = 1;
+    let mut path_2 = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
+    path_2.path_id = 2;
+    assert_eq!(path_1.nlri.key(), path_2.nlri.key());
+    assert_ne!(path_1.key(), path_2.key());
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![path_1.clone(), path_2.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best = query_vpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "one Loc-RIB best per RD+prefix identity");
+    assert_eq!(
+        best[0].path_id, 1,
+        "the higher-LOCAL_PREF received path wins"
+    );
+
+    // Withdraw ONLY path 1 — path 2 must survive and take over.
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![path_1.key()],
+    })
+    .await
+    .unwrap();
+    let best = query_vpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "path 2 must survive a path-1-only withdraw");
+    assert_eq!(best[0].path_id, 2);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![path_2.key()],
+    })
+    .await
+    .unwrap();
+    assert!(query_vpn_routes(&tx).await.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 7911 VPN send: an Add-Path-send target receives up to `send_max`
+/// candidates per RD+prefix with outbound path IDs 1..=N ranked by the VPN
+/// tiebreak, a non-Add-Path target keeps single-best (`path_id = 0`), and
+/// a source withdraw shrinks the staged set by outbound path ID.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "covers Add-Path top-N, single-best parity, and withdraw re-ranking in one scenario"
+)]
+async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let addpath_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (addpath_out_tx, mut addpath_out) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: addpath_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: addpath_out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut addpath_out).await;
+
+    let plain_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (plain_out_tx, mut plain_out) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: plain_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: plain_out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut plain_out).await;
+
+    // Same RD+prefix from three sources, ranked by LOCAL_PREF: 300 > 200 > 100.
+    let best = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 11), 31, 100, 300);
+    let second = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 12), 31, 200, 200);
+    let third = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 13), 31, 300, 100);
+    let nlri_key = best.nlri.key();
+    for route in [&best, &second, &third] {
+        tx.send(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let _ = query_vpn_routes(&tx).await; // sync point
+
+    let staged = drain_final_vpn(&mut addpath_out);
+    assert_eq!(
+        staged.len(),
+        2,
+        "send_max=2 caps the staged set at two paths, not three"
+    );
+    let rank_1 = staged
+        .get(&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1,
+        })
+        .expect("outbound path_id 1 staged");
+    let rank_2 = staged
+        .get(&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 2,
+        })
+        .expect("outbound path_id 2 staged");
+    assert_eq!(rank_1.next_hop, best.next_hop, "rank 1 = best by tiebreak");
+    assert_eq!(rank_2.next_hop, second.next_hop, "rank 2 = runner-up");
+
+    let plain_staged = drain_final_vpn(&mut plain_out);
+    assert_eq!(plain_staged.len(), 1, "non-Add-Path peer stays single-best");
+    let single = plain_staged
+        .get(&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 0,
+        })
+        .expect("single-best staged at path_id 0");
+    assert_eq!(single.next_hop, best.next_hop);
+
+    // The best source withdraws: the staged top-2 becomes {second, third}
+    // re-ranked as path IDs 1..2; the diff withdraws by outbound path ID.
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: best.peer,
+        announced: vec![],
+        withdrawn: vec![best.key()],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await; // sync point
+
+    let staged = drain_final_vpn(&mut addpath_out);
+    // drain_final_vpn folds over the earlier state: ranks 1..2 re-announced.
+    let rank_1 = staged
+        .get(&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1,
+        })
+        .expect("outbound path_id 1 restaged after withdraw");
+    let rank_2 = staged
+        .get(&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 2,
+        })
+        .expect("outbound path_id 2 restaged after withdraw");
+    assert_eq!(rank_1.next_hop, second.next_hop);
+    assert_eq!(rank_2.next_hop, third.next_hop);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// RFC 4456 eligibility on VPN reflection: a non-client iBGP route is
 /// reflected to RR clients, suppressed toward other non-clients, and never
 /// echoed back to the source.
@@ -21212,6 +21409,62 @@ async fn two_vpn_clients_different_vantages_receive_divergent_bests() {
         final_b.get(&key).map(|r| r.next_hop),
         Some(orr_nh_y()),
         "client at B exits via Y (cost 1 < 10)"
+    );
+}
+
+/// RFC 9107 + RFC 7911 composed: an ORR client with Add-Path send ranks
+/// its staged top-N by the VANTAGE's interior costs — `path_id` 1 is the
+/// vantage-closest exit, not the RR-local best.
+#[tokio::test]
+async fn vpn_orr_addpath_ranking_uses_vantage_costs() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_a) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: client_a,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_a()),
+        add_path_send_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_a).await;
+
+    // Same RD+prefix via X (cost 1 from vantage A) and Y (cost 10).
+    let key = announce_divergent_vpn_bests(&tx, 81).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let staged = drain_final_vpn(&mut out_a);
+    assert_eq!(staged.len(), 2, "both candidates staged under send_max=2");
+    assert_eq!(
+        staged
+            .get(&crate::route::VpnRibRouteKey {
+                nlri_key: key.nlri_key,
+                path_id: 1,
+            })
+            .map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "path_id 1 = vantage-closest exit (cost 1 via X)"
+    );
+    assert_eq!(
+        staged
+            .get(&crate::route::VpnRibRouteKey {
+                nlri_key: key.nlri_key,
+                path_id: 2,
+            })
+            .map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "path_id 2 = the farther exit (cost 10 via Y)"
     );
 }
 

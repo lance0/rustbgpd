@@ -647,14 +647,21 @@ impl RibManager {
                 HashSet::new()
             };
 
-            let effective_l3vpn_keys: HashSet<crate::route::VpnRibRouteKey> = if resync {
-                let mut all: HashSet<crate::route::VpnRibRouteKey> = self
+            let effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
+                let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = self
                     .loc_rib
                     .iter_vpn()
-                    .map(crate::route::VpnRibRoute::key)
+                    .map(|route| route.nlri.key())
                     .collect();
+                // For a VPN Add-Path-send resync, the staged top-N draws from
+                // every Adj-RIB-In identity, not just the Loc-RIB bests.
+                if self.peer_vpn_add_path_send(peer) {
+                    for rib in self.ribs.values() {
+                        all.extend(rib.iter_vpn().map(|route| route.nlri.key()));
+                    }
+                }
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(rib_out.iter_vpn().map(crate::route::VpnRibRoute::key));
+                    all.extend(rib_out.iter_vpn().map(|route| route.nlri.key()));
                 }
                 all
             } else {
@@ -948,6 +955,8 @@ impl RibManager {
                     sendable.as_ref(),
                     rtc_filter.as_ref(),
                     orr_ctx,
+                    peer_add_path_send_max,
+                    &peer_add_path_send_families,
                     export_pol.as_ref(),
                     &metrics,
                     policy_stats,

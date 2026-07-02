@@ -1125,6 +1125,29 @@ mod tests {
     }
 
     #[test]
+    fn negotiate_add_path_vpn_families_both_directions() {
+        // VPNv4/VPNv6 (SAFI 128) negotiate Add-Path exactly like unicast
+        // (RFC 9107 requires it between RRs for multi-cluster ORR).
+        let ours = vec![
+            AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::MplsVpn,
+                send_receive: AddPathMode::Both,
+            },
+            AddPathFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::MplsVpn,
+                send_receive: AddPathMode::Both,
+            },
+        ];
+        let peers = ours.clone();
+        let result = negotiate_add_path(&ours, &peers);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[&(Afi::Ipv4, Safi::MplsVpn)], AddPathMode::Both);
+        assert_eq!(result[&(Afi::Ipv6, Safi::MplsVpn)], AddPathMode::Both);
+    }
+
+    #[test]
     fn negotiate_add_path_no_overlap() {
         // We want Receive, peer also wants Receive → no match
         let ours = vec![AddPathFamily {

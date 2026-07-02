@@ -1035,7 +1035,10 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     );
     assert_eq!(
         mp.vpn_announced,
-        vec![route.nlri.clone()],
+        vec![rustbgpd_wire::VpnNlriEntry {
+            path_id: 0,
+            nlri: route.nlri.clone()
+        }],
         "RD + MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
@@ -1072,12 +1075,201 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     assert_eq!(mp.safi, Safi::MplsVpn);
     assert_eq!(
         mp.vpn_withdrawn,
-        vec![VpnNlri {
-            labels: vec![],
-            route_distinguisher: route.nlri.route_distinguisher,
-            prefix: route.nlri.prefix,
+        vec![rustbgpd_wire::VpnNlriEntry {
+            path_id: 0,
+            nlri: VpnNlri {
+                labels: vec![],
+                route_distinguisher: route.nlri.route_distinguisher,
+                prefix: route.nlri.prefix,
+            }
         }],
         "withdraw-mode NLRI carries no label stack (RFC 8277 §2.4 compatibility field)"
+    );
+}
+/// RFC 7911 VPN outbound: with Add-Path send negotiated for (IPv4, SAFI
+/// 128), announcements and withdrawals both carry the 4-octet path ID.
+#[tokio::test]
+async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::MplsVpn), AddPathMode::Both);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let mut route = make_vpn_rib_route(4093);
+    route.path_id = 2;
+    let key = route.key();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![route.clone()],
+        rtc_announce: vec![],
+        vpn_withdraw: vec![],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected VPN Add-Path MP_REACH UPDATE");
+    };
+    let vpn_add_path = [(Afi::Ipv4, Safi::MplsVpn)];
+    let parsed = msg.parse(true, false, &vpn_add_path).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN Add-Path announcement must use MP_REACH");
+    assert_eq!(
+        mp.vpn_announced,
+        vec![rustbgpd_wire::VpnNlriEntry {
+            path_id: 2,
+            nlri: route.nlri.clone()
+        }],
+        "announcement must carry the outbound path ID"
+    );
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        rtc_announce: vec![],
+        vpn_withdraw: vec![key],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected VPN Add-Path MP_UNREACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &vpn_add_path).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN Add-Path withdrawal must use MP_UNREACH");
+    assert_eq!(mp.vpn_withdrawn.len(), 1);
+    assert_eq!(
+        mp.vpn_withdrawn[0].path_id, 2,
+        "withdrawal must carry the outbound path ID"
+    );
+}
+/// RFC 7911 VPN inbound: with Add-Path receive negotiated for (IPv4, SAFI
+/// 128), the decoded path ID threads into the `VpnRibRouteKey`/`VpnRibRoute`
+/// delivered to the RIB — announcements and withdrawals alike.
+#[tokio::test]
+async fn process_update_threads_vpn_add_path_ids_into_rib_keys() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, true);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::MplsVpn), AddPathMode::Both);
+    install_test_negotiated_session(&mut session, negotiated);
+    let nlri = VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+        route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+        prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+    };
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::MplsVpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            vpn_announced: vec![
+                rustbgpd_wire::VpnNlriEntry {
+                    path_id: 1,
+                    nlri: nlri.clone(),
+                },
+                rustbgpd_wire::VpnNlriEntry {
+                    path_id: 2,
+                    nlri: nlri.clone(),
+                },
+            ],
+            rtc_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+    let RibUpdate::VpnRoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected VpnRoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert_eq!(announced[0].path_id, 1);
+    assert_eq!(announced[1].path_id, 2);
+    assert_eq!(announced[0].nlri, nlri);
+    assert_eq!(
+        announced[0].key(),
+        rustbgpd_rib::VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 1,
+        }
+    );
+
+    // Withdraw ONLY path 1 — the delivered key must carry the path ID.
+    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+        withdrawn: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
+        vpn_withdrawn: vec![rustbgpd_wire::VpnNlriEntry {
+            path_id: 1,
+            nlri: VpnNlri {
+                labels: vec![],
+                route_distinguisher: nlri.route_distinguisher,
+                prefix: nlri.prefix,
+            },
+        }],
+        rtc_withdrawn: vec![],
+    })];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+    let RibUpdate::VpnRoutesReceived { withdrawn, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected VpnRoutesReceived withdrawal");
+    };
+    assert_eq!(
+        withdrawn,
+        vec![rustbgpd_rib::VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id: 1,
+        }]
     );
 }
 /// iBGP reflection of a VPN route on an RR adds `ORIGINATOR_ID` and

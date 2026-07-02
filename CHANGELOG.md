@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Add-Path (RFC 7911) for VPNv4/VPNv6 (SAFI 128).** The family-blind
+  `add_path` knobs now cover the VPN families: negotiation advertises
+  Add-Path for configured `l3vpn_ipv4_unicast` / `l3vpn_ipv6_unicast`
+  alongside unicast, the wire codec encodes/decodes the 4-octet Path
+  Identifier prepended to each SAFI-128 NLRI (announce mode and the RFC
+  8277 §2.4 withdraw-compatibility mode alike), received path IDs are
+  distinct Adj-RIB-In entries withdrawn independently per path, and an
+  Add-Path-send peer receives up to `add_path_send_max` candidates per
+  RD+prefix with outbound path IDs `1..=N` ranked by the VPN best-path
+  chain — with the vantage-cost comparator for an RFC 9107 ORR client
+  (Add-Path between RRs is what RFC 9107 requires for multi-cluster ORR,
+  and VPN RR redundancy generally). Best-path selection and single-best
+  reflection collapse per RD+prefix identity, so non-Add-Path peers are
+  unchanged. BGP-LS and RT-Constrain keep their Add-Path rejections (no
+  demand; RTC membership Add-Path semantics are undefined-ish).
+  `ListVpnRoutes`/`rbgp rib vpn` surface the winning received path ID.
+
 - **GR/LLGR stale preservation for the RR families (VPNv4/v6, BGP-LS,
   RT-Constrain).** A restarting peer's SAFI-128/71/72/132 routes are now
   preserved as stale through the graceful-restart window (RFC 4724 helper

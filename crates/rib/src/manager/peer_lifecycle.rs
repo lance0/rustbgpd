@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
+use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix, Safi};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -996,12 +996,22 @@ impl RibManager {
 
         // VPNv4/VPNv6 initial dump — a peer that joins after the VPN table
         // has converged must still receive it before EoR. Mirrors the BGP-LS
-        // staging block.
-        let all_l3vpn_keys: HashSet<crate::route::VpnRibRouteKey> = self
+        // staging block. For an Add-Path-send peer the staged top-N draws
+        // from every Adj-RIB-In identity, not just the Loc-RIB bests.
+        let mut all_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
             .loc_rib
             .iter_vpn()
-            .map(crate::route::VpnRibRoute::key)
+            .map(|route| route.nlri.key())
             .collect();
+        if peer_add_path_send_max > 0
+            && peer_add_path_send_families
+                .iter()
+                .any(|(_, safi)| *safi == Safi::MplsVpn)
+        {
+            for rib in self.ribs.values() {
+                all_l3vpn_keys.extend(rib.iter_vpn().map(|route| route.nlri.key()));
+            }
+        }
         if !all_l3vpn_keys.is_empty() {
             Self::stage_vpn_routes(
                 loc_rib,
@@ -1018,6 +1028,8 @@ impl RibManager {
                 sendable.as_ref(),
                 rtc_filter.as_ref(),
                 orr_ctx,
+                peer_add_path_send_max,
+                &peer_add_path_send_families,
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,

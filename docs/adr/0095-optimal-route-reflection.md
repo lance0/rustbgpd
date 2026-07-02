@@ -92,7 +92,11 @@ BIRD/GoBGP/OpenBGPd lack it); only commercial routers do.
 - **Backup IGP locations** (RFC 9107 SHOULD) — when an operator asks for
   vantage redundancy.
 - **Inter-RR Add-Path** (required by RFC 9107 only for multi-cluster
-  deployments) — when a second-RR topology lands.
+  deployments) — the protocol piece is now available: Add-Path for
+  VPNv4/VPNv6 (SAFI 128) negotiates, receives, and sends, and an ORR
+  client's Add-Path top-N is ranked by its vantage costs. Multi-cluster
+  ORR itself remains deferred until a second-RR topology lands to prove
+  it.
 - **VPN-ORR** (vantage ranking for SAFI 128) — **shipped**: an ORR
   client's VPNv4/VPNv6 routes are ranked with its vantage's interior
   cost to each candidate's next-hop, exactly like unicast

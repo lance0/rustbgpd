@@ -207,8 +207,12 @@ impl PeerConfig {
     /// Build Add-Path capability entries for our outgoing OPEN message.
     ///
     /// Advertises the appropriate mode (Receive, Send, or Both) for all
-    /// configured unicast families. Add-Path is not currently implemented
-    /// for non-unicast SAFIs such as `FlowSpec`, so those families are
+    /// configured unicast and VPNv4/VPNv6 (SAFI 128) families. The single
+    /// `add_path_receive`/`add_path_send` knob pair is family-blind: it
+    /// covers every family this filter admits. Add-Path is not implemented
+    /// for the other SAFIs — `FlowSpec`/EVPN (no demand), BGP-LS (no demand
+    /// for multi-path topology feeds), and RT-Constrain (Add-Path semantics
+    /// for membership NLRI are undefined-ish) — so those families are
     /// omitted from the advertised capability even when configured on the
     /// session. The RIB applies the configured `send_max` numerically per
     /// peer, but only to families that actually negotiate Add-Path Send/Both.
@@ -225,7 +229,7 @@ impl PeerConfig {
         };
         self.effective_families()
             .into_iter()
-            .filter(|(_, safi)| *safi == Safi::Unicast)
+            .filter(|(_, safi)| matches!(safi, Safi::Unicast | Safi::MplsVpn))
             .map(|(afi, safi)| AddPathFamily {
                 afi,
                 safi,
@@ -552,6 +556,33 @@ mod tests {
         assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].afi, Afi::Ipv4);
         assert_eq!(caps[1].afi, Afi::Ipv6);
+    }
+
+    #[test]
+    fn add_path_capabilities_include_vpn_families() {
+        // The family-blind add_path knobs cover SAFI 128 (RFC 9107 needs
+        // Add-Path between RRs); BGP-LS and RT-Constrain stay excluded.
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        cfg.add_path_send = true;
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+            (Afi::BgpLs, Safi::BgpLs),
+            (Afi::Ipv4, Safi::RtConstrain),
+        ];
+        let caps = cfg.add_path_capabilities();
+        let families: Vec<(Afi, Safi)> = caps.iter().map(|c| (c.afi, c.safi)).collect();
+        assert_eq!(
+            families,
+            vec![
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv6, Safi::MplsVpn),
+            ]
+        );
+        assert!(caps.iter().all(|c| c.send_receive == AddPathMode::Both));
     }
 
     #[test]

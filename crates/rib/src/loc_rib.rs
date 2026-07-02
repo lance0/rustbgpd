@@ -14,7 +14,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 use crate::best_path::best_path_cmp;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, Route, RtcRibRoute, RtcRibRouteKey,
-    VpnRibRoute, VpnRibRouteKey,
+    VpnRibRoute,
 };
 
 /// The local RIB storing the best route per prefix.
@@ -27,7 +27,10 @@ pub struct LocRib {
     /// BGP-LS Loc-RIB: best route per opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 Loc-RIB: best route per RFC 4364 RD + prefix identity.
-    vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// Selected VPN routes keyed by RD+prefix identity alone: Loc-RIB best
+    /// selection collapses Add-Path path IDs — the winning route's own
+    /// `path_id` records which received path won.
+    vpn_routes: HashMap<rustbgpd_wire::VpnRouteKey, VpnRibRoute>,
     /// RT-Constrain Loc-RIB: best route per RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
@@ -320,7 +323,7 @@ impl LocRib {
     /// check so the reflected label stays current.
     pub fn recompute_vpn<'a>(
         &mut self,
-        key: VpnRibRouteKey,
+        key: rustbgpd_wire::VpnRouteKey,
         candidates: impl Iterator<Item = &'a VpnRibRoute>,
     ) -> bool {
         let best = candidates.min_by(|a, b| vpn_tiebreak(a, b)).cloned();
@@ -347,12 +350,12 @@ impl LocRib {
 
     /// Insert or replace the selected VPN route for a key.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
-        self.vpn_routes.insert(route.key(), route);
+        self.vpn_routes.insert(route.nlri.key(), route);
     }
 
-    /// Look up the selected VPN route for a key.
+    /// Look up the selected VPN route for an RD+prefix identity.
     #[must_use]
-    pub fn get_vpn(&self, key: &VpnRibRouteKey) -> Option<&VpnRibRoute> {
+    pub fn get_vpn(&self, key: &rustbgpd_wire::VpnRouteKey) -> Option<&VpnRibRoute> {
         self.vpn_routes.get(key)
     }
 
@@ -368,7 +371,7 @@ impl LocRib {
     }
 
     /// Remove the selected VPN route for a key. Returns `true` if it existed.
-    pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
+    pub fn remove_vpn(&mut self, key: &rustbgpd_wire::VpnRouteKey) -> bool {
         self.vpn_routes.remove(key).is_some()
     }
 
@@ -733,7 +736,7 @@ fn bgpls_originator_id(route: &BgpLsRibRoute) -> Option<std::net::Ipv4Addr> {
     })
 }
 
-fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
+pub(crate) fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
     vpn_cmp_chain(a, b, None)
 }
 
@@ -1103,15 +1106,12 @@ mod tests {
     #[test]
     fn recompute_vpn_higher_local_pref_wins() {
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
-        let key = VpnRibRouteKey {
-            nlri_key: nlri.key(),
-            path_id: 0,
-        };
+        let key = nlri.key();
         let r1 = make_vpn_route(nlri.clone(), 1, 100);
         let r2 = make_vpn_route(nlri, 2, 200);
         let mut loc = LocRib::new();
 
-        assert!(loc.recompute_vpn(key.clone(), [&r1, &r2].into_iter()));
+        assert!(loc.recompute_vpn(key, [&r1, &r2].into_iter()));
         assert_eq!(loc.vpn_len(), 1);
         assert_eq!(
             loc.get_vpn(&key).unwrap().peer,
@@ -1123,16 +1123,13 @@ mod tests {
     #[test]
     fn recompute_vpn_stale_demoted_despite_higher_local_pref() {
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
-        let key = VpnRibRouteKey {
-            nlri_key: nlri.key(),
-            path_id: 0,
-        };
+        let key = nlri.key();
         let mut r_stale = make_vpn_route(nlri.clone(), 1, 200);
         r_stale.is_stale = true;
         let r_fresh = make_vpn_route(nlri, 2, 100);
         let mut loc = LocRib::new();
 
-        loc.recompute_vpn(key.clone(), [&r_stale, &r_fresh].into_iter());
+        loc.recompute_vpn(key, [&r_stale, &r_fresh].into_iter());
         assert_eq!(
             loc.get_vpn(&key).unwrap().peer,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1143,19 +1140,16 @@ mod tests {
     #[test]
     fn recompute_vpn_empty_candidates_removes_existing_key() {
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
-        let key = VpnRibRouteKey {
-            nlri_key: nlri.key(),
-            path_id: 0,
-        };
+        let key = nlri.key();
         let route = make_vpn_route(nlri, 1, 100);
         let mut loc = LocRib::new();
 
-        loc.recompute_vpn(key.clone(), [&route].into_iter());
+        loc.recompute_vpn(key, [&route].into_iter());
         assert_eq!(loc.vpn_len(), 1);
 
         let empty: Vec<&VpnRibRoute> = vec![];
         assert!(
-            loc.recompute_vpn(key.clone(), empty.into_iter()),
+            loc.recompute_vpn(key, empty.into_iter()),
             "removing an existing key returns true"
         );
         assert_eq!(loc.vpn_len(), 0);

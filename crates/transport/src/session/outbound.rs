@@ -242,6 +242,29 @@ impl PeerSession {
                     )
                 })
         });
+        // VPNv4/VPNv6 (SAFI 128) negotiate Add-Path per family (RFC 7911);
+        // when send is negotiated, EVERY VPN NLRI to this peer carries the
+        // 4-octet path ID — announcements and withdrawals alike.
+        let add_path_vpnv4_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv4, Safi::MplsVpn))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
+        let add_path_vpnv6_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv6, Safi::MplsVpn))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
         // ROUTE-REFRESH *requests* toward the peer (RFC 2918), asked for by
         // the RIB manager (outbound-registration failover: the survivor's
         // Adj-RIB-In must be re-learned from the peer). The manager only
@@ -881,25 +904,37 @@ impl PeerSession {
             let mut v4_routes = Vec::new();
             let mut v6_routes = Vec::new();
             for key in &update.vpn_withdraw {
-                let nlri = rustbgpd_wire::VpnNlri {
-                    labels: vec![],
-                    route_distinguisher: key.nlri_key.route_distinguisher,
-                    prefix: key.nlri_key.prefix,
+                let entry = rustbgpd_wire::VpnNlriEntry {
+                    path_id: key.path_id,
+                    nlri: rustbgpd_wire::VpnNlri {
+                        labels: vec![],
+                        route_distinguisher: key.nlri_key.route_distinguisher,
+                        prefix: key.nlri_key.prefix,
+                    },
                 };
                 let family = key.afi_safi();
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
                 match family.0 {
-                    Afi::Ipv4 => v4_routes.push(nlri),
-                    Afi::Ipv6 => v6_routes.push(nlri),
+                    Afi::Ipv4 => v4_routes.push(entry),
+                    Afi::Ipv6 => v6_routes.push(entry),
                     Afi::L2Vpn | Afi::BgpLs => {}
                 }
             }
             let max_len = usize::from(self.max_message_len());
-            for (afi, routes) in [(Afi::Ipv4, v4_routes), (Afi::Ipv6, v6_routes)] {
+            for (afi, routes, add_path) in [
+                (Afi::Ipv4, v4_routes, add_path_vpnv4_send),
+                (Afi::Ipv6, v6_routes, add_path_vpnv6_send),
+            ] {
                 if !routes.is_empty()
-                    && !self.send_vpn_unreach_chunked(afi, &routes, four_octet_as, max_len)
+                    && !self.send_vpn_unreach_chunked(
+                        afi,
+                        &routes,
+                        four_octet_as,
+                        add_path,
+                        max_len,
+                    )
                 {
                     return;
                 }
@@ -1011,7 +1046,7 @@ impl PeerSession {
                 (Afi, Safi),
                 IpAddr,
                 Vec<PathAttribute>,
-                Vec<rustbgpd_wire::VpnNlri>,
+                Vec<rustbgpd_wire::VpnNlriEntry>,
             )> = Vec::new();
             for vpn_route in &update.vpn_announce {
                 let family = vpn_route.afi_safi();
@@ -1020,22 +1055,31 @@ impl PeerSession {
                 }
                 let attrs = self.prepare_outbound_attributes_vpn(vpn_route, is_ebgp);
                 let nh = vpn_route.next_hop;
+                let entry = rustbgpd_wire::VpnNlriEntry {
+                    path_id: vpn_route.path_id,
+                    nlri: vpn_route.nlri.clone(),
+                };
                 if let Some(group) = vpn_groups.iter_mut().find(|(g_family, g_nh, g_attrs, _)| {
                     *g_family == family && *g_nh == nh && *g_attrs == attrs
                 }) {
-                    group.3.push(vpn_route.nlri.clone());
+                    group.3.push(entry);
                 } else {
-                    vpn_groups.push((family, nh, attrs, vec![vpn_route.nlri.clone()]));
+                    vpn_groups.push((family, nh, attrs, vec![entry]));
                 }
             }
             let max_len = usize::from(self.max_message_len());
             for ((afi, _), next_hop, attrs, routes) in vpn_groups {
+                let add_path = match afi {
+                    Afi::Ipv4 => add_path_vpnv4_send,
+                    _ => add_path_vpnv6_send,
+                };
                 if !self.send_vpn_reach_chunked(
                     afi,
                     next_hop,
                     &attrs,
                     &routes,
                     four_octet_as,
+                    add_path,
                     max_len,
                 ) {
                     return;
@@ -1450,13 +1494,18 @@ impl PeerSession {
     /// default rewrite) is deliberately inert for this family — rewriting it
     /// would break the remote PE's transport-label resolution toward the
     /// originating PE.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "VPN chunked sender adds the RFC 7911 add_path flag to the shared chunking shape"
+    )]
     fn send_vpn_reach_chunked(
         &mut self,
         afi: Afi,
         next_hop: IpAddr,
         base_attrs: &[PathAttribute],
-        routes: &[rustbgpd_wire::VpnNlri],
+        routes: &[rustbgpd_wire::VpnNlriEntry],
         four_octet_as: bool,
+        add_path: bool,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
@@ -1481,7 +1530,7 @@ impl PeerSession {
                 &[],
                 &attrs,
                 four_octet_as,
-                false,
+                add_path,
                 Ipv4UnicastMode::Body,
             );
             if msg.encoded_len() > max_len {
@@ -1515,8 +1564,9 @@ impl PeerSession {
     fn send_vpn_unreach_chunked(
         &mut self,
         afi: Afi,
-        routes: &[rustbgpd_wire::VpnNlri],
+        routes: &[rustbgpd_wire::VpnNlriEntry],
         four_octet_as: bool,
+        add_path: bool,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
@@ -1538,7 +1588,7 @@ impl PeerSession {
                 &[],
                 &attrs,
                 four_octet_as,
-                false,
+                add_path,
                 Ipv4UnicastMode::Body,
             );
             if msg.encoded_len() > max_len {

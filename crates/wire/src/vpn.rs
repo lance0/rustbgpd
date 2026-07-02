@@ -1,10 +1,12 @@
-//! VPNv4/VPNv6 labeled NLRI codec substrate.
+//! VPNv4/VPNv6 labeled NLRI codec.
 //!
-//! This module is deliberately pure and unreachable from MP_REACH/MP_UNREACH
-//! dispatch today. It provides the RFC 8277 label-stack and RFC 4364 / RFC
-//! 4659 RD-prefixed VPN prefix codec pieces needed for a future typed
-//! VPNv4/VPNv6 route-reflector slice without treating VPN routes as unicast
-//! [`crate::nlri::Prefix`] values.
+//! Pure codec pieces dispatched from MP_REACH/MP_UNREACH for SAFI 128: the
+//! RFC 8277 label-stack and RFC 4364 / RFC 4659 RD-prefixed VPN prefix
+//! encodings (announce and withdraw-compatibility modes), plus their RFC
+//! 7911 Add-Path variants with the 4-octet Path Identifier prepended to
+//! each NLRI. VPN routes are deliberately not treated as unicast
+//! [`crate::nlri::Prefix`] values — the Route Distinguisher is part of the
+//! route key.
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -257,6 +259,19 @@ pub struct VpnNlri {
     pub prefix: VpnPrefix,
 }
 
+/// A VPNv4/VPNv6 NLRI with an optional Add-Path path ID (RFC 7911).
+///
+/// For non-Add-Path peers, `path_id` is always 0. Mirrors the unicast
+/// [`crate::nlri::NlriEntry`] shape: the 4-octet Path Identifier is
+/// prepended to the entire NLRI (length octet included) on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VpnNlriEntry {
+    /// Add-Path path identifier (0 when Add-Path is not in use).
+    pub path_id: u32,
+    /// The VPN NLRI.
+    pub nlri: VpnNlri,
+}
+
 impl VpnNlri {
     /// Return the route-key identity for this NLRI.
     #[must_use]
@@ -387,6 +402,170 @@ pub fn encode_vpn_nlri(
 
     for entry in entries {
         if let Err(err) = encode_one_vpn_nlri(entry, family, buf) {
+            buf.truncate(start_len);
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+/// Decode Add-Path `VPNv4`/`VPNv6` NLRI bytes (RFC 7911 §3).
+///
+/// Wire format per entry: `[4-byte path_id BE]` prepended to the ordinary
+/// RFC 8277 NLRI (`len | label stack | RD | prefix`).
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for a truncated path ID or malformed length,
+/// label stack, RD, or prefix encodings.
+pub fn decode_vpn_nlri_addpath(
+    mut buf: &[u8],
+    family: VpnAddressFamily,
+) -> Result<Vec<VpnNlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        let (path_id, rest) = split_vpn_path_id(buf, family)?;
+        buf = rest;
+
+        let field_start = buf;
+        let (value, total_len_bits, rest) = split_vpn_nlri_value(buf, family, "NLRI")?;
+        buf = rest;
+
+        entries.push(VpnNlriEntry {
+            path_id,
+            nlri: decode_one_vpn_nlri(value, total_len_bits, family, field_start)?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Decode Add-Path withdraw-mode `VPNv4`/`VPNv6` NLRI bytes
+/// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4).
+///
+/// The 4-octet Path Identifier is prepended to the whole withdraw-mode NLRI:
+/// `path_id(4) | len | 3-octet compatibility field | RD | prefix`. The
+/// compatibility field's value is ignored, exactly as in
+/// [`decode_vpn_withdraw_nlri`]. Decoded entries have an empty `labels` vec.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for a truncated path ID or malformed length, RD,
+/// or prefix encodings.
+pub fn decode_vpn_withdraw_nlri_addpath(
+    mut buf: &[u8],
+    family: VpnAddressFamily,
+) -> Result<Vec<VpnNlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        let (path_id, rest) = split_vpn_path_id(buf, family)?;
+        buf = rest;
+
+        let field_start = buf;
+        let (value, total_len_bits, rest) = split_vpn_nlri_value(buf, family, "withdraw NLRI")?;
+        buf = rest;
+
+        entries.push(VpnNlriEntry {
+            path_id,
+            nlri: decode_one_vpn_withdraw_nlri(value, total_len_bits, family, field_start)?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Split a 4-octet RFC 7911 Path Identifier off the front of `buf`.
+fn split_vpn_path_id(buf: &[u8], family: VpnAddressFamily) -> Result<(u32, &[u8]), DecodeError> {
+    if buf.len() < 5 {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} Add-Path NLRI truncated: need at least 5 bytes (path_id + length), have {}",
+                buf.len()
+            ),
+            buf,
+            buf.len(),
+        );
+    }
+    let path_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    Ok((path_id, &buf[4..]))
+}
+
+/// Split one length-prefixed NLRI value off the front of `buf`, returning
+/// `(value, total_len_bits, rest)`.
+fn split_vpn_nlri_value<'a>(
+    buf: &'a [u8],
+    family: VpnAddressFamily,
+    kind: &str,
+) -> Result<(&'a [u8], u8, &'a [u8]), DecodeError> {
+    let total_len_bits = buf[0];
+    let rest = &buf[1..];
+    let value_len = usize::from(total_len_bits.div_ceil(8));
+
+    if rest.len() < value_len {
+        return invalid_vpn_nlri(
+            format!(
+                "{family} {kind} truncated: length {total_len_bits} bits requires {value_len} bytes, have {}",
+                rest.len()
+            ),
+            buf,
+            1 + rest.len(),
+        );
+    }
+
+    Ok((&rest[..value_len], total_len_bits, &rest[value_len..]))
+}
+
+/// Encode Add-Path `VPNv4`/`VPNv6` NLRI bytes (RFC 7911 §3): each entry's
+/// 4-octet path ID is prepended to the ordinary RFC 8277 NLRI encoding.
+///
+/// On error, `buf` is restored to its original length.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if an entry belongs to the wrong family, its label
+/// stack is invalid, or its encoded length cannot fit in the one-octet NLRI
+/// length.
+pub fn encode_vpn_nlri_addpath(
+    entries: &[VpnNlriEntry],
+    family: VpnAddressFamily,
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
+
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        if let Err(err) = encode_one_vpn_nlri(&entry.nlri, family, buf) {
+            buf.truncate(start_len);
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+/// Encode Add-Path withdraw-mode `VPNv4`/`VPNv6` NLRI bytes
+/// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4): each entry's 4-octet
+/// path ID is prepended to the withdraw-mode NLRI (compatibility field
+/// 0x800000 in the label position; each entry's `labels` are ignored).
+///
+/// On error, `buf` is restored to its original length.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if an entry belongs to the wrong family.
+pub fn encode_vpn_withdraw_nlri_addpath(
+    entries: &[VpnNlriEntry],
+    family: VpnAddressFamily,
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
+
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        if let Err(err) = encode_vpn_withdraw_nlri(std::slice::from_ref(&entry.nlri), family, buf) {
             buf.truncate(start_len);
             return Err(err);
         }
@@ -958,6 +1137,161 @@ mod tests {
         let err = encode_vpn_withdraw_nlri(&[entry], VpnAddressFamily::V4, &mut buf).unwrap_err();
         assert!(matches!(err, EncodeError::ValueOutOfRange { .. }));
         assert_eq!(buf, vec![0xAA]);
+    }
+
+    #[test]
+    fn addpath_vpnv4_roundtrip_multiple() {
+        let entries = vec![
+            VpnNlriEntry {
+                path_id: 1,
+                nlri: VpnNlri {
+                    labels: vec![label(200, true)],
+                    route_distinguisher: rd(),
+                    prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+                },
+            },
+            VpnNlriEntry {
+                path_id: 0xFFFF_FFFF,
+                nlri: VpnNlri {
+                    labels: vec![label(16_000, false), label(24_000, true)],
+                    route_distinguisher: rd(),
+                    prefix: VpnPrefix::v4(Ipv4Addr::new(192, 0, 2, 0), 24).unwrap(),
+                },
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_vpn_nlri_addpath(&entries, VpnAddressFamily::V4, &mut buf).unwrap();
+        assert_eq!(
+            decode_vpn_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap(),
+            entries
+        );
+    }
+
+    #[test]
+    fn addpath_vpnv6_roundtrip() {
+        let entry = VpnNlriEntry {
+            path_id: 7,
+            nlri: VpnNlri {
+                labels: vec![label(300, true)],
+                route_distinguisher: rd(),
+                prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
+            },
+        };
+        let mut buf = Vec::new();
+        encode_vpn_nlri_addpath(std::slice::from_ref(&entry), VpnAddressFamily::V6, &mut buf)
+            .unwrap();
+        assert_eq!(
+            decode_vpn_nlri_addpath(&buf, VpnAddressFamily::V6).unwrap(),
+            vec![entry]
+        );
+    }
+
+    /// GoBGP-shaped `VPNv4` Add-Path fixture: the 4-octet Path Identifier is
+    /// prepended to the whole RFC 8277 NLRI (length octet included) —
+    /// `path_id=2`, then len=112 bits, label 100 (BOS), RD 65001:100,
+    /// 10.0.1.0/24.
+    #[test]
+    fn addpath_vpnv4_gobgp_shaped_fixture() {
+        let mut buf = vec![
+            0x00, 0x00, 0x00, 0x02, // path_id = 2
+            0x70, // 112 bits = 24 label + 64 RD + 24 prefix
+            0x00, 0x06, 0x41, // label 100, TC 0, S=1
+        ];
+        buf.extend_from_slice(&rd().0); // RD 65001:100
+        buf.extend_from_slice(&[10, 0, 1]); // 10.0.1.0/24
+
+        let decoded = decode_vpn_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].path_id, 2);
+        assert_eq!(decoded[0].nlri.labels, vec![label(100, true)]);
+        assert_eq!(decoded[0].nlri.route_distinguisher, rd());
+        assert_eq!(decoded[0].nlri.prefix.to_string(), "10.0.1.0/24");
+
+        let mut reencoded = Vec::new();
+        encode_vpn_nlri_addpath(&decoded, VpnAddressFamily::V4, &mut reencoded).unwrap();
+        assert_eq!(reencoded, buf);
+    }
+
+    #[test]
+    fn addpath_withdraw_roundtrip_emits_compatibility_value() {
+        let entry = VpnNlriEntry {
+            path_id: 3,
+            nlri: VpnNlri {
+                labels: vec![label(200, true)], // ignored on withdraw encode
+                route_distinguisher: rd(),
+                prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+            },
+        };
+        let mut buf = Vec::new();
+        encode_vpn_withdraw_nlri_addpath(
+            std::slice::from_ref(&entry),
+            VpnAddressFamily::V4,
+            &mut buf,
+        )
+        .unwrap();
+        // path_id(4) | len | compat(3) | RD(8) | prefix(3)
+        assert_eq!(&buf[..4], &3u32.to_be_bytes());
+        assert_eq!(buf[4], 24 + 64 + 24);
+        assert_eq!(&buf[5..8], &VPN_WITHDRAW_COMPATIBILITY);
+
+        let decoded = decode_vpn_withdraw_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].path_id, 3);
+        assert!(decoded[0].nlri.labels.is_empty());
+        assert_eq!(decoded[0].nlri.route_distinguisher, rd());
+        assert_eq!(decoded[0].nlri.prefix, entry.nlri.prefix);
+    }
+
+    #[test]
+    fn addpath_withdraw_decode_ignores_arbitrary_compatibility_value() {
+        // RFC 8277 §2.4 receiver-MUST-ignore holds under Add-Path too.
+        let mut buf = 9u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[24 + 64, 0x0C, 0x35, 0x00]); // label 50000, S=0
+        buf.extend_from_slice(&rd().0);
+        let decoded = decode_vpn_withdraw_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].path_id, 9);
+        assert_eq!(decoded[0].nlri.route_distinguisher, rd());
+    }
+
+    #[test]
+    fn addpath_decode_rejects_truncated_path_id() {
+        let err = decode_vpn_nlri_addpath(&[0, 0, 1], VpnAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+        let err = decode_vpn_withdraw_nlri_addpath(&[0, 0, 1], VpnAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    #[test]
+    fn addpath_decode_rejects_truncated_value() {
+        let mut buf = 1u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[112, 0, 0x0C, 0x81]);
+        let err = decode_vpn_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    #[test]
+    fn addpath_encode_rejects_wrong_family_and_restores_buffer() {
+        let entry = VpnNlriEntry {
+            path_id: 1,
+            nlri: VpnNlri {
+                labels: vec![label(100, true)],
+                route_distinguisher: rd(),
+                prefix: VpnPrefix::v6(Ipv6Addr::LOCALHOST, 128).unwrap(),
+            },
+        };
+        let mut buf = vec![0xAA];
+        let err =
+            encode_vpn_nlri_addpath(std::slice::from_ref(&entry), VpnAddressFamily::V4, &mut buf)
+                .unwrap_err();
+        assert!(matches!(err, EncodeError::ValueOutOfRange { .. }));
+        assert_eq!(buf, vec![0xAA]);
+
+        let mut buf = vec![0xBB];
+        let err =
+            encode_vpn_withdraw_nlri_addpath(&[entry], VpnAddressFamily::V4, &mut buf).unwrap_err();
+        assert!(matches!(err, EncodeError::ValueOutOfRange { .. }));
+        assert_eq!(buf, vec![0xBB]);
     }
 
     #[test]

@@ -33,6 +33,10 @@ pub struct AdjRibOut {
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
     vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    /// Secondary index: VPN RD+prefix identity → advertised Add-Path path IDs
+    /// (the SAFI 128 analog of `prefix_path_ids`). `SmallVec<[u32; 1]>` inlines
+    /// the single-best case (`path_id=0`) without heap allocation.
+    vpn_key_path_ids: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes advertised to this peer, keyed by RFC 4684 identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
@@ -58,6 +62,7 @@ impl AdjRibOut {
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: HashMap::default(),
+            vpn_key_path_ids: HashMap::default(),
             rtc_routes: HashMap::default(),
         }
     }
@@ -134,6 +139,7 @@ impl AdjRibOut {
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
         self.vpn_routes.clear();
+        self.vpn_key_path_ids.clear();
         self.rtc_routes.clear();
     }
 
@@ -270,12 +276,34 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised VPN route.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
-        self.vpn_routes.insert(route.key(), route);
+        let key = route.key();
+        if self.vpn_routes.insert(key.clone(), route).is_none() {
+            let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
+            if !ids.contains(&key.path_id) {
+                ids.push(key.path_id);
+            }
+        }
     }
 
     /// Remove an advertised VPN route by key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
-        self.vpn_routes.remove(key).is_some()
+        let removed = self.vpn_routes.remove(key).is_some();
+        if removed && let Some(ids) = self.vpn_key_path_ids.get_mut(&key.nlri_key) {
+            ids.retain(|id| *id != key.path_id);
+            if ids.is_empty() {
+                self.vpn_key_path_ids.remove(&key.nlri_key);
+            }
+        }
+        removed
+    }
+
+    /// Return all Add-Path path IDs currently advertised for a VPN RD+prefix
+    /// identity (the SAFI 128 analog of [`Self::path_ids_for_prefix`]).
+    #[must_use]
+    pub fn vpn_path_ids_for_key(&self, key: &rustbgpd_wire::VpnRouteKey) -> &[u32] {
+        self.vpn_key_path_ids
+            .get(key)
+            .map_or(&[], SmallVec::as_slice)
     }
 
     /// Look up an advertised VPN route by key.

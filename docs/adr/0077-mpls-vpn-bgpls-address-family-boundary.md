@@ -419,9 +419,27 @@ derivable from RFC 4684 alone:
    revisit only if gradual-interest churn is observed); eBGP RTC
    distribution subtleties (§3.1 — the shipped arc is iBGP RR; GoBGP's own
    eBGP RTC filtering is broken upstream); RTC × ORF cross-validation
-   (filters compose independently today); Add-Path for SAFI 132 (rejected
-   at negotiation, matching the VPN/BGP-LS posture).
+   (filters compose independently today); Add-Path for SAFI 132 (still
+   rejected at negotiation, matching the BGP-LS posture — Add-Path
+   semantics for RT *membership* NLRI are undefined-ish; SAFI 128 has
+   since grown Add-Path, see the amendment below).
 
 M75 is the interop receipt: GoBGP source/sink, strict filtering, RTC
 reflection, widen/narrow membership without session resets, an unfiltered
 non-RTC peer, and no dataplane installs.
+
+## Amendment (2026-07-02): Add-Path for SAFI 128 shipped
+
+Add-Path (RFC 7911) now covers VPNv4/VPNv6: the family-blind `add_path`
+knobs advertise the capability for configured SAFI-128 families, the
+codec prepends the 4-octet Path Identifier to each VPN NLRI in both
+announce and RFC 8277 §2.4 withdraw-compatibility modes, received path
+IDs key distinct Adj-RIB-In entries, and Add-Path-send staging ranks up
+to `send_max` candidates per RD+prefix (vantage-cost comparator for ORR
+clients; the RFC 4684 RTC gate applies per staged candidate). Loc-RIB
+selection collapses per RD+prefix identity, so the `VpnRouteKey` +
+path-id substrate anticipated above is now live rather than always-zero.
+
+Still deferred from the SAFI-128 register: labeled-unicast (SAFI 4) and
+Add-Path for BGP-LS (SAFI 71/72, no demand) and RT-Constrain (SAFI 132,
+see the 2026-07-01 amendment).

@@ -4,6 +4,8 @@ use super::{
     record_export_policy_eval, route_type, should_suppress_ibgp_inner, vpn_routes_equal, warn,
 };
 use crate::loc_rib::vpn_tiebreak_orr;
+use crate::route::{VpnRibRoute, VpnRibRouteKey};
+use rustbgpd_wire::{VpnAddressFamily, VpnRouteKey};
 
 /// A unicast-shaped probe of a VPN route for the shared RFC 4456
 /// suppression helper: `should_suppress_ibgp_inner` only reads
@@ -29,8 +31,28 @@ fn vpn_suppression_probe(route: &crate::route::VpnRibRoute) -> crate::route::Rou
     }
 }
 
+/// The wire AFI/SAFI pair for a VPN RD+prefix identity.
+fn vpn_afi_safi(key: &VpnRouteKey) -> (Afi, Safi) {
+    let afi = match key.prefix.family() {
+        VpnAddressFamily::V4 => Afi::Ipv4,
+        VpnAddressFamily::V6 => Afi::Ipv6,
+    };
+    (afi, Safi::MplsVpn)
+}
+
 impl RibManager {
-    /// Stage VPNv4/VPNv6 announces and withdrawals for a set of affected keys.
+    /// Whether Add-Path send is negotiated with `peer` for any VPN family
+    /// (SAFI 128) with a non-zero configured `send_max`.
+    pub(in crate::manager) fn peer_vpn_add_path_send(&self, peer: IpAddr) -> bool {
+        self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0) > 0
+            && self
+                .peer_add_path_send_families
+                .get(&peer)
+                .is_some_and(|families| families.iter().any(|(_, safi)| *safi == Safi::MplsVpn))
+    }
+
+    /// Stage VPNv4/VPNv6 announces and withdrawals for a set of affected
+    /// RD+prefix identities.
     ///
     /// ADR-0077 §6 guardrail: the next-hop, MPLS label stack, and Route
     /// Distinguisher pass through reflection unchanged — the staged route
@@ -38,17 +60,23 @@ impl RibManager {
     /// the VPN next-hop. Export policy matches on the RD-scoped inner prefix
     /// (honest, unlike the prefixless BGP-LS placeholder) plus communities,
     /// large communities, `AS_PATH`, peer, and route type.
+    ///
+    /// When the target negotiated Add-Path send for the key's family (RFC
+    /// 7911; RFC 9107 requires it between RRs), up to `add_path_send_max`
+    /// candidates per key are ranked — with the ORR vantage comparator when
+    /// a vantage is resolved — and staged with outbound path IDs `1..=N`.
+    /// Otherwise the single best is staged with `path_id = 0`.
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "VPN staging mirrors EVPN/BGP-LS distribution context for RR/export parity"
+        reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
     )]
     pub(in crate::manager) fn stage_vpn_routes(
         loc_rib: &LocRib,
         ribs: &HashMap<IpAddr, AdjRibIn>,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
-        keys: &HashSet<crate::route::VpnRibRouteKey>,
+        keys: &HashSet<VpnRouteKey>,
         target_peer: IpAddr,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
@@ -58,25 +86,175 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         rtc_filter: Option<&crate::manager::RtcMembership>,
         orr_ctx: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
+        add_path_send_max: u32,
+        add_path_send_families: &[(Afi, Safi)],
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
-        vpn_announce: &mut Vec<crate::route::VpnRibRoute>,
-        vpn_withdraw: &mut Vec<crate::route::VpnRibRouteKey>,
+        vpn_announce: &mut Vec<VpnRibRoute>,
+        vpn_withdraw: &mut Vec<VpnRibRouteKey>,
         force: bool,
     ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         for key in keys {
-            let family = key.afi_safi();
+            let family = vpn_afi_safi(key);
+            // Path IDs currently advertised for this identity — the diff
+            // baseline for every withdraw decision below.
+            let existing_path_ids = rib_out.vpn_path_ids_for_key(key);
+            let withdraw_existing = |vpn_withdraw: &mut Vec<VpnRibRouteKey>, existing: &[u32]| {
+                for &path_id in existing {
+                    vpn_withdraw.push(VpnRibRouteKey {
+                        nlri_key: *key,
+                        path_id,
+                    });
+                }
+            };
+
             if !sendable.is_some_and(|f| f.contains(&family)) {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
+                withdraw_existing(vpn_withdraw, existing_path_ids);
+                continue;
+            }
+
+            let key_send_max = if add_path_send_max > 0 && add_path_send_families.contains(&family)
+            {
+                add_path_send_max
+            } else {
+                0
+            };
+
+            if key_send_max > 0 {
+                // Multi-path: collect the per-target candidate set (every
+                // Adj-RIB-In entry for the identity, any received path ID,
+                // that survives split horizon and RFC 4456 reflection),
+                // rank it, and stage the top N with path IDs 1..=N.
+                let mut candidates: Vec<&VpnRibRoute> = ribs
+                    .values()
+                    .flat_map(|rib| rib.iter_vpn_for_nlri(key))
+                    .filter(|candidate| {
+                        candidate.peer != target_peer
+                            && !should_suppress_ibgp_inner(
+                                &vpn_suppression_probe(candidate),
+                                target_is_ebgp,
+                                target_is_rr_client,
+                                cluster_id,
+                                peer_is_rr_client,
+                            )
+                    })
+                    .collect();
+                // Rank by the VPN best-path chain; an RFC 9107 ORR peer with
+                // a resolved vantage ranks by the vantage's interior cost to
+                // each candidate's next-hop (comparator swap only).
+                match orr_ctx {
+                    Some((orr_topology, orr_spf)) => candidates.sort_by(|a, b| {
+                        vpn_tiebreak_orr(
+                            a,
+                            b,
+                            orr_spf.cost_to(orr_topology, a.next_hop),
+                            orr_spf.cost_to(orr_topology, b.next_hop),
+                        )
+                    }),
+                    None => candidates.sort_by(|a, b| crate::loc_rib::vpn_tiebreak(a, b)),
+                }
+
+                let mut next_rank: u32 = 1;
+                let limit = if key_send_max == u32::MAX {
+                    usize::MAX
+                } else {
+                    key_send_max as usize
+                };
+                for candidate in &candidates {
+                    if (next_rank as usize) > limit {
+                        break;
+                    }
+
+                    // RFC 4684 outbound gate, per candidate — the route
+                    // actually being advertised must fall inside the peer's
+                    // RT membership (consistent with the single-best gate).
+                    if let Some(membership) = rtc_filter
+                        && !membership.matches_any(candidate.extended_communities())
+                    {
+                        continue;
+                    }
+
+                    let aspath_str = if needs_as_path_string {
+                        candidate
+                            .as_path()
+                            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+                    } else {
+                        String::new()
+                    };
+                    let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let ctx = RouteContext {
+                        prefix: Some(candidate.inner_prefix()),
+                        next_hop: Some(candidate.next_hop),
+                        extended_communities: candidate.extended_communities(),
+                        communities: candidate.communities(),
+                        large_communities: candidate.large_communities(),
+                        as_path_str: &aspath_str,
+                        as_path_len: aspath_len,
+                        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                        peer_address: Some(target_peer),
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        route_type: Some(route_type(candidate.origin_type)),
+                        evpn_route_type: None,
+                        local_pref: candidate.local_pref_attr(),
+                        med: candidate.med_attr(),
+                    };
+                    let (result, evaluation) =
+                        rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+                    record_export_policy_eval(
+                        metrics,
+                        policy_stats,
+                        target_peer_label,
+                        &evaluation,
+                    );
+                    if result.action != rustbgpd_policy::PolicyAction::Permit {
+                        continue;
+                    }
+
+                    let mut modified = (*candidate).clone();
+                    if !result.modifications.is_empty() {
+                        let nh = rustbgpd_policy::apply_modifications(
+                            std::sync::Arc::make_mut(&mut modified.attributes),
+                            &result.modifications,
+                        );
+                        if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
+                            modified.next_hop = addr;
+                        }
+                    }
+                    modified.path_id = next_rank;
+
+                    let out_key = VpnRibRouteKey {
+                        nlri_key: *key,
+                        path_id: next_rank,
+                    };
+                    if force
+                        || rib_out
+                            .get_vpn(&out_key)
+                            .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
+                    {
+                        vpn_announce.push(modified);
+                    }
+                    next_rank += 1;
+                }
+
+                // Withdraw previously advertised path IDs outside the new
+                // 1..next_rank set (including a stale single-best 0 entry).
+                for &path_id in existing_path_ids {
+                    if path_id == 0 || path_id >= next_rank {
+                        vpn_withdraw.push(VpnRibRouteKey {
+                            nlri_key: *key,
+                            path_id,
+                        });
+                    }
                 }
                 continue;
             }
 
-            // Per-key best. An RFC 9107 ORR peer with a resolved vantage
+            // Single-best. An RFC 9107 ORR peer with a resolved vantage
             // does NOT take the Loc-RIB best: the per-target candidate
             // set (every Adj-RIB-In entry for the key that survives split
             // horizon and RFC 4456 reflection — the unicast
@@ -86,7 +264,7 @@ impl RibManager {
             let best = if let Some((orr_topology, orr_spf)) = orr_ctx {
                 let winner = ribs
                     .values()
-                    .filter_map(|rib| rib.get_vpn(key))
+                    .flat_map(|rib| rib.iter_vpn_for_nlri(key))
                     .filter(|candidate| {
                         candidate.peer != target_peer
                             && !should_suppress_ibgp_inner(
@@ -106,17 +284,13 @@ impl RibManager {
                         )
                     });
                 let Some(winner) = winner else {
-                    if rib_out.get_vpn(key).is_some() {
-                        vpn_withdraw.push(key.clone());
-                    }
+                    withdraw_existing(vpn_withdraw, existing_path_ids);
                     continue;
                 };
                 winner
             } else {
                 let Some(best) = loc_rib.get_vpn(key) else {
-                    if rib_out.get_vpn(key).is_some() {
-                        vpn_withdraw.push(key.clone());
-                    }
+                    withdraw_existing(vpn_withdraw, existing_path_ids);
                     continue;
                 };
                 best
@@ -134,9 +308,7 @@ impl RibManager {
             if let Some(membership) = rtc_filter
                 && !membership.matches_any(best.extended_communities())
             {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
-                }
+                withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
 
@@ -144,9 +316,7 @@ impl RibManager {
             // winner (its candidate set is pre-filtered above); they
             // decide only for the Loc-RIB best of a plain peer.
             if best.peer == target_peer {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
-                }
+                withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
 
@@ -157,9 +327,7 @@ impl RibManager {
                 cluster_id,
                 peer_is_rr_client,
             ) {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
-                }
+                withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
 
@@ -192,9 +360,7 @@ impl RibManager {
                 rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
             record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != rustbgpd_policy::PolicyAction::Permit {
-                if rib_out.get_vpn(key).is_some() {
-                    vpn_withdraw.push(key.clone());
-                }
+                withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
 
@@ -210,14 +376,28 @@ impl RibManager {
             }
             modified.path_id = 0;
 
-            if !force
-                && rib_out
-                    .get_vpn(key)
-                    .is_some_and(|existing| vpn_routes_equal(existing, &modified))
+            let out_key = VpnRibRouteKey {
+                nlri_key: *key,
+                path_id: 0,
+            };
+            if force
+                || rib_out
+                    .get_vpn(&out_key)
+                    .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
             {
-                continue;
+                vpn_announce.push(modified);
             }
-            vpn_announce.push(modified);
+
+            // Clean up stale multi-path entries if this identity was
+            // previously advertised via Add-Path and is now single-best.
+            for &path_id in existing_path_ids {
+                if path_id != 0 {
+                    vpn_withdraw.push(VpnRibRouteKey {
+                        nlri_key: *key,
+                        path_id,
+                    });
+                }
+            }
         }
     }
 
@@ -226,26 +406,29 @@ impl RibManager {
     ///
     /// The selected route is reflected as received: Route Distinguisher,
     /// MPLS label stack, and next-hop pass through unchanged (ADR-0077 §6),
-    /// with ordinary BGP attribute handling applied by transport.
+    /// with ordinary BGP attribute handling applied by transport. Selection
+    /// and staging operate per RD+prefix identity — received Add-Path path
+    /// IDs are distinct Adj-RIB-In entries but collapse into one candidate
+    /// set per identity.
     #[expect(
         clippy::too_many_lines,
-        reason = "VPN recompute keeps loc-rib selection and per-peer ORR staging together"
+        reason = "VPN recompute keeps loc-rib selection and per-peer ORR/Add-Path staging together"
     )]
     pub(in crate::manager) fn recompute_and_distribute_vpn(
         &mut self,
-        affected: &HashSet<crate::route::VpnRibRouteKey>,
+        affected: &HashSet<VpnRibRouteKey>,
     ) {
-        use crate::route::VpnRibRoute;
+        let affected_nlri: HashSet<VpnRouteKey> = affected.iter().map(|key| key.nlri_key).collect();
 
-        let mut changed_keys: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
-        for key in affected {
+        let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
+        for key in &affected_nlri {
             let candidates: Vec<VpnRibRoute> = self
                 .ribs
                 .values()
-                .filter_map(|rib| rib.get_vpn(key).cloned())
+                .flat_map(|rib| rib.iter_vpn_for_nlri(key).cloned())
                 .collect();
-            if self.loc_rib.recompute_vpn(key.clone(), candidates.iter()) {
-                changed_keys.insert(key.clone());
+            if self.loc_rib.recompute_vpn(*key, candidates.iter()) {
+                changed_keys.insert(*key);
             }
         }
 
@@ -254,12 +437,15 @@ impl RibManager {
         // Loc-RIB best untouched can still flip a vantage best, so
         // ORR-bound peers stage every affected key (the VPN parallel of
         // the unicast `all_affected` inclusion in `distribute_changes`).
-        let any_resolved_orr_peer = self.outbound_peers.keys().any(|peer| {
+        // Add-Path-send peers need the same widening: a non-best candidate
+        // change can alter the staged top-N set.
+        let any_widened_peer = self.outbound_peers.keys().any(|peer| {
             self.peer_orr_vantage
                 .get(peer)
                 .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
+                || self.peer_vpn_add_path_send(*peer)
         });
-        if changed_keys.is_empty() && !any_resolved_orr_peer {
+        if changed_keys.is_empty() && !any_widened_peer {
             return;
         }
 
@@ -278,8 +464,9 @@ impl RibManager {
                 .get(&peer)
                 .and_then(|vantage| self.orr.spf.get(vantage))
                 .map(|spf| (&self.orr.topology, spf));
-            let staged_keys = if orr_ctx.is_some() {
-                affected
+            let peer_add_path = self.peer_vpn_add_path_send(peer);
+            let staged_keys = if orr_ctx.is_some() || peer_add_path {
+                &affected_nlri
             } else {
                 &changed_keys
             };
@@ -287,7 +474,7 @@ impl RibManager {
             if !staged_keys.iter().any(|key| {
                 sendable
                     .as_ref()
-                    .is_some_and(|families| families.contains(&key.afi_safi()))
+                    .is_some_and(|families| families.contains(&vpn_afi_safi(key)))
             }) {
                 continue;
             }
@@ -298,6 +485,16 @@ impl RibManager {
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
             let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
+            let add_path_send_max = if peer_add_path {
+                self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let add_path_send_families = self
+                .peer_add_path_send_families
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             let target_peer_label = peer.to_string();
             let metrics = self.metrics.clone();
 
@@ -325,6 +522,8 @@ impl RibManager {
                 sendable.as_ref(),
                 rtc_filter.as_ref(),
                 orr_ctx,
+                add_path_send_max,
+                &add_path_send_families,
                 export_pol.as_ref(),
                 &metrics,
                 policy_stats,
