@@ -4,8 +4,8 @@
 //! `len | label stack | prefix` — the SAFI 128 VPN layout from
 //! [`crate::vpn`] minus the 8-byte Route Distinguisher — in both
 //! announce mode (BOS-terminated label stack) and RFC 8277 §2.4
-//! withdraw-compatibility mode (a single 3-octet compatibility field
-//! whose value the receiver MUST ignore).
+//! withdraw mode (a single 3-octet compatibility field, or a GoBGP-style
+//! echo of the announced label stack; ignored either way).
 //!
 //! MP_REACH/MP_UNREACH dispatch in [`crate::attribute`] accepts SAFI 4
 //! and routes announce/withdraw NLRI (plain and RFC 7911 Add-Path forms)
@@ -19,8 +19,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::error::{DecodeError, EncodeError};
 use crate::nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
 use crate::vpn::{
-    MPLS_LABEL_ENTRY_BITS, MPLS_LABEL_ENTRY_LEN, MplsLabelEntry, VPN_WITHDRAW_COMPATIBILITY,
-    decode_label_stack, encode_label_stack, validate_label_stack,
+    MPLS_LABEL_ENTRY_BITS, MplsLabelEntry, VPN_WITHDRAW_COMPATIBILITY, decode_label_stack,
+    encode_label_stack, split_withdraw_label_field, validate_label_stack,
 };
 
 /// Address family carried by a labeled-unicast NLRI.
@@ -190,11 +190,13 @@ pub fn encode_labeled_nlri(
 /// Decode withdraw-mode labeled-unicast NLRI bytes (`MP_UNREACH_NLRI`).
 ///
 /// Per RFC 8277 §2.4 a withdrawn labeled-unicast NLRI carries a single
-/// 3-octet compatibility field in the label position, not a BOS-terminated
-/// label stack. The field's value is ignored entirely (it need not be
-/// 0x800000 and its S bit need not be set), so announce-mode label-stack
-/// parsing must not be used here. Decoded entries have an empty `labels`
-/// vec.
+/// 3-octet compatibility field in the label position — but `GoBGP` (and any
+/// stack without a dedicated withdraw encoder) echoes the announced
+/// BOS-terminated label stack instead, so the label position is dispatched
+/// per the shared `split_withdraw_label_field` dispatch in `crate::vpn`: an exact compatibility
+/// value (0x800000 or 0x000000) is one field, anything else is S-bit-walked
+/// like announce mode. Labels are ignored either way; decoded entries have
+/// an empty `labels` vec.
 ///
 /// # Errors
 ///
@@ -307,8 +309,8 @@ pub fn decode_labeled_nlri_addpath(
 /// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4).
 ///
 /// The 4-octet Path Identifier is prepended to the whole withdraw-mode NLRI:
-/// `path_id(4) | len | 3-octet compatibility field | prefix`. The
-/// compatibility field's value is ignored, exactly as in
+/// `path_id(4) | len | label field | prefix`. The label field is dispatched
+/// (compatibility value or echoed stack) and ignored, exactly as in
 /// [`decode_labeled_withdraw_nlri`]. Decoded entries have an empty `labels`
 /// vec.
 ///
@@ -495,8 +497,12 @@ fn decode_one_labeled_withdraw_nlri(
         );
     }
 
-    // Exactly one 3-octet compatibility field; its value is ignored.
-    let prefix_len = total_len_bits - MPLS_LABEL_ENTRY_BITS;
+    let (label_octets, label_bits) =
+        split_withdraw_label_field(value, total_len_bits, family, field_start)?;
+
+    // The dispatch only consumes bits that fit in `total_len_bits`, so this
+    // subtraction cannot underflow.
+    let prefix_len = total_len_bits - label_bits;
     if prefix_len > family.max_prefix_len() {
         return invalid_labeled_nlri(
             format!(
@@ -509,7 +515,7 @@ fn decode_one_labeled_withdraw_nlri(
     }
 
     let prefix_octets = usize::from(prefix_len.div_ceil(8));
-    let prefix_end = MPLS_LABEL_ENTRY_LEN + prefix_octets;
+    let prefix_end = label_octets + prefix_octets;
     if value.len() < prefix_end {
         return invalid_labeled_nlri(
             format!("{family} withdraw NLRI truncated before prefix"),
@@ -518,8 +524,7 @@ fn decode_one_labeled_withdraw_nlri(
         );
     }
 
-    let prefix =
-        decode_labeled_prefix(family, prefix_len, &value[MPLS_LABEL_ENTRY_LEN..prefix_end]);
+    let prefix = decode_labeled_prefix(family, prefix_len, &value[label_octets..prefix_end]);
     Ok(LabeledNlri {
         labels: vec![],
         prefix,
@@ -715,15 +720,159 @@ mod tests {
     }
 
     #[test]
-    fn withdraw_decode_ignores_arbitrary_compatibility_value() {
-        // RFC 8277 §2.4: receiver MUST ignore the field — even a value
-        // with no BOS bit set, which announce-mode parsing would reject
-        // or overrun.
-        let buf = vec![24 + 24, 0x0C, 0x35, 0x00, 10, 0, 1]; // label 50000, S=0
+    fn withdraw_decode_accepts_zero_compatibility_value() {
+        // GoBGP's ZERO_LABEL: some stacks zero the withdraw label field.
+        // 0x000000 has S=0, so an S-bit walk would overrun — it must be
+        // taken as a single compatibility field.
+        let buf = vec![24 + 24, 0x00, 0x00, 0x00, 10, 0, 1];
         let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap();
         assert_eq!(decoded.len(), 1);
         assert!(decoded[0].labels.is_empty());
         assert_eq!(decoded[0].prefix, v4([10, 0, 1, 0], 24));
+    }
+
+    /// Exact wire bytes from the M79 lab: `GoBGP` has no withdraw-mode
+    /// encoder and echoes the announced label stack (801, 802) verbatim.
+    /// The old single-compatibility-field parse computed prefix length
+    /// 72 − 24 = 48 > 32 → NOTIFICATION 3/10 → session reset.
+    #[test]
+    fn withdraw_decode_m79_gobgp_label_stack_echo() {
+        let buf = vec![
+            0x48, // 72 bits = 2×24 label + 24 prefix
+            0x00, 0x32, 0x10, // label 801, S=0
+            0x00, 0x32, 0x21, // label 802, S=1
+            0xC6, 0x33, 0x65, // 198.51.101.0/24
+        ];
+        let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].prefix.to_string(), "198.51.101.0/24");
+    }
+
+    #[test]
+    fn withdraw_decode_v6_multi_label_stack_echo() {
+        // A GoBGP-shaped withdraw is byte-identical to the announce
+        // encoding of the same NLRI.
+        let entry = LabeledNlri {
+            labels: vec![label(16_000, false), label(24_000, true)],
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+        };
+        let mut buf = Vec::new();
+        encode_labeled_nlri(
+            std::slice::from_ref(&entry),
+            LabeledAddressFamily::V6,
+            &mut buf,
+        )
+        .unwrap();
+
+        let decoded = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V6).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].labels.is_empty());
+        assert_eq!(decoded[0].prefix, entry.prefix);
+    }
+
+    #[test]
+    fn addpath_withdraw_decode_label_stack_echo() {
+        let mut buf = 9u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[
+            0x48, // 72 bits = 2×24 label + 24 prefix
+            0x00, 0x32, 0x10, // label 801, S=0
+            0x00, 0x32, 0x21, // label 802, S=1
+            0xC6, 0x33, 0x65, // 198.51.101.0/24
+        ]);
+        let decoded = decode_labeled_withdraw_nlri_addpath(&buf, LabeledAddressFamily::V4).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].path_id, 9);
+        assert!(decoded[0].nlri.labels.is_empty());
+        assert_eq!(decoded[0].nlri.prefix.to_string(), "198.51.101.0/24");
+    }
+
+    #[test]
+    fn withdraw_decode_rejects_stack_without_bottom_of_stack() {
+        // Not a compatibility value and no S=1 within the declared length.
+        let buf = vec![24 + 24, 0x00, 0x32, 0x10, 0x00, 0x32, 0x20];
+        let err = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    #[test]
+    fn withdraw_decode_rejects_prefix_too_long_for_family() {
+        // Compatibility-field form: 57 − 24 = 33 > 32.
+        let buf = vec![24 + 33, 0x80, 0x00, 0x00, 10, 0, 0, 0, 0];
+        let err = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+
+        // Stack-echo form: single BOS label, 57 − 24 = 33 > 32.
+        let buf = vec![24 + 33, 0x00, 0x32, 0x11, 10, 0, 0, 0, 0];
+        let err = decode_labeled_withdraw_nlri(&buf, LabeledAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+    }
+
+    /// Stack-echo compatibility invariant: for every announce-encodable
+    /// NLRI, the announce bytes (what `GoBGP` sends as a withdraw) decode
+    /// through the withdraw decoders to the same route key.
+    #[test]
+    fn withdraw_stack_echo_matches_announce_key() {
+        let cases = [
+            (
+                LabeledAddressFamily::V4,
+                vec![
+                    LabeledNlri {
+                        labels: vec![label(3, true)],
+                        prefix: v4([0, 0, 0, 0], 0),
+                    },
+                    LabeledNlri {
+                        labels: vec![label(801, false), label(802, true)],
+                        prefix: v4([198, 51, 101, 0], 24),
+                    },
+                    LabeledNlri {
+                        labels: vec![label(100, false), label(200, false), label(300, true)],
+                        prefix: v4([203, 0, 113, 7], 32),
+                    },
+                ],
+            ),
+            (
+                LabeledAddressFamily::V6,
+                vec![
+                    LabeledNlri {
+                        labels: vec![label(16_000, false), label(24_000, true)],
+                        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+                    },
+                    LabeledNlri {
+                        labels: vec![label(42, true)],
+                        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::1".parse().unwrap(), 128)),
+                    },
+                ],
+            ),
+        ];
+
+        for (family, entries) in cases {
+            let mut announce = Vec::new();
+            encode_labeled_nlri(&entries, family, &mut announce).unwrap();
+            let withdrawn = decode_labeled_withdraw_nlri(&announce, family).unwrap();
+            assert_eq!(withdrawn.len(), entries.len());
+            for (got, want) in withdrawn.iter().zip(&entries) {
+                assert!(got.labels.is_empty());
+                assert_eq!(got.key(), want.key(), "{family}");
+            }
+
+            let addpath: Vec<_> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, nlri)| LabeledNlriEntry {
+                    path_id: u32::try_from(i).unwrap() + 1,
+                    nlri: nlri.clone(),
+                })
+                .collect();
+            let mut announce = Vec::new();
+            encode_labeled_nlri_addpath(&addpath, family, &mut announce).unwrap();
+            let withdrawn = decode_labeled_withdraw_nlri_addpath(&announce, family).unwrap();
+            assert_eq!(withdrawn.len(), addpath.len());
+            for (got, want) in withdrawn.iter().zip(&addpath) {
+                assert_eq!(got.path_id, want.path_id);
+                assert_eq!(got.nlri.key(), want.nlri.key(), "{family}");
+            }
+        }
     }
 
     #[test]

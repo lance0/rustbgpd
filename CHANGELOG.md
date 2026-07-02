@@ -173,6 +173,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Label-stack withdraws no longer reset labeled-unicast and VPN
+  sessions (caught live by the M79 lab).** RFC 8277 §2.4 says a withdraw
+  carries a single ignored 3-octet compatibility field in the label
+  position, but GoBGP (and any stack without a dedicated withdraw
+  encoder) echoes the announced BOS-terminated label stack instead. Our
+  SAFI 4 and SAFI 128 withdraw decoders assumed exactly one field, so a
+  withdraw of a multi-label route mis-computed the prefix length (or
+  mis-read the RD) → NOTIFICATION 3/10 → session reset, flushing the
+  peer's whole table with reconnect-flap potential. The decoders (plain
+  and Add-Path, both families) now dispatch like GoBGP's own parser: an
+  exact 0x800000/0x000000 value is one compatibility field, anything
+  else is S-bit-walked like announce mode; labels are ignored either
+  way. Encode side unchanged (we still emit the compliant 0x800000).
+
 - **Unicast, FlowSpec, and EVPN GR/LLGR semantics brought in line with
   RFC 4724/9494.** The legacy families now match the strict semantics the
   RR families (VPN/BGP-LS/RTC) shipped with: a route still stale from a
