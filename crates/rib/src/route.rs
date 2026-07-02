@@ -636,8 +636,8 @@ impl VpnRibRoute {
 /// per-prefix), matching the SAFI 128 VPN decision. The key deliberately
 /// wraps the unicast [`Prefix`] in a labeled-specific struct so the labeled
 /// table can never be confused with the unicast RIB maps (ADR-0077 §2).
-/// `path_id` is reserved for a future Add-Path-enabled slice and is always
-/// zero until negotiation grows that capability.
+/// `path_id` carries the RFC 7911 Add-Path path identifier (zero when
+/// Add-Path is not in use).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LabeledRibRouteKey {
     /// The IP prefix (route identity within SAFI 4).
@@ -724,6 +724,57 @@ impl LabeledRibRoute {
             .iter()
             .find_map(|attr| match attr {
                 PathAttribute::Communities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract the `AS_PATH`, returning `None` if absent.
+    #[must_use]
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit `LOCAL_PREF`, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::LocalPref(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract the explicit MED, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::Med(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// Extract EXTENDED COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES values, returning an empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[])

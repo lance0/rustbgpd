@@ -145,6 +145,20 @@ impl RibManager {
             } else {
                 HashSet::new()
             };
+            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+                if safi == Safi::LabeledUnicast {
+                    self.ribs
+                        .get(&peer)
+                        .map(|rib| {
+                            rib.iter_labeled()
+                                .filter(|route| route.afi_safi() == (afi, safi))
+                                .map(crate::route::LabeledRibRoute::key)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
             let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
                 if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
                     self.ribs
@@ -195,6 +209,9 @@ impl RibManager {
                 rib.sweep_stale_family_vpn((afi, safi));
                 rib.sweep_llgr_stale_family_vpn((afi, safi));
                 rib.clear_stale_vpn((afi, safi));
+                rib.sweep_stale_family_labeled((afi, safi));
+                rib.sweep_llgr_stale_family_labeled((afi, safi));
+                rib.clear_stale_labeled((afi, safi));
                 rib.sweep_stale_family_bgpls((afi, safi));
                 rib.sweep_llgr_stale_family_bgpls((afi, safi));
                 rib.clear_stale_bgpls((afi, safi));
@@ -224,6 +241,9 @@ impl RibManager {
             if !vpn_affected.is_empty() {
                 self.recompute_vpn_keys(&vpn_affected);
             }
+            if !labeled_affected.is_empty() {
+                self.recompute_labeled_keys(&labeled_affected);
+            }
             if !bgpls_affected.is_empty() {
                 self.recompute_bgpls_keys(&bgpls_affected);
             }
@@ -246,6 +266,7 @@ impl RibManager {
                     + rib.iter_flowspec().filter(|r| r.is_stale).count()
                     + rib.iter_evpn().filter(|r| r.is_stale).count()
                     + rib.iter_vpn().filter(|r| r.is_stale).count()
+                    + rib.iter_labeled().filter(|r| r.is_stale).count()
                     + rib.iter_bgpls().filter(|r| r.is_stale).count()
                     + rib.iter_rtc().filter(|r| r.is_stale).count()
             });
@@ -308,6 +329,20 @@ impl RibManager {
             } else {
                 HashSet::new()
             };
+            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+                if safi == Safi::LabeledUnicast {
+                    self.ribs
+                        .get(&peer)
+                        .map(|rib| {
+                            rib.iter_labeled()
+                                .filter(|route| route.afi_safi() == (afi, safi))
+                                .map(crate::route::LabeledRibRoute::key)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
             let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
                 if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
                     self.ribs
@@ -349,6 +384,8 @@ impl RibManager {
                 rib.clear_llgr_stale_evpn((afi, safi));
                 rib.sweep_llgr_stale_family_vpn((afi, safi));
                 rib.clear_llgr_stale_vpn((afi, safi));
+                rib.sweep_llgr_stale_family_labeled((afi, safi));
+                rib.clear_llgr_stale_labeled((afi, safi));
                 rib.sweep_llgr_stale_family_bgpls((afi, safi));
                 rib.clear_llgr_stale_bgpls((afi, safi));
                 rtc_swept = !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
@@ -375,6 +412,9 @@ impl RibManager {
             if !vpn_affected.is_empty() {
                 self.recompute_vpn_keys(&vpn_affected);
             }
+            if !labeled_affected.is_empty() {
+                self.recompute_labeled_keys(&labeled_affected);
+            }
             if !bgpls_affected.is_empty() {
                 self.recompute_bgpls_keys(&bgpls_affected);
             }
@@ -397,6 +437,7 @@ impl RibManager {
                     + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
                     + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
                     + rib.iter_vpn().filter(|r| r.is_llgr_stale).count()
+                    + rib.iter_labeled().filter(|r| r.is_llgr_stale).count()
                     + rib.iter_bgpls().filter(|r| r.is_llgr_stale).count()
                     + rib.iter_rtc().filter(|r| r.is_llgr_stale).count()
             });
@@ -458,6 +499,17 @@ impl RibManager {
                 stale.retain(|key| key.afi_safi() != (afi, safi));
                 for route in rib
                     .iter_vpn()
+                    .filter(|route| route.afi_safi() == (afi, safi))
+                {
+                    if stale.insert(route.key()) {
+                        stale_count += 1;
+                    }
+                }
+            } else if safi == Safi::LabeledUnicast {
+                let stale = self.refresh_stale_labeled.entry(peer).or_default();
+                stale.retain(|key| key.afi_safi() != (afi, safi));
+                for route in rib
+                    .iter_labeled()
                     .filter(|route| route.afi_safi() == (afi, safi))
                 {
                     if stale.insert(route.key()) {
@@ -544,6 +596,8 @@ impl RibManager {
         let mut bgpls_withdraw = Vec::new();
         let mut vpn_announce = Vec::new();
         let mut vpn_withdraw = Vec::new();
+        let mut labeled_announce = Vec::new();
+        let mut labeled_withdraw = Vec::new();
         let mut rtc_announce = Vec::new();
         let mut rtc_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
@@ -732,6 +786,55 @@ impl RibManager {
                     false, // route refresh re-emits via empty refresh_view
                 );
             }
+        } else if safi == Safi::LabeledUnicast {
+            let mut labeled_keys: HashSet<Prefix> = self
+                .loc_rib
+                .iter_labeled()
+                .filter(|route| route.afi_safi() == family)
+                .map(|route| route.nlri.key())
+                .collect();
+            // An Add-Path-send refresh re-emits the staged top-N, which
+            // draws from every Adj-RIB-In identity of the family.
+            if peer_add_path_send_max > 0
+                && peer_add_path_send_families
+                    .iter()
+                    .any(|(_, safi)| *safi == Safi::LabeledUnicast)
+            {
+                for rib in self.ribs.values() {
+                    labeled_keys.extend(
+                        rib.iter_labeled()
+                            .filter(|route| route.afi_safi() == family)
+                            .map(|route| route.nlri.key()),
+                    );
+                }
+            }
+            if !labeled_keys.is_empty() {
+                Self::stage_labeled_routes(
+                    loc_rib,
+                    &self.ribs,
+                    &refresh_view,
+                    &self.peer_is_rr_client,
+                    &labeled_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    llgr.as_ref(),
+                    orr_ctx,
+                    peer_add_path_send_max,
+                    &peer_add_path_send_families,
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut labeled_announce,
+                    &mut labeled_withdraw,
+                    false, // route refresh re-emits via empty refresh_view
+                );
+            }
         } else if safi == Safi::RtConstrain {
             let rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
                 .loc_rib
@@ -894,6 +997,8 @@ impl RibManager {
                 bgpls_withdraw,
                 vpn_announce,
                 vpn_withdraw,
+                labeled_announce,
+                labeled_withdraw,
                 rtc_announce,
                 rtc_withdraw,
             ) {
@@ -960,8 +1065,10 @@ impl RibManager {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            labeled_announce: vec![],
             rtc_announce: vec![],
             vpn_withdraw: vec![],
+            labeled_withdraw: vec![],
             rtc_withdraw: vec![],
             request_refresh_all_negotiated: false,
         };
@@ -1077,6 +1184,21 @@ impl RibManager {
         } else {
             Vec::new()
         };
+        let stale_labeled_keys: Vec<crate::route::LabeledRibRouteKey> =
+            if safi == Safi::LabeledUnicast {
+                self.refresh_stale_labeled
+                    .get(&peer)
+                    .map(|stale| {
+                        stale
+                            .iter()
+                            .filter(|key| key.afi_safi() == family)
+                            .copied()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         let stale_rtc_keys: Vec<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
             self.refresh_stale_rtc
                 .get(&peer)
@@ -1091,6 +1213,7 @@ impl RibManager {
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
         let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for (prefix, path_id) in &stale_route_keys {
@@ -1118,6 +1241,11 @@ impl RibManager {
                     vpn_affected.insert(key.clone());
                 }
             }
+            for key in &stale_labeled_keys {
+                if rib.withdraw_labeled(key) {
+                    labeled_affected.insert(*key);
+                }
+            }
             for key in &stale_rtc_keys {
                 if rib.withdraw_rtc(key) {
                     rtc_affected.insert(key.clone());
@@ -1132,6 +1260,7 @@ impl RibManager {
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
                 || !vpn_affected.is_empty()
+                || !labeled_affected.is_empty()
                 || !rtc_affected.is_empty()
             {
                 rib.gc_intern_table();
@@ -1198,6 +1327,18 @@ impl RibManager {
                 self.refresh_stale_vpn.remove(&peer);
             }
         }
+        if safi == Safi::LabeledUnicast {
+            let clear_labeled_stale_entry =
+                if let Some(stale) = self.refresh_stale_labeled.get_mut(&peer) {
+                    stale.retain(|key| key.afi_safi() != family);
+                    stale.is_empty()
+                } else {
+                    false
+                };
+            if clear_labeled_stale_entry {
+                self.refresh_stale_labeled.remove(&peer);
+            }
+        }
         self.refresh_stale_counts.remove(&(peer, afi, safi));
 
         let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
@@ -1237,6 +1378,13 @@ impl RibManager {
             // Same gc-after-recompute ordering as BGP-LS above: the swept VPN
             // routes' interned attribute sets stay alive in the Loc-RIB clone
             // until recompute_vpn_keys drops it, so gc must run after it.
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.gc_intern_table();
+            }
+        }
+        if !labeled_affected.is_empty() {
+            self.recompute_labeled_keys(&labeled_affected);
+            // Same gc-after-recompute ordering as VPN above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
             }

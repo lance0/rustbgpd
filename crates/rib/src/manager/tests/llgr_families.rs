@@ -1,34 +1,5 @@
 use super::*;
 
-/// GR entry with LLGR negotiated for the given family tuples. The per-family
-/// LLGR stale time equals `llgr_stale_time`.
-fn gr_with_llgr(
-    peer: IpAddr,
-    restart_time: u16,
-    gr_families: Vec<(Afi, Safi)>,
-    llgr_families: Vec<(Afi, Safi)>,
-    llgr_stale_time: u32,
-) -> RibUpdate {
-    RibUpdate::PeerGracefulRestart {
-        session_id: 0,
-        peer,
-        restart_time,
-        stale_routes_time: 360,
-        gr_families,
-        peer_llgr_capable: true,
-        peer_llgr_families: llgr_families
-            .into_iter()
-            .map(|(afi, safi)| rustbgpd_wire::LlgrFamily {
-                afi,
-                safi,
-                forwarding_preserved: false,
-                stale_time: llgr_stale_time,
-            })
-            .collect(),
-        llgr_stale_time,
-    }
-}
-
 /// Bring up an iBGP route-reflector client negotiating `sendable`, for
 /// observing typed-family re-exports.
 async fn llgr_target_peer_up(
@@ -1259,38 +1230,6 @@ async fn bgpls_llgr_stale_topology_keeps_orr_vantages_resolved_until_llgr_sweep(
 
     drop(tx);
     handle.await.unwrap();
-}
-
-/// Bring up an outbound target with an explicit eBGP/LLGR shape (and
-/// optional Add-Path send) for the RFC 9494 export-gate tests.
-async fn llgr_gate_peer_up(
-    tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
-    sendable: Vec<(Afi, Safi)>,
-    is_ebgp: bool,
-    llgr_families: Vec<(Afi, Safi)>,
-    add_path: Option<((Afi, Safi), u32)>,
-) -> mpsc::Receiver<OutboundRouteUpdate> {
-    let (out_tx, out_rx) = mpsc::channel(64);
-    tx.send(RibUpdate::PeerUp {
-        session_id: 0,
-        peer,
-        peer_asn: 65000,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
-        outbound_tx: out_tx,
-        export_policy: None,
-        sendable_families: sendable,
-        is_ebgp,
-        route_reflector_client: !is_ebgp,
-        orr_vantage: None,
-        add_path_send_families: add_path.map(|(family, _)| vec![family]).unwrap_or_default(),
-        add_path_send_max: add_path.map_or(0, |(_, max)| max),
-        negotiated_orf_recv: Vec::new(),
-        negotiated_llgr_families: llgr_families,
-    })
-    .await
-    .unwrap();
-    out_rx
 }
 
 /// Announce a unicast route from `source`, then drive it GR-stale →

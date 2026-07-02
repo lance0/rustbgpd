@@ -7,11 +7,11 @@
 //! withdraw-compatibility mode (a single 3-octet compatibility field
 //! whose value the receiver MUST ignore).
 //!
-//! Per ADR-0077 §3a this codec is substrate only: MP_REACH/MP_UNREACH
-//! dispatch still rejects SAFI 4, so the family stays unreachable from
-//! peers until a complete typed vertical slice lands. Route identity is
-//! the IP prefix alone (RFC 8277 §2.3 implicit-replace is per-prefix);
-//! the label stack is route data, matching the SAFI 128 decision.
+//! MP_REACH/MP_UNREACH dispatch in [`crate::attribute`] accepts SAFI 4
+//! and routes announce/withdraw NLRI (plain and RFC 7911 Add-Path forms)
+//! through this codec. Route identity is the IP prefix alone (RFC 8277
+//! §2.3 implicit-replace is per-prefix); the label stack is route data,
+//! matching the SAFI 128 decision.
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -64,6 +64,19 @@ pub struct LabeledNlri {
     pub labels: Vec<MplsLabelEntry>,
     /// The IP prefix.
     pub prefix: Prefix,
+}
+
+/// A labeled-unicast NLRI with an optional Add-Path path ID (RFC 7911).
+///
+/// For non-Add-Path peers, `path_id` is always 0. Mirrors the VPN
+/// [`crate::vpn::VpnNlriEntry`] shape: the 4-octet Path Identifier is
+/// prepended to the entire NLRI (length octet included) on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LabeledNlriEntry {
+    /// Add-Path path identifier (0 when Add-Path is not in use).
+    pub path_id: u32,
+    /// The labeled-unicast NLRI.
+    pub nlri: LabeledNlri,
 }
 
 impl LabeledNlri {
@@ -253,6 +266,176 @@ pub fn encode_labeled_withdraw_nlri(
         buf.push(total_bits);
         buf.extend_from_slice(&VPN_WITHDRAW_COMPATIBILITY);
         push_prefix_octets(&entry.prefix, buf);
+    }
+
+    Ok(())
+}
+
+/// Decode Add-Path labeled-unicast NLRI bytes (RFC 7911 §3).
+///
+/// Wire format per entry: `[4-byte path_id BE]` prepended to the ordinary
+/// RFC 8277 NLRI (`len | label stack | prefix`).
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for a truncated path ID or malformed length,
+/// label stack, or prefix encodings.
+pub fn decode_labeled_nlri_addpath(
+    mut buf: &[u8],
+    family: LabeledAddressFamily,
+) -> Result<Vec<LabeledNlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        let (path_id, rest) = split_labeled_path_id(buf, family)?;
+        buf = rest;
+
+        let field_start = buf;
+        let (value, total_len_bits, rest) = split_labeled_nlri_value(buf, family, "NLRI")?;
+        buf = rest;
+
+        entries.push(LabeledNlriEntry {
+            path_id,
+            nlri: decode_one_labeled_nlri(value, total_len_bits, family, field_start)?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Decode Add-Path withdraw-mode labeled-unicast NLRI bytes
+/// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4).
+///
+/// The 4-octet Path Identifier is prepended to the whole withdraw-mode NLRI:
+/// `path_id(4) | len | 3-octet compatibility field | prefix`. The
+/// compatibility field's value is ignored, exactly as in
+/// [`decode_labeled_withdraw_nlri`]. Decoded entries have an empty `labels`
+/// vec.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for a truncated path ID or malformed length or
+/// prefix encodings.
+pub fn decode_labeled_withdraw_nlri_addpath(
+    mut buf: &[u8],
+    family: LabeledAddressFamily,
+) -> Result<Vec<LabeledNlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        let (path_id, rest) = split_labeled_path_id(buf, family)?;
+        buf = rest;
+
+        let field_start = buf;
+        let (value, total_len_bits, rest) = split_labeled_nlri_value(buf, family, "withdraw NLRI")?;
+        buf = rest;
+
+        entries.push(LabeledNlriEntry {
+            path_id,
+            nlri: decode_one_labeled_withdraw_nlri(value, total_len_bits, family, field_start)?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Split a 4-octet RFC 7911 Path Identifier off the front of `buf`.
+fn split_labeled_path_id(
+    buf: &[u8],
+    family: LabeledAddressFamily,
+) -> Result<(u32, &[u8]), DecodeError> {
+    if buf.len() < 5 {
+        return invalid_labeled_nlri(
+            format!(
+                "{family} Add-Path NLRI truncated: need at least 5 bytes (path_id + length), have {}",
+                buf.len()
+            ),
+            buf,
+            buf.len(),
+        );
+    }
+    let path_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    Ok((path_id, &buf[4..]))
+}
+
+/// Split one length-prefixed NLRI value off the front of `buf`, returning
+/// `(value, total_len_bits, rest)`.
+fn split_labeled_nlri_value<'a>(
+    buf: &'a [u8],
+    family: LabeledAddressFamily,
+    kind: &str,
+) -> Result<(&'a [u8], u8, &'a [u8]), DecodeError> {
+    let total_len_bits = buf[0];
+    let rest = &buf[1..];
+    let value_len = usize::from(total_len_bits.div_ceil(8));
+
+    if rest.len() < value_len {
+        return invalid_labeled_nlri(
+            format!(
+                "{family} {kind} truncated: length {total_len_bits} bits requires {value_len} bytes, have {}",
+                rest.len()
+            ),
+            buf,
+            1 + rest.len(),
+        );
+    }
+
+    Ok((&rest[..value_len], total_len_bits, &rest[value_len..]))
+}
+
+/// Encode Add-Path labeled-unicast NLRI bytes (RFC 7911 §3): each entry's
+/// 4-octet path ID is prepended to the ordinary RFC 8277 NLRI encoding.
+///
+/// On error, `buf` is restored to its original length.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if an entry belongs to the wrong family, its label
+/// stack is invalid, or its encoded length cannot fit in the one-octet NLRI
+/// length.
+pub fn encode_labeled_nlri_addpath(
+    entries: &[LabeledNlriEntry],
+    family: LabeledAddressFamily,
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
+
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        if let Err(err) = encode_one_labeled_nlri(&entry.nlri, family, buf) {
+            buf.truncate(start_len);
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+/// Encode Add-Path withdraw-mode labeled-unicast NLRI bytes
+/// (`MP_UNREACH_NLRI`, RFC 7911 §3 + RFC 8277 §2.4): each entry's 4-octet
+/// path ID is prepended to the withdraw-mode NLRI (compatibility field
+/// 0x800000 in the label position; each entry's `labels` are ignored).
+///
+/// On error, `buf` is restored to its original length.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if an entry belongs to the wrong family.
+pub fn encode_labeled_withdraw_nlri_addpath(
+    entries: &[LabeledNlriEntry],
+    family: LabeledAddressFamily,
+    buf: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
+
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        if let Err(err) =
+            encode_labeled_withdraw_nlri(std::slice::from_ref(&entry.nlri), family, buf)
+        {
+            buf.truncate(start_len);
+            return Err(err);
+        }
     }
 
     Ok(())
@@ -647,6 +830,62 @@ mod tests {
         let err =
             encode_labeled_nlri(&[entry], LabeledAddressFamily::V4, &mut Vec::new()).unwrap_err();
         assert!(matches!(err, EncodeError::ValueOutOfRange { .. }));
+    }
+
+    #[test]
+    fn addpath_labeled_v4_roundtrip_multiple() {
+        let entries = vec![
+            LabeledNlriEntry {
+                path_id: 1,
+                nlri: LabeledNlri {
+                    labels: vec![label(100, true)],
+                    prefix: v4([10, 0, 1, 0], 24),
+                },
+            },
+            LabeledNlriEntry {
+                path_id: 0xFFFF_FFFF,
+                nlri: LabeledNlri {
+                    labels: vec![label(200, true)],
+                    prefix: v4([10, 0, 2, 0], 24),
+                },
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_labeled_nlri_addpath(&entries, LabeledAddressFamily::V4, &mut buf).unwrap();
+        assert_eq!(
+            decode_labeled_nlri_addpath(&buf, LabeledAddressFamily::V4).unwrap(),
+            entries
+        );
+    }
+
+    #[test]
+    fn addpath_labeled_v6_withdraw_roundtrip() {
+        let entry = LabeledNlriEntry {
+            path_id: 7,
+            nlri: LabeledNlri {
+                labels: vec![],
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+            },
+        };
+        let mut buf = Vec::new();
+        encode_labeled_withdraw_nlri_addpath(
+            std::slice::from_ref(&entry),
+            LabeledAddressFamily::V6,
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(&buf[..4], &7u32.to_be_bytes());
+        assert_eq!(&buf[5..8], &VPN_WITHDRAW_COMPATIBILITY);
+        assert_eq!(
+            decode_labeled_withdraw_nlri_addpath(&buf, LabeledAddressFamily::V6).unwrap(),
+            vec![entry]
+        );
+    }
+
+    #[test]
+    fn addpath_decode_rejects_truncated_path_id() {
+        let err = decode_labeled_nlri_addpath(&[0, 0, 1], LabeledAddressFamily::V4).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
     }
 
     #[test]

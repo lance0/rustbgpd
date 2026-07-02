@@ -11,7 +11,8 @@ use rustbgpd_wire::{
 /// Whether the RIB currently has GR/LLGR stale-retention handling for a family.
 ///
 /// Every typed Adj-RIB-In with a wired stale lifecycle is listed: unicast,
-/// `FlowSpec`, EVPN, VPNv4/VPNv6 (SAFI 128), BGP-LS/BGP-LS-VPN (AFI 16388),
+/// `FlowSpec`, EVPN, VPNv4/VPNv6 (SAFI 128), labeled-unicast (SAFI 4),
+/// BGP-LS/BGP-LS-VPN (AFI 16388),
 /// and RT-Constrain (SAFI 132). A family absent here is excluded from the
 /// GR/LLGR capability sets and therefore withdrawn (not retained stale) on
 /// session drop.
@@ -20,7 +21,7 @@ pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> boo
         (afi, safi),
         (
             Afi::Ipv4 | Afi::Ipv6,
-            Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn
+            Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn | Safi::LabeledUnicast
         ) | (Afi::L2Vpn, Safi::Evpn)
             | (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn)
             | (Afi::Ipv4, Safi::RtConstrain)
@@ -207,7 +208,8 @@ impl PeerConfig {
     /// Build Add-Path capability entries for our outgoing OPEN message.
     ///
     /// Advertises the appropriate mode (Receive, Send, or Both) for all
-    /// configured unicast and VPNv4/VPNv6 (SAFI 128) families. The single
+    /// configured unicast, VPNv4/VPNv6 (SAFI 128), and labeled-unicast
+    /// (SAFI 4) families. The single
     /// `add_path_receive`/`add_path_send` knob pair is family-blind: it
     /// covers every family this filter admits. Add-Path is not implemented
     /// for the other SAFIs — `FlowSpec`/EVPN (no demand), BGP-LS (no demand
@@ -229,7 +231,9 @@ impl PeerConfig {
         };
         self.effective_families()
             .into_iter()
-            .filter(|(_, safi)| matches!(safi, Safi::Unicast | Safi::MplsVpn))
+            .filter(|(_, safi)| {
+                matches!(safi, Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast)
+            })
             .map(|(afi, safi)| AddPathFamily {
                 afi,
                 safi,
@@ -440,9 +444,10 @@ mod tests {
 
     #[test]
     fn restart_capabilities_include_preserved_typed_families() {
-        // The GR/LLGR stale lifecycle is wired for BGP-LS, VPN, and RTC,
-        // so the advertised GR and LLGR capability sets carry every
-        // configured family in the preservation allowlist.
+        // The GR/LLGR stale lifecycle is wired for BGP-LS, VPN,
+        // labeled-unicast, and RTC, so the advertised GR and LLGR
+        // capability sets carry every configured family in the
+        // preservation allowlist.
         let mut cfg = test_config();
         cfg.families = vec![
             (Afi::Ipv4, Safi::Unicast),
@@ -450,6 +455,8 @@ mod tests {
             (Afi::BgpLs, Safi::BgpLsVpn),
             (Afi::Ipv4, Safi::MplsVpn),
             (Afi::Ipv6, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            (Afi::Ipv6, Safi::LabeledUnicast),
             (Afi::Ipv4, Safi::RtConstrain),
         ];
         cfg.graceful_restart = true;
@@ -561,7 +568,8 @@ mod tests {
     #[test]
     fn add_path_capabilities_include_vpn_families() {
         // The family-blind add_path knobs cover SAFI 128 (RFC 9107 needs
-        // Add-Path between RRs); BGP-LS and RT-Constrain stay excluded.
+        // Add-Path between RRs) and SAFI 4; BGP-LS and RT-Constrain stay
+        // excluded.
         let mut cfg = test_config();
         cfg.add_path_receive = true;
         cfg.add_path_send = true;
@@ -569,6 +577,8 @@ mod tests {
             (Afi::Ipv4, Safi::Unicast),
             (Afi::Ipv4, Safi::MplsVpn),
             (Afi::Ipv6, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            (Afi::Ipv6, Safi::LabeledUnicast),
             (Afi::BgpLs, Safi::BgpLs),
             (Afi::Ipv4, Safi::RtConstrain),
         ];
@@ -580,6 +590,8 @@ mod tests {
                 (Afi::Ipv4, Safi::Unicast),
                 (Afi::Ipv4, Safi::MplsVpn),
                 (Afi::Ipv6, Safi::MplsVpn),
+                (Afi::Ipv4, Safi::LabeledUnicast),
+                (Afi::Ipv6, Safi::LabeledUnicast),
             ]
         );
         assert!(caps.iter().all(|c| c.send_receive == AddPathMode::Both));

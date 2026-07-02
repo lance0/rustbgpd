@@ -263,6 +263,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — BGP-LS update deferred");

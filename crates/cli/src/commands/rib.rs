@@ -9,9 +9,10 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
-    ExplainDecision, FibRouteState, ListBgpLsRequest, ListBlackholeDiscardsRequest,
-    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest, ListRtcRoutesRequest,
-    ListVpnRoutesRequest, Route, RtcRouteEntry, VpnRouteEntry,
+    ExplainDecision, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
+    ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse,
+    ListLabeledRoutesRequest, ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, Route,
+    RtcRouteEntry, VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -178,6 +179,32 @@ fn make_vpn_request(
     })
 }
 
+fn parse_labeled_family(family: Option<&str>) -> Result<String, CliError> {
+    match family {
+        None => Ok(String::new()),
+        Some("ipv4_labeled_unicast" | "labeled-v4" | "labeled_v4" | "labeled-ipv4") => {
+            Ok("ipv4_labeled_unicast".to_string())
+        }
+        Some("ipv6_labeled_unicast" | "labeled-v6" | "labeled_v6" | "labeled-ipv6") => {
+            Ok("ipv6_labeled_unicast".to_string())
+        }
+        Some(other) => Err(CliError::Argument(format!(
+            "unsupported labeled family {other:?}; expected ipv4_labeled_unicast \
+             (alias: labeled-v4) or ipv6_labeled_unicast (alias: labeled-v6)"
+        ))),
+    }
+}
+
+fn make_labeled_request(
+    family: Option<&str>,
+    peer: Option<String>,
+) -> Result<ListLabeledRoutesRequest, CliError> {
+    Ok(ListLabeledRoutesRequest {
+        afi_safi: parse_labeled_family(family)?,
+        peer_filter: peer.unwrap_or_default(),
+    })
+}
+
 fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
     if json {
         output::print_json_pretty(&JsonRoutes(routes))?;
@@ -246,6 +273,33 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
                 route.next_hop,
                 route.peer_address,
                 vpn_route_targets(route).join(" ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_labeled_routes(routes: &[LabeledRouteEntry], json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&JsonLabeledRoutes(routes))?;
+    } else if routes.is_empty() {
+        println!("No labeled routes");
+    } else {
+        println!(
+            "{:<24} {:<14} {:<18} {:<18} Path ID",
+            "Prefix", "Labels", "Next Hop", "Peer"
+        );
+        println!("{}", "-".repeat(88));
+        for route in routes {
+            let labels = route
+                .labels
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "{:<24} {:<14} {:<18} {:<18} {}",
+                route.prefix, labels, route.next_hop, route.peer_address, route.path_id
             );
         }
     }
@@ -355,6 +409,62 @@ fn vpn_route_targets(route: &VpnRouteEntry) -> Vec<&str> {
         .filter(|ec| ec.starts_with("RT:"))
         .map(String::as_str)
         .collect()
+}
+
+struct JsonLabeledRoutes<'a>(&'a [LabeledRouteEntry]);
+
+impl Serialize for JsonLabeledRoutes<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for route in self.0 {
+            seq.serialize_element(&JsonLabeledRouteRef(route))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsonLabeledRouteRef<'a>(&'a LabeledRouteEntry);
+
+impl Serialize for JsonLabeledRouteRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let route = self.0;
+        let mut len = 8;
+        if route.path_id != 0 {
+            len += 1;
+        }
+        if route.stale {
+            len += 1;
+        }
+        if route.llgr_stale {
+            len += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("afi_safi", &route.afi_safi)?;
+        map.serialize_entry("prefix", &route.prefix)?;
+        map.serialize_entry("labels", &route.labels)?;
+        map.serialize_entry("next_hop", &route.next_hop)?;
+        map.serialize_entry("peer_address", &route.peer_address)?;
+        map.serialize_entry("as_path", &route.as_path)?;
+        map.serialize_entry("communities", &route.communities)?;
+        map.serialize_entry("extended_communities", &route.extended_communities)?;
+        if route.path_id != 0 {
+            map.serialize_entry("path_id", &route.path_id)?;
+        }
+        if route.stale {
+            map.serialize_entry("stale", &route.stale)?;
+        }
+        if route.llgr_stale {
+            map.serialize_entry("llgr_stale", &route.llgr_stale)?;
+        }
+        map.end()
+    }
 }
 
 struct JsonVpnRoutes<'a>(&'a [VpnRouteEntry]);
@@ -1358,6 +1468,21 @@ pub async fn vpn(
     print_vpn_routes(&resp.routes, json)
 }
 
+pub async fn labeled(
+    connection: Connection,
+    family: Option<&str>,
+    peer: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_labeled_routes(make_labeled_request(family, peer)?)
+        .await?
+        .into_inner();
+    print_labeled_routes(&resp.routes, json)
+}
+
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1647,6 +1772,45 @@ mod tests {
         assert_eq!(req.afi_safi, AddressFamily::BgpLs as i32);
         assert_eq!(req.peer_filter, "198.51.100.1");
         assert_eq!(req.nlri_type_filter, 1);
+    }
+
+    #[tokio::test]
+    async fn labeled_sends_filters_and_accepts_shorthand_family() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        labeled(
+            connection,
+            Some("labeled-v4"),
+            Some("198.51.100.1".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let req = server
+            .state
+            .last_list_labeled
+            .lock()
+            .await
+            .clone()
+            .expect("labeled request captured");
+        assert_eq!(req.afi_safi, "ipv4_labeled_unicast");
+        assert_eq!(req.peer_filter, "198.51.100.1");
+    }
+
+    #[test]
+    fn labeled_family_parse_rejects_unknown_and_maps_aliases() {
+        assert_eq!(parse_labeled_family(None).unwrap(), "");
+        assert_eq!(
+            parse_labeled_family(Some("labeled-v6")).unwrap(),
+            "ipv6_labeled_unicast"
+        );
+        assert_eq!(
+            parse_labeled_family(Some("ipv4_labeled_unicast")).unwrap(),
+            "ipv4_labeled_unicast"
+        );
+        assert!(parse_labeled_family(Some("vpnv4")).is_err());
     }
 
     #[tokio::test]

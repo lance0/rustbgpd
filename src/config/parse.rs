@@ -552,6 +552,8 @@ pub(super) fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, Co
             "linkstate_vpn" => (Afi::BgpLs, Safi::BgpLsVpn),
             "l3vpn_ipv4_unicast" => (Afi::Ipv4, Safi::MplsVpn),
             "l3vpn_ipv6_unicast" => (Afi::Ipv6, Safi::MplsVpn),
+            "ipv4_labeled_unicast" => (Afi::Ipv4, Safi::LabeledUnicast),
+            "ipv6_labeled_unicast" => (Afi::Ipv6, Safi::LabeledUnicast),
             "rtc" => (Afi::Ipv4, Safi::RtConstrain),
             other => {
                 return Err(ConfigError::InvalidPolicyEntry {
@@ -560,7 +562,8 @@ pub(super) fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, Co
                          \"ipv4_unicast\", \"ipv6_unicast\", \"ipv4_flowspec\", \
                          \"ipv6_flowspec\", \"l2vpn_evpn\", \"linkstate\", \
                          \"linkstate_vpn\", \"l3vpn_ipv4_unicast\", \
-                         \"l3vpn_ipv6_unicast\", \"rtc\""
+                         \"l3vpn_ipv6_unicast\", \"ipv4_labeled_unicast\", \
+                         \"ipv6_labeled_unicast\", \"rtc\""
                     ),
                 });
             }

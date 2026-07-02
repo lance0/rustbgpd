@@ -402,8 +402,10 @@ async fn initial_dump_failure_resyncs_via_timer() {
             bgpls_announce: vec![],
             bgpls_withdraw: vec![],
             vpn_announce: vec![],
+            labeled_announce: vec![],
             rtc_announce: vec![],
             vpn_withdraw: vec![],
+            labeled_withdraw: vec![],
             rtc_withdraw: vec![],
             request_refresh_all_negotiated: false,
         })

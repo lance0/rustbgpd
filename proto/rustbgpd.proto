@@ -957,6 +957,7 @@ service RibService {
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
+  rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
   rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
   // RFC 9107 ORR topology graph, built on demand from every peer's BGP-LS
   // Adj-RIB-In (the union view, not Loc-RIB best-only). Nodes are keyed by
@@ -2159,6 +2160,40 @@ message ListVpnRoutesRequest {
 
 message ListVpnRoutesResponse {
   repeated VpnRouteEntry routes = 1;
+}
+
+// IPv4/IPv6 labeled-unicast route entry in the RIB (RFC 8277, SAFI 4).
+// Reflected route-reflector state: the MPLS label stack and next-hop are
+// preserved verbatim (ADR-0077) — no label allocation or FIB programming.
+message LabeledRouteEntry {
+  // "ipv4_labeled_unicast" or "ipv6_labeled_unicast".
+  string afi_safi = 1;
+  // IP prefix, e.g. "10.1.0.0/24".
+  string prefix = 2;
+  // MPLS label values (20-bit), outermost first.
+  repeated uint32 labels = 3;
+  string next_hop = 4;
+  string peer_address = 5;
+  repeated uint32 as_path = 6;
+  // Standard communities as "high:low" strings.
+  repeated string communities = 7;
+  // Extended communities; Route Targets render as "RT:65000:1".
+  repeated string extended_communities = 8;
+  bool stale = 9;
+  bool llgr_stale = 10;
+  uint32 path_id = 11;
+}
+
+// Filter labeled-unicast route listings. All filters are optional.
+message ListLabeledRoutesRequest {
+  // "ipv4_labeled_unicast" or "ipv6_labeled_unicast"; empty = both.
+  string afi_safi = 1;
+  // Only routes from this peer, empty = any.
+  string peer_filter = 2;
+}
+
+message ListLabeledRoutesResponse {
+  repeated LabeledRouteEntry routes = 1;
 }
 
 // RT-Constrain route entry in the RIB (RFC 4684, AFI 1 / SAFI 132): a

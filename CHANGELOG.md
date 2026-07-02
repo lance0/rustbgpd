@@ -11,6 +11,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **IPv4/IPv6 labeled-unicast (RFC 8277, SAFI 4) route reflection — the
+  ADR-0077 quartet is complete.** The last family of the ADR-0077 scope
+  (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast) ships as one complete
+  vertical: MP_REACH/MP_UNREACH dispatch accepts (IPv4/IPv6,
+  LabeledUnicast) with the RFC 8277 announce-mode codec and the §2.4
+  withdraw-compatibility field (one ignored 3-octet field, never a label
+  stack); inbound ingest mirrors the VPN path (honest per-prefix policy
+  context, loop-detection withdraw handling, `known_labeled` max-prefix
+  accounting); reflection preserves the MPLS label stack and next-hop
+  verbatim (ADR-0077 §4/§6 — next-hop-self is inert for SAFI 4, and a
+  same-peer relabel re-advertises); and the family joins every existing
+  lifecycle from day one: Add-Path (RFC 7911) receive + ranked top-N
+  send, RFC 7313 BoRR/EoRR refresh-stale, RFC 4724 GR helper retention
+  (not-in-capability withdraw, consecutive-restart deletion, EoR sweep),
+  RFC 9494 two-phase LLGR with the §4.4/§4.6 export gate, RFC 9107 ORR
+  per-vantage bests, initial dump + EoR, and dirty resync. Config takes
+  `ipv4_labeled_unicast` / `ipv6_labeled_unicast` (OpenConfig names);
+  gRPC `ListLabeledRoutes` at SensitiveRead and `rbgp rib labeled`
+  (prefix / labels / next-hop / peer / path-id, `--json`) expose the
+  Loc-RIB. RR-only: no label allocation, rewrite, or MPLS FIB install.
+
 - **RFC 9494 LLGR-stale export gate (closes the last legacy GR/LLGR
   gap).** LLGR-stale routes are no longer advertised to eBGP peers that
   didn't advertise the Long-Lived Graceful Restart capability for the

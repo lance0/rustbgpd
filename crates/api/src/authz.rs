@@ -511,6 +511,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
+        "ListLabeledRoutes",
+        "/rustbgpd.v1.RibService/ListLabeledRoutes",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
         "ListRtcRoutes",
         "/rustbgpd.v1.RibService/ListRtcRoutes",
         AuthTier::SensitiveRead,
@@ -823,7 +829,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 95);
+        assert_eq!(METHODS.len(), 96);
     }
 
     #[test]
@@ -864,7 +870,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 53);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 54);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
@@ -896,6 +902,10 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.RibService/ListVpnRoutes").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/ListLabeledRoutes").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
         );
         assert_eq!(

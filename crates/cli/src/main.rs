@@ -670,6 +670,17 @@ enum RibAction {
         #[arg(long)]
         peer: Option<String>,
     },
+    /// Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)
+    #[command(name = "labeled")]
+    Labeled {
+        /// Labeled family filter: ipv4_labeled_unicast (alias labeled-v4) or
+        /// ipv6_labeled_unicast (alias labeled-v6)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+        /// Peer IP address filter
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Show RT-Constrain routes (RFC 4684, single IPv4 family)
     #[command(name = "rtc")]
     Rtc {
@@ -1389,6 +1400,27 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     let family = vpn_family.or(family);
                     return commands::rib::vpn(connection, family.as_deref(), peer, json).await;
                 }
+                Some(RibAction::Labeled {
+                    family: labeled_family,
+                    peer,
+                }) => {
+                    reject_rib_status_filters(
+                        binary_name,
+                        "labeled",
+                        RibStatusFilterArgs {
+                            family: &None,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    let family = labeled_family.or(family);
+                    return commands::rib::labeled(connection, family.as_deref(), peer, json).await;
+                }
                 Some(RibAction::Rtc { peer }) => {
                     reject_rib_status_filters(
                         binary_name,
@@ -1508,6 +1540,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     | RibAction::Fib { .. }
                     | RibAction::BgpLs { .. }
                     | RibAction::Vpn { .. }
+                    | RibAction::Labeled { .. }
                     | RibAction::Rtc { .. },
                 ) => {
                     unreachable!("RIB status subcommands return before route filter handling")

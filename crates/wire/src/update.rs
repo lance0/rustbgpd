@@ -411,6 +411,7 @@ mod tests {
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
                 bgpls_announced: vec![],
+                labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
             }),

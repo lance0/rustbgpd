@@ -149,6 +149,9 @@ pub struct RibManager {
     refresh_stale_bgpls: HashMap<IpAddr, HashSet<crate::route::BgpLsRouteKey>>,
     /// VPNv4/VPNv6 routes still awaiting replacement during an inbound refresh.
     refresh_stale_vpn: HashMap<IpAddr, HashSet<crate::route::VpnRibRouteKey>>,
+    /// Labeled-unicast route keys marked stale by an in-progress RFC 7313
+    /// enhanced route refresh (the SAFI 4 sibling of `refresh_stale_vpn`).
+    refresh_stale_labeled: HashMap<IpAddr, HashSet<crate::route::LabeledRibRouteKey>>,
     /// RT-Constrain routes still awaiting replacement during an inbound refresh.
     refresh_stale_rtc: HashMap<IpAddr, HashSet<crate::route::RtcRibRouteKey>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
@@ -579,6 +582,7 @@ impl RibManager {
             refresh_stale_evpn: HashMap::new(),
             refresh_stale_bgpls: HashMap::new(),
             refresh_stale_vpn: HashMap::new(),
+            refresh_stale_labeled: HashMap::new(),
             refresh_stale_rtc: HashMap::new(),
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
@@ -695,6 +699,7 @@ impl RibManager {
         self.refresh_stale_evpn.remove(&peer);
         self.refresh_stale_bgpls.remove(&peer);
         self.refresh_stale_vpn.remove(&peer);
+        self.refresh_stale_labeled.remove(&peer);
         self.refresh_stale_rtc.remove(&peer);
         self.refresh_stale_counts
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
@@ -768,6 +773,17 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", "vpn") {
                     self.handle_vpn_routes_received(peer, announced, withdrawn);
+                }
+            }
+            RibUpdate::LabeledRoutesReceived {
+                peer,
+                session_id,
+                announced,
+                withdrawn,
+            } => {
+                if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", "labeled")
+                {
+                    self.handle_labeled_routes_received(peer, announced, withdrawn);
                 }
             }
             RibUpdate::RtcRoutesReceived {
@@ -1003,6 +1019,11 @@ impl RibManager {
             RibUpdate::QueryBgpLsRoutes { reply } => {
                 let routes: Vec<crate::route::BgpLsRibRoute> =
                     self.loc_rib.iter_bgpls().cloned().collect();
+                let _ = reply.send(routes);
+            }
+            RibUpdate::QueryLabeledRoutes { reply } => {
+                let routes: Vec<crate::route::LabeledRibRoute> =
+                    self.loc_rib.iter_labeled().cloned().collect();
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryVpnRoutes { reply } => {
@@ -1821,6 +1842,68 @@ impl RibManager {
     /// the unicast/FlowSpec/EVPN/BGP-LS recompute + distribution pattern.
     fn recompute_vpn_keys(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
         self.recompute_and_distribute_vpn(affected);
+    }
+
+    fn handle_labeled_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::LabeledRibRoute>,
+        withdrawn: Vec<crate::route::LabeledRibRouteKey>,
+    ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let mut affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
+        let mut needs_intern_gc = false;
+
+        {
+            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            for key in withdrawn {
+                let family = key.afi_safi();
+                if rib.withdraw_labeled(&key) {
+                    needs_intern_gc = true;
+                    affected.insert(key);
+                }
+                if active_refresh.contains(&family)
+                    && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    *removed_stale_counts.entry(family).or_default() += 1;
+                }
+            }
+
+            for route in announced {
+                let key = route.key();
+                let family = route.afi_safi();
+                needs_intern_gc |= rib.insert_labeled(route);
+                affected.insert(key);
+                if active_refresh.contains(&family)
+                    && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    *removed_stale_counts.entry(family).or_default() += 1;
+                }
+            }
+        }
+
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
+        self.recompute_labeled_keys(&affected);
+        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
+            rib.gc_intern_table();
+        }
+    }
+
+    /// Recompute the Loc-RIB labeled selection for each affected key across
+    /// the current set of peer Adj-RIB-Ins, then distribute the changes to
+    /// eligible peers, mirroring [`Self::recompute_vpn_keys`].
+    fn recompute_labeled_keys(&mut self, affected: &HashSet<crate::route::LabeledRibRouteKey>) {
+        self.recompute_and_distribute_labeled(affected);
     }
 
     /// RT-Constrain ingest (RFC 4684). Mirrors the VPN receive path; after

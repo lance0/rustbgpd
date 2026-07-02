@@ -1541,3 +1541,173 @@ async fn vpn_orr_route_refresh_replays_vantage_best() {
 // ---------------------------------------------------------------------------
 // RFC 9494 §4.4 / §4.6 LLGR-stale export gate
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RFC 9107 labeled-unicast ORR: per-vantage best selection for SAFI 4
+// ---------------------------------------------------------------------------
+
+/// An IPv4 labeled route from `peer` with an explicit next-hop (identical
+/// attributes across sources so only the ORR interior-cost step and the
+/// final peer-address tiebreak can decide).
+fn labeled_route_at(
+    peer: Ipv4Addr,
+    next_hop: IpAddr,
+    prefix_octet: u8,
+) -> crate::route::LabeledRibRoute {
+    let mut route = make_labeled_rib_route(peer, prefix_octet, 100, 100);
+    route.next_hop = next_hop;
+    route
+}
+
+/// Announce labeled routes from `peer` through the normal receive path.
+async fn announce_labeled(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: Ipv4Addr,
+    announced: Vec<crate::route::LabeledRibRoute>,
+) {
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced,
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// The labeled divergence scenario: the SAME prefix key from two iBGP
+/// speakers with next-hops at node X and node Y, followed by a sync point.
+/// Returns the contested key.
+async fn announce_divergent_labeled_bests(
+    tx: &mpsc::Sender<RibUpdate>,
+    prefix_octet: u8,
+) -> crate::route::LabeledRibRouteKey {
+    let route_x = labeled_route_at(ORR_SRC_X, orr_nh_x(), prefix_octet);
+    let key = route_x.key();
+    announce_labeled(tx, ORR_SRC_X, vec![route_x]).await;
+    announce_labeled(
+        tx,
+        ORR_SRC_Y,
+        vec![labeled_route_at(ORR_SRC_Y, orr_nh_y(), prefix_octet)],
+    )
+    .await;
+    let _ = query_labeled_routes(tx).await;
+    key
+}
+
+/// Two RR clients bound to different vantages receive DIVERGENT labeled
+/// bests for the same prefix — each exits via the speaker closest to its
+/// own IGP location, not the RR's (the SAFI 4 mirror of the VPN test).
+#[tokio::test]
+async fn two_labeled_clients_different_vantages_receive_divergent_bests() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut out_a = vpn_orr_peer_up(
+        &tx,
+        client_a,
+        Some(vantage_at_node_a()),
+        labeled_sendable(),
+        true,
+    )
+    .await;
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        labeled_sendable(),
+        true,
+    )
+    .await;
+
+    let key = announce_divergent_labeled_bests(&tx, 80).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_labeled(&mut out_a);
+    let final_b = drain_final_labeled(&mut out_b);
+    assert_eq!(
+        final_a.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_x()),
+        "client at A exits via X (cost 1 < 10)"
+    );
+    assert_eq!(
+        final_b.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "client at B exits via Y (cost 1 < 10)"
+    );
+}
+
+/// A topology metric flip re-stages labeled keys ONLY toward the client
+/// whose vantage best actually moved — the unaffected vantage and the
+/// non-ORR client see zero messages (the vantage-changed dirty resync
+/// covers labeled keys).
+#[tokio::test]
+async fn labeled_orr_topology_metric_flip_moves_only_affected_client() {
+    use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_a = vpn_orr_peer_up(
+        &tx,
+        client_a,
+        Some(vantage_at_node_a()),
+        labeled_sendable(),
+        true,
+    )
+    .await;
+    let mut out_b = vpn_orr_peer_up(
+        &tx,
+        client_b,
+        Some(vantage_at_node_b()),
+        labeled_sendable(),
+        true,
+    )
+    .await;
+    let mut out_c = vpn_orr_peer_up(&tx, client_c, None, labeled_sendable(), true).await;
+
+    let key = announce_divergent_labeled_bests(&tx, 81).await;
+    // Steady state reached — empty every channel before the flip.
+    let _ = drain_final_labeled(&mut out_a);
+    let _ = drain_final_labeled(&mut out_b);
+    let _ = drain_final_labeled(&mut out_c);
+
+    // Flip A→X to metric 100: from A the SPF now prefers Y (10 < 100).
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![link_route(
+            ORR_FEED,
+            A,
+            X,
+            Some(100),
+            &[
+                v4_interface(Ipv4Addr::new(10, 0, A, X)),
+                v4_neighbor(Ipv4Addr::new(10, 0, X, A)),
+            ],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let final_a = drain_final_labeled(&mut out_a);
+    assert_eq!(
+        final_a.get(&key).map(|r| r.next_hop),
+        Some(orr_nh_y()),
+        "affected client's labeled best flips to Y (cost 10 < 100)"
+    );
+    assert!(
+        out_b.try_recv().is_err(),
+        "unaffected vantage's client must see zero messages"
+    );
+    assert!(
+        out_c.try_recv().is_err(),
+        "non-ORR client must see zero messages"
+    );
+}

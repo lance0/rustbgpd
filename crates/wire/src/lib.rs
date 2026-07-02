@@ -84,8 +84,10 @@ pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use error::{DecodeError, EncodeError};
 pub use header::{BgpHeader, MessageType, peek_message_length};
 pub use labeled::{
-    LabeledAddressFamily, LabeledNlri, decode_labeled_nlri, decode_labeled_withdraw_nlri,
-    encode_labeled_nlri, encode_labeled_withdraw_nlri,
+    LabeledAddressFamily, LabeledNlri, LabeledNlriEntry, decode_labeled_nlri,
+    decode_labeled_nlri_addpath, decode_labeled_withdraw_nlri,
+    decode_labeled_withdraw_nlri_addpath, encode_labeled_nlri, encode_labeled_nlri_addpath,
+    encode_labeled_withdraw_nlri, encode_labeled_withdraw_nlri_addpath,
 };
 pub use message::{Message, decode_message, encode_message, encode_message_with_limit};
 pub use notification::NotificationCode;
