@@ -867,6 +867,10 @@ impl RibManager {
                 );
             }
         } else {
+            // Pass-scoped export memo: one refresh is a single peer, but
+            // routes sharing an inbound attribute set still share the
+            // post-modification attributes and AS_PATH match string.
+            let mut export_memo = super::distribution::ExportMemo::default();
             for prefix in &all_prefixes {
                 let prefix_send_max = if peer_add_path_send_max > 0
                     && peer_add_path_send_families.contains(&prefix_family(prefix))
@@ -894,6 +898,7 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         orr_ctx,
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -924,6 +929,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -951,6 +957,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,

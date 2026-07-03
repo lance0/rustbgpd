@@ -31,11 +31,14 @@ use crate::update::{
 
 mod bgpls;
 mod evpn;
+mod export_memo;
 mod flowspec;
 mod labeled;
 mod rtc;
 mod unicast;
 mod vpn;
+
+pub(in crate::manager) use export_memo::ExportMemo;
 
 /// RFC 9494 §4.4 export restriction: an LLGR-stale route "SHOULD NOT be
 /// advertised to any neighbor from which the Long-Lived Graceful Restart
@@ -645,6 +648,11 @@ impl RibManager {
         }
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        // Pass-scoped export memo: shares post-modification attribute
+        // sets and AS_PATH match strings across the whole peer fanout —
+        // this outlives the per-peer iteration deliberately, since the
+        // win is identical modified attrs across peers sharing a chain.
+        let mut export_memo = ExportMemo::default();
         for peer in peers {
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
@@ -911,6 +919,7 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf,
                         orr_ctx,
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -941,6 +950,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -968,6 +978,7 @@ impl RibManager {
                         llgr.as_ref(),
                         export_pol.as_ref(),
                         orf,
+                        &mut export_memo,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
