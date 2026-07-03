@@ -603,3 +603,71 @@ fn check_rpol_shapes() {
     assert!(report.diagnostics.is_empty());
     assert_eq!(report.tests.as_ref().map(|t| t.failures.len()), Some(1));
 }
+
+// ── LAN-184: recursion-depth guard ──────────────────────────────────
+
+/// Run `check_rpol` on `src` in a small-stack thread so an unguarded
+/// recursive front overflows fast and deterministically instead of
+/// depending on the host's default stack size.
+fn check_on_small_stack(src: String) -> super::CheckReport {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || check_rpol(&src))
+        .expect("spawn")
+        .join()
+        .expect("policy compilation must never crash the thread")
+}
+
+#[test]
+fn deep_paren_nesting_is_a_diagnostic_not_a_stack_overflow() {
+    // 100k nested parens: config-triggered daemon crash before the
+    // parser depth guard (rpol files arrive via SIGHUP overlay).
+    let src = format!(
+        "policy p {{ term t {{ if {}route.med == 0{} {{ accept }} }} }}",
+        "(".repeat(100_000),
+        ")".repeat(100_000),
+    );
+    let report = check_on_small_stack(src);
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("nesting exceeds"),
+        "want a depth diagnostic, got: {rendered:.300}"
+    );
+}
+
+#[test]
+fn deep_bang_and_operator_chains_are_diagnostics_too() {
+    // `!` recursion in the parser.
+    let src = format!(
+        "policy p {{ term t {{ if {}route.med == 0 {{ accept }} }} }}",
+        "!".repeat(100_000),
+    );
+    let report = check_on_small_stack(src);
+    assert!(!report.diagnostics.is_empty());
+
+    // Chained binary ops build a left-leaning AST whose depth the
+    // downstream recursive passes (typeck, lower, Drop) consume.
+    let src = format!(
+        "policy p {{ term t {{ if route.med == 0{} {{ accept }} }} }}",
+        " && route.med == 0".repeat(100_000),
+    );
+    let report = check_on_small_stack(src);
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("nesting exceeds"),
+        "want a depth diagnostic, got: {rendered:.300}"
+    );
+}
+
+#[test]
+fn reasonable_nesting_stays_clean() {
+    // 64 levels of parens + a 100-term `&&` chain: well within the cap.
+    let src = format!(
+        "policy p {{ term t {{ if {}route.med == 0{}{} {{ accept }} }} }}",
+        "(".repeat(64),
+        ")".repeat(64),
+        " && route.local-pref >= 1".repeat(100),
+    );
+    let report = check_on_small_stack(src);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+}
