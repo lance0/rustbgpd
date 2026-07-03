@@ -1483,10 +1483,13 @@ impl RibManager {
     /// counts nothing; a grouped member is explained against its group
     /// table (its real advertised state) with split horizon applied
     /// against the member, exactly like the source-flip matrix does at
-    /// emit time. ORR-vantage and Add-Path-send peers (never grouped —
-    /// both disqualify) take the dedicated explain that shares its
-    /// candidate collection and gate helpers with the live
-    /// ORR/multipath bodies.
+    /// emit time. ORR-vantage, Add-Path-send, and per-client-best peers
+    /// (never grouped — all three disqualify) take the dedicated explain
+    /// that shares its candidate collection and gate helpers with the
+    /// live ORR/multipath bodies — a per-client-best peer's explain
+    /// ranks the same filtered-best candidate walk live staging
+    /// performs, so it reports the advertised runner-up (not a false
+    /// "denied") when the Loc-RIB best is policy-denied.
     fn explain_unicast_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
         let family = prefix_family(&prefix);
         if self
@@ -1518,8 +1521,9 @@ impl RibManager {
                 .map(|spf| (&self.orr.topology, spf, *vantage))
         });
         let add_path_send_max = self.add_path_send_max_for_prefix(peer, &prefix);
+        let per_client_best = self.peer_per_client_best.contains(&peer);
 
-        if orr_ctx.is_some() || add_path_send_max > 0 {
+        if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
             return Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,
@@ -1539,6 +1543,7 @@ impl RibManager {
                 add_path_send_max,
                 self.export_policy_for(peer),
                 orr_ctx,
+                per_client_best,
             );
         }
 

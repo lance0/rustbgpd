@@ -44,18 +44,74 @@ fn orr_candidates<'a>(
     })
 }
 
+/// Candidate paths for `prefix` visible to `target_peer` in the live
+/// multipath / per-client-best collector: [`orr_candidates`]'
+/// split-horizon and RFC 4456 reflection filter plus the per-candidate
+/// RFC 9494 §4.4 LLGR export gate. Shared by
+/// `distribute_multipath_prefix` and the per-client-best explain arm so
+/// explain walks exactly the candidate set live staging walks.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate collection mirrors the per-target reflection filter inputs"
+)]
+fn multipath_candidates<'a>(
+    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    prefix_peers: &'a UnicastPrefixPeers,
+    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    prefix: &'a Prefix,
+    target_peer: IpAddr,
+    target_is_ebgp: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    family: (Afi, Safi),
+    llgr: Option<&'a Vec<(Afi, Safi)>>,
+) -> impl Iterator<Item = &'a crate::route::Route> {
+    orr_candidates(
+        ribs,
+        prefix_peers,
+        peer_is_rr_client,
+        prefix,
+        target_peer,
+        target_is_ebgp,
+        target_is_rr_client,
+        cluster_id,
+    )
+    .filter(move |route| {
+        // RFC 9494 §4.4: each staged candidate is gated individually —
+        // a stale candidate must not occupy an Add-Path rank (or the
+        // filtered-best slot) toward a non-LLGR eBGP peer.
+        !super::llgr_stale_export_suppressed(
+            route.is_llgr_stale,
+            route.communities(),
+            family,
+            target_is_ebgp,
+            llgr,
+        )
+    })
+}
+
 impl RibManager {
-    /// Explain the single-best export ladder for an RFC 9107 ORR peer
-    /// or an Add-Path-send peer — the two per-target selection shapes
+    /// Explain the single-best export ladder for an RFC 9107 ORR peer,
+    /// an Add-Path-send peer, or an RFC 7947 §2.3.2 per-client-best
+    /// peer — the per-target selection shapes
     /// the [`super::ExportTarget::Explain`] dry run of
     /// `distribute_single_best_prefix` cannot serve (their best is not
     /// the Loc-RIB best / their staging is multipath). Candidate
-    /// collection is shared with live distribution (`orr_candidates`),
-    /// and every gate reuses the same helper the live bodies call
-    /// (`llgr_stale_export_suppressed`, `OrfFilterSet::permits`,
-    /// `rr_suppression_reason`, `routes_equal`), in the live bodies'
-    /// evaluation order (family → ORF → selection → LLGR → policy →
-    /// Adj-RIB-Out diff).
+    /// collection is shared with live distribution (`orr_candidates` /
+    /// `multipath_candidates`), and every gate reuses the same helper
+    /// the live bodies call (`llgr_stale_export_suppressed`,
+    /// `OrfFilterSet::permits`, `rr_suppression_reason`,
+    /// `routes_equal`), in the live bodies' evaluation order (family →
+    /// ORF → selection → LLGR → policy → Adj-RIB-Out diff).
+    ///
+    /// `per_client_best` selects the RFC 7947 §2.3.2 arm: rank the live
+    /// collector's candidate set with the Loc-RIB comparator and take
+    /// the first export-policy-permitted candidate, recording one
+    /// reason per denied candidate — the same walk
+    /// `distribute_multipath_prefix(send_max = 1, stage_path_id_zero)`
+    /// performs live. Ignored when Add-Path send is negotiated for the
+    /// prefix's family (a negotiated capability outranks the fallback,
+    /// exactly like the live mode ladder).
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -80,6 +136,7 @@ impl RibManager {
         add_path_send_max: u32,
         export_pol: Option<&PolicyChain>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
+        per_client_best: bool,
     ) -> ExplainAdvertisedRoute {
         use crate::best_path::{
             BestPathReason, best_path_cmp_orr, best_path_cmp_orr_with_reason,
@@ -269,6 +326,143 @@ impl RibManager {
                     message: format!("selected over runner-up: {detail}"),
                 });
             }
+            winner
+        } else if per_client_best && add_path_send_max == 0 {
+            // RFC 7947 §2.3.2 per-client best-path: rank the exact
+            // candidate set the live filtered-best collector walks
+            // (`multipath_candidates` — split horizon, RFC 4456
+            // reflection, per-candidate LLGR) with the Loc-RIB
+            // comparator, then take the first export-policy-permitted
+            // candidate — the same walk
+            // `distribute_multipath_prefix(send_max = 1)` performs
+            // live, with one recorded verdict per denied candidate.
+            let mut ranked: Vec<&crate::route::Route> = multipath_candidates(
+                ribs,
+                prefix_peers,
+                peer_is_rr_client,
+                &prefix,
+                target_peer,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                family,
+                llgr,
+            )
+            .collect();
+            ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b));
+            if ranked.is_empty() {
+                let message = "no candidate for this prefix survives split-horizon / \
+                               reflection / LLGR filtering for this per-client best-path \
+                               peer"
+                    .to_string();
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "no_per_client_candidate",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "no_per_client_candidate",
+                    message,
+                });
+                return explain;
+            }
+            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+            let total = ranked.len();
+            let mut winner = None;
+            for (index, &candidate) in ranked.iter().enumerate() {
+                // Per-candidate export-policy verdict — the same
+                // context the live per-candidate walk builds, evaluated
+                // without counters (explain is a one-shot query; see
+                // the tail's non-counting rationale).
+                let aspath_str = if needs_as_path_string {
+                    candidate
+                        .as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+                } else {
+                    String::new()
+                };
+                let ctx = RouteContext {
+                    prefix: Some(prefix),
+                    next_hop: Some(candidate.next_hop),
+                    extended_communities: candidate.extended_communities(),
+                    communities: candidate.communities(),
+                    large_communities: candidate.large_communities(),
+                    as_path_str: &aspath_str,
+                    as_path_len: candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+                    validation_state: candidate.validation_state,
+                    aspa_state: candidate.aspa_state,
+                    peer_address: Some(target_peer),
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    route_type: Some(route_type(candidate.origin_type)),
+                    evpn_route_type: None,
+                    local_pref: candidate.local_pref_attr(),
+                    med: candidate.med_attr(),
+                };
+                let permitted = match export_pol {
+                    Some(chain) => {
+                        let (result, evaluation) = chain.compiled().evaluate_with_attribution(&ctx);
+                        if result.action == PolicyAction::Permit {
+                            true
+                        } else {
+                            let label = super::policy_label_with_term(
+                                export_pol,
+                                &ctx,
+                                evaluation.matched_policy.as_deref(),
+                            );
+                            explain.reasons.push(ExplainReason {
+                                code: "per_client_candidate_denied",
+                                message: format!(
+                                    "candidate {rank} of {total} (from {peer}, next hop \
+                                     {next_hop}) denied by export policy {label:?}",
+                                    rank = index + 1,
+                                    peer = candidate.peer,
+                                    next_hop = candidate.next_hop,
+                                ),
+                            });
+                            false
+                        }
+                    }
+                    None => true,
+                };
+                if permitted {
+                    winner = Some((index, candidate));
+                    break;
+                }
+            }
+            let Some((rank, winner)) = winner else {
+                explain.decision = ExplainDecision::Deny;
+                let message = format!(
+                    "all {total} candidate(s) denied by export policy — per-client \
+                     best-path (RFC 7947 §2.3.2) advertises nothing"
+                );
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "per_client_all_denied",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "per_client_all_denied",
+                    message,
+                });
+                return explain;
+            };
+            gate(
+                &mut explain.gates,
+                "best_route",
+                "per_client_best",
+                Pass,
+                format!(
+                    "per-client best-path (RFC 7947 §2.3.2): candidate {} of {total} \
+                     from {} is the first export-policy-permitted candidate",
+                    rank + 1,
+                    winner.peer
+                ),
+            );
             winner
         } else {
             let Some(best) = loc_rib.get(&prefix) else {
@@ -820,39 +1014,22 @@ impl RibManager {
         }
 
         // Collect all candidates across the announcing peers' Adj-RIB-Ins
-        // (reverse-index probe, not an all-peers scan).
-        let mut candidates: Vec<&crate::route::Route> =
-            Self::unicast_candidates(ribs, prefix_peers, prefix)
-                .filter(|route| {
-                    // Split horizon: exclude routes from the target peer
-                    if route.peer == target_peer {
-                        return false;
-                    }
-                    // iBGP split-horizon / RFC 4456 reflection
-                    if should_suppress_ibgp_inner(
-                        route,
-                        target_is_ebgp,
-                        target_is_rr_client,
-                        cluster_id,
-                        peer_is_rr_client,
-                    ) {
-                        return false;
-                    }
-                    // RFC 9494 §4.4: each staged candidate is gated
-                    // individually — a stale candidate must not occupy an
-                    // Add-Path rank toward a non-LLGR eBGP peer.
-                    if super::llgr_stale_export_suppressed(
-                        route.is_llgr_stale,
-                        route.communities(),
-                        family,
-                        target_is_ebgp,
-                        llgr,
-                    ) {
-                        return false;
-                    }
-                    true
-                })
-                .collect();
+        // (reverse-index probe, not an all-peers scan) — the collector is
+        // shared with the per-client-best explain arm so explain walks
+        // exactly this set.
+        let mut candidates: Vec<&crate::route::Route> = multipath_candidates(
+            ribs,
+            prefix_peers,
+            peer_is_rr_client,
+            prefix,
+            target_peer,
+            target_is_ebgp,
+            target_is_rr_client,
+            cluster_id,
+            family,
+            llgr,
+        )
+        .collect();
 
         // Sort by best-path preference (best first). A target bound to a
         // resolved ORR vantage ranks by the vantage's interior cost to

@@ -78,6 +78,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --per-client-best` + show/JSON, config persistence, reload matrix
   (live, effective next session).
 
+- **Route-server profile polish (ADR-0101): truthful explain for
+  per-client best-path, distribution-mode display, and the refreshed
+  IXP example.** `ExplainAdvertisedRoute` for a `per_client_best`
+  member now dry-runs the same filtered-best candidate walk live
+  staging performs — ranked candidate ladder with one verdict per
+  denied candidate naming the deciding policy term ("candidate 1 of 2
+  denied by export policy \"no-tagged:block-tagged\"") and the
+  advertised runner-up, instead of the false "denied" the single-best
+  dry-run could report. `rbgp neighbor show` names the unicast
+  distribution mode (`single-best` / `add-path` / `orr` /
+  `per-client-best`, also in JSON). `examples/route-server/` now shows
+  both RFC 7947 §2.3.2 mitigations (member-alpha: Add-Path;
+  member-beta: `per_client_best`), sets `role = "route_server"` on
+  members (RFC 9234 OTC — dynamic/gRPC-added peers confirmed by test),
+  and adds `hygiene.rpol` (reject-AS_SET via `route.as-path matches
+  "\\{"`, reject-ASPA-invalid) with in-language tests runnable via
+  `rbgp policy check`.
+
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,
