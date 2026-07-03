@@ -16,6 +16,10 @@ pub enum NotificationCode {
     FsmError,
     /// Administrative or resource-related session termination (code 6).
     Cease,
+    /// Send Hold Timer expired: the local system could not hand outbound
+    /// BGP data to the peer within the `SendHoldTime` (code 8, RFC 9687 §5;
+    /// subcode is always 0 per §6).
+    SendHoldTimerExpired,
     /// A code value not defined in RFC 4271. The raw byte is preserved
     /// for logging and re-encoding.
     Unknown(u8),
@@ -32,6 +36,7 @@ impl NotificationCode {
             4 => Self::HoldTimerExpired,
             5 => Self::FsmError,
             6 => Self::Cease,
+            8 => Self::SendHoldTimerExpired,
             other => Self::Unknown(other),
         }
     }
@@ -46,6 +51,7 @@ impl NotificationCode {
             Self::HoldTimerExpired => 4,
             Self::FsmError => 5,
             Self::Cease => 6,
+            Self::SendHoldTimerExpired => 8,
             Self::Unknown(v) => v,
         }
     }
@@ -60,6 +66,7 @@ impl std::fmt::Display for NotificationCode {
             Self::HoldTimerExpired => write!(f, "Hold Timer Expired"),
             Self::FsmError => write!(f, "Finite State Machine Error"),
             Self::Cease => write!(f, "Cease"),
+            Self::SendHoldTimerExpired => write!(f, "Send Hold Timer Expired"),
             Self::Unknown(code) => write!(f, "Unknown({code})"),
         }
     }
@@ -209,6 +216,8 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::UpdateMessage, 11) => "Malformed AS_PATH",
         // Hold Timer Expired
         (NotificationCode::HoldTimerExpired, _) => "Hold Timer Expired",
+        // Send Hold Timer Expired (RFC 9687 §5/§6, subcode always 0)
+        (NotificationCode::SendHoldTimerExpired, _) => "Send Hold Timer Expired",
         // FSM Error
         (NotificationCode::FsmError, _) => "Finite State Machine Error",
         // Cease

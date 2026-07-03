@@ -651,6 +651,48 @@ implemented per ADR-0040.
 
 ---
 
+## RFC 9687 — Send Hold Timer
+
+- A peer that stops draining its TCP socket can no longer wedge a
+  session forever: each `write_all + flush` in the per-peer writer task
+  is bounded by the configured `SendHoldTime`
+  (`crates/transport/src/session/writer.rs`).
+- **Detection shape (documented deviation from §4.3's letter):** the
+  RFC models a free-running timer restarted on every sent message; we
+  run a per-write deadline that only ticks while a write is pending.
+  The trigger condition is equivalent — a wedged peer stalls the
+  pending write, which times out — and the variant cannot fire on an
+  idle session, so the §4.3 "stop when negotiated HoldTime is zero"
+  rule is unnecessary and protection stays active with keepalives
+  disabled. FRR's SendQ-progress check is the same shape.
+- **Expiry actions (§4.3, Event 29 §4.2):** teardown reuses the
+  TCP-failure path — session down, TCP close, `ConnectRetryCounter`
+  increment, transition to Idle — **without** sending a NOTIFICATION.
+  §4.3 makes the NOTIFICATION optional ("if … doing so will not delay"
+  the teardown); the socket is by definition not draining, and a
+  cancelled `write_all` may have left a partial PDU on the wire, so
+  injecting one could corrupt framing. FRR/OpenBGPd attempt a
+  best-effort code-8 NOTIFICATION here; we deliberately do not.
+- **Local reporting (§4.3 required log, §5/§9 error code):** `warn` log
+  with peer + duration, `bgp_send_hold_expirations_total{peer}`
+  counter, an operator event-history record carrying error code 8 /
+  subcode 0 ("Send Hold Timer Expired"), and a BMP Peer Down reason 2
+  (local close, no NOTIFICATION) with FSM event code 29
+  (`SendHoldTimer_Expires`). `NotificationCode::SendHoldTimerExpired`
+  (8) decodes/logs if a peer ever sends it to us.
+- **Default (§6):** enabled by default at
+  `max(480, 2 × configured hold_time)` seconds. §6 recommends
+  max(8 min, 2 × *negotiated* hold time); the negotiated value is
+  unknowable at config time but never exceeds the configured one, so
+  the derived default is always ≥ the RFC's recommendation and always
+  satisfies the §4.4 `SendHoldTime > HoldTime` MUST. Precedent: FRR
+  uses 2 × hold time (not configurable); OpenBGPd uses
+  max(negotiated hold time, 90 s) (not configurable). Per-neighbor +
+  peer-group `send_hold_time` knob (§6 MAY); 0 disables; non-zero
+  values ≤ the effective hold time are rejected at config load (§4.4).
+
+---
+
 ## RFC 7432 — EVPN (Phase 1: Route Reflector + Phase 2: Bidirectional VTEP + Phase 3: Multi-homing + Phase 4: IRB foundation)
 
 - AFI 25 (L2VPN) / SAFI 70 (EVPN). Enum variants added to `Afi` and

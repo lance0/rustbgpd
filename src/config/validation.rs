@@ -375,6 +375,19 @@ impl Config {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
             }
 
+            // RFC 9687 §4.4: a non-zero SendHoldTime MUST be greater
+            // than the hold time. Checked on the effective (inherited)
+            // values; the derived default always satisfies this.
+            let send_hold_time = neighbor
+                .send_hold_time
+                .or_else(|| group.and_then(|g| g.send_hold_time));
+            if let Some(value) = send_hold_time
+                && value != 0
+                && value <= u32::from(hold_time)
+            {
+                return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
+            }
+
             // Validate route_reflector_client: must be iBGP
             let route_reflector_client = neighbor
                 .route_reflector_client
@@ -1693,6 +1706,15 @@ fn validate_peer_group(
     let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
     if hold_time != 0 && hold_time < 3 {
         return Err(ConfigError::InvalidHoldTime { value: hold_time });
+    }
+
+    // RFC 9687 §4.4 on the group's own values; neighbor-effective
+    // combinations are re-checked per neighbor.
+    if let Some(value) = group.send_hold_time
+        && value != 0
+        && value <= u32::from(hold_time)
+    {
+        return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
     }
 
     if !group.families.is_empty() {

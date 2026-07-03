@@ -624,6 +624,12 @@ pub struct Neighbor {
     /// Optional peer-group reference for inherited transport/policy defaults.
     pub peer_group: Option<String>,
     pub hold_time: Option<u16>,
+    /// Send hold time in seconds (RFC 9687): tear the session down when
+    /// the peer stops draining its TCP socket for this long. 0 disables.
+    /// Non-zero values must be greater than the effective `hold_time`
+    /// (RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×
+    /// the effective `hold_time` (RFC 9687 §6).
+    pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
@@ -746,6 +752,9 @@ impl fmt::Debug for TcpAoConfig {
 #[serde(deny_unknown_fields)]
 pub struct PeerGroupConfig {
     pub hold_time: Option<u16>,
+    /// Send hold time in seconds (RFC 9687) inherited by neighbors in
+    /// this group. See the neighbor-level `send_hold_time`.
+    pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
     pub ttl_security: Option<bool>,
@@ -1621,6 +1630,11 @@ pub enum ConfigError {
     InvalidGrpcConfig { reason: String },
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
+    #[error(
+        "invalid send_hold_time {value}: must be 0 (disabled) or greater than hold_time \
+         {hold_time} (RFC 9687 §4.4)"
+    )]
+    InvalidSendHoldTime { value: u32, hold_time: u16 },
     #[error("invalid policy entry: {reason}")]
     InvalidPolicyEntry { reason: String },
     #[error("invalid local_ipv6_nexthop {value:?}: {reason}")]

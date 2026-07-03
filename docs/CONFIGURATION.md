@@ -431,6 +431,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
+| `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6 |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table    | no       | --      | TCP-AO key for static neighbors (RFC 5925; Linux startup sockets, restart-required edits) |
@@ -2892,6 +2893,7 @@ starting:
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
+| `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, or `"linkstate_vpn"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
@@ -2937,6 +2939,7 @@ starting:
 | Field | Default value |
 |-------|---------------|
 | `hold_time` | 90 seconds |
+| `send_hold_time` | `max(480, 2 × hold_time)` seconds (RFC 9687 §6) |
 | `connect_retry_secs` | 5 seconds (not configurable) |
 | gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |
 | `ttl_security` | `false` |

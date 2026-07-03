@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 9687 Send Hold Timer: a peer that stops draining its TCP socket
+  can no longer wedge a session forever.** The per-peer writer task
+  bounds each `write_all + flush` by the session's `SendHoldTime`;
+  expiry tears the session down through the TCP-failure path —
+  deliberately **without** a NOTIFICATION (the socket is not draining;
+  §4.3 makes it optional) — with a `warn` log, a new
+  `bgp_send_hold_expirations_total{peer}` counter, an event-history
+  record carrying the RFC 9687 error code 8 ("Send Hold Timer
+  Expired"), and a BMP Peer Down reason 2 (local close, no
+  NOTIFICATION) with FSM event code 29 (`SendHoldTimer_Expires`).
+  Enabled by default at `max(480, 2 × hold_time)` seconds per §6; new
+  per-neighbor + peer-group `send_hold_time` knob (0 disables; non-zero
+  must exceed the effective `hold_time` per §4.4, enforced at config
+  load). Wire decode of NOTIFICATION code 8 gains a named variant.
+  Detection is a per-write deadline rather than the RFC's free-running
+  restarted-on-send timer — equivalent trigger, documented in
+  `docs/RFC_NOTES.md` and `KNOWN_ISSUES.md`.
+
 - **Update groups: shared outbound staging for the RR fanout
   (ADR-0098, #674/#676 + cold paths).** Outbound peers whose staged
   output is provably identical — same export-chain content, eBGP/iBGP +

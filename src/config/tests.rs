@@ -3783,6 +3783,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         description: None,
         peer_group: None,
         hold_time: None,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
@@ -4383,6 +4384,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         "new-group".to_string(),
         PeerGroupConfig {
             hold_time: Some(60),
+            send_hold_time: None,
             max_prefixes: None,
             md5_password: None,
             ttl_security: None,
@@ -4416,6 +4418,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         description: None,
         peer_group: Some("new-group".into()),
         hold_time: None,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         bfd: None,
@@ -4456,6 +4459,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         description: None,
         peer_group: Some("new-group".into()),
         hold_time: None,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
@@ -4508,6 +4512,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         description: None,
         peer_group: None,
         hold_time: None,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         bfd: None,
@@ -4923,10 +4928,12 @@ fn diff_config_json_serializes() {
 fn diff_peer_group_changes_detects_field_diffs() {
     let old = PeerGroupConfig {
         hold_time: Some(90),
+        send_hold_time: None,
         ..Default::default()
     };
     let new = PeerGroupConfig {
         hold_time: Some(45),
+        send_hold_time: None,
         ..Default::default()
     };
     let changes = super::describe_peer_group_changes(&old, &new);
@@ -11661,4 +11668,118 @@ fn rpol_edit_classifies_policy_chain_impact_for_referencing_peers_only() {
     assert!(diff.policy.rpol_changed);
     // No resolved chain moved, so no per-neighbor impact.
     assert!(diff.effective_neighbor_impact.is_empty(), "{diff:?}");
+}
+
+// ── RFC 9687 send hold timer config ─────────────────────────────
+
+#[test]
+fn send_hold_time_default_is_rfc9687_section6() {
+    // hold_time 90 → max(480, 180) = 480 (8 minutes).
+    let config = parse(valid_toml()).unwrap();
+    assert_eq!(config.neighbors[0].send_hold_time, None);
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.peer.send_hold_time, 480);
+}
+
+#[test]
+fn send_hold_time_default_scales_with_large_hold_time() {
+    // hold_time 300 → max(480, 600) = 600.
+    let toml_str = valid_toml().replace("hold_time = 90", "hold_time = 300");
+    let peers = parse(&toml_str).unwrap().to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.peer.send_hold_time, 600);
+}
+
+#[test]
+fn send_hold_time_explicit_value_applies() {
+    let toml_str = valid_toml().replace("hold_time = 90", "hold_time = 90\nsend_hold_time = 120");
+    let peers = parse(&toml_str).unwrap().to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.peer.send_hold_time, 120);
+}
+
+#[test]
+fn send_hold_time_zero_disables() {
+    let toml_str = valid_toml().replace("hold_time = 90", "hold_time = 90\nsend_hold_time = 0");
+    let peers = parse(&toml_str).unwrap().to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.peer.send_hold_time, 0);
+}
+
+#[test]
+fn send_hold_time_not_greater_than_hold_time_rejected() {
+    // RFC 9687 §4.4: non-zero SendHoldTime MUST be > HoldTime.
+    let toml_str = valid_toml().replace("hold_time = 90", "hold_time = 90\nsend_hold_time = 90");
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidSendHoldTime {
+            value: 90,
+            hold_time: 90
+        }
+    ));
+}
+
+#[test]
+fn send_hold_time_group_inherited_and_validated_against_neighbor_hold_time() {
+    // Group supplies send_hold_time = 100; the neighbor overrides
+    // hold_time to 120, making the effective pair invalid.
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.transit]
+send_hold_time = 100
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "transit"
+hold_time = 120
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidSendHoldTime {
+            value: 100,
+            hold_time: 120
+        }
+    ));
+}
+
+#[test]
+fn send_hold_time_group_inheritance_applies() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.transit]
+send_hold_time = 900
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "transit"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    assert_eq!(resolved.transport_config.peer.send_hold_time, 900);
+}
+
+#[test]
+fn send_hold_time_change_is_a_runtime_neighbor_change() {
+    // Reload classification matches hold_time: a changed send_hold_time
+    // reports the neighbor as changed (session restart applies it).
+    let config = parse(valid_toml()).unwrap();
+    let old = config.neighbors[0].clone();
+    let mut new = old.clone();
+    new.send_hold_time = Some(600);
+    let diff = super::diff_neighbors(std::slice::from_ref(&old), std::slice::from_ref(&new));
+    assert_eq!(diff.changed.len(), 1);
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert!(
+        changes.iter().any(|c| c.contains("send_hold_time")),
+        "{changes:?}"
+    );
 }

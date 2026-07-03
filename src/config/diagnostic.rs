@@ -48,6 +48,12 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             "not a valid socket address",
         ),
         ConfigError::InvalidHoldTime { value } => find_hold_time_span(source, *value),
+        ConfigError::InvalidSendHoldTime { value, hold_time } => find_value_anywhere(
+            source,
+            "send_hold_time",
+            &value.to_string(),
+            &format!("must be 0 (disabled) or greater than hold_time {hold_time} (RFC 9687)"),
+        ),
         ConfigError::InvalidLocalIpv6Nexthop { value, .. } => find_value_anywhere(
             source,
             "local_ipv6_nexthop",
