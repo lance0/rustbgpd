@@ -389,3 +389,60 @@ To be the de facto Rust BGP codec, the concrete gaps:
       (the embedding proof).
 - [ ] `.github/workflows/ci.yml` — gate `cargo semver-checks` on
       `crates/wire/**` and `crates/fsm/**` path changes.
+
+---
+
+## 8. The Shape-A (gRPC) embedder surface — recent additions
+
+Shape A (§3.4) — a separate process driving the daemon over gRPC — is
+the recommended production embedding, and its surface grew. What a
+gRPC consumer gains from the recent proto additions
+(`proto/rustbgpd.proto`; all additive):
+
+- **`Route.received_at_epoch_seconds`** — every `Route` served by
+  `ListReceivedRoutes` / `ListBestRoutes` / `ListAdvertisedRoutes`
+  (and the explain RPCs that embed `Route`) now carries its receive
+  time, recovered from the monotonic RIB receive instant. Consumers
+  no longer need to track route age themselves by diffing streams.
+- **`RibService.ExplainAdvertisedRoute`** — the export decision as
+  data: the full gate ladder (`split_horizon`, `rr_reflection`,
+  `family`, `llgr`, `orf`, `rt_membership`, `export_policy`,
+  `adj_rib_out`) with per-gate verdict + detail, produced by a dry
+  run of the same staging body live distribution executes. A
+  controller can answer "why isn't prefix X on peer Y" without
+  screen-scraping. The response's `update_group_id` and
+  `NeighborState.update_group` expose ADR-0098 group membership for
+  fleet-level diagnostics.
+- **`send_hold_time` (RFC 9687)** — settable in `AddNeighbor`'s
+  `NeighborConfig` and in `PeerGroupDefinition`, with the same
+  validation as the config path; `ListNeighbors` reports the
+  effective value. Automation that provisions peers can now manage
+  the wedged-peer teardown timer instead of inheriting the default.
+
+**The event-replay contract** (`EventService.SubscribeFromEvent`,
+ADR-0072) is the durable half of the event surface and the one an
+integration should build on: events carry a monotonic `event_id`;
+the consumer persists the last id it processed and resumes with
+`from_event_id` after either side restarts. It requires
+`[event_history].enabled = true` on the daemon and returns
+`FAILED_PRECONDITION` otherwise — treat that as "replay not
+provisioned", not an error to retry. The live `WatchEvents` stream
+emits `stream_lagged` warnings when a bounded source dropped events;
+that is the signal to fall back to the durable cursor.
+
+**Reference consumers in-tree:** `examples/event-bridge/` (gRPC →
+JSON-lines event bridge, the minimal Shape-A skeleton) and
+`examples/birdwatcher-adapter/` (a complete REST service — the
+birdwatcher/Alice-LG contract — sourced entirely from the public gRPC
+API, including per-route `age` from `received_at_epoch_seconds`). The
+adapter is the honest template: if the public API is missing a field
+an external tool needs, the fix is an additive proto field, not a
+daemon-internal shortcut — that is how `received_at_epoch_seconds`
+landed.
+
+**Stability posture:** the daemon is alpha and the proto is versioned
+by convention, not frozen — but the working convention is additive
+evolution (new fields and RPCs; `optional` scalars for new knobs),
+with any breaking change called out in `CHANGELOG.md`. Generated
+client code should tolerate unknown fields (protobuf's default) and
+gate features on field presence, not daemon version.
