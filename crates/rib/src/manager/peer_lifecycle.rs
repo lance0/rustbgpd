@@ -826,6 +826,10 @@ impl RibManager {
         // re-sends the full current table for this peer.
         let initial_view = AdjRibOut::new(peer);
 
+        // Pass-scoped export memo: routes sharing an inbound attribute
+        // set share the post-modification attributes across this dump.
+        let mut export_memo = super::distribution::ExportMemo::default();
+
         for prefix in &all_prefixes {
             if orf_gated.contains(&prefix_family(prefix)) {
                 continue;
@@ -858,6 +862,7 @@ impl RibManager {
                     // has no installed filter during the initial dump.
                     None,
                     orr_ctx,
+                    &mut export_memo,
                     &metrics,
                     policy_stats,
                     &target_peer_label,
@@ -890,6 +895,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    &mut export_memo,
                     &metrics,
                     policy_stats,
                     &target_peer_label,
@@ -919,6 +925,7 @@ impl RibManager {
                     // ORF: gated families are skipped above; a non-gated family
                     // has no installed filter during the initial dump.
                     None,
+                    &mut export_memo,
                     &metrics,
                     policy_stats,
                     &target_peer_label,

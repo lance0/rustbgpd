@@ -1312,3 +1312,172 @@ policy no-doc {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Chain for the export-memo manager test. First-match-wins: ASN 65001
+/// takes the neighbor-set term (`mods.0`); everyone else takes the
+/// AS_PATH-regex term (`mods.1` — the regex also forces the
+/// `requires_as_path_string` / memoized-aspath evaluation path).
+fn export_memo_test_chain() -> (
+    rustbgpd_policy::PolicyChain,
+    rustbgpd_policy::RouteModifications,
+    rustbgpd_policy::RouteModifications,
+) {
+    use rustbgpd_policy::{
+        AsPathRegex, NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement,
+        RouteModifications,
+    };
+
+    let mods_asn65001 = RouteModifications {
+        set_med: Some(100),
+        communities_add: vec![0xFDE8_0001], // 65000:1
+        ..Default::default()
+    };
+    let mods_everyone_else = RouteModifications {
+        set_med: Some(200),
+        communities_add: vec![0xFDE8_0002], // 65000:2
+        ..Default::default()
+    };
+    let statement = |action| PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![
+            PolicyStatement {
+                match_neighbor_set: Some(NeighborSetMatch {
+                    addresses: vec![],
+                    remote_asns: vec![65001],
+                    peer_groups: vec![],
+                }),
+                modifications: mods_asn65001.clone(),
+                ..statement(PolicyAction::Permit)
+            },
+            PolicyStatement {
+                match_as_path: Some(AsPathRegex::new("_65100_").unwrap()),
+                modifications: mods_everyone_else.clone(),
+                ..statement(PolicyAction::Permit)
+            },
+        ],
+        default_action: PolicyAction::Deny,
+    }]);
+    (chain, mods_asn65001, mods_everyone_else)
+}
+
+/// Export-memo equivalence at the manager level: peers whose chain
+/// evaluation yields identical modifications must receive byte-identical
+/// attributes backed by ONE shared allocation, while a peer-varying
+/// match (neighbor-set) must land in its own correctly-modified set.
+/// Expected attributes are derived through the pre-memo path
+/// (private clone + `apply_modifications`) as the oracle.
+#[tokio::test]
+async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chains() {
+    use rustbgpd_policy::{RouteModifications, apply_modifications};
+
+    let (export_policy, mods_asn65001, mods_everyone_else) = export_memo_test_chain();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(export_policy),
+        None,
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+
+    // Peer A (ASN 65001) is the peer-varying case; B and C (ASN 65000)
+    // share the everyone-else verdict.
+    let mut receivers = Vec::new();
+    for (host, asn) in [(2u8, 65001u32), (3, 65000), (4, 65000)] {
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)),
+            peer_asn: asn,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        receivers.push(out_rx);
+    }
+
+    // One route, flooded to all three peers in a single distribution pass.
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let route = make_route_with_as_path(prefix, Ipv4Addr::new(10, 0, 0, 1), vec![65100, 65200]);
+    let source_attrs = Arc::clone(&route.attributes);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let updates: Vec<OutboundRouteUpdate> = {
+        let mut v = Vec::new();
+        for rx in &mut receivers {
+            v.push(rx.recv().await.unwrap());
+        }
+        v
+    };
+    for update in &updates {
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.next_hop_override, vec![None]);
+    }
+
+    // Oracle: the pre-memo private-clone path.
+    let oracle = |mods: &RouteModifications| {
+        let mut attrs = (*source_attrs).clone();
+        assert!(apply_modifications(&mut attrs, mods).is_none());
+        attrs
+    };
+    let a = &updates[0].announce[0];
+    let b = &updates[1].announce[0];
+    let c = &updates[2].announce[0];
+    assert_eq!(*a.attributes, oracle(&mods_asn65001));
+    assert_eq!(*b.attributes, oracle(&mods_everyone_else));
+    assert_eq!(*c.attributes, oracle(&mods_everyone_else));
+
+    // Structural proof of the fix: identical verdicts share ONE
+    // allocation; the peer-varying verdict does not.
+    assert!(Arc::ptr_eq(&b.attributes, &c.attributes));
+    assert!(!Arc::ptr_eq(&a.attributes, &b.attributes));
+    assert!(!Arc::ptr_eq(&a.attributes, &source_attrs));
+    assert!(!Arc::ptr_eq(&b.attributes, &source_attrs));
+
+    drop(tx);
+    handle.await.unwrap();
+}

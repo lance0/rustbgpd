@@ -525,6 +525,7 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
+        memo: &mut super::ExportMemo,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -622,13 +623,7 @@ impl RibManager {
             }
 
             // Export policy check per-candidate
-            let aspath_str = if needs_as_path_string {
-                candidate
-                    .as_path()
-                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
-            } else {
-                String::new()
-            };
+            let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
                 prefix: Some(*prefix),
@@ -636,7 +631,7 @@ impl RibManager {
                 extended_communities: candidate.extended_communities(),
                 communities: candidate.communities(),
                 large_communities: candidate.large_communities(),
-                as_path_str: &aspath_str,
+                as_path_str: aspath_str.as_deref().unwrap_or(""),
                 as_path_len: aspath_len,
                 validation_state: candidate.validation_state,
                 aspa_state: candidate.aspa_state,
@@ -660,20 +655,10 @@ impl RibManager {
                 continue;
             }
 
-            // Apply export modifications — skip deep clone when no mods needed
-            let mut modified = (*candidate).clone();
-            let nh_action = if result.modifications.is_empty() {
-                None
-            } else {
-                let nh = rustbgpd_policy::apply_modifications(
-                    std::sync::Arc::make_mut(&mut modified.attributes),
-                    &result.modifications,
-                );
-                if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
-                    modified.next_hop = *addr;
-                }
-                nh
-            };
+            // Apply export modifications — the pass-scoped memo shares one
+            // post-modification attribute Arc across every (route, peer)
+            // with the same source attrs and equal modifications.
+            let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
             modified.path_id = next_rank;
 
             // Only announce if different from what's already in AdjRibOut.
@@ -719,6 +704,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        memo: &mut super::ExportMemo,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -795,12 +781,9 @@ impl RibManager {
         }
 
         // Export policy check
-        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
-            best.as_path()
-                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
-        } else {
-            String::new()
-        };
+        let aspath_str = export_pol
+            .is_some_and(PolicyChain::requires_as_path_string)
+            .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
             prefix: Some(*prefix),
@@ -808,7 +791,7 @@ impl RibManager {
             extended_communities: best.extended_communities(),
             communities: best.communities(),
             large_communities: best.large_communities(),
-            as_path_str: &aspath_str,
+            as_path_str: aspath_str.as_deref().unwrap_or(""),
             as_path_len: aspath_len,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
@@ -835,21 +818,12 @@ impl RibManager {
             return;
         }
 
-        // Apply export modifications to a clone — skip the deep clone of
-        // the Arc<Vec<PathAttribute>> when no modifications are needed.
-        let mut modified = best.clone();
-        let nh_action = if result.modifications.is_empty() {
-            None
-        } else {
-            let nh = rustbgpd_policy::apply_modifications(
-                std::sync::Arc::make_mut(&mut modified.attributes),
-                &result.modifications,
-            );
-            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
-                modified.next_hop = *addr;
-            }
-            nh
-        };
+        // Apply export modifications to a clone. The pass-scoped memo
+        // shares one post-modification attribute Arc across every
+        // (route, peer) with the same source attribute set and equal
+        // modifications; no-modification exports keep sharing the
+        // source Arc as before.
+        let (mut modified, nh_action) = memo.apply(best, &result.modifications);
         modified.path_id = 0;
 
         // `force` mode: bypass the AdjRibOut equality suppression so
@@ -897,7 +871,6 @@ impl RibManager {
     /// cache.
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_orr_best_prefix(
@@ -917,6 +890,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
+        memo: &mut super::ExportMemo,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -996,12 +970,9 @@ impl RibManager {
         }
 
         // Export policy check — same tail as `distribute_single_best_prefix`.
-        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
-            best.as_path()
-                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
-        } else {
-            String::new()
-        };
+        let aspath_str = export_pol
+            .is_some_and(PolicyChain::requires_as_path_string)
+            .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
             prefix: Some(*prefix),
@@ -1009,7 +980,7 @@ impl RibManager {
             extended_communities: best.extended_communities(),
             communities: best.communities(),
             large_communities: best.large_communities(),
-            as_path_str: &aspath_str,
+            as_path_str: aspath_str.as_deref().unwrap_or(""),
             as_path_len: aspath_len,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
@@ -1036,21 +1007,14 @@ impl RibManager {
             return;
         }
 
-        // Apply export modifications to a clone — skip the deep clone of
-        // the Arc<Vec<PathAttribute>> when no modifications are needed.
-        let mut modified = best.clone();
-        let nh_action = if result.modifications.is_empty() {
-            None
-        } else {
-            let nh = rustbgpd_policy::apply_modifications(
-                std::sync::Arc::make_mut(&mut modified.attributes),
-                &result.modifications,
-            );
-            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
-                modified.next_hop = *addr;
-            }
-            nh
-        };
+        // Apply export modifications to a clone — the pass-scoped memo
+        // shares one post-modification attribute Arc across every
+        // (route, peer) with the same source attrs and equal
+        // modifications. NOTE: this is NOT the per-(vantage, prefix)
+        // winner memo the doc comment above rejects — the key here is
+        // (source attribute identity, modifications value), which is
+        // independent of which candidate won.
+        let (mut modified, nh_action) = memo.apply(best, &result.modifications);
         modified.path_id = 0;
 
         // `force` semantics as in `distribute_single_best_prefix`.
