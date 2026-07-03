@@ -11,6 +11,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M81 interop receipt: the BMP trio + BMPv4, against real collectors.**
+  New `interop` CI job (six-node containerlab): rustbgpd as RR reflecting
+  unicast v4/v6 + VPNv4 between two GoBGP clients while streaming all
+  three Route Monitoring views (`rib_in_pre` / `rib_out_post` /
+  `loc_rib`) to four collector slots at once — pmacct pmbmpd
+  bleeding-edge and gobmp (independent semantic v3 oracles,
+  digest-pinned) plus a raw byte sink with one v3 and one v4 slot under
+  tshark pcap capture. 50/50 assertions: the trio agrees on
+  Initiation/PeerUp, the RFC 9069 loc-rib instance peer (type 3, table
+  name `global`), rib-in-pre vs rib-out-post (RFC 8671 O+L flags) vs
+  loc-rib for the same routes, an LP-contested best-path flip,
+  withdraws, collector-reconnect table sync (dump + exactly 4
+  End-of-RIBs), loc-rib type 8/10 stats gauges, PeerDown reasons,
+  loc-rib PeerDown reason 6 + Termination at shutdown; BMPv4 is pinned
+  byte-level — version byte on every message, single BGP Message TLV
+  (type 7, index 0, length excludes the index), Stats TLV (code 1) wrap
+  byte-matching the v3 stats body, Initiation/PeerUp v3-vs-v4
+  byte-identical except the version byte, RM PDU sets byte-equal across
+  the v3 stream and the v4 TLVs — and Path Marking is pinned on the
+  wire (every live loc-rib announce marked `Best`, the contested winner
+  carrying reason 0x0003 local-preference, status-only dump entries,
+  nothing marked outside loc-rib). The lab's Phase-0 oracle matrix
+  documents the ecosystem honestly: no shipped collector decodes
+  tlv-20's final code points yet (pmacct bleeding-edge implements the
+  pre-tlv-20 numbering and discards tlv-20 RMs despite a comment
+  claiming tlv-20; gobmp hard-rejects version 4; released Wireshark
+  tracks older TLV drafts), so v4 code points are asserted at raw-byte
+  offsets against the drafts' wire figures with tshark scoped to what
+  it honestly dissects.
+
 - **BMP Path Marking TLV on Loc-RIB monitoring
   (draft-ietf-grow-bmp-path-marking-tlv-05, pre-IANA).** BMPv4
   (`version = 4`) collectors monitoring `loc_rib` now receive the Path

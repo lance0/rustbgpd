@@ -94,6 +94,49 @@ lives in `CHANGELOG.md` and the milestone docs, not here.
 
 ---
 
-*Last updated alongside the M79 labeled-unicast interop work. See
+# Upstream findings (pmacct)
+
+Found while validating the M81 BMP trio receipt against
+`pmacct/pmbmpd:bleeding-edge` (1.8.1-git 20260513, commit `cd619f58`).
+
+## 5. BMPv4 RM TLV code points are pre-tlv-20 while the source claims tlv-20
+
+- **Version:** pmbmpd 1.8.1-git 20260513 (bleeding-edge)
+- **Behavior:** `src/bmp/bmp.h` defines the Route Monitoring TLV code
+  points as `SP=1, GROUP=2, VRF=3, BGP_PDU=4, MARKING=5` under a comment
+  claiming "provisional code points: draft-ietf-grow-bmp-tlv-20" — but
+  tlv-20 §9 assigns `Group=4, VRF/Table Name=5, Stateless Parsing=6,
+  BGP Message=7`. A tlv-20-conformant sender's Route Monitoring messages
+  (UPDATE in BGP Message TLV type 7) are all discarded with
+  `[route monitor] packet discarded: BMPv4 BGP PDU TLV != 1` (verified
+  live: pmbmpd parses the indexed TLV structure fine — `bmp_tlv_list_add():
+  type=7 len=… tlv_idx=0` — then finds no TLV of its expected type 4).
+  Stats Reports are also read in the RFC 7854 layout with no tlv-20
+  Stats TLV (code 1) container, so a v4 Stats Report's first TLV header
+  bytes would be misread as the Stats Count.
+- **Workaround:** the M81 fixtures use pmacct as a v3-only semantic
+  oracle; BMPv4 framing is asserted byte-level and via tshark's generic
+  TLV-header dissection.
+- **Severity:** interop — any tlv-20 v4 sender loses its entire RM
+  stream silently (Initiation/PeerUp/PeerDown still decode, since those
+  differ from v3 only in the version byte).
+
+## 6. Indexed-TLV index field read as one byte
+
+- **Version:** pmbmpd 1.8.1-git 20260513 (bleeding-edge)
+- **Behavior:** `bmp_tlv_hdr_get_index()` in `src/bmp/bmp_msg.c` does
+  `(*idx) = ntohs((u_int16_t) *idx_ptr)` — dereferencing a `char*` reads
+  only the first byte of the 2-byte index (and byte-swaps it), so any
+  index > 0 decodes wrong: index 0x0001 reads as 0x0000 ("applies to all
+  NLRIs"), and G-bit group indexes collapse. Only index 0 round-trips.
+- **Workaround:** none needed for rustbgpd (it currently emits index 0
+  only); disqualifies pmacct master as an oracle for per-NLRI/per-group
+  TLV attribution.
+- **Severity:** correctness — silent TLV misattribution for multi-NLRI
+  v4 Route Monitoring messages.
+
+---
+
+*Last updated alongside the M81 BMP trio interop work. See
 `tests/interop/` fixture comments for the in-place documentation of each
 workaround.*
