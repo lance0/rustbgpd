@@ -59,6 +59,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
 | M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps, hot-apply under traffic | FRR 10.3.1 ×3 |
 | M81 | BMP trio (rib-in, rib-out, loc-rib) + BMPv4 against three independent decoders | GoBGP ×2 + pmacct + gobmp + tshark |
+| M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
 
 ## Interop labs — kernel dataplane, PR + nightly (`kernel-dataplane.yml`)
 

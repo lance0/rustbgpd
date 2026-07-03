@@ -1,0 +1,70 @@
+# Containerlab topology: GoBGP bundle originator ↔ rustbgpd RR ↔ GoBGP sink
+# (M82 leg 2 — EVPN VLAN-aware-bundle synthetic proof, ADR-0092 Decision 6)
+#
+# Validates: rustbgpd route-reflects non-zero-Ethernet-Tag EVPN routes
+# (the RFC 7432 §6.3 VLAN-Aware Bundle service shape) with the tag as
+# route identity. gobgp-src originates bundle-shaped Type 2 MAC/IP and
+# Type 3 IMET routes carrying Ethernet Tags 10 and 20 in one EVI (same
+# RD, same RT), including the SAME MAC address under both tags; the RR
+# must key them as distinct RIB entries, surface the tag over
+# ListEvpnRoutes, and reflect NLRIs tag-verbatim to gobgp-sink.
+# Withdrawing one tag's route must remove exactly that entry.
+#
+# This is the ADR-0092 GoBGP-synthetic first slice (the M71/M72
+# pattern); the vendor ground truth is the SR Linux leg in
+# m82-evpn-bundle-srlinux.clab.yml.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m82-evpn-bundle-synthetic-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
+#   containerlab destroy -t tests/interop/m82-evpn-bundle-synthetic-gobgp.clab.yml
+
+name: m82-evpn-bundle-synthetic-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m82-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-src:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m82-src.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-sink:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m82-sink.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-src:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-sink:eth1"]
+
+# Underlay: rustbgpd RR 10.0.0.1/10.0.1.1, gobgp-src 10.0.0.2,
+# gobgp-sink 10.0.1.2, all AS 65000 (iBGP L2VPN/EVPN, both RR clients).
+# Bundle shape: RD 65000:100, RT 65000:100, Ethernet Tags 10 (VNI 10010)
+# and 20 (VNI 10020).

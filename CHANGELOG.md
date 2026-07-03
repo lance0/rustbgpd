@@ -56,6 +56,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
+  Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
+  leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,
+  both legs. Synthetic leg (new `interop` CI job, GoBGP 3.37.0):
+  the RFC 7432 §6.3 bundle shape — one EVI, Ethernet Tags 10/20 with
+  per-tag VNIs, the same MAC under both tags — is keyed by the RR with
+  the tag as route identity (two distinct Type 2 entries for one
+  (RD, MAC), per-tag IMET entries), surfaced via `rbgp evpn`, and
+  reflected tag-verbatim (RD/etag/MAC/IP/label field-equal on the
+  sink's re-decoded NLRI) with ORIGINATOR_ID + CLUSTER_LIST; a
+  single-tag withdraw removes exactly that entry (26/26). Vendor leg
+  (local lab, `m82-evpn-bundle-srlinux.clab.yml`): SR Linux in
+  VLAN-aware-bundle interoperability mode (`vlan-aware-bundle-eth-tag`
+  on two mac-vrfs, shared RT, the same static MAC in both bridge
+  domains) originates real vendor non-zero-tag Type 2 + IMET routes;
+  same assertion classes, 20/20. SR Linux quirks recorded in the lab
+  fixtures: one EVI per mac-vrf enforced (bundle identity = shared RT +
+  eth-tag, per-BD RDs) and the session requires an explicit
+  `transport local-address` (otherwise SR Linux sources/accepts only on
+  the system0 address). Receive/reflect proof only — bundle-mode
+  origination and dataplane remain future ADR-0092 tranches.
+
 - **Export-side explain: "why did/didn't route X go to peer Y?" now
   gets a full, truthful gate-ladder answer.** `ExplainAdvertisedRoute`
   (and `rbgp rib advertised <peer> --explain --prefix X`) now reports

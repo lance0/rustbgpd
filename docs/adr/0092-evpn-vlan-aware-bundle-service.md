@@ -1,7 +1,22 @@
 # ADR-0092: EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag)
 
-**Status:** Accepted
+**Status:** Accepted — Decision 6 proof-ladder slice 1 executed (M82, 2026-07-03)
 **Date:** 2026-06-19
+
+> **Proof-ladder status (2026-07-03):** the Decision 6 receive/reflect
+> ground truth exists on both rungs. The GoBGP-synthetic slice is
+> CI-gated (M82 synthetic leg, 26/26: tag-as-route-identity on the RR,
+> same MAC under two tags uncollapsed, tag-verbatim reflection,
+> tag-scoped withdraw), and the non-FRR vendor receipt is in hand —
+> Nokia SR Linux 25.10.1 in VLAN-aware-bundle interoperability mode
+> (`vlan-aware-bundle-eth-tag`, 20/20, local lab; rustbgpd's first
+> vendor-NOS interop row). Feasibility note from the vendor lab:
+> SR Linux enforces one EVI per mac-vrf, so its bundle mode carries the
+> bundle identity as shared RT + non-zero eth-tag over per-BD RDs — a
+> remote PE modelling one-RD-per-bundle must not assume RD equality
+> across tags. The RR path needed no code changes (the wire/RIB key
+> already carries the tag); origination, import selection, and
+> dataplane bundle mode remain the unimplemented tranches of this ADR.
 
 ## Context
 

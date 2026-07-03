@@ -1,7 +1,7 @@
-# Upstream findings (GoBGP)
+# Upstream findings (GoBGP, pmacct, SR Linux)
 
-Behaviors found in GoBGP during rustbgpd interop lab development, recorded so
-they can be reported/patched upstream. Each entry lists the observed behavior,
+Behaviors found in peer/collector/NOS software during rustbgpd interop lab
+development, recorded so they can be reported/patched upstream. Each entry lists the observed behavior,
 a reproduction sketch, the workaround the interop fixtures use, and a severity
 read. Versions are the ones the labs ran; re-verify against GoBGP master
 before filing.
@@ -135,8 +135,24 @@ Found while validating the M81 BMP trio receipt against
 - **Severity:** correctness — silent TLV misattribution for multi-NLRI
   v4 Route Monitoring messages.
 
+## 7. SR Linux sr_cli batch input silently swallows everything after an unbalanced quote
+
+- **Version:** Nokia SR Linux 25.10.1-399 (observed during M82 development)
+- **Behavior:** feeding a CLI config file to `sr_cli --candidate-mode
+  --commit-at-end` over stdin, a `#` comment line containing an
+  unbalanced quote character (e.g. an apostrophe in prose) opens a
+  quoted string that consumes every subsequent LINE of the batch. No
+  error is raised: the CLI exits 0, prints nothing, and
+  `--commit-at-end` commits the truncated prefix of the config — a
+  silently half-configured box.
+- **Workaround:** keep sr_cli batch files free of apostrophes/quotes in
+  comments (`tests/interop/configs/srl-m82-bundle.cli` carries the
+  warning in-line).
+- **Severity:** operational — a comment typo turns into a silent
+  partial commit with exit code 0.
+
 ---
 
-*Last updated alongside the M81 BMP trio interop work. See
-`tests/interop/` fixture comments for the in-place documentation of each
-workaround.*
+*Last updated alongside the M82 SR Linux VLAN-aware-bundle interop
+work. See `tests/interop/` fixture comments for the in-place
+documentation of each workaround.*
