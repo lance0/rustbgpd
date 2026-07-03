@@ -21,7 +21,7 @@ title  = "Cookbook"
 groups = ["cookbook"]
 [[nav.tabs]]
 title  = "Internals"
-groups = ["design", "adr"]
+groups = ["design"]
 [nav.groups.guide]
 title = "Guide"
 pages = [
@@ -52,5 +52,3 @@ pages = [
   { slug = "INTEROP", title = "Interop results" }, { slug = "RFC_NOTES", title = "RFC notes" },
   { slug = "reload-matrix", title = "Reload matrix" }, { slug = "kernel-dataplane-runner", title = "Kernel dataplane runner" },
 ]
-[nav.groups.adr]
-title = "Design records (ADR)"

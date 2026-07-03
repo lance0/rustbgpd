@@ -29,7 +29,7 @@ jobs:
 
       - name: Trim generated artifacts and internal logs from the docs build copy
         run: |
-          rm -rf docs/artifacts docs/images docs/perf
+          rm -rf docs/artifacts docs/images docs/perf docs/adr
           rm -f docs/soak-*.md docs/RECEIPTS.md docs/OPERATIONAL_PROOF.md docs/evpn-alpha-soak.md \
                 docs/milestones.md docs/upstream-findings.md docs/RELEASE_CHECKLIST.md docs/FUZZING.md
 
