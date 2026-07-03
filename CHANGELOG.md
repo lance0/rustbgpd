@@ -78,6 +78,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the system0 address). Receive/reflect proof only — bundle-mode
   origination and dataplane remain future ADR-0092 tranches.
 
+- **Mixed EVPN runtime edits now hot-apply on SIGHUP via a plan
+  decomposer ([#268](https://github.com/lance0/rustbgpd/issues/268)).**
+  A candidate combining EVPN changes the ADR-0063 converger dispatch
+  rejects as a single shape (e.g. an Ethernet Segment delete + its
+  member L2VNI's redefine + a new L2VNI add in one edit) is now split
+  into an ordered sequence of already-supported primitive plans —
+  deletes → redefines → `ip_vrf` relink → adds — each applied through
+  the unchanged converge path and each committing **its own runtime
+  generation** (one SIGHUP / `ApplyEvpnRuntime` = N generations,
+  visible in runtime snapshots and logs). Every step is validated up
+  front, before anything commits; candidates the fixed order cannot
+  express (relink away from a deleted IP-VRF, relink onto an added
+  IP-VRF, an ES left memberless mid-sequence) and IP-VRF
+  L3VNI/device/table identity redefines fail closed naming the
+  offending step. A residual mid-sequence convergence failure is
+  fail-stop: earlier generations stay committed (no cross-step
+  rollback), the model pins, and re-SIGHUP after fixing converges only
+  the remainder. `rustbgpd --diff` classifies decomposable mixed edits
+  as reload-applied ("decomposed: N steps"). IP-VRF identity redefines
+  stay restart-required by design (kernel VRF identity lifecycle); the
+  rationale is recorded in the ADR-0063 amendment and
+  docs/reload-matrix.md.
 - **Export-side explain: "why did/didn't route X go to peer Y?" now
   gets a full, truthful gate-ladder answer.** `ExplainAdvertisedRoute`
   (and `rbgp rib advertised <peer> --explain --prefix X`) now reports

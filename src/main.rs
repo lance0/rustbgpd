@@ -28,6 +28,7 @@ mod evpn_es_link_drain;
 mod evpn_imet;
 mod evpn_l3_originator;
 mod evpn_originator;
+mod evpn_plan_decomposer;
 mod evpn_runtime_converger;
 mod evpn_segment;
 mod evpn_svi;

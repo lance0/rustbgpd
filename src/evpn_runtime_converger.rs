@@ -56,7 +56,7 @@ impl DaemonEvpnRuntimeConvergeError {
         Self::Failed(rustbgpd_evpn::EvpnRuntimeConvergeError::new(message))
     }
 
-    fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::Unsupported(message) => message,
             Self::Failed(source) => source.message(),
@@ -2081,6 +2081,84 @@ fn redefine_imet_failure(
     }
 }
 
+/// Pure shape gate mirroring [`EvpnRuntimeActorConverger::converge`]'s
+/// dispatch: routes `plan` to the same shape detector + validator the
+/// dispatch would pick, without any actor side effects. Used by the
+/// #268 plan decomposer (`crate::evpn_plan_decomposer`) to prove — up
+/// front, before any step commits — that every decomposed step is an
+/// already-supported primitive shape, and to recognize a plan that is
+/// already primitive. Keep the routing here and in `converge` in sync.
+///
+/// # Errors
+/// The routed validator's error when the plan is not a supported shape.
+pub(crate) fn validate_supported_plan_shape(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    if is_tenant_teardown_plan(plan, current) {
+        return validate_tenant_teardown(current, candidate, plan).map(drop);
+    }
+    if is_ip_vrf_relink_plan(plan) {
+        return validate_ip_vrf_relink(current, candidate, plan);
+    }
+    if is_additive_build_up_plan(plan) {
+        return validate_additive_build_up(current, candidate, plan).map(drop);
+    }
+    if is_l2vni_mixed_plan(plan) {
+        return validate_l2vni_mixed(current, candidate, plan).map(drop);
+    }
+    validate_no_unexpected_relink(current, candidate, plan)?;
+    if plan.evpn_instances.has_changes() {
+        if plan.evpn_instances.added.is_empty()
+            && !plan.evpn_instances.deleted.is_empty()
+            && plan.evpn_instances.redefined.is_empty()
+        {
+            return validate_single_l2vni_delete(current, candidate, plan).map(drop);
+        }
+        if plan.evpn_instances.added.is_empty()
+            && plan.evpn_instances.deleted.is_empty()
+            && !plan.evpn_instances.redefined.is_empty()
+        {
+            return validate_single_l2vni_redefine(current, candidate, plan).map(drop);
+        }
+        return validate_single_l2vni_add(current, candidate, plan).map(drop);
+    }
+    if plan.ip_vrfs.has_changes() {
+        if plan.ip_vrfs.added.is_empty()
+            && !plan.ip_vrfs.deleted.is_empty()
+            && plan.ip_vrfs.redefined.is_empty()
+        {
+            return validate_single_ip_vrf_delete(current, candidate, plan).map(drop);
+        }
+        if plan.ip_vrfs.added.is_empty()
+            && plan.ip_vrfs.deleted.is_empty()
+            && !plan.ip_vrfs.redefined.is_empty()
+        {
+            return validate_single_ip_vrf_redefine(current, candidate, plan).map(drop);
+        }
+        return validate_single_ip_vrf_add(plan).map(drop);
+    }
+    if plan.ethernet_segments.has_changes() {
+        if plan.ethernet_segments.added.is_empty()
+            && !plan.ethernet_segments.deleted.is_empty()
+            && plan.ethernet_segments.redefined.is_empty()
+        {
+            return validate_single_ethernet_segment_delete(current, candidate, plan).map(drop);
+        }
+        if plan.ethernet_segments.added.is_empty()
+            && plan.ethernet_segments.deleted.is_empty()
+            && !plan.ethernet_segments.redefined.is_empty()
+        {
+            return validate_single_ethernet_segment_redefine(current, candidate, plan).map(drop);
+        }
+        return validate_single_ethernet_segment_add(current, candidate, plan).map(drop);
+    }
+    Err(DaemonEvpnRuntimeConvergeError::unsupported(
+        "ApplyEvpnRuntime has no supported changes in this candidate",
+    ))
+}
+
 impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
     fn converge<'a>(
         &'a self,
@@ -2089,6 +2167,9 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
     ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
         Box::pin(async move {
+            // NOTE: `validate_supported_plan_shape` above mirrors this
+            // dispatch for the #268 plan decomposer — keep the routing in
+            // sync when adding or reshaping converge paths.
             // Atomic tenant teardown (delete-only multi-element / cross-resource)
             // is routed first; single-element deletes fall through to the
             // single-shape converters below.
@@ -3455,6 +3536,37 @@ where
     }
 
     if let Err(error) = converger.converge(&current, &candidate, &plan).await {
+        // #268: a candidate the dispatch rejects as an unsupported *mixed*
+        // composition may still converge as an ordered sequence of
+        // already-supported primitive steps, each committing its own
+        // generation. Only `Unsupported` triggers the attempt — a `Failed`
+        // converge had side effects and must pin, exactly as before.
+        if matches!(error, DaemonEvpnRuntimeConvergeError::Unsupported(_)) {
+            match crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(
+                &current, &candidate, &plan,
+            ) {
+                Ok(steps) => {
+                    return apply_decomposed_evpn_runtime_steps(
+                        steps,
+                        &plan,
+                        coordinator,
+                        converger,
+                    )
+                    .await;
+                }
+                // The plan is already primitive (e.g. a supported shape that
+                // failed on a missing actor): today's error stands verbatim.
+                Err(crate::evpn_plan_decomposer::EvpnDecomposeError::AlreadyPrimitive) => {}
+                // Fail the whole candidate closed, naming the offending
+                // step, before any step commits.
+                Err(crate::evpn_plan_decomposer::EvpnDecomposeError::Unsupported(message)) => {
+                    return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                        "EVPN runtime mutation failed: {message}; generation {} remains committed",
+                        snapshot.generation.as_u64()
+                    )));
+                }
+            }
+        }
         if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
             let mut coordinator = coordinator.lock().map_err(|_| {
                 GrpcEvpnRuntimeApplyError::Internal(
@@ -3486,6 +3598,114 @@ where
         message: format!(
             "candidate EVPN runtime model committed as generation {}",
             report.committed_generation.as_u64()
+        ),
+    })
+}
+
+/// Apply the #268-decomposed primitive steps of a mixed candidate in
+/// order, each through the unchanged converge path and each committing
+/// its own runtime generation (operators see N generations for one
+/// SIGHUP / apply). A mid-sequence failure is **fail-stop**: earlier
+/// generations stay committed (no cross-step rollback), a `Failed`
+/// converge pins the coordinator exactly like the single-shot path, and
+/// the error + `ERROR` log name the completed generations, the failed
+/// step, and the re-SIGHUP recovery. The caller holds the apply lock.
+async fn apply_decomposed_evpn_runtime_steps<C>(
+    steps: Vec<crate::evpn_plan_decomposer::DecomposedStep>,
+    overall_plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    converger: &C,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
+where
+    C: DaemonEvpnRuntimeConverger + ?Sized,
+{
+    let lock_coordinator = || {
+        coordinator.lock().map_err(|_| {
+            GrpcEvpnRuntimeApplyError::Internal(
+                "EVPN runtime coordinator lock poisoned".to_string(),
+            )
+        })
+    };
+    let total = steps.len();
+    tracing::info!(
+        total_steps = total,
+        "mixed EVPN runtime candidate decomposed into {total} primitive steps; \
+         each step commits its own runtime generation ({total} generations for one apply/SIGHUP)"
+    );
+    let mut committed_generations: Vec<u64> = Vec::new();
+    for (index, step) in steps.into_iter().enumerate() {
+        let step_number = index + 1;
+        let (step_current, step_plan) = {
+            let coordinator = lock_coordinator()?;
+            (
+                coordinator.model().clone(),
+                coordinator.plan_candidate(&step.candidate),
+            )
+        };
+        if step_plan.is_noop() {
+            continue;
+        }
+        if let Err(error) = converger
+            .converge(&step_current, &step.candidate, &step_plan)
+            .await
+        {
+            if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
+                let mut coordinator = lock_coordinator()?;
+                let mut failed = FailedRuntimeConverger { source };
+                let _ = coordinator.apply_candidate(step.candidate.clone(), &mut failed);
+            }
+            let committed_summary = if committed_generations.is_empty() {
+                "no earlier step committed".to_string()
+            } else {
+                format!(
+                    "earlier steps committed generations {committed_generations:?}, which remain \
+                     committed (fail-stop: no cross-step rollback)"
+                )
+            };
+            tracing::error!(
+                step = step_number,
+                total_steps = total,
+                description = %step.description,
+                error = %error.message(),
+                "decomposed EVPN runtime apply failed mid-sequence; {committed_summary}; fix the \
+                 candidate config and re-SIGHUP / re-apply — the next attempt replans from the \
+                 committed model and converges only the remainder"
+            );
+            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                "EVPN runtime mutation failed at decomposed step {step_number}/{total} ({}): {}; \
+                 {committed_summary}; fix the config and re-SIGHUP / re-apply to converge the \
+                 remainder",
+                step.description,
+                error.message(),
+            )));
+        }
+        let report = {
+            let mut coordinator = lock_coordinator()?;
+            let mut preconverged = PreconvergedRuntimeConverger;
+            coordinator
+                .apply_candidate(step.candidate, &mut preconverged)
+                .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?
+        };
+        tracing::info!(
+            step = step_number,
+            total_steps = total,
+            generation = report.committed_generation.as_u64(),
+            description = %step.description,
+            "decomposed EVPN runtime step committed"
+        );
+        committed_generations.push(report.committed_generation.as_u64());
+    }
+    let snapshot = lock_coordinator()?.snapshot();
+    let generations_summary = match (committed_generations.first(), committed_generations.last()) {
+        (Some(first), Some(last)) => format!(" as generations {first}..={last}"),
+        _ => String::new(),
+    };
+    Ok(proto::ApplyEvpnRuntimeResponse {
+        outcome: runtime_apply_outcome_to_proto(rustbgpd_evpn::EvpnRuntimeApplyOutcome::Committed),
+        runtime: Some(runtime_snapshot_to_proto(&snapshot)),
+        plan: Some(runtime_plan_to_proto(overall_plan)),
+        message: format!(
+            "candidate EVPN runtime model committed via {total} decomposed steps{generations_summary}"
         ),
     })
 }
@@ -10935,5 +11155,339 @@ table_id = 6000
         );
 
         dataplane_handle.shutdown().await;
+    }
+
+    // ---- #268 mixed-candidate decomposition (apply-level) ----
+
+    /// Behaves like the real dispatch's validation without actor side
+    /// effects: accepts exactly the supported primitive shapes (via
+    /// `validate_supported_plan_shape`), rejects everything else as
+    /// `Unsupported`, records each accepted plan, and can be scripted to
+    /// fail the Nth accepted converge with a `Failed` error.
+    struct ShapeCheckingConverger {
+        accepted_plans: Arc<std::sync::Mutex<Vec<rustbgpd_evpn::EvpnRuntimePlan>>>,
+        fail_on_accepted_call: Option<usize>,
+    }
+
+    impl ShapeCheckingConverger {
+        fn new() -> Self {
+            Self {
+                accepted_plans: Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_on_accepted_call: None,
+            }
+        }
+
+        fn failing_on(call: usize) -> Self {
+            Self {
+                fail_on_accepted_call: Some(call),
+                ..Self::new()
+            }
+        }
+    }
+
+    impl DaemonEvpnRuntimeConverger for ShapeCheckingConverger {
+        fn converge<'a>(
+            &'a self,
+            current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+            candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+            plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+        ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+            Box::pin(async move {
+                validate_supported_plan_shape(current, candidate, plan)?;
+                let call_number = {
+                    let mut accepted = self.accepted_plans.lock().unwrap();
+                    accepted.push(plan.clone());
+                    accepted.len()
+                };
+                if self.fail_on_accepted_call == Some(call_number) {
+                    return Err(DaemonEvpnRuntimeConvergeError::failed(
+                        "injected decomposed-step failure",
+                    ));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    // The #268 maintainer example candidate on top of the committed
+    // `l2vni_one_es_runtime_candidate_toml()` model: delete the ES,
+    // redefine its (surviving) member L2VNI 100, and add L2VNI 200.
+    fn decomposer_mixed_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:101"
+route_targets = ["65000:101"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#
+    }
+
+    fn one_es_coordinator() -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
+        let current = runtime_candidate_from_toml(l2vni_one_es_runtime_candidate_toml());
+        Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_mixed_candidate_decomposes_across_generations() {
+        let coordinator = one_es_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = ShapeCheckingConverger::new();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: decomposer_mixed_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert!(
+            response.message.contains("3 decomposed steps"),
+            "message must surface the decomposition: {}",
+            response.message
+        );
+        assert!(
+            response.message.contains("generations 2..=4"),
+            "message must name the N committed generations: {}",
+            response.message
+        );
+        assert_eq!(response.runtime.unwrap().generation, 4);
+
+        // The converger saw the mixed whole (rejected, not recorded) and
+        // then exactly the ordered primitive steps: deletes, redefine, add.
+        let accepted = converger.accepted_plans.lock().unwrap();
+        assert_eq!(accepted.len(), 3, "three primitive converges expected");
+        assert_eq!(accepted[0].ethernet_segments.deleted.len(), 1);
+        assert!(!accepted[0].evpn_instances.has_changes());
+        assert_eq!(accepted[1].evpn_instances.redefined, vec![100]);
+        assert!(accepted[1].evpn_instances.added.is_empty());
+        assert_eq!(accepted[2].evpn_instances.added, vec![200]);
+        assert!(accepted[2].evpn_instances.redefined.is_empty());
+
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(guard.model().generation().as_u64(), 4);
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+        );
+        assert!(guard.model().ethernet_segments().is_empty());
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .unwrap()
+                .rd
+                .to_string(),
+            "65000:101"
+        );
+        assert!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_decomposed_mid_sequence_failure_is_fail_stop_and_recoverable() {
+        let coordinator = one_es_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        // Accepted call 2 = decomposed step 2 (the L2VNI redefine).
+        let converger = ShapeCheckingConverger::failing_on(2);
+
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: decomposer_mixed_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap_err();
+
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = error else {
+            panic!("expected FailedPrecondition, got: {error:?}");
+        };
+        assert!(
+            message.contains("decomposed step 2/3"),
+            "must name the failed step: {message}"
+        );
+        assert!(
+            message.contains("generations [2]"),
+            "must name the generations committed by earlier steps: {message}"
+        );
+        assert!(
+            message.contains("no cross-step rollback"),
+            "must state fail-stop semantics: {message}"
+        );
+        assert!(
+            message.contains("re-SIGHUP"),
+            "must carry the recovery instruction: {message}"
+        );
+
+        {
+            let guard = coordinator.lock().unwrap();
+            // Step 1 (the ES delete) committed generation 2 and stays
+            // committed; the failed step pins the model.
+            assert_eq!(guard.model().generation().as_u64(), 2);
+            assert!(guard.model().ethernet_segments().is_empty());
+            assert_eq!(
+                guard.model().mutation_state(),
+                rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+            );
+            assert_eq!(
+                guard.model().lifecycle(),
+                rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded
+            );
+            // The redefine never published: VNI 100 keeps the committed RD.
+            assert_eq!(
+                guard
+                    .model()
+                    .instances()
+                    .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                    .unwrap()
+                    .rd
+                    .to_string(),
+                "65000:100"
+            );
+        }
+
+        // Recovery: re-apply the same candidate with a healthy converger —
+        // the remainder replans from the committed model (redefine + add is
+        // a supported L2VNI-mixed shape) and converges.
+        let healthy = ShapeCheckingConverger::new();
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: decomposer_mixed_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &healthy,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(guard.model().generation().as_u64(), 3);
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+        );
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .unwrap()
+                .rd
+                .to_string(),
+            "65000:101"
+        );
+        assert!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_undecomposable_mixed_fails_closed_without_commit() {
+        // L2VNI add mixed with an IP-VRF identity (L3VNI) redefine: the
+        // precondition must fail the whole candidate closed, naming the
+        // offending step, with no generation advance and no pinning.
+        let current = runtime_candidate_from_toml(ip_vrf_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = ShapeCheckingConverger::new();
+
+        let mut candidate_toml = ip_vrf_redefined_l3vni_runtime_candidate_toml().to_string();
+        candidate_toml.push_str(
+            r#"
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        );
+
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml,
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap_err();
+
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = error else {
+            panic!("expected FailedPrecondition, got: {error:?}");
+        };
+        assert!(
+            message.contains("does not decompose"),
+            "must fail as a decomposition precondition: {message}"
+        );
+        assert!(
+            message.contains("restart-required by design"),
+            "must carry today's identity-redefine error: {message}"
+        );
+        assert!(
+            message.contains("generation 1 remains committed"),
+            "nothing may commit: {message}"
+        );
+
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(guard.model().generation().as_u64(), 1);
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+            "an unsupported candidate must not pin/degrade the runtime"
+        );
     }
 }

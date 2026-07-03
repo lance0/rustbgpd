@@ -1880,6 +1880,11 @@ pub enum EvpnRuntimeChangeClass {
     /// can hot-apply on SIGHUP, subject to the live actor being
     /// present and accepting the candidate.
     ReloadApplied,
+    /// The edit is a mixed shape the #268 plan decomposer splits into
+    /// `steps` ordered primitive plans, each committed by SIGHUP as its
+    /// own runtime generation (operators see `steps` generations for
+    /// one reload).
+    ReloadAppliedDecomposed { steps: usize },
     /// The edit is a generic/mixed/identity shape the current
     /// runtime coordinator rejects, or the diff could not resolve a
     /// typed EVPN model defensively. A restart is required.
@@ -1888,7 +1893,19 @@ pub enum EvpnRuntimeChangeClass {
 
 impl EvpnRuntimeChangeClass {
     const fn is_reload_applied(self) -> bool {
-        matches!(self, Self::ReloadApplied)
+        matches!(
+            self,
+            Self::ReloadApplied | Self::ReloadAppliedDecomposed { .. }
+        )
+    }
+
+    /// Number of decomposed primitive steps when the edit hot-applies
+    /// via the #268 plan decomposer.
+    const fn decomposed_steps(self) -> Option<usize> {
+        match self {
+            Self::ReloadAppliedDecomposed { steps } => Some(steps),
+            _ => None,
+        }
     }
 
     const fn is_restart_required(self) -> bool {
@@ -2682,7 +2699,14 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
-        if diff.evpn_runtime_change_class.is_reload_applied() {
+        if let Some(steps) = diff.evpn_runtime_change_class.decomposed_steps() {
+            let _ = writeln!(
+                out,
+                "  {} EVPN runtime model hot-applied through the ADR-0063 coordinator \
+                 (decomposed: {steps} steps, one runtime generation each)",
+                style.change_marker
+            );
+        } else if diff.evpn_runtime_change_class.is_reload_applied() {
             let _ = writeln!(
                 out,
                 "  {} EVPN runtime model hot-applied through the ADR-0063 coordinator",
@@ -2878,6 +2902,13 @@ fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChange
     let plan = current.plan_candidate(&candidate);
     if evpn_runtime_plan_is_reload_applied(&current, &candidate, &plan) {
         EvpnRuntimeChangeClass::ReloadApplied
+    } else if let Ok(steps) =
+        crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(&current, &candidate, &plan)
+    {
+        // #268: a mixed shape the coordinator dispatch rejects may still
+        // converge on SIGHUP as an ordered sequence of primitive steps,
+        // each committing its own runtime generation.
+        EvpnRuntimeChangeClass::ReloadAppliedDecomposed { steps: steps.len() }
     } else {
         EvpnRuntimeChangeClass::RestartRequired
     }

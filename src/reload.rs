@@ -2368,6 +2368,131 @@ originator_ip = "10.0.0.1"
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "reload hot-apply test keeps initial/candidate EVPN TOML fixtures inline"
+    )]
+    async fn reload_decomposes_mixed_evpn_runtime_edit_across_generations() {
+        // #268: an ES delete + its (surviving) member L2VNI redefine + a new
+        // L2VNI add in ONE SIGHUP. The converge of the mixed whole rejects it
+        // (scripted `Unsupported`, as the real dispatch would), and the
+        // decomposer then applies deletes → redefine → add as three
+        // primitive steps — three committed generations for one SIGHUP.
+        let path = unique_temp_path("reload-evpn-decomposed-mixed");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply_sequence(
+            &initial,
+            vec![
+                Err(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Unsupported(
+                        "mixed shape rejected by the dispatch".to_string(),
+                    ),
+                ),
+                Ok(()),
+                Ok(()),
+                Ok(()),
+            ],
+        );
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:101"
+route_targets = ["65000:101"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should hot-apply the decomposed mixed EVPN edit");
+
+        assert_eq!(
+            returned.evpn_instances.len(),
+            2,
+            "the reload snapshot must advance to the mixed candidate"
+        );
+        assert!(returned.ethernet_segments.is_empty());
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(
+            guard.model().generation().as_u64(),
+            4,
+            "one SIGHUP must commit three generations (deletes, redefine, add)"
+        );
+        assert!(guard.model().ethernet_segments().is_empty());
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .unwrap()
+                .rd
+                .to_string(),
+            "65000:101"
+        );
+        assert!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
+                .is_some()
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
     async fn reload_retains_hot_applied_evpn_runtime_with_later_steps() {
         let path = unique_temp_path("reload-evpn-hot-apply-plus-honor");
         std::fs::write(

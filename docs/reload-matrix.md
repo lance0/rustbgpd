@@ -235,21 +235,37 @@ live shapes as `EvpnService.ApplyEvpnRuntime`: single L2VNI/IP-VRF/ES
 add/delete/redefine within the documented identity bounds, atomic tenant
 teardown, `ip_vrf` relink, additive build-up, and standalone L2VNI swaps that
 only combine L2VNI adds with standalone L2VNI deletes, plus L2VNI-only batch
-redefines that do not relink IP-VRF membership. The runtime snapshot advances
-only after the coordinator and daemon actor converger accept the
-candidate. Unsupported shapes, missing EVPN actors, or actor convergence
-failure are pinned back to the committed runtime model and logged at `ERROR`,
-so repeated SIGHUPs keep surfacing the drift. Static `rustbgpd --diff` is
-shape-aware: it lists coordinator-supported EVPN edits under reload-applied and
-keeps unsupported mixed edits or restart-only identity changes in
-restart-required. The static diff still cannot predict live actor availability
-or a later convergence failure; those remain runtime SIGHUP outcomes.
+redefines that do not relink IP-VRF membership. Mixed edits beyond those
+shapes now hot-apply through the **#268 plan decomposer**: the candidate is
+split into an ordered sequence of already-supported primitive plans (deletes
+→ redefines → `ip_vrf` relink → adds), each committing **its own runtime
+generation** — one SIGHUP produces N generations in `rbgp`/gRPC runtime
+snapshots and logs, one per step. Every step is validated up front, before
+anything commits; a candidate with an unsupported step (an IP-VRF
+L3VNI/device/table identity redefine, or a shape the fixed phase order
+cannot express — relink away from an IP-VRF deleted in the same candidate,
+relink onto an IP-VRF added in the same candidate, an ES left memberless
+mid-sequence) fails closed naming the offending step. A residual
+mid-sequence convergence failure is fail-stop: generations committed by
+earlier steps stay committed (no cross-step rollback), the model pins, and a
+re-SIGHUP after fixing the config converges only the remainder. The runtime
+snapshot advances only after the coordinator and daemon actor converger
+accept the candidate. Unsupported shapes, missing EVPN actors, or actor
+convergence failure are pinned back to the committed runtime model and
+logged at `ERROR`, so repeated SIGHUPs keep surfacing the drift. Static
+`rustbgpd --diff` is shape-aware: it lists coordinator-supported EVPN edits
+under reload-applied — a decomposable mixed edit shows as "hot-applied
+through the ADR-0063 coordinator (decomposed: N steps, one runtime
+generation each)" — and keeps undecomposable mixed edits or restart-only
+identity changes in restart-required. The static diff still cannot predict
+live actor availability or a later convergence failure; those remain runtime
+SIGHUP outcomes.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; unsupported mixed edits, missing actors, or convergence failure pin/log. |
-| `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply; L3VNI/device/table identity changes stay restart-required. |
-| `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge. |
+| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply, including standalone L2VNI swaps and L2VNI-only batch redefines; mixed edits decompose into ordered primitive steps (#268), one committed generation per step; undecomposable shapes, missing actors, or convergence failure pin/log. |
+| `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply, including decomposed mixed edits (#268); L3VNI/device/table identity changes stay restart-required by design — kernel VRF identity lifecycle (destroy + recreate); a runtime drain/recreate risks a dual-state window (see the ADR-0063 amendment). |
+| `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge; mixed edits decompose (#268) with ES redefines applied one segment per generation. |
 | `[managed_netdevs]` | restart-required | ADR-0091 bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle is resolved at startup and reconciled by the dataplane actor (create, stamp, restart adoption, same-owner orphan reap). Managed netdevs are not live-mutable in this tranche. |
 
 ## `[[fib_tables]]` and FIB runtime

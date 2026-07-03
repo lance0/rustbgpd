@@ -5956,7 +5956,7 @@ bridge_vlan = 10
 }
 
 #[test]
-fn evpn_instance_swap_with_es_member_delete_stays_restart_required() {
+fn evpn_instance_swap_with_es_member_delete_decomposes_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -5998,12 +5998,14 @@ local_vtep_ip = "10.0.0.100"
 
     assert!(diff.evpn_instances_changed);
     assert!(diff.ethernet_segments_changed);
+    // #268: the ES-member delete decomposes into an atomic-teardown step
+    // (L2VNI 100 + its ES) followed by the L2VNI 300 add step.
     assert_eq!(
         diff.evpn_runtime_change_class,
-        EvpnRuntimeChangeClass::RestartRequired
+        EvpnRuntimeChangeClass::ReloadAppliedDecomposed { steps: 2 }
     );
-    assert!(!diff.has_reload_applied_changes());
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]
@@ -6061,7 +6063,7 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
-fn evpn_instance_add_existing_es_field_change_stays_restart_required() {
+fn evpn_instance_add_existing_es_field_change_decomposes_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6102,12 +6104,14 @@ originator_ip = "10.0.0.101"
     let diff = diff_config(&old, &new);
     assert!(diff.evpn_instances_changed);
     assert!(diff.ethernet_segments_changed);
+    // #268: the ES field change + add-only build-up decomposes into an ES
+    // redefine step followed by the add step, each its own generation.
     assert_eq!(
         diff.evpn_runtime_change_class,
-        EvpnRuntimeChangeClass::RestartRequired
+        EvpnRuntimeChangeClass::ReloadAppliedDecomposed { steps: 2 }
     );
-    assert!(!diff.has_reload_applied_changes());
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]
@@ -6310,7 +6314,7 @@ local_vtep_ip = "10.0.0.100"
 }
 
 #[test]
-fn evpn_instance_multi_redefine_relink_stays_restart_required() {
+fn evpn_instance_multi_redefine_relink_decomposes_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6371,20 +6375,24 @@ table_id = 5000
     let diff = diff_config(&old, &new);
 
     assert!(diff.evpn_instances_changed);
+    // #268: decomposes into a batch L2VNI redefine step and a pure relink step.
     assert_eq!(
         diff.evpn_runtime_change_class,
-        EvpnRuntimeChangeClass::RestartRequired
+        EvpnRuntimeChangeClass::ReloadAppliedDecomposed { steps: 2 }
     );
-    assert!(!diff.has_reload_applied_changes());
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
     let json = config_diff_json_value(&diff);
-    assert_eq!(json["evpn_runtime_change_class"], "restart_required");
-    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
-    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
+    assert_eq!(
+        json["evpn_runtime_change_class"]["reload_applied_decomposed"]["steps"],
+        2
+    );
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
 }
 
 #[test]
-fn evpn_instance_mixed_redefine_relink_stays_restart_required() {
+fn evpn_instance_mixed_redefine_relink_decomposes_reload_applied() {
     let old = parse(&evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -6445,16 +6453,20 @@ table_id = 5000
     let diff = diff_config(&old, &new);
 
     assert!(diff.evpn_instances_changed);
+    // #268: decomposes into deletes, L2VNI redefine, relink, and add steps.
     assert_eq!(
         diff.evpn_runtime_change_class,
-        EvpnRuntimeChangeClass::RestartRequired
+        EvpnRuntimeChangeClass::ReloadAppliedDecomposed { steps: 4 }
     );
-    assert!(!diff.has_reload_applied_changes());
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
     let json = config_diff_json_value(&diff);
-    assert_eq!(json["evpn_runtime_change_class"], "restart_required");
-    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], false);
-    assert_eq!(json["restart_required"]["evpn_instances_changed"], true);
+    assert_eq!(
+        json["evpn_runtime_change_class"]["reload_applied_decomposed"]["steps"],
+        4
+    );
+    assert_eq!(json["reload_applied"]["evpn_runtime_changed"], true);
+    assert_eq!(json["restart_required"]["evpn_instances_changed"], false);
 }
 
 #[test]
