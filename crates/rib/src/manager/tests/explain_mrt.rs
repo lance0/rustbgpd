@@ -42,6 +42,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65001,
@@ -371,6 +372,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -466,6 +468,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: peer_winner, // <-- target IS the winner
         peer_asn: 65000,
@@ -537,6 +540,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
 
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -612,6 +616,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
     // prefix → effective send_max should be 0.
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

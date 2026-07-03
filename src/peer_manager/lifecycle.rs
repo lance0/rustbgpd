@@ -77,6 +77,7 @@ impl PeerManager {
             route_reflector_client: tc.route_reflector_client,
             orr_vantage: tc.orr_vantage,
             route_server_client: tc.route_server_client,
+            per_client_best: tc.per_client_best,
             remove_private_as: tc.remove_private_as,
             add_path_receive: tc.peer.add_path_receive,
             add_path_send: tc.peer.add_path_send,

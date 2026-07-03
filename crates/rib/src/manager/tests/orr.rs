@@ -629,6 +629,7 @@ async fn orr_client_initial_dump_gets_vantage_best() {
     let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,
@@ -832,6 +833,7 @@ async fn split_horizon_and_rr_suppression_apply_before_orr_ranking() {
     let peer_d = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
     let (out_tx_d, mut out_d) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: peer_d,
         peer_asn: 65000,
@@ -913,6 +915,7 @@ async fn orr_with_addpath_send_ranks_by_vantage_cost() {
     let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,
@@ -988,6 +991,7 @@ async fn vpn_orr_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -1093,6 +1097,7 @@ async fn vpn_orr_addpath_ranking_uses_vantage_costs() {
     let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_a) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: client_a,
         peer_asn: 65000,
@@ -1343,6 +1348,7 @@ async fn vpn_orr_rtc_filter_applies_to_vantage_winner() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1471,6 +1477,7 @@ async fn vpn_orr_initial_dump_gets_vantage_best() {
     let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,

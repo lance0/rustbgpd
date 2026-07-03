@@ -94,6 +94,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         route_reflector_client: false,
         orr_vantage: None,
         route_server_client: false,
+        per_client_best: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         cluster_id: None,
         explain_enabled: true,

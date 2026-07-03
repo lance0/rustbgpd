@@ -63,6 +63,7 @@ struct PeerUpSpec {
     is_ebgp: bool,
     route_reflector_client: bool,
     orr_vantage: Option<IpAddr>,
+    per_client_best: bool,
     add_path_send_max: u32,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
@@ -76,9 +77,17 @@ impl PeerUpSpec {
             is_ebgp: false,
             route_reflector_client: false,
             orr_vantage: None,
+            per_client_best: false,
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
             negotiated_llgr_families: Vec::new(),
+        }
+    }
+
+    fn ebgp(peer: IpAddr) -> Self {
+        Self {
+            is_ebgp: true,
+            ..Self::ibgp(peer)
         }
     }
 }
@@ -95,6 +104,7 @@ async fn peer_up(
         vec![]
     };
     tx.send(RibUpdate::PeerUp {
+        per_client_best: spec.per_client_best,
         session_id: 0,
         peer: spec.peer,
         peer_asn: 65000,
@@ -228,6 +238,7 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     let add_path_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2));
     let orr_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 3));
     let orf_negotiated_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 4));
+    let per_client_best_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 5));
 
     let mut spec = PeerUpSpec::ibgp(policy_peer);
     spec.export_policy = Some(peer_context_chain());
@@ -241,12 +252,17 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     spec.orr_vantage = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
     let _rx3 = peer_up(&tx, spec).await;
 
+    let mut spec = PeerUpSpec::ebgp(per_client_best_peer);
+    spec.per_client_best = true;
+    let _rx5 = peer_up(&tx, spec).await;
+
     let mut spec = PeerUpSpec::ibgp(orf_negotiated_peer);
     spec.negotiated_orf_recv = ipv4_sendable();
     // The RFC 5291 §6 gate holds the ORF peer's initial dump (no EoR
     // yet), so send PeerUp by hand instead of the helper.
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: spec.per_client_best,
         session_id: 0,
         peer: orf_negotiated_peer,
         peer_asn: 65000,
@@ -275,12 +291,16 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     );
     assert_eq!(query_update_group(&tx, orr_peer).await, "orr_vantage");
     assert_eq!(
+        query_update_group(&tx, per_client_best_peer).await,
+        "per_client_best"
+    );
+    assert_eq!(
         query_update_group(&tx, orf_negotiated_peer).await,
         "orf_installed"
     );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
-        4.0,
+        5.0,
         "bgp_update_group_fallback_peers",
     );
     assert_metric(
@@ -288,6 +308,79 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
         0.0,
         "bgp_update_groups",
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The RS mixed-group pin (route-server design §3): transparent
+/// route-server clients share staged routes with plain eBGP peers —
+/// `route_server_client` is applied per-session in transport, BELOW
+/// the group staging boundary, so it is deliberately absent from the
+/// manager's fingerprint inputs and two eBGP peers with the same chain
+/// group regardless of it. Only `per_client_best` (a *selection*
+/// divergence, not an attribute-prep one) disqualifies.
+#[tokio::test]
+async fn rs_transparent_peers_group_per_client_best_falls_back() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // Conceptually: rs1/rs2 are RS-transparent members, plain is not.
+    // The manager sees identical staging inputs for all three — the
+    // transparency flag lives in transport (outbound attribute prep).
+    let rs1 = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1));
+    let rs2 = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 2));
+    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 3));
+    let pcb = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 4));
+
+    let mut rx1 = peer_up(&tx, PeerUpSpec::ebgp(rs1)).await;
+    let mut rx2 = peer_up(&tx, PeerUpSpec::ebgp(rs2)).await;
+    let _rx3 = peer_up(&tx, PeerUpSpec::ebgp(plain)).await;
+    let mut spec = PeerUpSpec::ebgp(pcb);
+    spec.per_client_best = true;
+    let _rx4 = peer_up(&tx, spec).await;
+
+    let g1 = query_update_group(&tx, rs1).await;
+    assert!(g1.starts_with("group:"), "RS-transparent peers group: {g1}");
+    assert_eq!(query_update_group(&tx, rs2).await, g1);
+    assert_eq!(
+        query_update_group(&tx, plain).await,
+        g1,
+        "transparency is transport-side; shared chain ⇒ shared group"
+    );
+    assert_eq!(query_update_group(&tx, pcb).await, "per_client_best");
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
+        1.0,
+        "bgp_update_group_fallback_peers",
+    );
+
+    // Shared staging feeds the grouped members identically.
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 9));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![crate::test_support::make_route(
+            prefix,
+            Ipv4Addr::new(10, 0, 3, 9),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let u1 = rx1.recv().await.unwrap();
+    let u2 = rx2.recv().await.unwrap();
+    assert_eq!(u1.announce.len(), 1);
+    assert_eq!(u1.announce[0].prefix, Prefix::V4(prefix));
+    assert_eq!(u1.announce[0].attributes, u2.announce[0].attributes);
 
     drop(tx);
     handle.await.unwrap();

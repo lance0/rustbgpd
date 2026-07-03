@@ -2273,6 +2273,102 @@ fn route_server_client_defaults_to_false() {
 }
 
 #[test]
+fn per_client_best_requires_route_server_client() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+per_client_best = true
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRouteServerConfig { .. }));
+}
+
+#[test]
+fn per_client_best_with_route_server_client_accepted() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+per_client_best = true
+"#;
+    let config = parse(toml_str).unwrap();
+    assert_eq!(config.neighbors[0].per_client_best, Some(true));
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.per_client_best);
+}
+
+#[test]
+fn per_client_best_inherits_from_peer_group() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+route_server_client = true
+per_client_best = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.route_server_client);
+    assert!(peers[0].0.per_client_best);
+}
+
+#[test]
+fn per_client_best_from_group_without_route_server_client_rejected() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+per_client_best = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRouteServerConfig { .. }));
+}
+
+#[test]
 fn remove_private_as_on_ibgp_rejected() {
     let toml_str = r#"
 [global]
@@ -3798,6 +3894,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         route_reflector_client: Some(false),
         orr_vantage: None,
         route_server_client: Some(false),
+        per_client_best: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -4398,6 +4495,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             route_reflector_client: None,
             orr_vantage: None,
             route_server_client: None,
+            per_client_best: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
@@ -4440,6 +4538,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        per_client_best: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -4474,6 +4573,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        per_client_best: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -4534,6 +4634,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        per_client_best: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,

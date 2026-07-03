@@ -101,6 +101,7 @@ async fn vpn_gr_family_not_in_capability_is_withdrawn() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -175,6 +176,7 @@ async fn vpn_gr_eor_clears_stale() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -368,6 +370,7 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -506,6 +509,7 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
     let addpath_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (addpath_out_tx, mut addpath_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: addpath_target,
         peer_asn: 65000,
@@ -528,6 +532,7 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
     let plain_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (plain_out_tx, mut plain_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: plain_target,
         peer_asn: 65000,
@@ -646,6 +651,7 @@ async fn vpn_rr_reflects_non_client_route_to_clients_only() {
     for (peer, is_client) in [(source, false), (client, true), (non_client, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
             session_id: 0,
             peer,
             peer_asn: 65000,
@@ -713,6 +719,7 @@ async fn vpn_same_peer_relabel_triggers_re_advertise() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -785,6 +792,7 @@ async fn vpn_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -863,6 +871,7 @@ async fn send_initial_table_includes_vpn_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -918,6 +927,7 @@ async fn route_refresh_vpn_re_advertises_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

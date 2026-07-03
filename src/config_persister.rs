@@ -179,6 +179,7 @@ log_format = "json"
             route_reflector_client: Some(false),
             orr_vantage: None,
             route_server_client: Some(false),
+            per_client_best: Some(false),
             role: None,
             strict_role: None,
             prefix_orf_receive: None,

@@ -404,6 +404,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        per_client_best: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,

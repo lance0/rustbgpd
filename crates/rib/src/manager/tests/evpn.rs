@@ -19,6 +19,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // Register target as RR client for L2VPN/EVPN (iBGP, same AS).
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -44,6 +45,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     // suppresses them at the stage step.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -137,6 +139,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // Source is an RR client.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -159,6 +162,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     // A second RR client so reflection has somewhere to go.
     let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: other,
         peer_asn: 65000,
@@ -246,6 +250,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // We'll fill it, then the EVPN announce will fail and mark target dirty.
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -268,6 +273,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // Source as RR client so reflection isn't suppressed.
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -914,6 +920,7 @@ async fn inject_evpn_reflects_to_peer() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -1026,6 +1033,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let early = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: early,
         peer_asn: 65000,
@@ -1070,6 +1078,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let late = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: late,
         peer_asn: 65000,
@@ -1244,6 +1253,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1265,6 +1275,7 @@ async fn evpn_export_policy_applies_modifications() {
 
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,

@@ -651,6 +651,7 @@ impl RibManager {
             .get(&peer)
             .and_then(|vantage| self.orr.spf.get(vantage))
             .map(|spf| (&self.orr.topology, spf));
+        let per_client_best = self.peer_per_client_best.contains(&peer);
         let loc_rib = &self.loc_rib;
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
@@ -972,6 +973,7 @@ impl RibManager {
                         target_peer_asn,
                         target_peer_group,
                         prefix_send_max,
+                        false,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,
@@ -980,6 +982,44 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         orr_ctx,
+                        &mut export_memo,
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                        &mut policy_filtered,
+                        false, // route refresh re-emits all anyway via empty refresh_view
+                    );
+                    current_policy_filtered_routes.extend(policy_filtered);
+                } else if per_client_best {
+                    // RFC 7947 §2.3.2 per-client best-path: the refresh
+                    // replay re-derives the same filtered best the live
+                    // distribution path stages (path_id 0). See the
+                    // `send_initial_table` arm for the mode-precedence
+                    // notes (Add-Path outranks; ORR cannot coexist).
+                    debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
+                    let mut policy_filtered = Vec::new();
+                    Self::distribute_multipath_prefix(
+                        &self.ribs,
+                        &self.unicast_prefix_peers,
+                        &refresh_view,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        peer,
+                        target_peer_asn,
+                        target_peer_group,
+                        1,
+                        true,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        llgr.as_ref(),
+                        export_pol.as_ref(),
+                        orf_filter.as_ref(),
+                        None,
                         &mut export_memo,
                         &metrics,
                         policy_stats,

@@ -753,10 +753,18 @@ impl RibManager {
     /// Collects all candidates from all Adj-RIB-In entries, filters by
     /// split-horizon/iBGP/family/policy, sorts by best-path, takes top N,
     /// and diffs against `AdjRibOut` to produce announces and withdrawals.
+    ///
+    /// `stage_path_id_zero` is the RFC 7947 §2.3.2 per-client best-path
+    /// mode (`send_max = 1`): the one permitted candidate is staged at
+    /// `path_id 0` instead of rank 1, so Adj-RIB-Out, BMP RIB-Out, and
+    /// `ListAdvertisedRoutes` present the ordinary single-best shape
+    /// (the wire is already path-id-free — Add-Path send was not
+    /// negotiated for this family).
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together"
+        clippy::fn_params_excessive_bools,
+        reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together; the bools are independent per-target mode/state flags threaded from the caller's ladder"
     )]
     pub(in crate::manager) fn distribute_multipath_prefix(
         ribs: &HashMap<IpAddr, AdjRibIn>,
@@ -768,6 +776,7 @@ impl RibManager {
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         send_max: u32,
+        stage_path_id_zero: bool,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
@@ -910,14 +919,14 @@ impl RibManager {
             // post-modification attribute Arc across every (route, peer)
             // with the same source attrs and equal modifications.
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
-            modified.path_id = next_rank;
+            modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
 
             // Only announce if different from what's already in AdjRibOut.
             // `force` mode bypasses the equality check — see
             // `distribute_single_best_prefix` for the GShut rationale.
             let changed = force
                 || rib_out
-                    .get(prefix, next_rank)
+                    .get(prefix, modified.path_id)
                     .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
                 nh_override_flags.push(nh_action);
@@ -927,10 +936,24 @@ impl RibManager {
             next_rank += 1;
         }
 
-        // Withdraw any previously advertised path_ids beyond the new set
-        for &path_id in rib_out.path_ids_for_prefix(prefix) {
-            if path_id >= next_rank {
-                withdraw.push((*prefix, path_id));
+        if stage_path_id_zero {
+            // Per-client best: at most one route lives at path_id 0.
+            // Withdraw any non-zero residue (e.g. a previous Add-Path
+            // session's ranks), and 0 itself when no candidate was
+            // permitted — an implicit replace otherwise (no spurious
+            // withdraw+announce pair when the filtered best flips).
+            let staged_winner = next_rank > 1;
+            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+                if path_id != 0 || !staged_winner {
+                    withdraw.push((*prefix, path_id));
+                }
+            }
+        } else {
+            // Withdraw any previously advertised path_ids beyond the new set
+            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+                if path_id >= next_rank {
+                    withdraw.push((*prefix, path_id));
+                }
             }
         }
     }

@@ -332,6 +332,13 @@ message NeighborConfig {
   // (RFC 9687 §4.4). Unset = the RFC 9687 §6 default,
   // max(480, 2 × hold_time).
   optional uint32 send_hold_time = 16;
+  // RFC 7947 §2.3.2 per-client best-path (path-hiding mitigation for
+  // route-server clients without Add-Path): when the Loc-RIB best is
+  // denied by this peer's export policy, advertise the best permitted
+  // candidate instead of hiding the prefix. Requires
+  // route_server_client; families with negotiated Add-Path send use
+  // Add-Path instead.
+  bool per_client_best = 17;
 }
 
 message NeighborState {
@@ -372,8 +379,9 @@ message NeighborState {
   uint64 export_policy_routes_denied = 21;
   // Update-group membership (shadow mode): "group:N" when the RIB
   // fingerprint grouped this peer, or the ungrouped reason
-  // ("policy_peer_context", "add_path_send", "orr_vantage",
-  // "orf_installed"). Empty when the peer has no outbound registration.
+  // ("policy_peer_context", "add_path_send", "per_client_best",
+  // "orr_vantage", "orf_installed"). Empty when the peer has no
+  // outbound registration.
   string update_group = 22;
 }
 
@@ -594,6 +602,9 @@ message PeerGroupDefinition {
   // group. 0 disables; non-zero must be greater than the effective hold
   // time (RFC 9687 §4.4). Unset = the RFC 9687 §6 default.
   optional uint32 send_hold_time = 23;
+  // RFC 7947 §2.3.2 per-client best-path inherited by neighbors in this
+  // group. Requires route_server_client. See NeighborConfig.
+  optional bool per_client_best = 24;
 }
 
 message NamedPeerGroup {

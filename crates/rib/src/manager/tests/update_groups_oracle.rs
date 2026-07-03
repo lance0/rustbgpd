@@ -384,6 +384,7 @@ impl Oracle {
         let (out_tx, out_rx) = mpsc::channel(capacity);
         self.tx
             .send(RibUpdate::PeerUp {
+                per_client_best: false,
                 session_id: SESSION,
                 peer: IpAddr::V4(peer),
                 peer_asn: if is_ebgp { 65010 } else { 65000 },

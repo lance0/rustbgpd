@@ -238,6 +238,8 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_group: String,
     pub route_server_client: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub per_client_best: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
     pub strict_role: bool,
@@ -787,6 +789,7 @@ mod tests {
             families: vec!["ipv4_unicast".to_string()],
             peer_group: "rs-clients".to_string(),
             route_server_client: true,
+            per_client_best: false,
             role: "rs".to_string(),
             strict_role: true,
             remote_role: "rs-client".to_string(),

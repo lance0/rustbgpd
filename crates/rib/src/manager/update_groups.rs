@@ -96,6 +96,10 @@ pub(super) enum GroupMembership {
     /// Add-Path send negotiated: the multipath candidate set is
     /// per-target (ranks shift when the target's own path is excluded).
     AddPathSend,
+    /// RFC 7947 §2.3.2 per-client best-path: the filtered best is
+    /// per-target (the member sourcing the Loc-RIB best gets the
+    /// runner-up), so no shared staged winner exists.
+    PerClientBest,
     /// ORR vantage bound: per-vantage winners are per-target
     /// (ADR-0095 Decision 5).
     OrrVantage,
@@ -111,6 +115,7 @@ impl GroupMembership {
             Self::Grouped(id) => format!("group:{id}"),
             Self::PolicyPeerContext => "policy_peer_context".to_string(),
             Self::AddPathSend => "add_path_send".to_string(),
+            Self::PerClientBest => "per_client_best".to_string(),
             Self::OrrVantage => "orr_vantage".to_string(),
             Self::OrfInstalled => "orf_installed".to_string(),
         }
@@ -1899,6 +1904,9 @@ impl RibManager {
         }
         if self.peer_has_any_add_path_send(peer) {
             return GroupMembership::AddPathSend;
+        }
+        if self.peer_per_client_best.contains(&peer) {
+            return GroupMembership::PerClientBest;
         }
         if self.peer_orr_vantage.contains_key(&peer) {
             return GroupMembership::OrrVantage;

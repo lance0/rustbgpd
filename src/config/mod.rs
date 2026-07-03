@@ -847,6 +847,10 @@ impl Config {
             .route_server_client
             .or_else(|| group.and_then(|g| g.route_server_client))
             .unwrap_or(false);
+        transport.per_client_best = neighbor
+            .per_client_best
+            .or_else(|| group.and_then(|g| g.per_client_best))
+            .unwrap_or(false);
         transport.route_reflector_client = neighbor
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))
@@ -918,6 +922,7 @@ impl Config {
             route_reflector_client: None,
             orr_vantage: None,
             route_server_client: None,
+            per_client_best: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
@@ -1599,6 +1604,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(route_reflector_client);
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
+    cmp_field!(per_client_best);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
@@ -1705,6 +1711,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.route_reflector_client == new.route_reflector_client
         && old.orr_vantage == new.orr_vantage
         && old.route_server_client == new.route_server_client
+        && old.per_client_best == new.per_client_best
         && old.role == new.role
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
@@ -4298,6 +4305,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(route_reflector_client);
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
+    cmp_field!(per_client_best);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);

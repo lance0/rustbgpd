@@ -397,6 +397,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
         peer_group: info.peer_group.clone().unwrap_or_default(),
         route_server_client: info.route_server_client,
+        per_client_best: info.per_client_best,
         role: bgp_role_to_string(info.local_role),
         strict_role: info.strict_role,
         add_path_receive: info.add_path_receive,
@@ -540,6 +541,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 config.remote_asn, self.local_asn
             )));
         }
+        if config.per_client_best && !config.route_server_client {
+            return Err(Status::invalid_argument(
+                "per_client_best requires route_server_client",
+            ));
+        }
         if local_role.is_some() && config.remote_asn == self.local_asn {
             return Err(Status::invalid_argument(format!(
                 "role requires eBGP (remote_asn {} == local asn {})",
@@ -591,6 +597,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             // the static TOML `orr_vantage` knob.
             orr_vantage: None,
             route_server_client: config.route_server_client,
+            per_client_best: config.per_client_best,
             remove_private_as,
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
@@ -1121,6 +1128,7 @@ mod tests {
             route_reflector_client: false,
             orr_vantage: None,
             route_server_client: false,
+            per_client_best: false,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,
             add_path_send: false,
