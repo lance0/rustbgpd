@@ -36,7 +36,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (writer+syscall 21.8%). Membership is operator-visible: `rbgp
   neighbor show` Update Group line, `bgp_update_groups`,
   `bgp_update_group_members{group}`, `bgp_update_group_regroups_total`,
-  `bgp_update_group_fallback_peers`.
+  `bgp_update_group_fallback_peers`. Proven at scale by the
+  [1000-peer RR scale receipt](docs/perf/scale-receipt-2026-07.md)
+  (same host, real transport sessions over loopback): 1000 uniform RR
+  clients × 100k routes converge in 1.82 s wire-measured (~32× the
+  pre-arc linear extrapolation of ~59 s) at 419 MiB whole-process RSS
+  (vs an extrapolated 30–40 GB per-peer Adj-RIB-Out before the arc);
+  an M80-style tagging chain on all 1000 clients costs +3%
+  convergence / +8% RSS; churn sustains ~55,800 best-path flips/s to
+  all 1000 clients with `recompute_best` at 1.6% of CPU (was 40–45%
+  pre-#675); a 900-grouped + 100-fallback mixed fleet converges in
+  8.4 s, pinning the fallback price at ~22 MiB per ungrouped peer.
 
 - **M81 interop receipt: the BMP trio + BMPv4, against real collectors.**
   New `interop` CI job (six-node containerlab): rustbgpd as RR reflecting

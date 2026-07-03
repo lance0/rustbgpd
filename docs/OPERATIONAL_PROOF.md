@@ -43,6 +43,7 @@ Compact M36-M80 index (details and assertions stay in
 
 | Receipt | Status | Notes |
 |---------|--------|-------|
+| 1000-peer RR scale receipt | Documented same-host measurement | Real `RibManager` + 1000 real transport sessions over loopback: 100k-route cold convergence, policy-on, mixed-fleet, and churn tables with the profile-to-fix storyline are in [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md). |
 | RIB operations Criterion suite | Documented A/B methodology | Current `main` medians and cumulative deltas are in [`BENCHMARKS.md`](BENCHMARKS.md#rib-operations). |
 | End-to-end bgperf2 | Documented cross-stack comparison | Same-host rustbgpd/BIRD/GoBGP convergence, CPU, and RSS results are in [`BENCHMARKS.md`](BENCHMARKS.md#end-to-end-system-benchmarks). |
 | Distribution fanout | Documented baseline | Measures the real `RibManager::distribute_changes` fanout path and policy-chain overhead. |
