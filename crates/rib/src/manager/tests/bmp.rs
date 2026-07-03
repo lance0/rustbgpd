@@ -4,7 +4,7 @@
 
 use std::time::SystemTime;
 
-use rustbgpd_bmp::{BmpDumpChunk, BmpEvent};
+use rustbgpd_bmp::{BmpDumpChunk, BmpEvent, BmpPathStatus, tlv as bmp_tlv};
 use rustbgpd_wire::UpdateMessage;
 
 use super::*;
@@ -25,7 +25,7 @@ fn decode_pdu(pdu: &bytes::Bytes) -> rustbgpd_wire::ParsedUpdate {
 
 async fn recv_loc_rib_rm(
     bmp_rx: &mut mpsc::Receiver<BmpEvent>,
-) -> (bytes::Bytes, std::time::SystemTime) {
+) -> (bytes::Bytes, std::time::SystemTime, Option<BmpPathStatus>) {
     let event = tokio::time::timeout(Duration::from_secs(2), bmp_rx.recv())
         .await
         .expect("expected a Loc-RIB BMP event")
@@ -34,7 +34,8 @@ async fn recv_loc_rib_rm(
         BmpEvent::LocRibRouteMonitoring {
             update_pdu,
             timestamp,
-        } => (update_pdu, timestamp),
+            path_status,
+        } => (update_pdu, timestamp, path_status),
         other => panic!("expected LocRibRouteMonitoring, got {other:?}"),
     }
 }
@@ -74,10 +75,15 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     })
     .await
     .unwrap();
-    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
     assert_eq!(parsed.announced.len(), 1);
     assert_eq!(parsed.announced[0].prefix, prefix);
+    // Path Marking: sole candidate is Best with no reason (nothing was
+    // compared against it).
+    let status = status.expect("announce carries a path status");
+    assert_eq!(status.status, bmp_tlv::PATH_STATUS_BEST);
+    assert_eq!(status.reason, None);
 
     // 2. Higher LOCAL_PREF from another peer → best changes → announce
     // of the new best (next-hop = peer B).
@@ -93,7 +99,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     })
     .await
     .unwrap();
-    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
     assert_eq!(parsed.announced[0].prefix, prefix);
     assert!(
@@ -103,6 +109,11 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
             .any(|a| matches!(a, PathAttribute::NextHop(nh) if *nh == peer_b)),
         "announce must carry the NEW best's next-hop"
     );
+    // Two candidates decided on LOCAL_PREF: Best bit + the draft's
+    // "local preference" Reason Code re-derived vs the runner-up.
+    let status = status.expect("announce carries a path status");
+    assert_eq!(status.status, bmp_tlv::PATH_STATUS_BEST);
+    assert_eq!(status.reason, Some(bmp_tlv::REASON_LOCAL_PREF));
 
     // 3. Losing path withdrawn — the best (peer B) is unchanged → no
     // Loc-RIB emission.
@@ -135,11 +146,49 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     })
     .await
     .unwrap();
-    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
     assert!(parsed.announced.is_empty());
     assert_eq!(parsed.withdrawn.len(), 1);
     assert_eq!(parsed.withdrawn[0].prefix, prefix);
+    assert_eq!(status, None, "withdrawals carry no path status");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// path-marking-05 §3.1 Stale: a best route flagged by the GR/LLGR
+/// stale machinery carries Best | Stale in its Path Marking payload.
+#[tokio::test]
+async fn stale_best_route_sets_stale_path_status_bit() {
+    let (tx, rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(64);
+    let manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_bmp_tx(bmp_tx);
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 7, 0, 0), 16);
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    let mut route = make_route_with_lp(prefix, peer, 100);
+    route.is_stale = true; // what the RFC 4724 helper marks at restart
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (_, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let status = status.expect("stale announce still carries a path status");
+    assert_eq!(
+        status.status,
+        bmp_tlv::PATH_STATUS_BEST | bmp_tlv::PATH_STATUS_STALE
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -166,7 +215,7 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
     })
     .await
     .unwrap();
-    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
     let mp = parsed
         .attributes
@@ -178,6 +227,11 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
         .expect("VPN announce rides in MP_REACH");
     assert_eq!(mp.vpn_announced.len(), 1);
     assert_eq!(mp.vpn_announced[0].nlri, nlri);
+    // VPN announces mark Best (bits only — the VPN ladder has no
+    // with-reason variant).
+    let status = status.expect("VPN announce carries a path status");
+    assert_eq!(status.status, bmp_tlv::PATH_STATUS_BEST);
+    assert_eq!(status.reason, None);
 
     tx.send(RibUpdate::VpnRoutesReceived {
         peer: IpAddr::V4(peer),
@@ -190,7 +244,7 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
     })
     .await
     .unwrap();
-    let (pdu, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+    let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
     let parsed = decode_pdu(&pdu);
     let mp = parsed
         .attributes
@@ -202,6 +256,7 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
         .expect("VPN withdraw rides in MP_UNREACH");
     assert_eq!(mp.vpn_withdrawn.len(), 1);
     assert_eq!(mp.vpn_withdrawn[0].nlri.key(), nlri.key());
+    assert_eq!(status, None, "VPN withdrawals carry no path status");
 
     drop(tx);
     handle.await.unwrap();
@@ -210,6 +265,10 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
 /// The Loc-RIB dump streams every best (unicast + VPN) in chunks and
 /// closes with exactly one End-of-RIB per streamed family; dump-entry
 /// timestamps reflect route install time, not dump time.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end dump walk asserting order, timestamps, path status, and EoR set together"
+)]
 #[tokio::test]
 async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
     let (tx, rx) = mpsc::channel(64);
@@ -250,7 +309,7 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
         .await
         .unwrap();
 
-    let mut messages: Vec<(bytes::Bytes, SystemTime)> = Vec::new();
+    let mut messages: Vec<(bytes::Bytes, SystemTime, Option<BmpPathStatus>)> = Vec::new();
     while let Some(chunk) = tokio::time::timeout(Duration::from_secs(2), chunk_rx.recv())
         .await
         .expect("dump chunk within timeout")
@@ -266,7 +325,11 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
     let (route_msgs, eor_msgs) = messages.split_at(3);
     let mut dumped_prefixes = Vec::new();
     let mut dumped_vpn = 0;
-    for (pdu, timestamp) in route_msgs {
+    for (pdu, timestamp, status) in route_msgs {
+        // Dump entries are Loc-RIB bests: Best bit, no reason code.
+        let status = status.expect("dump route carries a path status");
+        assert_eq!(status.status, bmp_tlv::PATH_STATUS_BEST);
+        assert_eq!(status.reason, None);
         let parsed = decode_pdu(pdu);
         assert!(
             *timestamp < dump_started - Duration::from_millis(900),
@@ -293,7 +356,8 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
 
     // The trailing four PDUs are EoRs: no NLRI anywhere, one per family.
     let mut eor_families = Vec::new();
-    for (pdu, _) in eor_msgs {
+    for (pdu, _, status) in eor_msgs {
+        assert_eq!(*status, None, "EoR markers carry no path status");
         let parsed = decode_pdu(pdu);
         assert!(parsed.announced.is_empty() && parsed.withdrawn.is_empty());
         match parsed.attributes.iter().find_map(|a| match a {

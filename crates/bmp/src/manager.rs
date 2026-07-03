@@ -151,7 +151,11 @@ impl BmpManager {
             BmpEvent::RouteMonitoring {
                 peer_info,
                 update_pdu,
-            } => codec::encode_route_monitoring(peer_info, update_pdu, version),
+                // Path marking is Loc-RIB-only: the rib-in tap fires at
+                // receive time (before best-path selection) and rib-out
+                // is per-peer staged output — neither has an honest
+                // local decision status to mark.
+            } => codec::encode_route_monitoring(peer_info, update_pdu, None, version),
             BmpEvent::StatsReport {
                 peer_info,
                 adj_rib_in_routes,
@@ -204,9 +208,13 @@ impl BmpManager {
                 BmpEvent::LocRibRouteMonitoring {
                     update_pdu,
                     timestamp,
-                } => {
-                    codec::encode_route_monitoring(&cfg.peer_info(*timestamp), update_pdu, version)
-                }
+                    path_status,
+                } => codec::encode_route_monitoring(
+                    &cfg.peer_info(*timestamp),
+                    update_pdu,
+                    *path_status,
+                    version,
+                ),
                 BmpEvent::LocRibStats { per_family } => {
                     // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
                     // type 10 = its per-AFI/SAFI breakdown.
@@ -472,8 +480,13 @@ async fn forward_loc_rib_dump(
 ) {
     let mut sent: u64 = 0;
     while let Some(chunk) = chunk_rx.recv().await {
-        for (pdu, timestamp) in chunk.messages {
-            let msg = codec::encode_route_monitoring(&cfg.peer_info(timestamp), &pdu, version);
+        for (pdu, timestamp, path_status) in chunk.messages {
+            let msg = codec::encode_route_monitoring(
+                &cfg.peer_info(timestamp),
+                &pdu,
+                path_status,
+                version,
+            );
             match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, collector_tx.send(msg)).await {
                 Ok(Ok(())) => sent += 1,
                 Ok(Err(_)) => {
@@ -1290,6 +1303,7 @@ mod tests {
             .send(BmpEvent::LocRibRouteMonitoring {
                 update_pdu: Bytes::from_static(&[0xCC; 23]),
                 timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+                path_status: None,
             })
             .await
             .unwrap();
@@ -1435,8 +1449,8 @@ mod tests {
             .reply
             .send(crate::types::BmpDumpChunk {
                 messages: vec![
-                    (Bytes::from_static(&[0xD1; 23]), install),
-                    (Bytes::from_static(&[0xD2; 23]), install),
+                    (Bytes::from_static(&[0xD1; 23]), install, None),
+                    (Bytes::from_static(&[0xD2; 23]), install, None),
                 ],
             })
             .await
@@ -1444,7 +1458,7 @@ mod tests {
         request
             .reply
             .send(crate::types::BmpDumpChunk {
-                messages: vec![(Bytes::from_static(&[0xE0; 23]), install)],
+                messages: vec![(Bytes::from_static(&[0xE0; 23]), install, None)],
             })
             .await
             .unwrap();
@@ -1464,11 +1478,77 @@ mod tests {
             .send(BmpEvent::LocRibRouteMonitoring {
                 update_pdu: Bytes::from_static(&[0xF7; 23]),
                 timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+                path_status: None,
             })
             .await
             .unwrap();
         let live = c_rx.recv().await.unwrap();
         assert_eq!(live[48], 0xF7);
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Mixed v3/v4 collectors, one marked Loc-RIB RM event: the v3
+    /// collector's message carries no TLV bytes at all (bare PDU after
+    /// the per-peer header) while the v4 collector gets the BGP
+    /// Message TLV followed by the Path Marking TLV with the event's
+    /// status bitmap and reason code.
+    #[tokio::test]
+    async fn mixed_version_collectors_loc_rib_path_marking() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (v3_tx, mut v3_rx) = mpsc::channel(16);
+        let (v4_tx, mut v4_rx) = mpsc::channel(16);
+        let (dump_tx, _dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (collector_addr(0), v3_tx, loc_rib_filter(), BmpVersion::V3),
+                (collector_addr(1), v4_tx, loc_rib_filter(), BmpVersion::V4),
+            ],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        let pdu = [0xCC; 23];
+        event_tx
+            .send(BmpEvent::LocRibRouteMonitoring {
+                update_pdu: Bytes::copy_from_slice(&pdu),
+                timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+                path_status: Some(crate::types::BmpPathStatus {
+                    status: crate::tlv::PATH_STATUS_BEST,
+                    reason: Some(crate::tlv::REASON_LOCAL_PREF),
+                }),
+            })
+            .await
+            .unwrap();
+
+        // v3: bare PDU right after the per-peer header — no TLVs.
+        let msg = v3_rx.recv().await.unwrap();
+        assert_eq!(msg[0], 3);
+        assert_eq!(&msg[6 + 42..], &pdu, "v3 carries the bare PDU, no TLVs");
+
+        // v4: BGP Message TLV then the Path Marking TLV.
+        let msg = v4_rx.recv().await.unwrap();
+        assert_eq!(msg[0], 4);
+        let tlvs = &msg[6 + 42..];
+        assert_eq!(u16::from_be_bytes([tlvs[0], tlvs[1]]), 7, "BGP Message");
+        let pm = &tlvs[6 + pdu.len()..];
+        assert_eq!(
+            pm,
+            &[
+                0x00, 0x05, // Path Marking TLV (type 5)
+                0x00, 0x06, // status(4) + reason(2)
+                0x00, 0x00, // index 0
+                0x00, 0x00, 0x00, 0x02, // Best
+                0x00, 0x03, // local preference
+            ]
+        );
 
         drop(event_tx);
         drop(control_tx);

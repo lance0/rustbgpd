@@ -533,11 +533,34 @@ impl RibManager {
                 // Loc-RIB install time, i.e. now. Best-unchanged
                 // prefixes never reach this branch.
                 if self.bmp_tx.is_some() {
-                    let pdu = match current_best {
-                        Some(best) => crate::bmp_sync::synthesize_unicast_announce(best),
-                        None => crate::bmp_sync::synthesize_unicast_withdraw(*prefix),
+                    let (pdu, path_status) = match current_best {
+                        Some(best) => {
+                            // Path Marking reason = the decisive step
+                            // versus the runner-up (the closest
+                            // competitor), re-derived here from the
+                            // explain ladder — the hot-path comparator
+                            // records nothing, and a sole candidate
+                            // carries no reason (nothing was compared).
+                            let runner_up = self
+                                .ribs
+                                .values()
+                                .flat_map(|rib| rib.iter_prefix(prefix))
+                                .filter(|c| !(c.peer == best.peer && c.path_id == best.path_id))
+                                .min_by(|a, b| crate::best_path::best_path_cmp(a, b));
+                            let reason = runner_up
+                                .map(|r| crate::best_path::best_path_cmp_with_reason(best, r).1);
+                            let status = crate::bmp_sync::loc_rib_path_status(
+                                best.is_stale || best.is_llgr_stale,
+                                reason,
+                            );
+                            (
+                                crate::bmp_sync::synthesize_unicast_announce(best),
+                                Some(status),
+                            )
+                        }
+                        None => (crate::bmp_sync::synthesize_unicast_withdraw(*prefix), None),
                     };
-                    self.emit_bmp_loc_rib(pdu, std::time::SystemTime::now());
+                    self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
                 }
                 match (previous_best, current_best) {
                     (None, Some(best)) => {

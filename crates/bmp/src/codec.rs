@@ -357,17 +357,26 @@ pub fn encode_loc_rib_peer_down(
 ///
 /// Carries a raw BGP UPDATE PDU (including 19-byte header): bare
 /// after the per-peer header in v3; enclosed in the mandatory BGP
-/// Message TLV (type 7, index 0) in v4 (draft §5.2).
+/// Message TLV (type 7, index 0) in v4 (draft §5.2), followed by the
+/// Path Marking TLV (path-marking-05 §2) when `path_status` is
+/// present. The Path Marking TLV is an RM TLV and cannot be framed in
+/// v3 — a v3 collector's output is byte-identical whether or not a
+/// payload is attached. Index 0 (all NLRIs) is correct because every
+/// synthesized Loc-RIB UPDATE carries exactly one NLRI.
 #[must_use]
 pub fn encode_route_monitoring(
     info: &BmpPeerInfo,
     update_pdu: &[u8],
+    path_status: Option<crate::types::BmpPathStatus>,
     version: BmpVersion,
 ) -> Bytes {
-    // v4 adds type(2) + length(2) + index(2) around the PDU.
+    // v4 adds type(2) + length(2) + index(2) around the PDU, plus the
+    // Path Marking TLV (6 + status(4) [+ reason(2)]) when attached.
     let tlv_overhead = match version {
         BmpVersion::V3 => 0,
-        BmpVersion::V4 => 6,
+        BmpVersion::V4 => {
+            6 + path_status.map_or(0, |ps| 10 + if ps.reason.is_some() { 2 } else { 0 })
+        }
     };
     let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + tlv_overhead + update_pdu.len();
 
@@ -383,6 +392,9 @@ pub fn encode_route_monitoring(
                 tlv::INDEX_ALL_NLRI,
                 update_pdu,
             );
+            if let Some(ps) = path_status {
+                tlv::put_path_marking_tlv(&mut buf, tlv::INDEX_ALL_NLRI, ps.status, ps.reason);
+            }
         }
     }
 
@@ -597,7 +609,12 @@ mod tests {
     fn v3_golden_bytes_regression() {
         let info = sample_peer_info();
         assert_eq!(
-            hex(&encode_route_monitoring(&info, &[0xAB; 23], BmpVersion::V3)),
+            hex(&encode_route_monitoring(
+                &info,
+                &[0xAB; 23],
+                None,
+                BmpVersion::V3
+            )),
             "030000004700000000000000000000000000000000000000000000000a0000020000fdea0a00\
              00026553f10000000000ababababababababababababababababababababababab"
         );
@@ -663,7 +680,7 @@ mod tests {
     fn v4_route_monitoring_wraps_pdu_in_bgp_message_tlv() {
         let info = sample_peer_info();
         let pdu = [0xAB; 23];
-        let msg = encode_route_monitoring(&info, &pdu, BmpVersion::V4);
+        let msg = encode_route_monitoring(&info, &pdu, None, BmpVersion::V4);
 
         assert_eq!(msg[0], 4, "BMP version 4 (draft §3)");
         let len = u32::from_be_bytes(msg[1..5].try_into().unwrap());
@@ -693,11 +710,79 @@ mod tests {
         );
         assert_eq!(&tlv[6..], &pdu, "value = exact UPDATE PDU");
         // Everything before the TLV is byte-identical to v3.
-        let v3 = encode_route_monitoring(&info, &pdu, BmpVersion::V3);
+        let v3 = encode_route_monitoring(&info, &pdu, None, BmpVersion::V3);
         assert_eq!(
             &msg[5..BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN],
             &v3[5..BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN],
             "type + per-peer header unchanged"
+        );
+    }
+
+    /// Path Marking is v4-only: a v3 Route Monitoring message is
+    /// byte-identical whether or not a path-status payload is attached
+    /// (the RM TLV cannot be framed in RFC 7854 v3).
+    #[test]
+    fn v3_route_monitoring_unchanged_by_path_status() {
+        let info = sample_peer_info();
+        let pdu = [0xAB; 23];
+        let ps = crate::types::BmpPathStatus {
+            status: tlv::PATH_STATUS_BEST | tlv::PATH_STATUS_STALE,
+            reason: Some(tlv::REASON_LOCAL_PREF),
+        };
+        assert_eq!(
+            encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V3),
+            encode_route_monitoring(&info, &pdu, None, BmpVersion::V3),
+        );
+    }
+
+    /// draft-ietf-grow-bmp-path-marking-tlv-05 §2 golden bytes: the v4
+    /// Route Monitoring message appends the Path Marking TLV (type 5,
+    /// index 0 — every synthesized Loc-RIB UPDATE carries one NLRI)
+    /// after the BGP Message TLV, with the 4-byte status bitmap and
+    /// the Reason Code present only when one applies.
+    #[test]
+    fn v4_route_monitoring_appends_path_marking_tlv() {
+        let info = sample_peer_info();
+        let pdu = [0xAB; 23];
+
+        // With reason: value = status(4) + reason(2).
+        let ps = crate::types::BmpPathStatus {
+            status: tlv::PATH_STATUS_BEST,
+            reason: Some(tlv::REASON_LOCAL_PREF),
+        };
+        let msg = encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V4);
+        let unmarked = encode_route_monitoring(&info, &pdu, None, BmpVersion::V4);
+        let len = u32::from_be_bytes(msg[1..5].try_into().unwrap());
+        assert_eq!(len as usize, msg.len(), "common-header length");
+        assert_eq!(msg.len(), unmarked.len() + 12, "TLV adds 6 + 4 + 2 bytes");
+        assert_eq!(
+            &msg[5..unmarked.len()],
+            &unmarked[5..],
+            "everything before the Path Marking TLV is the plain v4 framing \
+             (common-header length field aside)"
+        );
+        let pm = &msg[unmarked.len()..];
+        assert_eq!(
+            pm,
+            &[
+                0x00, 0x05, // type 5 (path-marking-05 §7)
+                0x00, 0x06, // length: status(4) + reason(2), index excluded
+                0x00, 0x00, // index 0 = all NLRIs (single-NLRI UPDATE)
+                0x00, 0x00, 0x00, 0x02, // Best
+                0x00, 0x03, // reason: local preference
+            ]
+        );
+
+        // Without reason: the optional field is absent, not zeroed.
+        let ps = crate::types::BmpPathStatus {
+            status: tlv::PATH_STATUS_BEST | tlv::PATH_STATUS_STALE,
+            reason: None,
+        };
+        let msg = encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V4);
+        let pm = &msg[unmarked.len()..];
+        assert_eq!(
+            pm,
+            &[0x00, 0x05, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02]
         );
     }
 
@@ -827,7 +912,7 @@ mod tests {
     fn route_monitoring_encoding() {
         let info = sample_peer_info();
         let update_pdu = vec![0xAA; 50];
-        let msg = encode_route_monitoring(&info, &update_pdu, BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &update_pdu, None, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         let pdu_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         assert_eq!(&msg[pdu_offset..], &update_pdu[..]);
@@ -942,7 +1027,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.is_ipv6 = true;
         info.peer_addr = IpAddr::V6("2001:db8::2".parse().unwrap());
-        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], None, BmpVersion::V3);
         assert_ne!(msg[BMP_COMMON_HEADER_LEN + 1] & PEER_FLAG_V, 0);
     }
 
@@ -955,7 +1040,7 @@ mod tests {
         info.is_rib_out = true;
         info.is_post_policy = true;
         let pdu = [0xAB; 23];
-        let msg = encode_route_monitoring(&info, &pdu, BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &pdu, None, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         assert_eq!(msg[0], 3, "BMP version 3");
         assert_eq!(
@@ -1054,7 +1139,7 @@ mod tests {
     #[test]
     fn loc_rib_per_peer_header_golden() {
         let cfg = sample_loc_rib_config();
-        let msg = encode_route_monitoring(&cfg.peer_info(ts()), &[0xCD; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&cfg.peer_info(ts()), &[0xCD; 23], None, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         let hdr = &msg[BMP_COMMON_HEADER_LEN..];
         assert_eq!(hdr[0], 3, "peer type 3 (Loc-RIB instance)");
@@ -1086,7 +1171,7 @@ mod tests {
             is_as4: false,
             timestamp: ts(),
         };
-        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], None, BmpVersion::V3);
         assert_eq!(msg[BMP_COMMON_HEADER_LEN + 1], 0);
     }
 
@@ -1192,7 +1277,7 @@ mod tests {
     fn ipv4_address_encoding_uses_12_zero_bytes() {
         // RFC 7854 §4.2: IPv4 peer address is 12 zero bytes + 4-byte IPv4 (NOT IPv4-mapped ::ffff:)
         let info = sample_peer_info(); // IPv4 10.0.0.2
-        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], None, BmpVersion::V3);
         // Per-peer header starts at offset 6 (after common header)
         // Address field is at offset 6 + 2 (type+flags) + 8 (distinguisher) = 16
         let addr_offset = BMP_COMMON_HEADER_LEN + 2 + 8;
@@ -1215,7 +1300,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.timestamp = UNIX_EPOCH + std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
 
-        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], None, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
 
         let timestamp_offset = BMP_COMMON_HEADER_LEN + 34;
@@ -1233,7 +1318,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.is_ipv6 = true;
         info.peer_addr = IpAddr::V6("2001:db8::2".parse().unwrap());
-        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], None, BmpVersion::V3);
         let addr_offset = BMP_COMMON_HEADER_LEN + 2 + 8;
         let addr_bytes = &msg[addr_offset..addr_offset + 16];
         let expected: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();

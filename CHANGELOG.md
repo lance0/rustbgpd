@@ -11,6 +11,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BMP Path Marking TLV on Loc-RIB monitoring
+  (draft-ietf-grow-bmp-path-marking-tlv-05, pre-IANA).** BMPv4
+  (`version = 4`) collectors monitoring `loc_rib` now receive the Path
+  Marking TLV on every Route Monitoring announcement (live best-path
+  changes and the collector-connect table dump): a 4-octet Path Status
+  bitmap marking the route `Best` (§3.1 — every Loc-RIB route is the
+  decision winner by definition) plus `Stale` when the GR/LLGR stale
+  machinery holds it, and — on live unicast announcements where a
+  competing path was compared — the optional 2-octet Reason Code (§3.2)
+  naming the decisive best-path step, re-derived at emit against the
+  runner-up from the existing explain ladder (the hot-path comparator
+  records nothing). Decisive steps without a registered draft code
+  (stale/RPKI/ASPA preference, cluster-list length) omit the optional
+  reason rather than mislabel it. Status bits a route reflector without
+  a forwarding plane cannot attest to (Primary/Backup/Non-installed/
+  Best-external/Filtered/Suppressed) are never fabricated; rib-in-pre
+  (taps before best-path selection) and rib-out-post (per-peer staged
+  output) streams carry no marking; withdrawals carry none (a gone path
+  has no status). Automatic on v4 — no new knob; v3 output stays
+  byte-identical (pinned by regression tests). **Type-code collision
+  caveat:** path-marking-05 self-assigns RM TLV type 5, which
+  draft-ietf-grow-bmp-tlv-20 §9 meanwhile assigned to the VRF/Table
+  Name TLV — rustbgpd never emits that TLV so its own v4 output is
+  unambiguous, but expect a renumber at RFC publication (annotated in
+  `crates/bmp/src/tlv.rs`).
+
 - **BMPv4 per-collector framing (draft-ietf-grow-bmp-tlv-20, pre-IANA).**
   New per-collector `version = 3 | 4` config field (default 3). A v4
   collector gets common-header version 4 on every message type (draft
