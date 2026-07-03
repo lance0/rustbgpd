@@ -33,11 +33,13 @@
 #    all — survive the entire cycle. The zebra-stamped row is the
 #    discrimination the NDA_PROTOCOL stamp buys (the flags-only rule
 #    would have adopted and reaped it); the stamp-LESS row proves the
-#    post-v0.38.0 strict default, which requires the stamp and no
-#    longer accepts absence as the pre-stamp legacy shape (the
-#    stamp-or-legacy rule would have adopted and reaped it; it
-#    remains reachable via RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1,
-#    deliberately NOT set here).
+#    strict rule (required since the post-v0.38.0 flip; the strict
+#    path is now the ONLY path — the RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY
+#    escape hatch that restored stamp-or-legacy acceptance was removed
+#    once the migration window closed, and setting it now hard-errors
+#    at boot), which requires the stamp and does not accept absence as
+#    the pre-stamp legacy shape (the stamp-or-legacy rule would have
+#    adopted and reaped it).
 # 3. After `kill -9` of the rustbgpd process (container and netns
 #    survive — this is NOT a container stop), every marker row is
 #    still in the kernel: the crash-leftover premise.

@@ -118,13 +118,6 @@ pub struct LinuxDataplane {
     /// socket. Slice 2 (`nexthop_raw::NexthopSocket`) supplies the
     /// underlying primitive; slice 3b uses it via `NexthopOps`.
     nexthop_socket: nexthop_raw::NexthopSocket,
-    /// ADR-0082 L3 neighbor adoption mode, resolved once at
-    /// construction from `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY` and
-    /// threaded into the per-row classifier as a plain bool. `false`
-    /// (the default) requires the `NDA_PROTOCOL = RTPROT_BGP`
-    /// ownership stamp at adoption; `true` restores the pre-flip
-    /// stamp-or-legacy rule for skip-version upgrades.
-    l3_adoption_accept_legacy: bool,
 }
 
 impl LinuxDataplane {
@@ -299,7 +292,6 @@ impl LinuxDataplane {
             local_mac_rx: Some(local_mac_rx),
             kernel_event_rx,
             nexthop_socket,
-            l3_adoption_accept_legacy: l3_adoption::adoption_accept_legacy(),
         })
     }
 }
@@ -623,12 +615,7 @@ impl Dataplane for LinuxDataplane {
         // marker classifiers, and the all-or-nothing failure handling
         // (any sub-dump error → `None`, with the failing surface
         // logged) live in `linux::l3_adoption`.
-        l3_adoption::dump_l3_adoption_candidates(
-            &self.handle,
-            ip_vrfs,
-            self.l3_adoption_accept_legacy,
-        )
-        .await
+        l3_adoption::dump_l3_adoption_candidates(&self.handle, ip_vrfs).await
     }
 
     async fn probe_ip_vrfs(&mut self, ip_vrfs: &IpVrfTable) -> HashMap<IpVrfId, IpVrfStatus> {

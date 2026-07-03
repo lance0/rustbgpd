@@ -941,6 +941,20 @@ fn main() {
         return;
     }
 
+    // Removed escape hatch: fail loudly rather than silently ignoring it,
+    // so automation still setting the variable can't restart into changed
+    // adoption behavior unnoticed. Any value (even "0") is an error.
+    if std::env::var_os("RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY").is_some() {
+        eprintln!(
+            "error: RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY is set, but this escape hatch \
+             has been removed: the EVPN L3 legacy-adoption migration window closed at \
+             v0.38.0 (ADR-0082). Unset the variable; for the skip-version upgrade path \
+             see docs/evpn-vtep-troubleshooting.md, \"Crash-restart adoption across \
+             upgrades (ADR-0082)\"."
+        );
+        process::exit(1);
+    }
+
     let config = match Config::load_with_diagnostics(&config_path) {
         Ok(c) => c,
         Err(diagnostic) => {

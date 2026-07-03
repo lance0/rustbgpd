@@ -542,20 +542,23 @@ rows show `proto bgp` in `ip neigh show` alongside `extern_learn`,
 and the crash-restart adoption sweep (ADR-0079) refuses rows stamped
 by another controller (e.g. zebra's `proto zebra`).
 
-L3 neighbor adoption now *requires* the stamp by default: the
-stamp-or-legacy migration window (v0.38.0) is closed, and a
-stamp-less `extern_learn` + permanent row — the shape a pre-stamp
-rustbgpd left behind — is no longer adopted (it is preserved
-untouched, like any other foreign row, but it will not be reaped
-when its route is withdrawn). The upgrade gate that follows:
-upgrading from v0.37.0 or earlier, run v0.38.0 at least once first —
-its converge re-writes every owned row with the stamp — before
-moving to a strict-default version. For a skip-version upgrade with
-pre-stamp kernel rows still live, set
-`RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` for the first boot; it
-restores the stamp-or-legacy acceptance rule for that run (the
-re-claims stamp the rows, so the variable can be dropped on the next
-restart). Foreign stamps are refused in both modes.
+L3 neighbor adoption *requires* the stamp: the stamp-or-legacy
+migration window (v0.38.0) is closed, and a stamp-less
+`extern_learn` + permanent row — the shape a pre-stamp rustbgpd left
+behind — is not adopted (it is preserved untouched, like any other
+foreign row, but it will not be reaped when its route is withdrawn).
+The upgrade gate that follows: upgrading from v0.37.0 or earlier,
+run a version in the v0.38.0–v0.45.0 range at least once first — its
+converge re-writes every owned row with the stamp — before moving
+on. Foreign stamps are always refused.
+
+The `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` escape hatch that
+restored stamp-or-legacy acceptance for a skip-version upgrade's
+first boot was **removed in [Unreleased]**: the daemon now refuses
+to start if the variable is set (to any value), so stale automation
+fails loudly instead of silently changing adoption behavior. If you
+still have pre-stamp kernel rows, step through a v0.38.0–v0.45.0
+release once (or clear the stale rows by hand) before upgrading.
 
 FDB rows are unaffected either way: mainline kernels don't store the
 attribute for AF_BRIDGE entries, so FDB adoption stays flag-based

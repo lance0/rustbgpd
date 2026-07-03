@@ -151,6 +151,37 @@ fn optional_json_string<'a>(row: &'a serde_json::Value, key: &str) -> &'a str {
 }
 
 #[test]
+fn removed_adoption_accept_legacy_env_hard_errors_at_boot() {
+    // The RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY escape hatch was removed
+    // after the v0.38.0 migration window closed. Setting it — to ANY
+    // value, including "0" — must abort boot with a message naming the
+    // variable and the upgrade path, never be silently ignored.
+    for value in ["1", "0"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+            .env("RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY", value)
+            .arg("/nonexistent/rustbgpd-test-config.toml")
+            .output()
+            .expect("failed to spawn rustbgpd binary");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "value={value}: daemon must exit 1 before touching the config"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for needle in [
+            "RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY",
+            "v0.38.0",
+            "docs/evpn-vtep-troubleshooting.md",
+        ] {
+            assert!(
+                stderr.contains(needle),
+                "value={value}: boot error must mention {needle:?}, got:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let config_path = write_config(temp.path());

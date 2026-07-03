@@ -315,10 +315,11 @@ fn build_ip_route_ecmp_message(
 /// retry succeeds (ADR-0082 decision 5: a strict-validation kernel
 /// predating the neighbor protocol attribute, Linux < 5.0 — outside
 /// the EVPN kernel baseline we test, but fail-soft). Subsequent
-/// installs skip the stamp for the rest of the run; since the
-/// ADR-0082 strict flip, adopting such unstamped rows after a crash
-/// needs `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` (the warn below
-/// says so once). Process-global on purpose: the capability is a
+/// installs skip the stamp for the rest of the run; under the
+/// ADR-0082 strict rule such unstamped rows cannot be adopted after
+/// a crash restart (the legacy escape hatch was removed once the
+/// v0.38.0 migration window closed — the warn below says so once).
+/// Process-global on purpose: the capability is a
 /// property of the running kernel, not of any one actor.
 static L3_NEIGHBOR_STAMP_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
@@ -394,9 +395,9 @@ pub(crate) async fn apply_add_l3_neighbor(
                 tracing::warn!(
                     "kernel rejected the NDA_PROTOCOL ownership stamp on an L3 \
                      neighbor install (EINVAL) but accepted the unstamped retry; \
-                     disabling stamping for the rest of this run — set \
-                     RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1 so a restart can \
-                     adopt this kernel's unstamped rows (ADR-0082)"
+                     disabling stamping for the rest of this run — a restart \
+                     cannot adopt this kernel's unstamped rows (ADR-0082 strict \
+                     rule; crash leftovers are preserved untouched, never reaped)"
                 );
             }
             Ok(())
