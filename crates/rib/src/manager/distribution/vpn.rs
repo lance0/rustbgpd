@@ -594,6 +594,20 @@ impl RibManager {
                                 .map(|d| d.key),
                         );
                     }
+                    // Member-scoped withdraws (source flip onto this
+                    // member / RT mutation out of its Φ) keep the key
+                    // IN the table — invisible to tombstones. Ride the
+                    // member's extra-withdraw residue instead.
+                    let lost: Vec<VpnRouteKey> = stage
+                        .member_scoped_withdraws(peer, member_filter.as_ref())
+                        .collect();
+                    if !lost.is_empty() {
+                        self.pending_extra_withdraws
+                            .entry(peer)
+                            .or_default()
+                            .vpn
+                            .extend(lost);
+                    }
                 }
                 continue;
             }

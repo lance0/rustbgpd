@@ -111,6 +111,35 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pre-#675); a 900-grouped + 100-fallback mixed fleet converges in
   8.4 s, pinning the fallback price at ~22 MiB per ungrouped peer.
 
+- **Update groups v2: VPNv4/VPNv6 join the shared staging, with the
+  RFC 4684 RT filter applied per member at emit (ADR-0099,
+  #685/#686 + close slice).** The group key gains the VPN-sendable
+  and RTC-negotiated dimensions (still one group per peer); grouped
+  members' VPN routes stage once per group through the same
+  parameterized export tail and fan out via an RT-aware source-flip
+  matrix — a PE fleet with distinct RT memberships shares ONE group,
+  because the per-member filter Φ is applied at emit and never keyed.
+  A member's RT-membership change takes a zero-policy-eval
+  membership-delta path: one walk of the group table emits the
+  minimal RFC 4684 wire delta, table untouched. Joins, dirty resyncs,
+  regroup snapshots, RFC 7313 VPN refresh, and adj-out/BMP queries
+  are all Φ-aware; Add-Path send stays a structural disqualifier
+  (recorded verdict: per-member path-id correction is unsound without
+  per-member state) and per-vantage ORR grouping is cut pending
+  demand. Also fixes a v2-slice-1 gap: a member-scoped withdraw
+  (source flip onto the member, or a route mutating out of its Φ)
+  lost to a full outbound channel now rides the member's
+  extra-withdraw residue instead of stranding a stale route until the
+  next covering event. Measured (rrharness, 100k VPNv4, same host,
+  3-run medians; [scale receipt](docs/perf/scale-receipt-2026-07.md)
+  Scenario E): uniform 256-client convergence 18.66 s → 3.75 s and
+  RSS 8227 → 492 MiB; heterogeneous ~10%-Φ 256-client 3.21 s → 1.10 s
+  / 1481 → 482 MiB; at 1000 clients 12.60 s / 625 MiB uniform and
+  3.92 s / 636 MiB heterogeneous (vs ~73 s / ~31 GiB and ~12.5 s /
+  ~5.7 GiB extrapolated per-peer); a one-RT membership flip at 100k
+  staged routes delivers its 1600-route delta on the wire in ~15 ms
+  (widen) / ~12 ms (narrow).
+
 - **M81 interop receipt: the BMP trio + BMPv4, against real collectors.**
   New `interop` CI job (six-node containerlab): rustbgpd as RR reflecting
   unicast v4/v6 + VPNv4 between two GoBGP clients while streaming all

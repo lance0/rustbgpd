@@ -230,6 +230,26 @@ impl GroupStageOutput {
         !self.exceptions.contains(&member)
     }
 
+    /// Member-scoped withdraw keys of this pass that [`Self::withdrawn_keys`]
+    /// (the tombstone feed) never records: the source-flip arm — the
+    /// member is the delta's NEW source and the displaced entry was
+    /// another peer's, so the member's emission is a withdraw while the
+    /// key stays IN the group table. Recorded into the member's extra
+    /// (over-)withdraws when its emission is lost to a full channel.
+    pub(in crate::manager) fn member_scoped_withdraws(
+        &self,
+        member: IpAddr,
+    ) -> impl Iterator<Item = (Prefix, u32)> + '_ {
+        self.deltas.iter().filter_map(move |delta| {
+            (delta
+                .new
+                .as_ref()
+                .is_some_and(|(route, _)| route.peer == member)
+                && delta.old_source.is_some_and(|source| source != member))
+            .then_some((delta.prefix, delta.path_id))
+        })
+    }
+
     /// Build the shared emission from the committed deltas (one `Route`
     /// shell clone per delta, TOTAL — not per member).
     fn build_shared_emit(&mut self) {
@@ -391,6 +411,33 @@ pub(in crate::manager) struct VpnGroupDelta {
 pub(in crate::manager) struct VpnGroupStageOutput {
     pub(in crate::manager) deltas: Vec<VpnGroupDelta>,
     pub(in crate::manager) evals: GroupEvalAccumulator,
+}
+
+impl VpnGroupStageOutput {
+    /// Member-scoped withdraw keys of this pass that the VPN tombstone
+    /// feed (deltas with `new == None`) never records: `had ∧ ¬gets`
+    /// entries whose delta still holds a staged route — a source flip
+    /// ONTO the member, or a route mutating out of its Φ — so the
+    /// member's emission is a withdraw while the key stays IN the group
+    /// table. Recorded into the member's extra (over-)withdraws when
+    /// its emission is lost to a full channel.
+    pub(in crate::manager) fn member_scoped_withdraws<'a>(
+        &'a self,
+        member: IpAddr,
+        filter: Option<&'a RtcMembership>,
+    ) -> impl Iterator<Item = VpnRouteKey> + 'a {
+        self.deltas.iter().filter_map(move |delta| {
+            let had = delta
+                .old
+                .as_ref()
+                .is_some_and(|old| old.peer != member && rt_passes(filter, old));
+            let gets = delta
+                .new
+                .as_ref()
+                .is_some_and(|new| new.peer != member && rt_passes(filter, new));
+            (delta.new.is_some() && had && !gets).then_some(delta.key)
+        })
+    }
 }
 
 /// Whether a staged VPN route passes a member's RFC 4684 RT filter:

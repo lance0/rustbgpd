@@ -953,9 +953,19 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     knob — with a differential oracle pinning identical output. Measured
     ~28× single-shot 100k-route convergence at 256 uniform RR clients
     (15.1 s → 0.54 s); staging falls from 82.8% to 30.5% of RR CPU.
-    Remaining v2 refinements, demand-gated: per-family group keying,
-    grouping Add-Path peers with identical (max, families), per-(vantage,
-    key) ORR groups, RT-filter-aware VPN grouping.
+    v2 (ADR-0099, #685/#686): per-family keying and RT-filter-aware VPN
+    grouping are **done** — VPNv4/v6 stage through the group table with
+    the RFC 4684 Φ filter applied per member at emit (never keyed, so
+    heterogeneous PE fleets share one group) and a zero-policy-eval
+    membership-delta path; 1000 clients × 100k VPNv4 converge in 12.6 s
+    / 625 MiB uniform, 3.9 s / 636 MiB at ~10% heterogeneous Φ.
+    Remaining, recorded in ADR-0099: grouping Add-Path-send peers —
+    verdict **unsound without per-member path-id state** (shared rank
+    holes or per-member renumbering both break wire parity / the group
+    equality baseline; a v3 needs per-member id maps or nothing); and
+    per-(vantage, key) ORR groups — cut (win bounded by
+    peers-per-vantage, second staged-table dimension), un-defer trigger:
+    an operator running many peers per vantage.
   - Adj-RIB-In attribute interning: explore storing a stable fingerprint beside
     interned `Arc<Vec<PathAttribute>>` sets to avoid hashing every attribute on
     each insert, with full equality fallback. Gate on `adj_rib_in_insert`,

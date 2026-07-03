@@ -1715,10 +1715,24 @@ impl RibManager {
                     // its resync can (over-)withdraw them.
                     if let Some(gid) = member_of
                         && let Some(stage) = group_stage.get(&gid)
-                        && let Some(group) = self.group_ribs.get_mut(&gid)
                     {
-                        let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys().collect();
-                        group.tombstones.extend(withdrawn);
+                        if let Some(group) = self.group_ribs.get_mut(&gid) {
+                            let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys().collect();
+                            group.tombstones.extend(withdrawn);
+                        }
+                        // A source-flip member-scoped withdraw (this
+                        // member is the delta's new source) keeps the
+                        // key IN the table — invisible to tombstones.
+                        // Ride the member's extra-withdraw residue.
+                        let lost: Vec<(Prefix, u32)> =
+                            stage.member_scoped_withdraws(peer).collect();
+                        if !lost.is_empty() {
+                            self.pending_extra_withdraws
+                                .entry(peer)
+                                .or_default()
+                                .unicast
+                                .extend(lost);
+                        }
                     }
                 }
             } else {

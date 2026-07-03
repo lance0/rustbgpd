@@ -107,6 +107,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0096](0096-policy-language.md) | A typed, compiled policy language (`.rpol`) | Accepted | 2026-07-02 |
 | [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 |
 | [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 |
+| [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted | 2026-07-03 |
 
 ## Template
 

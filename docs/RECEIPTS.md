@@ -125,6 +125,7 @@ covered by later CI receipts). Procedures and results:
 | Receipt | What it measures | Source |
 |---------|------------------|--------|
 | 1000-peer RR scale receipt | Real `RibManager` + 1000 real transport sessions over loopback: 100k-route cold convergence, policy-on, mixed-fleet, and churn, with the profile-to-fix storyline behind the ADR-0098 update-groups arc | [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md) |
+| 1000-peer VPN scale receipt (update-groups v2) | 100k VPNv4 to 1000 RR clients, uniform and heterogeneous ~10% RT-membership shapes, plus the one-RT membership-flip wire latency (~15 ms at 100k staged, zero policy evals) — the ADR-0099 receipt | [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md) (Scenario E) |
 | RIB operations (Criterion) | Ingest, best-path, distribution microbenchmarks with pinned A/B compare methodology | [`BENCHMARKS.md`](BENCHMARKS.md#rib-operations) |
 | End-to-end bgperf2 | Same-host convergence/CPU/RSS comparison vs BIRD and GoBGP | [`BENCHMARKS.md`](BENCHMARKS.md#end-to-end-system-benchmarks) |
 | High-N RIB memory | Structural memory at 100k/500k/900k prefixes; A/B via `bench/compare-rib-memory.sh` under the shared host lock | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md) |
