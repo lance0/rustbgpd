@@ -169,6 +169,8 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
 pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
     PeerGroupConfig {
         hold_time: definition.hold_time,
+        send_hold_time: None,
+        // Not exposed over the gRPC peer-group definition yet.
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password,
         ttl_security: definition.ttl_security,
@@ -403,6 +405,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
                     hold_time: cfg.hold_time,
+                    send_hold_time: cfg.send_hold_time,
                     max_prefixes: cfg.max_prefixes,
                     md5_password: cfg.md5_password.clone(),
                     tcp_ao: cfg.tcp_ao.as_ref().map(transport_tcp_ao_to_config),
@@ -846,6 +849,7 @@ remote_asn = 65002
                     description: "protected".to_string(),
                     peer_group: None,
                     hold_time: None,
+                    send_hold_time: None,
                     max_prefixes: None,
                     md5_password: None,
                     tcp_ao: Some(rustbgpd_transport::TcpAoConfig {

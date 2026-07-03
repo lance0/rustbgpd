@@ -467,6 +467,10 @@ impl PeerManager {
         };
         let mut peer = PeerConfig::new(self.local_asn, config.remote_asn, self.router_id);
         peer.hold_time = config.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+        // RFC 9687 §6 default: greater of 8 minutes or 2× hold time.
+        peer.send_hold_time = config
+            .send_hold_time
+            .unwrap_or_else(|| rustbgpd_fsm::default_send_hold_time(peer.hold_time));
         peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
         peer.families = families;
         peer.graceful_restart = config.graceful_restart;

@@ -59,6 +59,7 @@ impl PeerManager {
             description: managed.description.clone(),
             peer_group: managed.peer_group.clone(),
             hold_time: managed.hold_time,
+            send_hold_time: Some(tc.peer.send_hold_time),
             max_prefixes: managed.max_prefixes,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),

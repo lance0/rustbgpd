@@ -75,6 +75,7 @@ the old neighbor is torn down, the new one starts fresh.
 | `description` | live | Metadata only; flows through reconcile. |
 | `peer_group` | live | Group inheritance resolves at reconcile time; effective fields update in place. |
 | `hold_time` | live (effective next session) | New value used in the next OPEN exchange. Existing session keeps the negotiated hold time until renegotiation. |
+| `send_hold_time` | live (effective next session) | RFC 9687 send hold timer. The per-peer writer task captures the value when its TCP connection is established, so a new value (including 0 = disable) guards the next session; the existing session keeps the old timer. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `md5_password` | live (effective next session) | New password is staged in the transport config; the next active-open socket installs it. **TCP-MD5 keys are per-socket**, so the running session keeps the old key until it bounces. To rotate, change the value and either wait for a natural flap or disable+enable the neighbor. |
 | `tcp_ao` | restart-required | Pinned by `pin_tcp_ao_startup_only_runtime`. RFC 5925 MKTs are installed only when the socket is created (active-open) or when the passive listener boots. Add/remove/rotate requires a daemon restart. Logged at `ERROR` during reload. |
@@ -112,6 +113,7 @@ dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 | Field | Class | Notes |
 |---|---|---|
 | `hold_time` | live (effective next session) | Same as neighbor. |
+| `send_hold_time` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
 | `bfd` | restart-required | Pinned. |

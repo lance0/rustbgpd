@@ -6873,3 +6873,75 @@ async fn established_session_routes_keepalive_cadence_to_writer() {
         "hold 90 negotiates a 30 s keepalive cadence owned by the writer"
     );
 }
+
+/// RFC 9687 §4.3 teardown semantics at the session layer: a writer
+/// exit of `SendHoldExpired` must (1) tear the session down to Idle
+/// through the TCP-failure path, (2) emit a BMP Peer Down with reason
+/// 2 — local close, *no* NOTIFICATION — carrying FSM event code 29
+/// (`SendHoldTimer_Expires`, RFC 9687 §4.2), (3) increment
+/// `bgp_send_hold_expirations_total`, and (4) put no NOTIFICATION on
+/// the wire (the peer observes a bare FIN after the handshake bytes).
+#[tokio::test]
+async fn send_hold_expiry_tears_down_without_notification() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    // Drain the handshake bytes we sent (OPEN + KEEPALIVE) and the BMP
+    // Peer Up so the assertions below observe only the teardown.
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Open(_)
+    ));
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Keepalive
+    ));
+    assert!(matches!(
+        bmp_rx.recv().await.unwrap(),
+        BmpEvent::PeerUp { .. }
+    ));
+
+    // The writer observed a wedged peer and exited with SendHoldExpired.
+    session
+        .handle_writer_exit(Ok(Err(super::writer::WriterExit::SendHoldExpired {
+            limit: Duration::from_secs(2),
+        })))
+        .await;
+
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::PeerDown { reason, .. } => {
+            assert!(
+                matches!(reason, PeerDownReason::LocalNoNotification(29)),
+                "expected reason 2 with FSM event 29, got {reason:?}"
+            );
+        }
+        other => panic!("expected BMP PeerDown, got {other:?}"),
+    }
+    let expirations = counter_value(
+        &session.metrics.clone(),
+        "bgp_send_hold_expirations_total",
+        &session.peer_label,
+    );
+    assert!(
+        (expirations - 1.0).abs() < f64::EPSILON,
+        "got {expirations}"
+    );
+    assert!(session.last_error.contains("send hold timer expired"));
+
+    // No NOTIFICATION follows the handshake: the teardown dropped the
+    // writer senders, so the peer sees EOF as the very next event.
+    let mut trailing = [0_u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(5), server.read(&mut trailing))
+        .await
+        .expect("peer must observe EOF promptly")
+        .unwrap();
+    assert_eq!(
+        n,
+        0,
+        "unexpected bytes after teardown: {:?}",
+        &trailing[..n]
+    );
+}

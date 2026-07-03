@@ -541,6 +541,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
+            // Not exposed over gRPC AddNeighbor yet: derive the
+            // RFC 9687 §6 default from the hold time.
+            send_hold_time: None,
             max_prefixes: if config.max_prefixes > 0 {
                 Some(config.max_prefixes)
             } else {
@@ -1077,6 +1080,7 @@ mod tests {
             description: "static peer".to_string(),
             peer_group: None,
             hold_time: Some(90),
+            send_hold_time: None,
             max_prefixes: None,
             md5_password: None,
             tcp_ao: None,

@@ -104,9 +104,9 @@ pub(crate) struct PeerSession {
     /// teardown) also stops the cadence.
     writer_keepalive_tx: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
     /// `JoinHandle` of the writer task. Polled by the session's
-    /// `select!` so writer-exit (clean shutdown or TCP error) surfaces
-    /// as a TCP-disconnect event.
-    writer_join: Option<JoinHandle<std::io::Result<()>>>,
+    /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687
+    /// send-hold expiry) surfaces as a TCP-disconnect event.
+    writer_join: Option<JoinHandle<Result<(), writer::WriterExit>>>,
     read_buf: ReadBuffer,
     timers: Timers,
     metrics: BgpMetrics,
@@ -274,6 +274,19 @@ pub(crate) struct PeerSession {
 
 /// Outbound channel buffer size.
 const OUTBOUND_BUFFER: usize = 4096;
+
+/// FSM event code carried in the BMP Peer Down reason-2 body when the
+/// send hold timer expires: Event 29, `SendHoldTimer_Expires` (RFC 9687
+/// §4.2, extending the RFC 4271 §8.1 event numbering that RFC 7854 §4.9
+/// references for "Local system closed, no NOTIFICATION").
+const SEND_HOLD_TIMER_EXPIRES_FSM_EVENT: u16 = 29;
+
+/// The writer's RFC 9687 `SendHoldTime` for this session, as a
+/// `Duration`. `0` in config means disabled (`None`).
+fn send_hold_duration(config: &TransportConfig) -> Option<Duration> {
+    (config.peer.send_hold_time > 0)
+        .then(|| Duration::from_secs(u64::from(config.peer.send_hold_time)))
+}
 
 /// Resolve next-hop for import policy modifications.
 ///
@@ -556,6 +569,7 @@ impl PeerSession {
             OUTBOUND_BUFFER,
             metrics.clone(),
             peer_label.clone(),
+            send_hold_duration(&config),
         );
         Self {
             config,
@@ -718,6 +732,68 @@ impl PeerSession {
         }
     }
 
+    /// Handle the writer task's exit as observed by the run-loop
+    /// `select!`. Clean exits (both senders dropped) are the tail end
+    /// of a teardown already in progress; everything else is treated as
+    /// a TCP disconnect. A send-hold expiry (RFC 9687 §4.3) additionally
+    /// records the local no-NOTIFICATION cause before tearing down:
+    ///
+    /// - counter `bgp_send_hold_expirations_total{peer}`;
+    /// - BMP Peer Down reason 2 (local close, no NOTIFICATION) with FSM
+    ///   event code 29 (`SendHoldTimer_Expires`, RFC 9687 §4.2);
+    /// - an operator event carrying BGP error code 8 / subcode 0
+    ///   ("Send Hold Timer Expired", RFC 9687 §5) — the §4.3 required
+    ///   error log in event-history form. No NOTIFICATION is put on the
+    ///   wire: the socket is not draining and §4.3 only permits one when
+    ///   it cannot delay the teardown.
+    ///
+    /// The subsequent `TcpConnectionFails` drive performs exactly the
+    /// §4.3 expiry actions: session down, TCP close, `ConnectRetryCounter`
+    /// increment, transition to Idle.
+    async fn handle_writer_exit(
+        &mut self,
+        join_result: Result<Result<(), writer::WriterExit>, tokio::task::JoinError>,
+    ) {
+        match join_result {
+            Ok(Ok(())) => {
+                debug!(peer = %self.peer_label, "writer task exited cleanly");
+                return;
+            }
+            Ok(Err(writer::WriterExit::SendHoldExpired { limit })) => {
+                // The writer already logged the expiry at `warn`.
+                self.metrics.record_send_hold_expiration(&self.peer_label);
+                self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
+                    SEND_HOLD_TIMER_EXPIRES_FSM_EVENT,
+                ));
+                self.last_error = format!(
+                    "send hold timer expired after {}s (RFC 9687)",
+                    limit.as_secs()
+                );
+                self.emit_notification_event(
+                    SessionNotificationDirection::Sent,
+                    &NotificationMessage {
+                        code: NotificationCode::SendHoldTimerExpired,
+                        subcode: 0,
+                        data: Bytes::new(),
+                    },
+                    Some(format!(
+                        "send hold timer ({}s) expired; session terminated locally without \
+                         sending a NOTIFICATION (RFC 9687 §4.3)",
+                        limit.as_secs()
+                    )),
+                );
+            }
+            Ok(Err(writer::WriterExit::Io(e))) => {
+                debug!(peer = %self.peer_label, error = %e, "writer task TCP error");
+            }
+            Err(e) => {
+                warn!(peer = %self.peer_label, error = %e, "writer task panicked");
+            }
+        }
+        self.handle_tcp_disconnect();
+        self.drive_fsm(Event::TcpConnectionFails).await;
+    }
+
     pub(super) fn record_otc_routes_blocked(
         &mut self,
         reason: rustbgpd_telemetry::reason_labels::OtcBlockReason,
@@ -743,10 +819,6 @@ impl PeerSession {
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "single select! over 9 arms — splitting hides the dispatch shape"
-    )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
@@ -856,6 +928,7 @@ impl PeerSession {
                                 OUTBOUND_BUFFER,
                                 self.metrics.clone(),
                                 self.peer_label.clone(),
+                                send_hold_duration(&self.config),
                             );
                             self.read_half = Some(rh);
                             self.writer_bulk_tx = Some(handle.bulk_tx);
@@ -877,27 +950,14 @@ impl PeerSession {
 
                 // Writer task exit — clean shutdown when both senders
                 // dropped (close_tcp / handle_tcp_disconnect did their
-                // job), or `Err(io::Error)` when TCP write/flush failed.
-                // Either way, treat as TCP-disconnect from the session's
+                // job), or `Err(WriterExit)` when TCP write/flush failed
+                // or the RFC 9687 send hold timer expired. Either way,
+                // treat as TCP-disconnect from the session's
                 // perspective. The arm clears `writer_join = None` to
                 // prevent the second-poll panic.
                 join_result = io::await_writer_join(writer_join), if writer_join.is_some() => {
                     self.writer_join = None;
-                    match join_result {
-                        Ok(Ok(())) => {
-                            debug!(peer = %self.peer_label, "writer task exited cleanly");
-                        }
-                        Ok(Err(e)) => {
-                            debug!(peer = %self.peer_label, error = %e, "writer task TCP error");
-                            self.handle_tcp_disconnect();
-                            self.drive_fsm(Event::TcpConnectionFails).await;
-                        }
-                        Err(e) => {
-                            warn!(peer = %self.peer_label, error = %e, "writer task panicked");
-                            self.handle_tcp_disconnect();
-                            self.drive_fsm(Event::TcpConnectionFails).await;
-                        }
-                    }
+                    self.handle_writer_exit(join_result).await;
                 }
 
                 // Outbound route updates from RIB manager
@@ -923,6 +983,7 @@ impl PeerSession {
             OUTBOUND_BUFFER,
             self.metrics.clone(),
             self.peer_label.clone(),
+            send_hold_duration(&self.config),
         );
         self.read_half = Some(rh);
         self.writer_bulk_tx = Some(handle.bulk_tx);

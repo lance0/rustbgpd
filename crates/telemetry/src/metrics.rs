@@ -112,6 +112,7 @@ pub struct BgpMetrics {
     outbound_route_drops: IntCounterVec,
     inbound_rib_backpressure: IntCounterVec,
     hold_timer_rearmed_pending_input: IntCounterVec,
+    send_hold_expirations: IntCounterVec,
 
     // ── RIB distribution health ─────────────────────────────────
     rib_outbound_registered_peers: IntGauge,
@@ -464,6 +465,18 @@ impl BgpMetrics {
                 "bgp_hold_timer_rearmed_pending_input_total",
                 "Hold-timer expiries converted to re-arms because unprocessed peer input was \
                  pending — the local daemon was the bottleneck, not the peer (ADR-0078).",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let send_hold_expirations = IntCounterVec::new(
+            Opts::new(
+                "bgp_send_hold_expirations_total",
+                "Sessions torn down because the RFC 9687 send hold timer expired: the peer \
+                 stopped draining its TCP socket, so our outbound BGP data could not be \
+                 written within the configured SendHoldTime. Terminated locally without a \
+                 NOTIFICATION.",
             ),
             &["peer"],
         )
@@ -1280,6 +1293,9 @@ impl BgpMetrics {
             .register(Box::new(hold_timer_rearmed_pending_input.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(send_hold_expirations.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_outbound_registered_peers.clone()))
             .expect("metric not already registered");
         registry
@@ -1556,6 +1572,7 @@ impl BgpMetrics {
             outbound_route_drops,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
+            send_hold_expirations,
             rib_outbound_registered_peers,
             rib_outbound_registration_replaced,
             rib_stale_peer_down_ignored,
@@ -1688,6 +1705,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_failover, peer);
         Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
+        Self::reap_peer_series_from_vec(&self.send_hold_expirations, peer);
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.otc_routes_blocked, peer);
@@ -1987,6 +2005,12 @@ impl BgpMetrics {
         self.hold_timer_rearmed_pending_input
             .with_label_values(&[peer])
             .inc();
+    }
+
+    /// Record a session teardown caused by an RFC 9687 send-hold-timer
+    /// expiry (peer stopped draining its TCP socket).
+    pub fn record_send_hold_expiration(&self, peer: &str) {
+        self.send_hold_expirations.with_label_values(&[peer]).inc();
     }
 
     /// Set the number of peers currently registered with the RIB manager
@@ -3881,6 +3905,7 @@ mod tests {
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
         m.record_hold_timer_rearmed_pending_input(peer);
+        m.record_send_hold_expiration(peer);
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
         m.record_rib_stale_session_message_ignored(peer, "routes");
@@ -3930,8 +3955,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 31 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 32);
+        // 32 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 33);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -3941,7 +3966,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 32);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 33);
     }
 
     #[test]

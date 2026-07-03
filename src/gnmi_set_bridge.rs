@@ -389,6 +389,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         description: None,
         peer_group: None,
         hold_time: None,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,

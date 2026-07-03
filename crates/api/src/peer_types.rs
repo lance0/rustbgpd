@@ -1372,6 +1372,9 @@ pub struct PeerManagerNeighborConfig {
     pub peer_group: Option<String>,
     /// Override hold time (None = use default).
     pub hold_time: Option<u16>,
+    /// Override RFC 9687 send hold time in seconds; 0 disables (None =
+    /// derive the RFC 9687 §6 default from the hold time).
+    pub send_hold_time: Option<u32>,
     /// Maximum prefixes accepted before Cease/1 (None = unlimited).
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.

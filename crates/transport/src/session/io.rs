@@ -706,8 +706,8 @@ pub(super) async fn read_tcp(
 /// `writer_join = None` before the next select iteration — polling a
 /// completed `JoinHandle` a second time panics per tokio semantics.
 pub(super) async fn await_writer_join(
-    handle: &mut Option<JoinHandle<std::io::Result<()>>>,
-) -> Result<std::io::Result<()>, JoinError> {
+    handle: &mut Option<JoinHandle<Result<(), super::writer::WriterExit>>>,
+) -> Result<Result<(), super::writer::WriterExit>, JoinError> {
     let join = handle
         .as_mut()
         .expect("await_writer_join called without handle");

@@ -28,6 +28,22 @@ pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> boo
     )
 }
 
+/// Minimum default `SendHoldTime` in seconds: 8 minutes (RFC 9687 §6).
+pub const MIN_DEFAULT_SEND_HOLD_TIME: u32 = 480;
+
+/// Derive the default `SendHoldTime` for a configured hold time.
+///
+/// RFC 9687 §6 recommends a default of the greater of 8 minutes or 2×
+/// the *negotiated* hold time. The negotiated hold time is not known at
+/// configuration time, but it can never exceed the configured value
+/// (RFC 4271 §4.2 takes the minimum of both proposals), so deriving
+/// from the configured hold time always yields a value ≥ the RFC's
+/// recommendation and always > `hold_time` as §4.4 requires.
+#[must_use]
+pub fn default_send_hold_time(hold_time: u16) -> u32 {
+    MIN_DEFAULT_SEND_HOLD_TIME.max(2 * u32::from(hold_time))
+}
+
 /// Configuration for a single BGP peer session.
 ///
 /// `#[non_exhaustive]`: future BGP features add fields here, so external
@@ -49,6 +65,12 @@ pub struct PeerConfig {
     pub local_router_id: Ipv4Addr,
     /// Proposed hold time in seconds (0 = no keepalives, or >= 3).
     pub hold_time: u16,
+    /// Send hold time in seconds (RFC 9687): tear the session down when
+    /// outbound BGP data cannot be handed to the peer's TCP stream for
+    /// this long. 0 = disabled. When non-zero it MUST be greater than
+    /// `hold_time` (RFC 9687 §4.4) — config validation enforces this.
+    /// Use [`default_send_hold_time`] to derive the RFC 9687 §6 default.
+    pub send_hold_time: u32,
     /// Base connect-retry timer in seconds.
     pub connect_retry_secs: u32,
     /// Address families to advertise in OPEN capabilities.
@@ -92,6 +114,7 @@ impl Default for PeerConfig {
             remote_asn: 0,
             local_router_id: Ipv4Addr::UNSPECIFIED,
             hold_time: 90,
+            send_hold_time: default_send_hold_time(90),
             connect_retry_secs: 120,
             families: Vec::new(),
             graceful_restart: false,
@@ -319,6 +342,7 @@ mod tests {
             remote_asn: 65002,
             local_router_id: Ipv4Addr::new(10, 0, 0, 1),
             hold_time: 90,
+            send_hold_time: default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
@@ -393,6 +417,17 @@ mod tests {
                 .iter()
                 .any(|cap| matches!(cap, Capability::ExtendedNextHop(_)))
         );
+    }
+
+    #[test]
+    fn default_send_hold_time_is_rfc9687_section6() {
+        // Greater of 8 minutes or 2× hold time, always > hold_time.
+        assert_eq!(default_send_hold_time(0), 480);
+        assert_eq!(default_send_hold_time(90), 480);
+        assert_eq!(default_send_hold_time(240), 480);
+        assert_eq!(default_send_hold_time(241), 482);
+        assert_eq!(default_send_hold_time(u16::MAX), 131_070);
+        assert_eq!(PeerConfig::default().send_hold_time, 480);
     }
 
     #[test]

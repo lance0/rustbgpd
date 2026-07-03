@@ -99,6 +99,23 @@ resolved.
 
 ## Limitations (by design, not bugs)
 
+- **RFC 9687 send hold timer is a per-write deadline, not the RFC's
+  free-running timer.** The RFC models a `SendHoldTimer` restarted on
+  every sent message; rustbgpd instead bounds each individual
+  `write_all + flush` in the writer task by the configured
+  `send_hold_time`. The trigger condition is equivalent — a peer that
+  stops draining its socket stalls the pending write, which then times
+  out — and the per-write shape cannot false-fire on an idle session
+  (so protection stays active even with `hold_time = 0`, where the RFC
+  would stop its timer). Two practical consequences: detection starts
+  only once the kernel send buffer stops accepting bytes (shared by
+  every implementation of this mechanism — FRR's SendQ-progress check
+  measures the same way), and a `send_hold_time` config change applies
+  to sessions established after the change, not to the currently
+  running writer. No NOTIFICATION is sent on expiry (optional per
+  §4.3; the socket is by definition not draining). Details in
+  `docs/RFC_NOTES.md` (RFC 9687 section).
+
 - **BMP Adj-RIB-In/Adj-RIB-Out streams are live-only — no table dump on
   collector (re)connect.** A collector that connects mid-life receives
   the cached Peer Up replay but no synthesized Route Monitoring dump of

@@ -704,6 +704,11 @@ impl Config {
             .hold_time
             .or_else(|| group.and_then(|g| g.hold_time))
             .unwrap_or(DEFAULT_HOLD_TIME);
+        // RFC 9687 §6 default: greater of 8 minutes or 2× hold time.
+        peer.send_hold_time = neighbor
+            .send_hold_time
+            .or_else(|| group.and_then(|g| g.send_hold_time))
+            .unwrap_or_else(|| rustbgpd_fsm::default_send_hold_time(peer.hold_time));
         peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
         peer.families = families;
         peer.graceful_restart = neighbor
@@ -849,6 +854,7 @@ impl Config {
             description: Some(description.to_string()),
             peer_group: Some(peer_group_name.to_string()),
             hold_time: None,
+            send_hold_time: None,
             max_prefixes: None,
             md5_password: None,
             tcp_ao: None,
@@ -1532,6 +1538,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(description);
     cmp_field!(peer_group);
     cmp_field!(hold_time);
+    cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
     cmp_field!(ttl_security);
     cmp_field!(families);
@@ -1636,6 +1643,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.description == new.description
         && old.peer_group == new.peer_group
         && old.hold_time == new.hold_time
+        && old.send_hold_time == new.send_hold_time
         && old.max_prefixes == new.max_prefixes
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
@@ -4198,6 +4206,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     }
 
     cmp_field!(hold_time);
+    cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
     cmp_field!(ttl_security);
     cmp_field!(families);
