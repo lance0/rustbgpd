@@ -32,6 +32,11 @@ jobs:
       - run: python3 scripts/check-clippy-reasons.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `bench-internals` is off by default and its bench target carries
+      # `required-features`, so nothing above compiles the feature-gated
+      # bench_support surface; it has silently broken before when a
+      # manager API grew an argument.
+      - run: cargo check -p rustbgpd-rib --features bench-internals --benches
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:
