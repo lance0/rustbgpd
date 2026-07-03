@@ -577,6 +577,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An enhanced route refresh no longer purges GR/LLGR-stale routes
+  awaiting End-of-RIB (LAN-187).** RFC 7313's end-of-refresh sweep
+  removes routes not re-advertised inside the BoRR..EoRR window — but a
+  refresh window opened while a peer was re-established under graceful
+  restart (End-of-RIB still pending) also snapshotted the GR-stale and
+  LLGR-stale routes RFC 4724 §4.1 / RFC 9494 §4.2 deliberately retain,
+  so an EoRR (or refresh timeout) from the still-converging restarter
+  deleted exactly the paths GR preserves. GR/LLGR-stale routes are now
+  excluded from the refresh snapshot: a re-advertisement inside the
+  window still refreshes them, and End-of-RIB or the GR/LLGR timers
+  remain their only removal points. Manager tests pin the joint
+  GR+refresh and LLGR+refresh lifecycles across all seven route
+  families' snapshot arms.
+
 - **Label-stack withdraws no longer reset labeled-unicast and VPN
   sessions (caught live by the M79 lab).** RFC 8277 §2.4 says a withdraw
   carries a single ignored 3-octet compatibility field in the label

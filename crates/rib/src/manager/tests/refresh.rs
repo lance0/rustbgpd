@@ -798,3 +798,290 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// LAN-187: an enhanced-refresh window completing while the peer is inside
+/// its GR window (re-established, End-of-RIB pending) must not purge the
+/// GR-stale routes RFC 4724 §4.1 retains until End-of-RIB — the restarting
+/// peer's replay is not authoritative while it is still converging.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end GR + refresh-window walk: down, re-establish, BoRR..EoRR, End-of-RIB"
+)]
+#[tokio::test]
+async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(kept_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            make_route(retained_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Peer re-establishes — still awaiting End-of-RIB, routes GR-stale.
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // A refresh window opens mid-GR: GR-stale routes are owned by the GR
+    // machinery and must not enter the refresh snapshot.
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap();
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 0.0);
+
+    // Only `kept_prefix` is re-advertised inside the window.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(kept_prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    // EoRR must NOT purge the GR-stale route: End-of-RIB (or the GR
+    // timer) resolves it, not the refresh sweep.
+    let mut received = query_received_routes(&tx, source).await;
+    received.sort_by_key(|r| r.prefix.to_string());
+    assert_eq!(
+        received.len(),
+        2,
+        "GR-stale route must survive the EoRR sweep until End-of-RIB"
+    );
+    assert!(!received[0].is_stale, "re-advertised route is fresh");
+    assert!(
+        received[1].is_stale,
+        "non-readvertised route stays GR-stale after EoRR"
+    );
+
+    // End-of-RIB then performs the RFC 4724 §4.1 removal as usual.
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let received = query_received_routes(&tx, source).await;
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].prefix, Prefix::V4(kept_prefix));
+    assert!(!received[0].is_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-187 (LLGR arm): a route promoted to LLGR-stale (RFC 9494) whose peer
+/// re-established during the LLGR phase must equally survive an `EoRR` sweep
+/// — RFC 9494 §4.2 retains it until re-advertisement, End-of-RIB, or the
+/// LLGR timer.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end LLGR + refresh-window walk: down, GR expiry, re-establish, BoRR..EoRR, End-of-RIB"
+)]
+#[tokio::test]
+async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(kept_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            make_route(retained_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 3600,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+    assert!(best.iter().all(|r| r.is_stale));
+
+    // GR timer expires → LLGR promotion.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    let best = query_best_routes(&tx).await;
+    assert!(best.iter().all(|r| r.is_llgr_stale));
+
+    // Peer re-establishes during LLGR (moves back to the GR wait-for-EoR
+    // phase, routes keep their LLGR-stale flag).
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        session_id: 0,
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(kept_prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    let mut received = query_received_routes(&tx, source).await;
+    received.sort_by_key(|r| r.prefix.to_string());
+    assert_eq!(
+        received.len(),
+        2,
+        "LLGR-stale route must survive the EoRR sweep until End-of-RIB"
+    );
+    assert!(!received[0].is_llgr_stale, "re-advertised route is fresh");
+    assert!(
+        received[1].is_llgr_stale,
+        "non-readvertised route stays LLGR-stale after EoRR"
+    );
+
+    // End-of-RIB then removes it (RFC 4724 §4.1 via RFC 9494 §4.2).
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let received = query_received_routes(&tx, source).await;
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].prefix, Prefix::V4(kept_prefix));
+    assert!(!received[0].is_llgr_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
