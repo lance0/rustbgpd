@@ -473,12 +473,34 @@ impl RibManager {
             (peer, afi, safi),
             tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
         );
+        // RFC 7313 §4 refresh-stale snapshot, joint with GR/LLGR retention
+        // (LAN-187). A route can be inside a refresh window AND GR/LLGR-stale
+        // at once: the peer re-established under GR (or during the LLGR
+        // phase), its End-of-RIB is still pending, and a refresh window
+        // opened. The four combinations at EoRR:
+        //   1. snapshotted, not GR/LLGR-stale, not re-advertised → purged
+        //      (RFC 7313 §4: not re-advertised between BoRR and EoRR).
+        //   2. re-advertised inside the window → kept; the insert removed
+        //      the snapshot key and cleared any GR/LLGR staleness
+        //      (implicit-replace, RFC 4724 §4.1).
+        //   3. GR/LLGR-stale at BoRR, not re-advertised → NOT snapshotted
+        //      below, so EoRR does not purge it: a restarting peer's replay
+        //      is not authoritative while it is still converging. RFC 4724
+        //      §4.1 retains stale paths until End-of-RIB or the restart
+        //      timer, and RFC 9494 §4.2 retains LLGR-stale paths until the
+        //      LLGR timer — those owners sweep the route later.
+        //   4. GR/LLGR-stale acquired DURING the window: unreachable — GR
+        //      entry is session-down, which drops every refresh window for
+        //      the peer (`clear_peer_refresh_state`).
         let mut stale_count = 0usize;
         if let Some(rib) = self.ribs.get(&peer) {
             if safi == Safi::FlowSpec {
                 let stale = self.refresh_stale_flowspec.entry(peer).or_default();
                 stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
-                for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
+                for route in rib
+                    .iter_flowspec()
+                    .filter(|route| route.afi == afi && !route.is_stale && !route.is_llgr_stale)
+                {
                     if stale.insert((route.afi, route.rule.clone(), route.path_id)) {
                         stale_count += 1;
                     }
@@ -486,10 +508,9 @@ impl RibManager {
             } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
                 let stale = self.refresh_stale_bgpls.entry(peer).or_default();
                 stale.retain(|key| key.family != bgpls_family);
-                for route in rib
-                    .iter_bgpls()
-                    .filter(|route| route.family == bgpls_family)
-                {
+                for route in rib.iter_bgpls().filter(|route| {
+                    route.family == bgpls_family && !route.is_stale && !route.is_llgr_stale
+                }) {
                     if stale.insert(route.key()) {
                         stale_count += 1;
                     }
@@ -497,10 +518,9 @@ impl RibManager {
             } else if safi == Safi::MplsVpn {
                 let stale = self.refresh_stale_vpn.entry(peer).or_default();
                 stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib
-                    .iter_vpn()
-                    .filter(|route| route.afi_safi() == (afi, safi))
-                {
+                for route in rib.iter_vpn().filter(|route| {
+                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
+                }) {
                     if stale.insert(route.key()) {
                         stale_count += 1;
                     }
@@ -508,10 +528,9 @@ impl RibManager {
             } else if safi == Safi::LabeledUnicast {
                 let stale = self.refresh_stale_labeled.entry(peer).or_default();
                 stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib
-                    .iter_labeled()
-                    .filter(|route| route.afi_safi() == (afi, safi))
-                {
+                for route in rib.iter_labeled().filter(|route| {
+                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
+                }) {
                     if stale.insert(route.key()) {
                         stale_count += 1;
                     }
@@ -519,7 +538,10 @@ impl RibManager {
             } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 let stale = self.refresh_stale_evpn.entry(peer).or_default();
                 stale.clear();
-                for route in rib.iter_evpn() {
+                for route in rib
+                    .iter_evpn()
+                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
+                {
                     if stale.insert(route.key()) {
                         stale_count += 1;
                     }
@@ -529,7 +551,10 @@ impl RibManager {
                 // per-peer set is safe — the EVPN pattern, not the VPN one.
                 let stale = self.refresh_stale_rtc.entry(peer).or_default();
                 stale.clear();
-                for route in rib.iter_rtc() {
+                for route in rib
+                    .iter_rtc()
+                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
+                {
                     if stale.insert(route.key()) {
                         stale_count += 1;
                     }
@@ -537,10 +562,11 @@ impl RibManager {
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
                 stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
-                for route in rib
-                    .iter()
-                    .filter(|route| prefix_family(&route.prefix) == (afi, safi))
-                {
+                for route in rib.iter().filter(|route| {
+                    prefix_family(&route.prefix) == (afi, safi)
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                }) {
                     if stale.insert((route.prefix, route.path_id)) {
                         stale_count += 1;
                     }

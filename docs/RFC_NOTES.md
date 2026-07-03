@@ -468,6 +468,16 @@ implemented per ADR-0040.
   unreplaced routes. 5-minute timeout on the refresh window.
 - Outbound: Enhanced peers get BoRR → routes → EoRR; legacy peers get
   routes → EoR.
+- Joint behavior with GR/LLGR retention (LAN-187): routes flagged
+  GR-stale or LLGR-stale are NOT snapshotted at BoRR, so EoRR (or the
+  window timeout) never purges them. A restarting peer's refresh replay
+  is not authoritative while it is still converging — RFC 4724 §4.1
+  retains stale paths until End-of-RIB or the restart timer, RFC 9494
+  §4.2 until the LLGR timer; those remain the only removal points. A
+  re-advertisement inside the window still clears both staleness kinds
+  via implicit replace. The reverse ordering (GR entry during an open
+  window) is a session-down, which drops all refresh windows for the
+  peer. Combination matrix in `handle_begin_route_refresh`.
 - See ADR-0038.
 
 ---
