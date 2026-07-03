@@ -1,0 +1,8 @@
+homepage: "https://github.com/lance0/rustbgpd"
+main_repo: "https://github.com/lance0/rustbgpd"
+language: rust
+primary_contact: "lancey3@gmail.com"
+sanitizers:
+  - address
+fuzzing_engines:
+  - libfuzzer

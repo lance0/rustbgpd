@@ -62,4 +62,28 @@ path = "fuzz_targets/decode_vpn.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_labeled"
+path = "fuzz_targets/decode_labeled.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_rtc"
+path = "fuzz_targets/decode_rtc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_open"
+path = "fuzz_targets/decode_open.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_route_refresh"
+path = "fuzz_targets/decode_route_refresh.rs"
+test = false
+doc = false
+
 [workspace]
