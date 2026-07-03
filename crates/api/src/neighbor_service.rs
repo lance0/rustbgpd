@@ -22,6 +22,11 @@ use rustbgpd_rib::RibUpdate;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Default hold time applied by the peer manager when `hold_time` is
+/// unset — mirrored here (same value as the daemon config default) for
+/// send-hold-time validation parity with the config path.
+const DEFAULT_HOLD_TIME: u16 = 90;
+
 fn is_ipv6_link_local(address: IpAddr) -> bool {
     match address {
         IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
@@ -384,6 +389,9 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         remote_asn: info.remote_asn,
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
+        // Effective value (configured or the RFC 9687 §6 derived
+        // default); 0 = disabled.
+        send_hold_time: Some(info.send_hold_time),
         max_prefixes: info.max_prefixes.unwrap_or(0),
         families,
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
@@ -482,6 +490,26 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         if config.hold_time > 0 && config.hold_time < 3 {
             return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
         }
+        // RFC 9687 §4.4 parity with the config path: a non-zero send
+        // hold time must exceed the effective hold time (0 = disabled,
+        // unset = derived default). hold_time 0 here means "use the
+        // default" (see the Some/None mapping below), so validate
+        // against what the peer manager will actually apply.
+        if let Some(value) = config.send_hold_time
+            && value != 0
+        {
+            let effective_hold_time = if config.hold_time > 0 {
+                config.hold_time
+            } else {
+                u32::from(DEFAULT_HOLD_TIME)
+            };
+            if value <= effective_hold_time {
+                return Err(Status::invalid_argument(format!(
+                    "invalid send_hold_time {value}: must be 0 (disabled) or greater than \
+                     hold_time {effective_hold_time} (RFC 9687 §4.4)"
+                )));
+            }
+        }
         let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
         match (is_ipv6_link_local(address), interface.as_ref()) {
             (true, None) => {
@@ -541,9 +569,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
-            // Not exposed over gRPC AddNeighbor yet: derive the
-            // RFC 9687 §6 default from the hold time.
-            send_hold_time: None,
+            send_hold_time: config.send_hold_time,
             max_prefixes: if config.max_prefixes > 0 {
                 Some(config.max_prefixes)
             } else {
@@ -1199,6 +1225,61 @@ mod tests {
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("hold_time"));
+    }
+
+    /// RFC 9687 §4.4 parity with the config path: a non-zero
+    /// `send_hold_time` must exceed the effective hold time — both when
+    /// `hold_time` is explicit and when it is the daemon default (90).
+    #[tokio::test]
+    async fn add_neighbor_rejects_send_hold_time_not_above_hold_time() {
+        let svc = make_service();
+        for (hold_time, send_hold_time) in [(90, 90), (0, 90), (120, 100)] {
+            let req = Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    remote_asn: 65002,
+                    hold_time,
+                    send_hold_time: Some(send_hold_time),
+                    ..Default::default()
+                }),
+            });
+            let err = svc.add_neighbor(req).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+            assert!(
+                err.message().contains("send_hold_time"),
+                "hold {hold_time} / send-hold {send_hold_time}: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_forwards_send_hold_time() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
+
+        let call = tokio::spawn(async move {
+            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    remote_asn: 65002,
+                    hold_time: 90,
+                    // 0 = disabled is also valid (config-path parity).
+                    send_hold_time: Some(0),
+                    ..Default::default()
+                }),
+            }))
+            .await
+        });
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddPeer { config, reply, .. } => {
+                assert_eq!(config.send_hold_time, Some(0));
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddPeer"),
+        }
+        call.await.unwrap().unwrap();
     }
 
     #[tokio::test]

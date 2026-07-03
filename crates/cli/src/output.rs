@@ -232,6 +232,8 @@ pub struct JsonNeighborDetail {
     pub last_error: String,
     pub description: String,
     pub hold_time: u32,
+    /// Effective RFC 9687 send hold time in seconds (0 = disabled).
+    pub send_hold_time: u32,
     pub families: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_group: String,
@@ -781,6 +783,7 @@ mod tests {
             last_error: String::new(),
             description: "peer-2".to_string(),
             hold_time: 90,
+            send_hold_time: 480,
             families: vec!["ipv4_unicast".to_string()],
             peer_group: "rs-clients".to_string(),
             route_server_client: true,

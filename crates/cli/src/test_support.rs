@@ -597,6 +597,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 remote_asn: 65002,
                 description: "peer-2".to_string(),
                 hold_time: 90,
+                send_hold_time: Some(480),
                 max_prefixes: 0,
                 families: vec!["ipv4_unicast".to_string()],
                 remove_private_as: String::new(),

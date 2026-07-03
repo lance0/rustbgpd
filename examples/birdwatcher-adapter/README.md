@@ -45,13 +45,14 @@ every RPC the adapter calls is a read.
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 
 Every endpoint of the in-daemon server is fully servable over today's
-gRPC API — there are no 501 endpoints.
+gRPC API — there are no 501 endpoints. Route `age` is served from the
+`Route.received_at_epoch_seconds` proto field (RIB receive time), the
+same source the in-daemon server reads.
 
 ### Field-level gaps
 
 | Field                  | In-daemon server                  | Adapter                              |
 |------------------------|-----------------------------------|--------------------------------------|
-| route `age`            | derived from RIB receive time     | `""` — the gRPC `Route` message carries no received-at timestamp; Alice-LG parses empty as zero time (benign) |
 | status `last_reconfig` | `""` (not tracked)                | `""` (unchanged)                     |
 
 Error behavior differs only on failure: when the daemon is unreachable

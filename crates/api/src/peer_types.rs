@@ -1294,6 +1294,9 @@ pub struct NamedPolicySnapshot {
 pub struct PeerGroupDefinition {
     /// Override hold time.
     pub hold_time: Option<u16>,
+    /// Override RFC 9687 send hold time in seconds; 0 disables (None =
+    /// derive the RFC 9687 §6 default from the hold time).
+    pub send_hold_time: Option<u32>,
     /// Override max prefixes.
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.
@@ -1673,6 +1676,8 @@ pub struct PeerInfo {
     pub prefix_count: usize,
     /// Configured hold time override (None = default).
     pub hold_time: Option<u16>,
+    /// Effective RFC 9687 send hold time in seconds (0 = disabled).
+    pub send_hold_time: u32,
     /// Maximum prefix limit (None = unlimited).
     pub max_prefixes: Option<u32>,
     /// Configured address families.

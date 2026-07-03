@@ -169,8 +169,7 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
 pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
     PeerGroupConfig {
         hold_time: definition.hold_time,
-        send_hold_time: None,
-        // Not exposed over the gRPC peer-group definition yet.
+        send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password,
         ttl_security: definition.ttl_security,
@@ -209,6 +208,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
 pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
     PeerGroupDefinition {
         hold_time: definition.hold_time,
+        send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password.clone(),
         ttl_security: definition.ttl_security,

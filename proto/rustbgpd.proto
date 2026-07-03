@@ -326,6 +326,12 @@ message NeighborConfig {
   string role = 14;
   // Require the peer to advertise a compatible BGP Role capability.
   bool strict_role = 15;
+  // RFC 9687 send hold timer in seconds: tear the session down when the
+  // peer stops draining its TCP socket for this long. 0 disables; a
+  // non-zero value must be greater than the effective hold time
+  // (RFC 9687 §4.4). Unset = the RFC 9687 §6 default,
+  // max(480, 2 × hold_time).
+  optional uint32 send_hold_time = 16;
 }
 
 message NeighborState {
@@ -584,6 +590,10 @@ message PeerGroupDefinition {
   // in this group: an IP address identifying the clients' IGP location as a
   // BGP-LS topology node. Requires route_reflector_client = true.
   optional string orr_vantage = 22;
+  // RFC 9687 send hold timer in seconds inherited by neighbors in this
+  // group. 0 disables; non-zero must be greater than the effective hold
+  // time (RFC 9687 §4.4). Unset = the RFC 9687 §6 default.
+  optional uint32 send_hold_time = 23;
 }
 
 message NamedPeerGroup {
@@ -1640,6 +1650,11 @@ message Route {
   // attribute". Used by the M35 interop test to assert the implicit
   // honor rule actually fired on a tagged route.
   optional uint32 local_pref_attr = 16;
+  // Wall-clock time this route was received, in Unix epoch seconds,
+  // recovered at query time from the monotonic receive instant (the
+  // same recovery the RFC 9069 BMP Loc-RIB dump uses for its per-peer
+  // header timestamp). 0 = unknown.
+  uint64 received_at_epoch_seconds = 17;
 }
 
 message WatchRoutesRequest {

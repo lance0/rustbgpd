@@ -1713,6 +1713,7 @@ peer_group = "edge"
             name: "edge".to_string(),
             definition: rustbgpd_api::peer_types::PeerGroupDefinition {
                 hold_time: Some(45),
+                send_hold_time: None,
                 max_prefixes: None,
                 md5_password: None,
                 ttl_security: None,
@@ -1747,6 +1748,7 @@ peer_group = "edge"
 fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::PeerGroupDefinition {
     rustbgpd_api::peer_types::PeerGroupDefinition {
         hold_time,
+        send_hold_time: None,
         max_prefixes: None,
         md5_password: None,
         ttl_security: None,

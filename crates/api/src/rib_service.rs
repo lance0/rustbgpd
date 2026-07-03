@@ -1050,6 +1050,13 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         // tagged route (otherwise local_pref=0 is ambiguous between
         // "policy set it" and "no LOCAL_PREF on EBGP wire").
         local_pref_attr: route.local_pref_attr(),
+        // Receive wall time recovered from the monotonic receive
+        // instant, the same recovery the BMP Loc-RIB dump uses for its
+        // RFC 9069 per-peer header timestamp.
+        received_at_epoch_seconds: std::time::SystemTime::now()
+            .checked_sub(route.received_at.elapsed())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs()),
     }
 }
 

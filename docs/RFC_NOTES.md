@@ -700,6 +700,8 @@ implemented per ADR-0040.
   max(negotiated hold time, 90 s) (not configurable). Per-neighbor +
   peer-group `send_hold_time` knob (§6 MAY); 0 disables; non-zero
   values ≤ the effective hold time are rejected at config load (§4.4).
+  Also settable over gRPC (`AddNeighbor` / `PeerGroupDefinition`, same
+  validation) and via `rbgp neighbor <addr> add --send-hold-time`.
 
 ---
 
