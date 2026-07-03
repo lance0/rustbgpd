@@ -466,6 +466,7 @@ impl RibManager {
         // totals can subtract Prometheus snapshots
         // (`bgp_policy_routes_total` is monotonic per process).
         self.export_policy_stats.remove(&peer);
+        self.remove_update_group_member(peer);
         self.clear_peer_refresh_state(peer);
     }
 
@@ -683,6 +684,11 @@ impl RibManager {
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
+        // Shadow-mode update-group fingerprint (slice 1): record this
+        // registration's group membership / ungrouped reason. Runs after
+        // every fingerprint input map above is populated; distribution
+        // (including the initial dump below) does not read it.
+        self.recompute_update_group(peer);
         self.send_initial_table(peer);
     }
 

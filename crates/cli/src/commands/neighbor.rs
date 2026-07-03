@@ -97,6 +97,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             import_policy_routes_denied: n.import_policy_routes_denied,
             export_policy_routes_permitted: n.export_policy_routes_permitted,
             export_policy_routes_denied: n.export_policy_routes_denied,
+            update_group: n.update_group.clone(),
         };
         output::print_json_pretty(&out)?;
     } else {
@@ -186,6 +187,9 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "  Export — permitted: {} denied: {}",
             n.export_policy_routes_permitted, n.export_policy_routes_denied
         );
+        if !n.update_group.is_empty() {
+            println!("Update Group:          {}", n.update_group);
+        }
         println!("Flap Count:            {}", n.flap_count);
         if !n.last_error.is_empty() {
             println!("Last Error:            {}", n.last_error);

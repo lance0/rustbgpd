@@ -298,6 +298,16 @@ impl CompiledChain {
         self.requires_rpki_validation() || self.requires_aspa_validation()
     }
 
+    /// Whether evaluating this chain depends on the evaluation peer's
+    /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
+    /// ASN, or peer-group matching). Content-equal chains with such a
+    /// guard can still yield peer-different verdicts, so update-group
+    /// fingerprinting must not group peers that share one.
+    #[must_use]
+    pub fn requires_peer_context(&self) -> bool {
+        self.any_guard_node(&|expr| matches!(expr, MatchExpr::NeighborIn(_)))
+    }
+
     /// Does any guard node across all policies satisfy `pred`?
     fn any_guard_node(&self, pred: &impl Fn(&MatchExpr) -> bool) -> bool {
         self.policies

@@ -282,6 +282,12 @@ impl RibManager {
         }
 
         self.peer_export_policies.insert(peer, export_policy);
+        // Shadow-mode update-group fingerprint: recompute on the policy
+        // replacement seam (per-peer gRPC edits, ADR-0076 live-impact
+        // txns, and SIGHUP rpol overlays all funnel through this
+        // handler). Content-equality keying makes a reinstall of an
+        // identical chain key-stable — no regroup is recorded.
+        self.recompute_update_group(peer);
         self.dirty_peers.insert(peer);
         self.distribute_changes(&HashSet::new(), &HashSet::new());
         let _ = reply.send(Ok(()));

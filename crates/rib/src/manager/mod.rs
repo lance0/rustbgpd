@@ -5,6 +5,7 @@ mod graceful_restart;
 mod helpers;
 mod peer_lifecycle;
 mod route_refresh;
+mod update_groups;
 
 #[cfg(test)]
 mod tests;
@@ -290,6 +291,10 @@ pub struct RibManager {
     /// re-arm) becomes deterministically observable. `None` in
     /// production — the only cost when unset is an `is_some()` check.
     test_ingest_stall: Option<std::time::Duration>,
+    /// Update-group fingerprint registry (shadow mode, slice 1):
+    /// records which peers *could* share staged output and why the
+    /// rest can't. Distribution never reads it yet.
+    update_groups: update_groups::UpdateGroupRegistry,
 }
 
 /// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
@@ -608,6 +613,7 @@ impl RibManager {
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
+            update_groups: update_groups::UpdateGroupRegistry::default(),
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
@@ -978,6 +984,9 @@ impl RibManager {
             }
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);
+            }
+            RibUpdate::QueryPeerUpdateGroup { peer, reply } => {
+                self.handle_query_peer_update_group(peer, reply);
             }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);

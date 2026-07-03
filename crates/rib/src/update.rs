@@ -638,6 +638,18 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<NeighborPolicyStats>,
     },
+    /// Query: return a peer's update-group membership label — `group:N`
+    /// when the fingerprint grouped it, an ungrouped reason
+    /// (`policy_peer_context` / `add_path_send` / `orr_vantage` /
+    /// `orf_installed`) when a v1 disqualifier applies, or empty for a
+    /// peer with no outbound registration. Shadow mode: observational
+    /// only; distribution still runs per peer.
+    QueryPeerUpdateGroup {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel.
+        reply: oneshot::Sender<String>,
+    },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters
     /// accumulate since a chain instance was installed and reset when

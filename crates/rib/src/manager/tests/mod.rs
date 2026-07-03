@@ -905,4 +905,5 @@ mod refresh;
 mod rpki;
 mod rtc;
 mod unicast;
+mod update_groups;
 mod vpn;

@@ -774,6 +774,10 @@ fn golden_corpus_ir_matches_legacy() {
             .policies
             .iter()
             .any(|np| np.entries.iter().any(|e| e.match_aspa_validation.is_some()));
+        let legacy_peer_ctx = chain
+            .policies
+            .iter()
+            .any(|np| np.entries.iter().any(|e| e.match_neighbor_set.is_some()));
         assert_eq!(
             chain.requires_as_path_string(),
             legacy_regex,
@@ -793,6 +797,11 @@ fn golden_corpus_ir_matches_legacy() {
             chain.requires_validation_state(),
             legacy_rpki || legacy_aspa,
             "requires_validation_state diverges on {chain_name}"
+        );
+        assert_eq!(
+            chain.requires_peer_context(),
+            legacy_peer_ctx,
+            "requires_peer_context diverges on {chain_name}"
         );
 
         for (ctx_name, route) in &contexts {
