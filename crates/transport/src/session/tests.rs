@@ -2780,7 +2780,7 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
     const ADDED_COMMUNITY: u32 = 0xFDE9_0064; // 65001:100
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
-    session.import_policy = Some(PolicyChain::new(vec![Policy {
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
             ge: None,
@@ -2806,7 +2806,7 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
             },
         }],
         default_action: PolicyAction::Permit,
-    }]));
+    }])));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3341,7 +3341,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let replacement_next_hop: IpAddr = "2001:db8::99".parse().unwrap();
-    session.import_policy = Some(PolicyChain::new(vec![Policy {
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,
             ge: None,
@@ -3369,7 +3369,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             },
         }],
         default_action: PolicyAction::Deny,
-    }]));
+    }])));
     let received_next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),

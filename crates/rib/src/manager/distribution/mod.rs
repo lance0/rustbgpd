@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -662,7 +663,7 @@ impl RibManager {
             // `force_outbound_peers`.
             let is_force = self.force_outbound_peers.contains(&peer);
             let resync = is_dirty || is_force;
-            let effective_prefixes: HashSet<Prefix> = if resync {
+            let effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                 let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
                 // For multi-path dirty resync, also include all Adj-RIB-In prefixes
                 if self.peer_has_any_add_path_send(peer) {
@@ -673,9 +674,8 @@ impl RibManager {
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter().map(|r| r.prefix));
                 }
-                all
+                Cow::Owned(all)
             } else {
-                let mut prefixes = best_changed.clone();
                 // An RFC 9107 ORR peer selects from the per-target
                 // candidate set, not the Loc-RIB best — a candidate
                 // change that leaves the Loc-RIB best untouched can
@@ -685,13 +685,26 @@ impl RibManager {
                     .peer_orr_vantage
                     .get(&peer)
                     .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
-                for prefix in all_affected {
-                    if peer_has_resolved_orr || self.add_path_send_max_for_prefix(peer, prefix) > 0
-                    {
-                        prefixes.insert(*prefix);
-                    }
+                let extras: Vec<Prefix> = all_affected
+                    .iter()
+                    .filter(|prefix| {
+                        (peer_has_resolved_orr
+                            || self.add_path_send_max_for_prefix(peer, prefix) > 0)
+                            && !best_changed.contains(*prefix)
+                    })
+                    .copied()
+                    .collect();
+                // Common case (no ORR vantage, no Add-Path extras):
+                // borrow the shared changed set instead of re-hashing a
+                // per-peer clone of it — this loop runs once per
+                // outbound peer per distribution pass.
+                if extras.is_empty() {
+                    Cow::Borrowed(best_changed)
+                } else {
+                    let mut prefixes = best_changed.clone();
+                    prefixes.extend(extras);
+                    Cow::Owned(prefixes)
                 }
-                prefixes
             };
             let effective_flowspec_rules: HashSet<FlowSpecRule> = if resync {
                 let mut all: HashSet<FlowSpecRule> = self
@@ -884,7 +897,7 @@ impl RibManager {
                 .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
 
             // Stage: compute delta without mutating AdjRibOut
-            for prefix in &effective_prefixes {
+            for prefix in &*effective_prefixes {
                 let family = prefix_family(prefix);
                 // RFC 5291 §6 gate: suppress this family's advertisement (incl.
                 // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.

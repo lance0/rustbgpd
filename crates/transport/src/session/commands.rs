@@ -98,7 +98,7 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateImportPolicy { policy, reply } => {
-                self.import_policy = policy;
+                self.install_import_policy(policy);
                 // ADR-0073: advancing the session-local generation makes
                 // every decision recorded under the prior chain read as
                 // STALE on a subsequent explain lookup. saturating_add so

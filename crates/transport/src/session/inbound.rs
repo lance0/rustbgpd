@@ -185,7 +185,15 @@ pub(super) struct PolicyAttrSummary<'a> {
     pub(super) med: Option<u32>,
 }
 impl<'a> PolicyAttrSummary<'a> {
-    pub(super) fn from_route_attrs(attrs: &'a [PathAttribute]) -> Self {
+    /// `needs_as_path_string` gates the `as_path_str` build (String +
+    /// per-ASN `to_string` + join): callers pass the session's cached
+    /// `import_needs_as_path_string` so an import chain with no
+    /// `AS_PATH` regex terms (or no chain at all) never pays for it —
+    /// the same `requires_as_path_string` gate the export-side RIB
+    /// distribution modules apply. When `false`, `as_path_str` is
+    /// empty; `as_path_len` / `origin_asn` are still extracted (cheap,
+    /// and RPKI/ASPA need them regardless of policy).
+    pub(super) fn from_route_attrs(attrs: &'a [PathAttribute], needs_as_path_string: bool) -> Self {
         let mut extended_communities: Option<&'a [rustbgpd_wire::ExtendedCommunity]> = None;
         let mut communities: Option<&'a [u32]> = None;
         let mut large_communities: Option<&'a [rustbgpd_wire::LargeCommunity]> = None;
@@ -220,7 +228,11 @@ impl<'a> PolicyAttrSummary<'a> {
             communities: communities.unwrap_or_default(),
             large_communities: large_communities.unwrap_or_default(),
             as_path,
-            as_path_str: as_path.map(AsPath::to_aspath_string).unwrap_or_default(),
+            as_path_str: if needs_as_path_string {
+                as_path.map(AsPath::to_aspath_string).unwrap_or_default()
+            } else {
+                String::new()
+            },
             as_path_len: as_path.map_or(0, AsPath::len),
             origin_asn: as_path.and_then(AsPath::origin_asn),
             local_pref,
@@ -1098,7 +1110,8 @@ impl PeerSession {
         // / `origin_asn` feed ASPA (per-family) and RPKI (per-prefix)
         // validation below.
         let explain_enabled = self.import_explain_enabled;
-        let policy_summary = PolicyAttrSummary::from_route_attrs(&route_attrs);
+        let policy_summary =
+            PolicyAttrSummary::from_route_attrs(&route_attrs, self.import_needs_as_path_string);
         let cached_policy_context = explain_enabled.then(|| policy_summary.to_cached_context());
         let PolicyAttrSummary {
             extended_communities: update_ecs,
@@ -2032,7 +2045,7 @@ mod policy_attr_summary_tests {
     #[test]
     fn empty_attrs_use_defaults() {
         let attrs: Vec<PathAttribute> = Vec::new();
-        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        let s = PolicyAttrSummary::from_route_attrs(&attrs, true);
         assert!(s.extended_communities.is_empty());
         assert!(s.communities.is_empty());
         assert!(s.large_communities.is_empty());
@@ -2053,7 +2066,7 @@ mod policy_attr_summary_tests {
             PathAttribute::LocalPref(150),
             PathAttribute::Med(42),
         ];
-        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        let s = PolicyAttrSummary::from_route_attrs(&attrs, true);
         assert_eq!(s.communities, [100u32, 200].as_slice());
         assert_eq!(s.extended_communities.len(), 1);
         assert_eq!(s.large_communities.len(), 1);
@@ -2082,7 +2095,7 @@ mod policy_attr_summary_tests {
             PathAttribute::Med(5),
             PathAttribute::Med(9), // later — must be ignored
         ];
-        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        let s = PolicyAttrSummary::from_route_attrs(&attrs, true);
         assert_eq!(
             s.communities,
             [100u32, 200].as_slice(),
