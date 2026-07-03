@@ -3,7 +3,9 @@
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
 [ROADMAP.md](../ROADMAP.md). For a full changelog, see
-[CHANGELOG.md](../CHANGELOG.md).
+[CHANGELOG.md](../CHANGELOG.md). For the index of every M-series
+interop receipt (and the perf/soak/CI receipts alongside them), see
+[RECEIPTS.md](RECEIPTS.md).
 
 All milestones below shipped as **v0.1.0** (2026-02-28).
 
