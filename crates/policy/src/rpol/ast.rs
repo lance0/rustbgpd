@@ -75,6 +75,11 @@ pub enum CommunityLit {
         /// IPv4 address (selects the type 0x01 wire encoding).
         ipv4_admin: bool,
     },
+    /// A well-known extended community by raw 8-byte value —
+    /// `OV_VALID` / `OV_NOT_FOUND` / `OV_INVALID` (RFC 8097
+    /// origin-validation state). The name is resolved at parse time;
+    /// matching and add/remove operate on the exact wire value.
+    ExtRaw(u64),
 }
 
 /// The community kind named by an action or fixture keyword
@@ -96,7 +101,7 @@ impl CommunityLit {
         match self {
             CommunityLit::Standard(_) => CommunityKind::Standard,
             CommunityLit::Large(_) => CommunityKind::Large,
-            CommunityLit::Ext { .. } => CommunityKind::Ext,
+            CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => CommunityKind::Ext,
         }
     }
 
@@ -122,6 +127,7 @@ impl CommunityLit {
                 local,
                 ..
             } => CommunityMatch::RouteOrigin { global, local },
+            CommunityLit::ExtRaw(raw) => CommunityMatch::ExactExt(raw),
         }
     }
 }
@@ -319,6 +325,11 @@ pub enum Rhs {
     /// Community literal (never valid in a comparison — accepted so
     /// the typechecker can point at `has`/`in` instead).
     Community(Spanned<CommunityLit>),
+    /// A field path on the right-hand side. The only accepted
+    /// field-vs-field comparison is strict next-hop
+    /// (`route.next-hop == peer.address`); the typechecker rejects
+    /// everything else with a spanned diagnostic.
+    Field(FieldPath),
 }
 
 impl Rhs {
@@ -329,6 +340,7 @@ impl Rhs {
             Rhs::Int(_, span) | Rhs::Ip(_, span) | Rhs::Prefix(_, span) => *span,
             Rhs::Ident(s) | Rhs::Str(s) => s.span,
             Rhs::Community(lit) => lit.span,
+            Rhs::Field(path) => path.span,
         }
     }
 
@@ -342,6 +354,7 @@ impl Rhs {
             Rhs::Prefix(..) => "prefix",
             Rhs::Str(_) => "string",
             Rhs::Community(_) => "community literal",
+            Rhs::Field(_) => "field reference",
         }
     }
 }

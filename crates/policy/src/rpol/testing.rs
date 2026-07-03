@@ -97,19 +97,22 @@ impl Fixture {
                 }
                 RouteField::ExtCommunities(lits, _) => {
                     for lit in lits {
-                        if let CommunityLit::Ext {
-                            route_target,
-                            global,
-                            local,
-                            ipv4_admin,
-                        } = lit.node
-                        {
-                            fixture.extended_communities.push(ext_community_value(
+                        match lit.node {
+                            CommunityLit::Ext {
                                 route_target,
                                 global,
                                 local,
                                 ipv4_admin,
-                            ));
+                            } => fixture.extended_communities.push(ext_community_value(
+                                route_target,
+                                global,
+                                local,
+                                ipv4_admin,
+                            )),
+                            CommunityLit::ExtRaw(raw) => fixture
+                                .extended_communities
+                                .push(ExtendedCommunity::new(raw)),
+                            CommunityLit::Standard(_) | CommunityLit::Large(_) => {}
                         }
                     }
                 }
@@ -282,6 +285,9 @@ fn check_assertion(
                     local,
                     ipv4_admin,
                 )),
+                CommunityLit::ExtRaw(raw) => mods
+                    .extended_communities_add
+                    .contains(&ExtendedCommunity::new(raw)),
             };
             (!present).then(|| "expected community was not added".to_string())
         }

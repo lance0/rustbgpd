@@ -285,6 +285,17 @@ pub struct DfElectionExtendedCommunity {
     pub preference: Option<u16>,
 }
 impl ExtendedCommunity {
+    /// RFC 8097 BGP Origin Validation State Extended Community,
+    /// state `valid` (0). Non-transitive opaque: type `0x43`
+    /// (opaque `0x03` with the non-transitive bit `0x40` set),
+    /// sub-type `0x00`, five reserved zero bytes, and the validation
+    /// state in the last octet (RFC 8097 §2).
+    pub const ORIGIN_VALIDATION_VALID: Self = Self(0x4300_0000_0000_0000);
+    /// RFC 8097 Origin Validation State, state `not found` (1).
+    pub const ORIGIN_VALIDATION_NOT_FOUND: Self = Self(0x4300_0000_0000_0001);
+    /// RFC 8097 Origin Validation State, state `invalid` (2).
+    pub const ORIGIN_VALIDATION_INVALID: Self = Self(0x4300_0000_0000_0002);
+
     /// Create from a raw 8-byte value.
     #[must_use]
     pub fn new(raw: u64) -> Self {
@@ -579,6 +590,14 @@ impl ExtendedCommunity {
 }
 impl fmt::Display for ExtendedCommunity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // RFC 8097 origin-validation states render by their well-known
+        // names (the same aliases the policy frontends parse).
+        match *self {
+            Self::ORIGIN_VALIDATION_VALID => return write!(f, "OV_VALID"),
+            Self::ORIGIN_VALIDATION_NOT_FOUND => return write!(f, "OV_NOT_FOUND"),
+            Self::ORIGIN_VALIDATION_INVALID => return write!(f, "OV_INVALID"),
+            _ => {}
+        }
         let is_ipv4 = self.type_byte() & 0x3F == 0x01;
         if let Some((g, l)) = self.route_target() {
             if is_ipv4 {
@@ -2906,6 +2925,46 @@ mod tests {
         assert!(matches!(err, DecodeError::MalformedField { .. }));
     }
     // ---- EVPN extended community typed accessors (RFC 7432 / 8365 / 9135) ---
+    #[test]
+    fn ext_comm_rfc8097_origin_validation_state_encoding() {
+        // RFC 8097 §2: high-order octet 0x43 (non-transitive), low-order
+        // 0x00, five reserved zero bytes, state in the last octet
+        // (0 = valid, 1 = not found, 2 = invalid).
+        for (ec, state) in [
+            (ExtendedCommunity::ORIGIN_VALIDATION_VALID, 0u8),
+            (ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND, 1),
+            (ExtendedCommunity::ORIGIN_VALIDATION_INVALID, 2),
+        ] {
+            assert_eq!(
+                ec.as_u64().to_be_bytes(),
+                [0x43, 0x00, 0, 0, 0, 0, 0, state]
+            );
+            assert_eq!(ec.type_byte(), 0x43);
+            assert_eq!(ec.subtype(), 0x00);
+            assert!(!ec.is_transitive(), "RFC 8097 is non-transitive");
+            assert_eq!(
+                ExtendedCommunity::new(u64::from_be_bytes([0x43, 0x00, 0, 0, 0, 0, 0, state])),
+                ec,
+                "decode roundtrip"
+            );
+            // Not an RT/RO — the two-part decoders must not claim it.
+            assert_eq!(ec.route_target(), None);
+            assert_eq!(ec.route_origin(), None);
+        }
+        assert_eq!(
+            ExtendedCommunity::ORIGIN_VALIDATION_INVALID.to_string(),
+            "OV_INVALID"
+        );
+        assert_eq!(
+            ExtendedCommunity::ORIGIN_VALIDATION_VALID.to_string(),
+            "OV_VALID"
+        );
+        assert_eq!(
+            ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND.to_string(),
+            "OV_NOT_FOUND"
+        );
+    }
+
     #[test]
     fn ext_comm_bgp_encapsulation_vxlan() {
         let c = ExtendedCommunity::bgp_encapsulation(8); // VXLAN

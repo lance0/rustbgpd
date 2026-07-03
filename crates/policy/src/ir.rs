@@ -90,6 +90,13 @@ pub enum MatchExpr {
     Med(Cmp),
     /// The route's next-hop equals this address.
     NextHopEq(IpAddr),
+    /// The route's next-hop equals the evaluation peer's address
+    /// (strict next-hop, `.rpol` `route.next-hop == peer.address`).
+    /// Never matches when either side is unknown. Reads peer identity,
+    /// so it counts toward [`CompiledChain::requires_peer_context`]:
+    /// on an export chain the verdict is per-target-peer and the peer
+    /// must not join an update group.
+    NextHopEqPeer,
     /// The evaluation peer matches a neighbor set (address, ASN, or
     /// peer-group membership — OR within the set). Boxed: the set is
     /// three `Vec`s (72 bytes) and would otherwise dominate every
@@ -126,6 +133,7 @@ impl MatchExpr {
             | MatchExpr::LocalPref(_)
             | MatchExpr::Med(_)
             | MatchExpr::NextHopEq(_)
+            | MatchExpr::NextHopEqPeer
             | MatchExpr::RouteTypeIs(_)
             | MatchExpr::EvpnRouteTypeIs(_)
             | MatchExpr::RpkiIs(_)
@@ -300,12 +308,17 @@ impl CompiledChain {
 
     /// Whether evaluating this chain depends on the evaluation peer's
     /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
-    /// ASN, or peer-group matching). Content-equal chains with such a
-    /// guard can still yield peer-different verdicts, so update-group
-    /// fingerprinting must not group peers that share one.
+    /// ASN, or peer-group matching — or a strict-next-hop
+    /// [`MatchExpr::NextHopEqPeer`] node). Content-equal chains with
+    /// such a guard can still yield peer-different verdicts, so
+    /// update-group fingerprinting must not group peers that share one.
+    /// Import chains are evaluated per-session and are unaffected by
+    /// this flag.
     #[must_use]
     pub fn requires_peer_context(&self) -> bool {
-        self.any_guard_node(&|expr| matches!(expr, MatchExpr::NeighborIn(_)))
+        self.any_guard_node(&|expr| {
+            matches!(expr, MatchExpr::NeighborIn(_) | MatchExpr::NextHopEqPeer)
+        })
     }
 
     /// Does any guard node across all policies satisfy `pred`?

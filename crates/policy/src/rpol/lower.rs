@@ -404,12 +404,13 @@ fn lower_cmp(
             });
             negate_if(op == CmpOp::Ne, node)
         }
-        Field::NextHop => {
-            let Rhs::Ip(addr, _) = rhs else {
-                unreachable!("typechecked: next-hop compares an IP")
-            };
-            negate_if(op == CmpOp::Ne, MatchExpr::NextHopEq(*addr))
-        }
+        Field::NextHop => match rhs {
+            Rhs::Ip(addr, _) => negate_if(op == CmpOp::Ne, MatchExpr::NextHopEq(*addr)),
+            // Strict next-hop (`route.next-hop == peer.address`); the
+            // typechecker only lets `peer.address` through here.
+            Rhs::Field(_) => negate_if(op == CmpOp::Ne, MatchExpr::NextHopEqPeer),
+            _ => unreachable!("typechecked: next-hop compares an IP or peer.address"),
+        },
         Field::PeerAddress => {
             let Rhs::Ip(addr, _) = rhs else {
                 unreachable!("typechecked: peer.address compares an IP")
@@ -508,6 +509,16 @@ fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMa
                 ipv4_admin,
             } => {
                 let value = ext_community_value(route_target, global, local, ipv4_admin);
+                if *add {
+                    mods.extended_communities_add.push(value);
+                } else {
+                    mods.extended_communities_remove.push(value);
+                }
+            }
+            // Well-known extended communities (RFC 8097 OV_* states):
+            // add/remove by exact raw wire value.
+            CommunityLit::ExtRaw(raw) => {
+                let value = ExtendedCommunity::new(raw);
                 if *add {
                     mods.extended_communities_add.push(value);
                 } else {

@@ -78,6 +78,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tests (`tests/commit_confirm_binary.rs`); closes the KNOWN_ISSUES
   "commit-confirmed does not survive a daemon restart" row.
 
+- **RFC 8097 origin-validation-state extended communities as policy
+  well-knowns.** `OV_VALID` / `OV_NOT_FOUND` / `OV_INVALID` (RFC 8097:
+  non-transitive opaque, type `0x43` sub-type `0x00`, validation state
+  in the last octet) are accepted everywhere community names are: TOML
+  `match_community` / `set_community_add` / `set_community_remove` and
+  `.rpol` `has` / `in` (community sets) / `add ext-community` /
+  `remove ext-community`, with matching and removal by exact wire
+  value. The route-server example's `hygiene.rpol` now tags routes
+  with their RPKI outcome so clients can act on it (the missing
+  arouteserver-essentials piece from ADR-0101).
+- **Strict next-hop matching in `.rpol`:** `route.next-hop ==
+  peer.address` (and `!=`) — the policy-language form of the classic
+  IXP next-hop-hygiene check. It is the language's only field-vs-field
+  comparison; anything else on the right-hand side is a compile-time
+  diagnostic. Reads peer identity, so an export chain using it makes
+  the peer ineligible for update-group sharing
+  (`policy_peer_context`), exactly like `peer.*` matches; import-chain
+  use is grouping-irrelevant. Never matches when either side is
+  unknown.
 - **Per-client best-path for route-server clients (RFC 7947 §2.3.2
   path-hiding mitigation, the BIRD-`secondary` equivalent).** New
   per-neighbor / per-peer-group knob `per_client_best = true` (requires

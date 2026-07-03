@@ -439,20 +439,7 @@ impl Checker<'_> {
             }
             Field::EvpnRouteType => {
                 eq_only(self);
-                match rhs {
-                    Rhs::Int(value, span) if *value > 255 => {
-                        self.diags.push(Diagnostic::new(
-                            *span,
-                            format!("EVPN route type {value} out of range"),
-                            "must be 0-255 (RFC 7432 route types are 1-5)",
-                        ));
-                    }
-                    Rhs::Int(..) => {}
-                    other => {
-                        self.diags
-                            .push(type_mismatch(field, "an integer EVPN route type", other));
-                    }
-                }
+                self.check_evpn_route_type_rhs(field, rhs);
             }
             Field::Rpki => {
                 eq_only(self);
@@ -466,7 +453,11 @@ impl Checker<'_> {
                 eq_only(self);
                 self.expect_enum_rhs(field, rhs, ROUTE_TYPE_MEMBERS, params);
             }
-            Field::NextHop | Field::PeerAddress => {
+            Field::NextHop => {
+                eq_only(self);
+                self.check_next_hop_rhs(field, rhs);
+            }
+            Field::PeerAddress => {
                 eq_only(self);
                 if !matches!(rhs, Rhs::Ip(..)) {
                     self.diags.push(type_mismatch(field, "an IP address", rhs));
@@ -512,6 +503,56 @@ impl Checker<'_> {
                     ),
                 );
             }
+        }
+    }
+
+    /// `route.evpn-route-type` compares against a 0-255 integer
+    /// literal (RFC 7432 route types are 1-5).
+    fn check_evpn_route_type_rhs(&mut self, field: &FieldPath, rhs: &Rhs) {
+        match rhs {
+            Rhs::Int(value, span) if *value > 255 => {
+                self.diags.push(Diagnostic::new(
+                    *span,
+                    format!("EVPN route type {value} out of range"),
+                    "must be 0-255 (RFC 7432 route types are 1-5)",
+                ));
+            }
+            Rhs::Int(..) => {}
+            other => {
+                self.diags
+                    .push(type_mismatch(field, "an integer EVPN route type", other));
+            }
+        }
+    }
+
+    /// `route.next-hop` compares against an IP literal or — the one
+    /// legal field-vs-field comparison (strict next-hop) —
+    /// `peer.address`.
+    fn check_next_hop_rhs(&mut self, field: &FieldPath, rhs: &Rhs) {
+        match rhs {
+            Rhs::Ip(..) => {}
+            Rhs::Field(path) => match resolve_field(path) {
+                Ok(Field::PeerAddress) => {}
+                Ok(_) => self.diags.push(
+                    Diagnostic::new(
+                        path.span,
+                        format!(
+                            "`route.next-hop` cannot be compared against `{}`",
+                            path.render()
+                        ),
+                        "only `peer.address` is allowed here",
+                    )
+                    .with_note(
+                        "strict next-hop is `route.next-hop == peer.address`; other fields have no next-hop comparison",
+                    ),
+                ),
+                Err(diag) => self.diags.push(diag),
+            },
+            other => self.diags.push(type_mismatch(
+                field,
+                "an IP address or `peer.address`",
+                other,
+            )),
         }
     }
 

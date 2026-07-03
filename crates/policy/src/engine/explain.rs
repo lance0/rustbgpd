@@ -212,6 +212,9 @@ fn fmt_community_match(cm: &CommunityMatch) -> String {
             local_data1,
             local_data2,
         } => format!("LC:{global_admin}:{local_data1}:{local_data2}"),
+        // Well-known values (e.g. the RFC 8097 OV_* states) render by
+        // name via the wire Display impl; unknown raws render as hex.
+        CommunityMatch::ExactExt(raw) => rustbgpd_wire::ExtendedCommunity::new(*raw).to_string(),
     }
 }
 
@@ -595,6 +598,7 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::LocalPref(cmp) => render_cmp("route.local-pref", *cmp),
         MatchExpr::Med(cmp) => render_cmp("route.med", *cmp),
         MatchExpr::NextHopEq(addr) => format!("route.next-hop == {addr}"),
+        MatchExpr::NextHopEqPeer => "route.next-hop == peer.address".to_string(),
         MatchExpr::NeighborIn(set) => {
             let mut parts: Vec<String> = Vec::new();
             for addr in &set.addresses {
@@ -686,9 +690,9 @@ fn community_field(criteria: &[CommunityMatch]) -> &'static str {
     let mut fields = criteria.iter().map(|cm| match cm {
         CommunityMatch::Standard { .. } => "route.communities",
         CommunityMatch::LargeCommunity { .. } => "route.large-communities",
-        CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => {
-            "route.ext-communities"
-        }
+        CommunityMatch::RouteTarget { .. }
+        | CommunityMatch::RouteOrigin { .. }
+        | CommunityMatch::ExactExt(_) => "route.ext-communities",
     });
     let Some(first) = fields.next() else {
         return "route.communities";
