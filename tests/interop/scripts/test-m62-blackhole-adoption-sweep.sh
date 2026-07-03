@@ -36,7 +36,7 @@
 #    process.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m62-blackhole-adoption-sweep.clab.yml
 #   bash tests/interop/scripts/test-m62-blackhole-adoption-sweep.sh
 #   containerlab destroy -t tests/interop/m62-blackhole-adoption-sweep.clab.yml

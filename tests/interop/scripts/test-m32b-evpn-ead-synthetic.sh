@@ -19,7 +19,7 @@
 #   4. RR gRPC stays healthy throughout.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m32b-evpn-ead-synthetic.clab.yml
 
 TOPO="m32b-evpn-ead-synthetic"

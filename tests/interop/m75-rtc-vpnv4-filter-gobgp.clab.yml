@@ -12,7 +12,7 @@
 # (gobgp #2427).
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 #   containerlab deploy -t tests/interop/m75-rtc-vpnv4-filter-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh

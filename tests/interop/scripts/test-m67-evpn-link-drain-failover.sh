@@ -72,7 +72,7 @@
 # BUM-flood-only.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m67-evpn-link-drain-failover.clab.yml
 #   bash tests/interop/scripts/test-m67-evpn-link-drain-failover.sh
 #   containerlab destroy -t tests/interop/m67-evpn-link-drain-failover.clab.yml

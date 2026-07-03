@@ -129,7 +129,7 @@
 # level (30/31) instead.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 #   - docker build -t bmpsink:m81 -f tests/interop/Dockerfile.bmpsink tests/interop
 #   - containerlab deployed:

@@ -11783,3 +11783,78 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
         "{changes:?}"
     );
 }
+
+// ── Global inline policy deprecation (Item: surface reduction) ──────
+
+/// `MakeWriter` capturing tracing output into a shared buffer so the
+/// deprecation-warning tests can assert on emitted (or absent) warns.
+#[derive(Clone, Default)]
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_deprecation_warning(config: &Config) -> String {
+    let writer = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        config.warn_if_deprecated_global_inline_policy();
+    });
+    let bytes = writer.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn global_inline_policy_emits_deprecation_warning() {
+    let toml_str = format!(
+        "{}\n[[policy.import]]\nprefix = \"10.0.0.0/8\"\nge = 8\nle = 24\naction = \"permit\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert!(config.uses_deprecated_global_inline_policy());
+    let output = capture_deprecation_warning(&config);
+    assert!(
+        output.contains("WARN"),
+        "expected a warn-level log: {output}"
+    );
+    assert!(
+        output.contains("DEPRECATED") && output.contains("[[policy.import]]"),
+        "warning must name the deprecated surface: {output}"
+    );
+    assert!(
+        output.contains("import_chain") && output.contains("rpol"),
+        "warning must point at the migration targets: {output}"
+    );
+}
+
+#[test]
+fn config_without_global_inline_policy_does_not_warn() {
+    // Named definitions + chains and per-neighbor inline policy are
+    // NOT deprecated — only the global inline fallback warns.
+    let toml_str = format!(
+        "{}\nimport_policy = [{{ prefix = \"10.0.0.0/8\", ge = 8, le = 32, action = \"permit\" }}]\n\
+         [policy]\nimport_chain = [\"keep-all\"]\n\
+         [policy.definitions.keep-all]\nstatements = []\n",
+        valid_toml_no_grpc_security()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert!(!config.uses_deprecated_global_inline_policy());
+    let output = capture_deprecation_warning(&config);
+    assert!(output.is_empty(), "no warning expected: {output}");
+}

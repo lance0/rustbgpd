@@ -188,7 +188,7 @@ the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
 
 - Docker installed and running
 - containerlab installed
-- `rustbgpd:dev` Docker image built: `docker build -t rustbgpd:dev .`
+- `rustbgpd:dev` Docker image built: `docker build --target dev -t rustbgpd:dev .`
 - `bird:2-bookworm` Docker image built: `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/`
 - `bird:3.2.1-tcpao` Docker image built for M43:
   `docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/`
@@ -248,7 +248,7 @@ Linux kernel with `CONFIG_TCP_AO=y`:
 
 ```sh
 docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
 bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
 containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup

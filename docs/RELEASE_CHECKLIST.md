@@ -261,7 +261,7 @@ test -s docs/adr/0064-threat-model.md
 Run at least one from each category:
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 
 # Basic eBGP + RIB
 containerlab deploy -t tests/interop/m4-frr.clab.yml
@@ -331,7 +331,7 @@ can be reproduced manually the same way. M36 and M37 run in the hosted
 
 ```bash
 # Build the daemon image (bidirectional VTEP needs CAP_NET_ADMIN)
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 
 # M36 — Gate 7b downward path: rustbgpd-as-VTEP, FRR-as-originator
 containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
@@ -410,7 +410,7 @@ reproduction:
 
 ```bash
 # M42 — ADR-0061 configured-table unicast Linux FIB runtime
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
 bash tests/interop/scripts/test-m42-fib-runtime-frr.sh
 containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml
@@ -433,7 +433,7 @@ Manual reproduction:
 
 ```bash
 # M51 — single-hop BFD + RFC 5882 coupling against FRR bfdd
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m51-bfd-frr.clab.yml
 bash tests/interop/scripts/test-m51-bfd-frr.sh
 containerlab destroy -t tests/interop/m51-bfd-frr.clab.yml
@@ -477,7 +477,7 @@ containerlab destroy -t tests/interop/m23-gobgp.clab.yml
 ### Docker smoke
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 
 # Verify shipped binaries are present
 docker run --rm --entrypoint sh rustbgpd:dev -c \

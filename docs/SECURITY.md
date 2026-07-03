@@ -259,13 +259,15 @@ setcap cap_net_admin=eip /usr/local/bin/rustbgpd
 getcap /usr/local/bin/rustbgpd  # verify
 ```
 
-Or under systemd:
+Or under systemd, install the shipped drop-in
+[`examples/systemd/rustbgpd-dataplane.conf`](../examples/systemd/rustbgpd-dataplane.conf)
+on top of the unprivileged base unit (see
+[deployment.md](deployment.md#kernel-dataplane-opt-in-privilege-drop-in)):
 
 ```ini
 [Service]
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
-NoNewPrivileges=true
 ```
 
 This privilege scope is the minimum required for Linux EVPN VTEP

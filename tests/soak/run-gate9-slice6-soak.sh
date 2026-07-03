@@ -28,7 +28,7 @@
 #   - run.json        run metadata (image SHA, git rev, env at start)
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/soak/gate9-slice6-soak.clab.yml
 #
 # Usage:

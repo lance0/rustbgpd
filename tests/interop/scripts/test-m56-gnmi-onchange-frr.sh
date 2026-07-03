@@ -15,7 +15,7 @@
 #      a replay of the disconnected-window transitions.
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   bash tests/interop/scripts/gen-m54-certs.sh   # certs reused
 #   containerlab deploy -t tests/interop/m56-gnmi-onchange-frr.clab.yml
 #

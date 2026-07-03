@@ -332,6 +332,34 @@ impl Config {
         None
     }
 
+    /// True when the deprecated global inline policy fallback
+    /// (`[[policy.import]]` / `[[policy.export]]`) is present.
+    ///
+    /// This is the pre-ADR-0076/0096 legacy surface: evaluated only
+    /// when the global chains are empty, restart-required on change
+    /// (no hot-reload), and invisible to the transaction planner.
+    /// Per-neighbor inline policy is NOT covered — only the global
+    /// fallback is deprecated.
+    pub fn uses_deprecated_global_inline_policy(&self) -> bool {
+        !self.policy.import.is_empty() || !self.policy.export.is_empty()
+    }
+
+    /// Emit the load-time deprecation warning for the global inline
+    /// policy fallback, if present. Called wherever a config enters
+    /// the daemon (startup, SIGHUP reload).
+    pub fn warn_if_deprecated_global_inline_policy(&self) {
+        if self.uses_deprecated_global_inline_policy() {
+            tracing::warn!(
+                "DEPRECATED: global inline [[policy.import]] / [[policy.export]] \
+                 statements are deprecated and will be removed in a future release. \
+                 They are restart-required on change and invisible to config \
+                 transactions. Migrate to named policy chains ([policy.definitions] \
+                 + import_chain/export_chain) or .rpol files (policy.rpol_files) — \
+                 see docs/CONFIGURATION.md, \"Inline policy\"."
+            );
+        }
+    }
+
     /// Resolve the global import policy chain.
     ///
     /// If `import_chain` is set, resolves named policies. Otherwise wraps

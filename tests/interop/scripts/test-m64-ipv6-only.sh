@@ -31,7 +31,7 @@
 #    flag.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m64-ipv6-only.clab.yml
 #   bash tests/interop/scripts/test-m64-ipv6-only.sh
 #   containerlab destroy -t tests/interop/m64-ipv6-only.clab.yml --cleanup

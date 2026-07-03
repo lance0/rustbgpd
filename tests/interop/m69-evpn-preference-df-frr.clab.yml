@@ -14,7 +14,7 @@
 #   (10.0.0.2, AS 65000)
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m69-evpn-preference-df-frr.clab.yml
 #   bash tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
 #   sudo containerlab destroy -t tests/interop/m69-evpn-preference-df-frr.clab.yml --cleanup

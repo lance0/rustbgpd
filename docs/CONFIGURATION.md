@@ -1269,7 +1269,19 @@ See [ADR-0034](adr/0034-rpki-origin-validation.md) for design details.
 Optional. Defines global import and export policy that applies to all neighbors
 that do not declare their own per-neighbor policy.
 
-### Inline policy (original syntax)
+### Inline policy (deprecated)
+
+> **DEPRECATED.** The global inline fallback (`[[policy.import]]` /
+> `[[policy.export]]`) predates the current policy architecture and
+> will be **removed in a future release**. It is restart-required on
+> change (no SIGHUP hot-apply), and it is invisible to config
+> transactions and the impact planner. The daemon logs a loud
+> deprecation warning at startup and on every reload while it is
+> present. Migrate to [named policy definitions](#named-policy-definitions)
+> plus `import_chain` / `export_chain`, or to
+> [`.rpol` policy files](rpol-language.md) via `policy.rpol_files`.
+> Per-neighbor inline policy (`[[neighbors.import_policy]]` /
+> `[[neighbors.export_policy]]`) is **not** deprecated.
 
 ```toml
 [[policy.import]]
@@ -1613,7 +1625,9 @@ For each neighbor, import and export policies are resolved independently:
    or `[[neighbors.export_policy]]`), those are wrapped in a single-element chain.
 3. Otherwise, the global **chain** (`import_chain` / `export_chain`) is used.
 4. Otherwise, the global **inline policy** (`[[policy.import]]` / `[[policy.export]]`)
-   is wrapped in a single-element chain.
+   is wrapped in a single-element chain. *(Deprecated — see
+   [Inline policy (deprecated)](#inline-policy-deprecated); will be removed
+   in a future release.)*
 5. If none of the above exist, all routes are permitted (no filtering).
 
 Per-neighbor policy completely replaces the global policy for that direction --

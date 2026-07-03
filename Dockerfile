@@ -1,6 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
-# rustbgpd:dev — interop / CI / dev container.
+# rustbgpd container image.
+#
+# Two consumable stages:
+#
+#   runtime (DEFAULT) — lean production image: the daemon + the `rbgp`
+#     CLI, nonroot user, nothing else. This is what the GHCR release
+#     image publishes (.github/workflows/container.yml builds the
+#     default target).
+#   dev — interop / CI / lab image: adds the EVPN load-gen helpers
+#     (evpn-tester / evpn-monitor), the interop start script, and
+#     iproute2/ping for containerlab topologies.
 #
 # Multi-stage build with cargo-chef separating dep compilation from
 # workspace compilation. Builds the `ci` profile (release-shaped but
@@ -13,7 +23,8 @@
 #   - mold linker: parallel final link, faster than the default GNU ld
 #
 # Build:
-#   docker build -t rustbgpd:dev .
+#   docker build -t rustbgpd:latest .                    # lean runtime
+#   docker build --target dev -t rustbgpd:dev .          # dev / interop
 #
 # BuildKit is required for the `RUN --mount=type=cache` directives
 # below; the legacy Docker builder rejects them with a parse error.
@@ -59,7 +70,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/ci/evpn-tester /out/ && \
     cp target/ci/evpn-monitor /out/
 
-FROM debian:bookworm-slim
+# ── dev: interop / CI / lab image ────────────────────────────────────
+# Ships the daemon + CLI plus the development-only helpers the
+# containerlab topologies and soak harnesses expect. Runs as root so
+# labs can program links/netns freely.
+FROM debian:bookworm-slim AS dev
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
@@ -78,4 +93,30 @@ EXPOSE 179 9179
 
 # Default: run daemon with config at /etc/rustbgpd/config.toml
 # Interop tests override with: docker run ... sleep infinity
+CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
+
+# ── runtime: lean production image (DEFAULT target) ──────────────────
+# Daemon + rbgp only — no dev/test/bench helpers. Runs as a nonroot
+# user; Docker's default net.ipv4.ip_unprivileged_port_start=0 lets it
+# bind port 179 (grant CAP_NET_BIND_SERVICE explicitly on runtimes
+# that don't, e.g. some Kubernetes setups). Kernel-dataplane features
+# (Linux FIB / EVPN VTEP) additionally need CAP_NET_ADMIN — see
+# docs/deployment.md.
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --user-group --home-dir /var/lib/rustbgpd \
+       --shell /usr/sbin/nologin rustbgpd \
+    && mkdir -p /var/lib/rustbgpd \
+    && chown rustbgpd:rustbgpd /var/lib/rustbgpd
+
+COPY --from=builder /out/rustbgpd /usr/local/bin/rustbgpd
+COPY --from=builder /out/rbgp /usr/local/bin/rbgp
+
+USER rustbgpd
+
+EXPOSE 179 9179
+
 CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]

@@ -18,7 +18,7 @@
 #      exits).
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
 #   bash tests/interop/scripts/test-m37-evpn-local-origination.sh
 #   sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml

@@ -60,7 +60,7 @@ churn."
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
 
 # Full 24h run (default):
@@ -217,7 +217,7 @@ DF flips and FDB programming in flight.
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m37-soak.clab.yml
 
 # 10-minute wiring check:
@@ -319,7 +319,7 @@ whole-AC gate under repeated real carrier transitions.
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/soak/m67-link-drain-soak.clab.yml
 
 # 5-minute wiring check:
@@ -439,7 +439,7 @@ the BUM-suppression rtnetlink path is exercised on every flip.
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
 
 # Full 24h run (default):
@@ -540,7 +540,7 @@ pipeline is the path under test, not the gRPC route-inject path.
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
 
 # Full 24h run (default):
@@ -734,7 +734,7 @@ oscillation rather than steady state.
 ## Run
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 sudo containerlab deploy -t tests/soak/gate9-slice6-soak.clab.yml
 
 # Full 24h run (default):

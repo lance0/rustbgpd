@@ -16,7 +16,7 @@
 # container.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   containerlab deploy -t tests/interop/m79-labeled-reflection-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m79-labeled-reflection-gobgp.sh

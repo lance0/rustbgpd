@@ -47,7 +47,7 @@
 #    == 1 with state Established.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m63-stalled-rib-hold-timer.clab.yml
 #   bash tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
 #   containerlab destroy -t tests/interop/m63-stalled-rib-hold-timer.clab.yml --cleanup

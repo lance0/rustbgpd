@@ -25,7 +25,7 @@
 #      `evpn_df_role_changes_total{...,vni="200"}` increments.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m49-evpn-preference-df.clab.yml
 #   bash tests/interop/scripts/test-m49-evpn-preference-df.sh
 #   sudo containerlab destroy -t tests/interop/m49-evpn-preference-df.clab.yml

@@ -8,7 +8,7 @@
 # VLAN-scoped FDB row.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml
 #   bash tests/interop/scripts/test-m70-evpn-vlan-aware-bridge-frr.sh
 #   sudo containerlab destroy -t tests/interop/m70-evpn-vlan-aware-bridge-frr.clab.yml --cleanup

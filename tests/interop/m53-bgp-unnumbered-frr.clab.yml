@@ -11,7 +11,7 @@
 #     re-advertising restores two-way ECMP.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m53-bgp-unnumbered-frr.clab.yml
 #   bash tests/interop/scripts/test-m53-bgp-unnumbered-frr.sh
 #   containerlab destroy -t tests/interop/m53-bgp-unnumbered-frr.clab.yml --cleanup

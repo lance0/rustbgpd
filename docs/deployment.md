@@ -72,7 +72,9 @@ rbgp --version
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
-cargo build --workspace --release
+# Builds exactly what a deployment ships: the daemon + the rbgp CLI.
+# (`--workspace` would also build dev/bench helpers you don't need.)
+cargo build --release -p rustbgpd -p rustbgpctl
 sudo install -m 0755 \
   target/release/rustbgpd target/release/rbgp \
   /usr/local/bin/
@@ -98,79 +100,92 @@ releases but pins against minor-version churn:
 docker pull ghcr.io/lance0/rustbgpd:0.30
 ```
 
-If you'd rather build locally:
+The published image is the Dockerfile's default `runtime` target:
+lean, daemon + `rbgp` only, running as a nonroot `rustbgpd` user. No
+dev/test/bench helpers are included. If you'd rather build it locally:
 
 ```sh
-docker build -t rustbgpd:dev .
+docker build -t rustbgpd:latest .
 ```
 
-The local image is what the M-series interop suite runs against; it's
-the canonical *development* image.
+The *development* image — adds `evpn-tester` / `evpn-monitor`,
+`iproute2`, and the interop start script, and runs as root for lab
+plumbing — is the `dev` target. It's what the M-series interop suite
+and the soak harnesses run against:
+
+```sh
+docker build --target dev -t rustbgpd:dev .
+```
 
 ## systemd
 
 A hardened unit lives at
-[`examples/systemd/rustbgpd.service`](../examples/systemd/rustbgpd.service):
-
-```ini
-[Unit]
-Description=rustbgpd BGP daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
-ExecReload=/bin/kill -HUP $MAINPID
-StateDirectory=rustbgpd
-RuntimeDirectory=rustbgpd
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/rustbgpd /etc/rustbgpd
-PrivateTmp=yes
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+[`examples/systemd/rustbgpd.service`](../examples/systemd/rustbgpd.service).
+It runs the daemon **unprivileged by default**: a dedicated `rustbgpd`
+system user, the standard sandbox set (`NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `StateDirectory` /
+`RuntimeDirectory`), and a capability set of exactly
+`CAP_NET_BIND_SERVICE` (bind port 179 as non-root). That is everything
+a route-reflector / control-plane-only deployment needs.
 
 Notes on the sandbox:
 
 - `CAP_NET_BIND_SERVICE` lets the daemon bind port 179 without running
-  as root. `CAP_NET_RAW` is required for the configured Linux FIB
-  integration (ADR-0061) and for the optional BFD socket setup
-  (ADR-0067).
+  as root. Nothing else is granted by default — in particular **not**
+  `CAP_NET_ADMIN`, so the unprivileged unit cannot program the kernel.
 - `ProtectSystem=strict` + explicit `ReadWritePaths` confines the
   daemon to `/var/lib/rustbgpd` (state) and `/etc/rustbgpd` (config).
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](reload-matrix.md) for which fields hot-apply vs.
   need a restart.
-- **If rustbgpd programs the kernel** (`[[fib_tables]]`,
-  `install_blackhole_discard`, or the EVPN dataplane) on a host that
-  also runs systemd-networkd, set `ManageForeignRoutes=no`,
-  `ManageForeignRoutingPolicyRules=no`, and (where supported)
-  `ManageForeignNextHops=no` in `networkd.conf`. The defaults are
-  `yes`, and networkd will delete routes and next-hop groups it did
-  not create — including rustbgpd's, especially across a daemon
-  restart (ADR-0079). Co-residency with another daemon that claims
-  `proto bgp` kernel state (e.g. FRR zebra) is unsupported for the
-  same reason.
 
 ### Installation
 
 ```sh
+sudo useradd --system --home-dir /var/lib/rustbgpd \
+  --shell /usr/sbin/nologin rustbgpd
 sudo install -m 0644 examples/systemd/rustbgpd.service \
   /etc/systemd/system/rustbgpd.service
 sudo install -d -m 0755 /etc/rustbgpd
 sudo install -m 0640 examples/minimal/config.toml /etc/rustbgpd/config.toml
+sudo chgrp rustbgpd /etc/rustbgpd/config.toml   # readable by the service user
 $EDITOR /etc/rustbgpd/config.toml    # set ASN, router_id, neighbors
 sudo systemctl daemon-reload
 sudo systemctl enable --now rustbgpd
 ```
+
+### Kernel dataplane: opt-in privilege drop-in
+
+If — and only if — the config programs the kernel (`[[fib_tables]]`
+per ADR-0061, `install_blackhole_discard`, or the EVPN VTEP/IRB
+dataplane), the daemon needs `CAP_NET_ADMIN` for rtnetlink route /
+nexthop programming, VXLAN + bridge FDB writes, and the
+`RTNLGRP_NEIGH` subscription behind local-MAC learning. Grant it via
+the shipped drop-in
+[`examples/systemd/rustbgpd-dataplane.conf`](../examples/systemd/rustbgpd-dataplane.conf)
+instead of editing the base unit — systemd merges capability sets, so
+the drop-in *adds* `CAP_NET_ADMIN` on top of the unprivileged default:
+
+```sh
+sudo mkdir -p /etc/systemd/system/rustbgpd.service.d
+sudo install -m 0644 examples/systemd/rustbgpd-dataplane.conf \
+  /etc/systemd/system/rustbgpd.service.d/rustbgpd-dataplane.conf
+sudo systemctl daemon-reload
+sudo systemctl restart rustbgpd
+```
+
+RR-only boxes should **not** install this drop-in — the unprivileged
+default is the point.
+
+Dataplane host caveat: **if rustbgpd programs the kernel** on a host
+that also runs systemd-networkd, set `ManageForeignRoutes=no`,
+`ManageForeignRoutingPolicyRules=no`, and (where supported)
+`ManageForeignNextHops=no` in `networkd.conf`. The defaults are
+`yes`, and networkd will delete routes and next-hop groups it did
+not create — including rustbgpd's, especially across a daemon
+restart (ADR-0079). Co-residency with another daemon that claims
+`proto bgp` kernel state (e.g. FRR zebra) is unsupported for the
+same reason.
 
 ### Operational checks
 
@@ -249,7 +264,7 @@ Bring it up:
 
 ```sh
 # Build the dev image
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 
 # Deploy
 sudo containerlab deploy -t tests/interop/m0-frr.clab.yml

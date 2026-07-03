@@ -5,7 +5,10 @@ consuming `rustbgpd`'s **durable event outbox** over gRPC and
 forwarding events to an external system (Kafka, NATS, Vector,
 journald, a SIEM ingestion endpoint, etc.).
 
-It is a **reference skeleton**, not a maintained bus connector.
+It is a **reference skeleton**, not a maintained bus connector —
+development/example status only. It is not part of the default
+`cargo build`, the release tarballs, or any container image; it
+builds only with `--workspace` or an explicit `-p event-bridge`.
 Real deployments fork this and replace the stdout writer with the
 operator's preferred sink. The patterns to preserve are:
 

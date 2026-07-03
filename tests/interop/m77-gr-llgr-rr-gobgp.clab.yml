@@ -32,7 +32,7 @@
 # the very table this receipt asserts on.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh

@@ -664,6 +664,10 @@ async fn trigger_import_validation_refresh(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear eprintln per banner line; splitting it would scatter the banner's visual order across helpers"
+)]
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
     let ebgp = config
         .neighbors
@@ -726,6 +730,13 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
             ));
         }
         eprintln!("  |- {}", parts.join(", "));
+    }
+    if config.uses_deprecated_global_inline_policy() {
+        eprintln!(
+            "  |- DEPRECATED: global inline [[policy.import]]/[[policy.export]] — \
+             will be removed in a future release; migrate to named policy chains \
+             or .rpol files (docs/CONFIGURATION.md)"
+        );
     }
 
     // Listeners
@@ -1197,6 +1208,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         neighbors = config.neighbors.len(),
         "starting rustbgpd"
     );
+    config.warn_if_deprecated_global_inline_policy();
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {

@@ -2,6 +2,21 @@
 
 This directory contains local tooling for repeatable performance checks.
 
+**Development tooling only.** Nothing in this directory is production
+surface: it is excluded from the default `cargo build`, the release
+binary tarballs, and the default (runtime) container image. The
+`evpn-load` crate's `evpn-tester` / `evpn-monitor` binaries are built
+only with `--workspace` and ship only in the `dev` image target used
+by the interop/soak labs.
+
+## evpn-load
+
+`evpn-load/` is the EVPN scale load generator — a deliberately minimal
+iBGP tester (`evpn-tester`) + convergence monitor (`evpn-monitor`) for
+RR benchmarking and the soak gates. It is not a BGP implementation and
+not an operator tool; see the crate docs in `evpn-load/src/lib.rs` for
+scope.
+
 ## Criterion compare
 
 `compare-criterion.sh` runs the same Criterion bench target at two git refs,

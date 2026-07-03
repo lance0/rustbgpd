@@ -16,7 +16,7 @@
 #      under bounded result labels.
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   bash tests/interop/scripts/gen-m44-certs.sh
 #   containerlab deploy -t tests/interop/m44-grpc-tier-authz.clab.yml
 #

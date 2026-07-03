@@ -9,7 +9,7 @@
 # and leaves enough metadata for a 1h or 24h postmortem.
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m37-soak.clab.yml
 #
 # The soak uses tests/interop/m37-soak.clab.yml (topology name

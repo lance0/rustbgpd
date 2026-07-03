@@ -50,7 +50,7 @@
 #   8. No dataplane writes on the RR.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml

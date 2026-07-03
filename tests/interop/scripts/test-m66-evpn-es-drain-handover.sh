@@ -59,7 +59,7 @@
 #    the static all-zero flood entries survive the whole cycle.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m66-evpn-es-drain-handover.clab.yml
 #   bash tests/interop/scripts/test-m66-evpn-es-drain-handover.sh
 #   containerlab destroy -t tests/interop/m66-evpn-es-drain-handover.clab.yml

@@ -14,7 +14,7 @@
 #   - report.json     analyzer verdict (slope, percentiles, gates)
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
 #
 # Usage:

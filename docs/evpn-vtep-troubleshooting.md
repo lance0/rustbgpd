@@ -321,7 +321,7 @@ The current real-VTEP smokes are M37 (MAC-only origination) and
 M37+IP (MAC+IP origination via ARP/ND suppression):
 
 ```bash
-docker build -t rustbgpd:dev .
+docker build --target dev -t rustbgpd:dev .
 
 # MAC-only path (Gate 7b+1)
 sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml

@@ -131,7 +131,7 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 ```bash
 # Prerequisites: Rust 1.95+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-cargo build --workspace --release
+cargo build --release -p rustbgpd -p rustbgpctl
 
 # Binaries are at target/release/rustbgpd and target/release/rbgp
 ```
@@ -139,7 +139,8 @@ cargo build --workspace --release
 ### Docker
 
 ```bash
-docker build -t rustbgpd .
+docker build -t rustbgpd .                    # lean runtime: daemon + rbgp, nonroot
+docker build --target dev -t rustbgpd:dev .   # dev/interop image (lab helpers, root)
 ```
 
 ## Quick start (bare metal)

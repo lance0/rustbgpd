@@ -32,7 +32,7 @@
 #      the session ("rf 65537 not available") in a permanent flap loop.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m76-orr-divergent-best-gobgp.clab.yml

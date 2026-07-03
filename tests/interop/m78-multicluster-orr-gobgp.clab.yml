@@ -17,7 +17,7 @@
 # non-client iBGP route is never reflected to another non-client).
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   containerlab deploy -t tests/interop/m78-multicluster-orr-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m78-multicluster-orr-gobgp.sh

@@ -29,7 +29,7 @@
 #    evpn_fdb_single_dst_reaped_total == 1 for the restarted process.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m60-evpn-adoption-sweep.clab.yml
 #   bash tests/interop/scripts/test-m60-evpn-adoption-sweep.sh
 #   sudo containerlab destroy -t tests/interop/m60-evpn-adoption-sweep.clab.yml

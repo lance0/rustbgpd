@@ -7,7 +7,7 @@
 # Companion to M42, which covers the startup FIB path.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m58-fib-table-crud-frr.clab.yml
 #   - grpcurl + jq installed on the host
 

@@ -18,7 +18,7 @@
 #    preservation against a real kernel, not just the fake.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
 #   bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
 #   sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml

@@ -9,7 +9,7 @@
 # survivor; re-advertising restores the ECMP.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
 #   - grpcurl + jq installed on the host
 
