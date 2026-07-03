@@ -50,6 +50,17 @@ struct Fail;
 
 type PResult<T> = Result<T, Fail>;
 
+/// Maximum expression nesting depth (LAN-184). Parenthesized groups,
+/// `!`, and each `&&`/`||` chain fold all count toward it: chained
+/// binary ops fold into a left-leaning AST whose depth the recursive
+/// passes downstream of the parser (typecheck, lowering, `Drop`)
+/// consume, so the parser — the only producer of user-shaped `Expr`
+/// trees — bounds them all here. Generous for any human-written
+/// config, far below stack limits; rpol files arrive via SIGHUP
+/// overlay at runtime, so an unbounded recursion is a
+/// daemon-crash-by-config.
+const MAX_EXPR_DEPTH: u32 = 128;
+
 impl Parser<'_> {
     // ── token plumbing ──────────────────────────────────────────────
 
@@ -499,7 +510,7 @@ impl Parser<'_> {
 
     fn if_stmt(&mut self) -> PResult<IfStmt> {
         let start = self.expect(Tok::IfKw, "`if`")?.span;
-        let cond = self.expr()?;
+        let cond = self.expr(0)?;
         let span = start.to(cond.span());
         self.expect(Tok::LBrace, "`{`")?;
         let then_actions = self.action_list()?;
@@ -635,32 +646,52 @@ impl Parser<'_> {
 
     // ── expressions ─────────────────────────────────────────────────
 
-    fn expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.and_expr()?;
+    /// Fail with a spanned diagnostic when `depth` exceeds
+    /// [`MAX_EXPR_DEPTH`].
+    fn check_expr_depth(&mut self, depth: u32) -> PResult<()> {
+        if depth > MAX_EXPR_DEPTH {
+            self.diags.push(
+                Diagnostic::new(
+                    self.here(),
+                    format!("expression nesting exceeds {MAX_EXPR_DEPTH} levels"),
+                    "too deeply nested",
+                )
+                .with_note("simplify the condition or split it across terms"),
+            );
+            return Err(Fail);
+        }
+        Ok(())
+    }
+
+    fn expr(&mut self, mut depth: u32) -> PResult<Expr> {
+        let mut lhs = self.and_expr(depth)?;
         while self.eat(Tok::OrOr).is_some() {
-            let rhs = self.and_expr()?;
+            depth += 1;
+            let rhs = self.and_expr(depth)?;
             lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
         }
         Ok(lhs)
     }
 
-    fn and_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.unary_expr()?;
+    fn and_expr(&mut self, mut depth: u32) -> PResult<Expr> {
+        let mut lhs = self.unary_expr(depth)?;
         while self.eat(Tok::AndAnd).is_some() {
-            let rhs = self.unary_expr()?;
+            depth += 1;
+            let rhs = self.unary_expr(depth)?;
             lhs = Expr::And(Box::new(lhs), Box::new(rhs));
         }
         Ok(lhs)
     }
 
-    fn unary_expr(&mut self) -> PResult<Expr> {
+    fn unary_expr(&mut self, depth: u32) -> PResult<Expr> {
+        self.check_expr_depth(depth)?;
         if let Some(bang) = self.eat(Tok::Bang) {
-            let inner = self.unary_expr()?;
+            let inner = self.unary_expr(depth + 1)?;
             let span = bang.span.to(inner.span());
             return Ok(Expr::Not(Box::new(inner), span));
         }
         if self.eat(Tok::LParen).is_some() {
-            let inner = self.expr()?;
+            let inner = self.expr(depth + 1)?;
             self.expect(Tok::RParen, "`)`")?;
             return Ok(inner);
         }

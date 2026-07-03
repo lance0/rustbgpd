@@ -590,9 +590,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remain their only removal points. Manager tests pin the joint
   GR+refresh and LLGR+refresh lifecycles across all seven route
   families' snapshot arms.
+- **A deeply-nested `.rpol` expression can no longer crash the daemon
+  (LAN-184).** The rpol parser is recursive descent, and typecheck,
+  lowering, and AST teardown all recurse over expression depth — so a
+  policy file with thousands of nested parens, `!` chains, or chained
+  `&&`/`||` (which fold into a left-leaning tree) overflowed the stack
+  and aborted the process. `.rpol` files arrive via the SIGHUP overlay
+  and the `TestPolicy` RPC at runtime, so this was a
+  daemon-crash-by-config. The parser — the only producer of user-shaped
+  expression trees — now enforces a 128-level nesting cap and reports a
+  spanned diagnostic (`expression nesting exceeds 128 levels`) like any
+  other rpol error, which bounds every recursive pass downstream
+  (typecheck, lowering, eval, drop). The TOML frontend has no
+  equivalent exposure: its match blocks compile to flat `And`/`Or`
+  child vectors with no user-controlled nesting. The crash case is
+  pinned in the `rpol_compile` fuzz seed corpus.
 
 - **Label-stack withdraws no longer reset labeled-unicast and VPN
-  sessions (caught live by the M79 lab).** RFC 8277 §2.4 says a withdraw
+  sessions (caught live by the M79 lab; resolves LAN-188).** RFC 8277
+  §2.4 says a withdraw
   carries a single ignored 3-octet compatibility field in the label
   position, but GoBGP (and any stack without a dedicated withdraw
   encoder) echoes the announced BOS-terminated label stack instead. Our
@@ -603,7 +619,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and Add-Path, both families) now dispatch like GoBGP's own parser: an
   exact 0x800000/0x000000 value is one compatibility field, anything
   else is S-bit-walked like announce mode; labels are ignored either
-  way. Encode side unchanged (we still emit the compliant 0x800000).
+  way. Encode side unchanged (we still emit the compliant 0x800000) —
+  a LAN-188 audit re-verified that every SAFI 4/128 withdraw emitter
+  (session floods, update-group emits, Add-Path variants, BMP Loc-RIB
+  synthesis) routes through the normalizing withdraw encoders.
 
 - **Unicast, FlowSpec, and EVPN GR/LLGR semantics brought in line with
   RFC 4724/9494.** The legacy families now match the strict semantics the
