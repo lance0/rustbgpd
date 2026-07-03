@@ -818,6 +818,7 @@ impl RibManager {
         // per-prefix staging walk). The loop below is the ungrouped
         // path; grouped peers skip it (empty staging set).
         let member_of = self.grouped_member_of(peer);
+        let mut vpn_group_replayed = false;
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             for route in group.table.iter() {
                 if route.peer == peer {
@@ -825,6 +826,19 @@ impl RibManager {
                 }
                 nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
                 announce.push(route.clone());
+            }
+            // VPN join replay (non-RTC groups): table minus own-sourced,
+            // export tail already paid when the table was staged. An RTC
+            // group never stages VPN — its members take the per-peer VPN
+            // staging below, where the RFC 4684 RT filter applies.
+            if group.stages_vpn() {
+                vpn_group_replayed = true;
+                for route in group.table.iter_vpn() {
+                    if route.peer == peer {
+                        continue;
+                    }
+                    vpn_announce.push(route.clone());
+                }
             }
             current_policy_filtered_routes
                 .extend(group.policy_filtered_for_member(peer, &all_prefixes));
@@ -1075,16 +1089,25 @@ impl RibManager {
                 all_l3vpn_keys.extend(rib.iter_vpn().map(|route| route.nlri.key()));
             }
         }
-        if !all_l3vpn_keys.is_empty() {
+        // Skipped when the VPN dump was replayed from the group table
+        // above (VPN-staging group member — design §4: join pays no
+        // per-key staging walk).
+        if !all_l3vpn_keys.is_empty() && !vpn_group_replayed {
+            let mut target = super::distribution::ExportTarget::Peer {
+                peer,
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group.as_deref(),
+                metrics: &metrics,
+                policy_stats: &mut *policy_stats,
+                peer_label: &target_peer_label,
+            };
             Self::stage_vpn_routes(
                 loc_rib,
                 &self.ribs,
                 &initial_view,
                 &self.peer_is_rr_client,
                 &all_l3vpn_keys,
-                peer,
-                target_peer_asn,
-                target_peer_group.as_deref(),
+                &mut target,
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1095,9 +1118,6 @@ impl RibManager {
                 peer_add_path_send_max,
                 &peer_add_path_send_families,
                 export_pol.as_ref(),
-                &metrics,
-                policy_stats,
-                &target_peer_label,
                 &mut vpn_announce,
                 &mut vpn_withdraw,
                 false, // initial dump — equality check is correct

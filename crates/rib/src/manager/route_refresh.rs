@@ -629,6 +629,9 @@ impl RibManager {
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
         let member_of = self.grouped_member_of(peer);
+        // Resolved before the `policy_stats` borrow below (whole-`self`
+        // method call).
+        let vpn_member_of = self.vpn_grouped_member_of(peer);
         let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         let mut all_prefixes: HashSet<Prefix> = self
@@ -740,54 +743,78 @@ impl RibManager {
                 );
             }
         } else if safi == Safi::MplsVpn {
-            let mut vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
-                .loc_rib
-                .iter_vpn()
-                .filter(|route| route.afi_safi() == family)
-                .map(|route| route.nlri.key())
-                .collect();
-            // An Add-Path-send refresh re-emits the staged top-N, which
-            // draws from every Adj-RIB-In identity of the family.
-            if peer_add_path_send_max > 0
-                && peer_add_path_send_families
-                    .iter()
-                    .any(|(_, safi)| *safi == Safi::MplsVpn)
-            {
-                for rib in self.ribs.values() {
-                    vpn_keys.extend(
-                        rib.iter_vpn()
-                            .filter(|route| route.afi_safi() == family)
-                            .map(|route| route.nlri.key()),
+            // A member of a VPN-staging group replays the refreshed
+            // family from the group table — own-sourced excluded, NO
+            // policy re-evaluation (same shape as the unicast grouped
+            // arm below). RTC-negotiated groups don't stage VPN, so
+            // their members keep the per-peer staging (RT filter applies
+            // there).
+            if let Some(gid) = vpn_member_of {
+                if let Some(group) = self.group_ribs.get(&gid) {
+                    for route in group.table.iter_vpn() {
+                        if route.peer == peer || route.afi_safi() != family {
+                            continue;
+                        }
+                        vpn_announce.push(route.clone());
+                    }
+                }
+                // Export counters for the replayed family, from the
+                // group's staged residue (per-peer refresh re-eval
+                // parity).
+                self.apply_group_join_counters(peer, gid, Some(family));
+            } else {
+                let mut vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
+                    .loc_rib
+                    .iter_vpn()
+                    .filter(|route| route.afi_safi() == family)
+                    .map(|route| route.nlri.key())
+                    .collect();
+                // An Add-Path-send refresh re-emits the staged top-N, which
+                // draws from every Adj-RIB-In identity of the family.
+                if peer_add_path_send_max > 0
+                    && peer_add_path_send_families
+                        .iter()
+                        .any(|(_, safi)| *safi == Safi::MplsVpn)
+                {
+                    for rib in self.ribs.values() {
+                        vpn_keys.extend(
+                            rib.iter_vpn()
+                                .filter(|route| route.afi_safi() == family)
+                                .map(|route| route.nlri.key()),
+                        );
+                    }
+                }
+                if !vpn_keys.is_empty() {
+                    let mut target = super::distribution::ExportTarget::Peer {
+                        peer,
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        metrics: &metrics,
+                        policy_stats: &mut *policy_stats,
+                        peer_label: &target_peer_label,
+                    };
+                    Self::stage_vpn_routes(
+                        loc_rib,
+                        &self.ribs,
+                        &refresh_view,
+                        &self.peer_is_rr_client,
+                        &vpn_keys,
+                        &mut target,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        llgr.as_ref(),
+                        rtc_filter.as_ref(),
+                        orr_ctx,
+                        peer_add_path_send_max,
+                        &peer_add_path_send_families,
+                        export_pol.as_ref(),
+                        &mut vpn_announce,
+                        &mut vpn_withdraw,
+                        false, // route refresh re-emits via empty refresh_view
                     );
                 }
-            }
-            if !vpn_keys.is_empty() {
-                Self::stage_vpn_routes(
-                    loc_rib,
-                    &self.ribs,
-                    &refresh_view,
-                    &self.peer_is_rr_client,
-                    &vpn_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    rtc_filter.as_ref(),
-                    orr_ctx,
-                    peer_add_path_send_max,
-                    &peer_add_path_send_families,
-                    export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
-                    &mut vpn_announce,
-                    &mut vpn_withdraw,
-                    false, // route refresh re-emits via empty refresh_view
-                );
             }
         } else if safi == Safi::LabeledUnicast {
             let mut labeled_keys: HashSet<Prefix> = self

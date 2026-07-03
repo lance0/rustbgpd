@@ -320,17 +320,16 @@ pub struct RibManager {
     /// pass) at the first member's join, dropped at the last member's
     /// leave. See [`update_groups::GroupRibOut`].
     group_ribs: HashMap<usize, update_groups::GroupRibOut>,
-    /// A regrouped member's previously-advertised unicast view (old
-    /// group table minus own-sourced, or the per-peer Adj-RIB-Out),
-    /// held until its one-shot resync diff succeeds. Transient —
-    /// regroups are config-time events.
-    pending_regroup_baseline:
-        HashMap<IpAddr, rustc_hash::FxHashMap<(Prefix, u32), crate::route::Route>>,
+    /// A regrouped member's previously-advertised view (old group table
+    /// minus own-sourced, or the per-peer Adj-RIB-Out) — unicast plus
+    /// group-owned VPN — held until its one-shot resync diff succeeds.
+    /// Transient — regroups are config-time events.
+    pending_regroup_baseline: HashMap<IpAddr, update_groups::RegroupBaseline>,
     /// Extra (over-)withdraw keys a member must emit on its next
     /// resync: tombstones carried across a regroup by a member that was
     /// dirty when it moved (its missed withdrawals are unknown —
     /// over-withdraw is the safe direction). Cleared on resync success.
-    pending_extra_withdraws: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
+    pending_extra_withdraws: HashMap<IpAddr, update_groups::ExtraWithdraws>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
