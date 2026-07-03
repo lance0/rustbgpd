@@ -142,6 +142,14 @@ pub(crate) struct PeerSession {
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     /// Import policy (prefix filter applied to inbound UPDATEs).
     import_policy: Option<PolicyChain>,
+    /// Whether the inbound hot path must build the per-UPDATE `AS_PATH`
+    /// match string (`PolicyAttrSummary::as_path_str`). Derived from
+    /// the import chain via `PolicyChain::requires_as_path_string`
+    /// (mirroring the export-side gate in the RIB distribution
+    /// modules) plus the explain toggle — cached decisions store the
+    /// evaluation-time context verbatim. Recomputed once per chain
+    /// install (`install_import_policy`), not per UPDATE.
+    import_needs_as_path_string: bool,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PolicyChain>,
     /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
@@ -439,6 +447,8 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let import_needs_as_path_string =
+            Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         Self {
             config,
@@ -465,6 +475,7 @@ impl PeerSession {
             outbound_rx,
             outbound_tx,
             import_policy,
+            import_needs_as_path_string,
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
@@ -532,6 +543,8 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let import_needs_as_path_string =
+            Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         // Split the inbound stream and spawn the writer immediately —
         // we're in async context here (inside `tokio::spawn` from
@@ -569,6 +582,7 @@ impl PeerSession {
             outbound_rx,
             outbound_tx,
             import_policy,
+            import_needs_as_path_string,
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
@@ -608,6 +622,26 @@ impl PeerSession {
             ),
             import_policy_generation: 0,
         }
+    }
+
+    /// Whether an import chain (plus the explain toggle) needs the
+    /// per-UPDATE `AS_PATH` match string. See
+    /// [`Self::install_import_policy`].
+    fn import_chain_needs_as_path_string(
+        import_policy: Option<&PolicyChain>,
+        explain_enabled: bool,
+    ) -> bool {
+        explain_enabled || import_policy.is_some_and(PolicyChain::requires_as_path_string)
+    }
+
+    /// Install (or clear) the import chain, recomputing the cached
+    /// `as_path_str` gate. The single mutation point for
+    /// `import_policy` after construction — assigning the field
+    /// directly would desynchronize the gate.
+    pub(super) fn install_import_policy(&mut self, policy: Option<PolicyChain>) {
+        self.import_needs_as_path_string =
+            Self::import_chain_needs_as_path_string(policy.as_ref(), self.import_explain_enabled);
+        self.import_policy = policy;
     }
 
     fn build_bmp_peer_info(&self) -> BmpPeerInfo {

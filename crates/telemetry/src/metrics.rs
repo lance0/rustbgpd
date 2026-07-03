@@ -1,8 +1,51 @@
 //! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
+
+/// Monotonic id distinguishing `BgpMetrics` instances (tests create
+/// several on one thread). Clones share the id — they share the
+/// underlying metric vecs, so a memoized counter handle stays valid
+/// across clones.
+static NEXT_METRICS_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Bumped whenever peer series are reaped ([`BgpMetrics::reap_peer_series`]),
+/// invalidating every thread's [`POLICY_ROUTES_MEMO`]. Without this, a
+/// memoized handle would keep incrementing a child detached from the
+/// vec — invisible to scrapes — instead of re-resolving (and thereby
+/// recreating, from zero) the series like `with_label_values` does.
+static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// One memoized `bgp_policy_routes_total` child handle.
+///
+/// `record_policy_routes` fires once per route × policy evaluation —
+/// O(peers × prefixes) on a distribution pass, per-NLRI on ingest —
+/// and `with_label_values` pays a `RwLock` read + four label-string
+/// hashes + a map probe every time. The evaluation loops are
+/// synchronous and label-uniform in the common case, so a single-slot
+/// thread-local memo (plain string compares, no lock) absorbs almost
+/// every resolve. Cloned children share the underlying atomic, so
+/// increments through the memo are indistinguishable from
+/// `with_label_values(..).inc()` to `gather()`.
+// ponytail: single slot — alternating label sets within one loop fall
+// back to per-call resolution (today's cost); widen to a tiny LRU if a
+// profile ever shows thrash.
+struct PolicyRoutesMemo {
+    instance: u64,
+    reap_epoch: u64,
+    peer: String,
+    policy: String,
+    direction: String,
+    action: String,
+    counter: IntCounter,
+}
+
+thread_local! {
+    static POLICY_ROUTES_MEMO: RefCell<Option<PolicyRoutesMemo>> = const { RefCell::new(None) };
+}
 
 /// Prometheus metrics for the BGP daemon.
 ///
@@ -22,6 +65,8 @@ use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registr
 #[derive(Debug, Clone)]
 pub struct BgpMetrics {
     registry: Registry,
+    /// See [`NEXT_METRICS_INSTANCE_ID`].
+    instance_id: u64,
 
     // ── Session ────────────────────────────────────────────────────
     state_transitions: IntCounterVec,
@@ -1428,6 +1473,7 @@ impl BgpMetrics {
 
         Self {
             registry,
+            instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             state_transitions,
             session_flaps,
             session_established,
@@ -1594,6 +1640,15 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.route_refresh_in_progress, peer);
         Self::reap_peer_series_from_vec(&self.route_refresh_stale_entries, peer);
         Self::reap_peer_series_from_vec(&self.bmp_source_drops, peer);
+        // Invalidate memoized policy-routes handles AFTER the removal:
+        // every memo taken before this point (including one resolved
+        // mid-reap, whose series the loop above may just have removed)
+        // carries an older epoch and re-resolves on next use — a stale
+        // handle must never keep incrementing a child detached from the
+        // vec. An increment racing the removal itself can still be
+        // lost, exactly as a bare `with_label_values` racing
+        // `remove_label_values` could before the memo existed.
+        POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
     }
 
     /// Remove every series of one Vec metric whose `peer` label equals
@@ -2099,10 +2154,39 @@ impl BgpMetrics {
     /// - `action`: `"permit"` or `"deny"`.
     ///
     /// Cardinality stays bounded by config (no free-form labels).
+    /// Hot path (fires per route × policy evaluation): a thread-local
+    /// single-slot memo of the resolved child skips the prometheus
+    /// `RwLock` + label hashing when consecutive calls carry the same
+    /// labels — see [`PolicyRoutesMemo`]. Totals and label sets are
+    /// identical to unmemoized `with_label_values(..).inc()`.
     pub fn record_policy_routes(&self, peer: &str, policy: &str, direction: &str, action: &str) {
-        self.policy_routes
-            .with_label_values(&[peer, policy, direction, action])
-            .inc();
+        let reap_epoch = POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire);
+        POLICY_ROUTES_MEMO.with_borrow_mut(|memo| {
+            if let Some(m) = memo
+                && m.instance == self.instance_id
+                && m.reap_epoch == reap_epoch
+                && m.peer == peer
+                && m.policy == policy
+                && m.direction == direction
+                && m.action == action
+            {
+                m.counter.inc();
+                return;
+            }
+            let counter = self
+                .policy_routes
+                .with_label_values(&[peer, policy, direction, action]);
+            counter.inc();
+            *memo = Some(PolicyRoutesMemo {
+                instance: self.instance_id,
+                reap_epoch,
+                peer: peer.to_owned(),
+                policy: policy.to_owned(),
+                direction: direction.to_owned(),
+                action: action.to_owned(),
+                counter,
+            });
+        });
     }
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).
@@ -2932,6 +3016,62 @@ mod tests {
         assert!(text.contains(r#"policy="ingress-filter""#));
         assert!(text.contains(r#"direction="import""#));
         assert!(text.contains(r#"action="deny""#));
+    }
+
+    /// Reaping a peer must invalidate the thread-local memoized counter
+    /// handle: a later record for the same labels re-resolves (series
+    /// recreated from zero), never increments the detached child.
+    #[test]
+    fn policy_routes_memo_invalidated_by_reap() {
+        let m = BgpMetrics::new();
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+
+        m.reap_peer_series("10.0.0.2");
+        assert!(
+            !gather_text(&m).contains("bgp_policy_routes_total{"),
+            "reap must remove the peer's policy-routes series"
+        );
+
+        // Same labels again — must land on a fresh series, not the
+        // memoized pre-reap child.
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+        assert_eq!(
+            m.policy_routes
+                .with_label_values(&["10.0.0.2", "ingress-filter", "import", "permit"])
+                .get(),
+            1,
+            "post-reap series restarts from zero and receives the increment"
+        );
+    }
+
+    /// Two `BgpMetrics` instances on one thread (the ubiquitous test
+    /// topology) must not cross-increment through the shared
+    /// thread-local memo, while clones of ONE instance share it.
+    #[test]
+    fn policy_routes_memo_is_per_instance_but_shared_across_clones() {
+        let a = BgpMetrics::new();
+        let b = BgpMetrics::new();
+        let a2 = a.clone();
+
+        a.record_policy_routes("10.0.0.2", "p", "import", "permit");
+        b.record_policy_routes("10.0.0.2", "p", "import", "permit");
+        a2.record_policy_routes("10.0.0.2", "p", "import", "permit");
+
+        assert_eq!(
+            a.policy_routes
+                .with_label_values(&["10.0.0.2", "p", "import", "permit"])
+                .get(),
+            2,
+            "instance A counts its own and its clone's increment"
+        );
+        assert_eq!(
+            b.policy_routes
+                .with_label_values(&["10.0.0.2", "p", "import", "permit"])
+                .get(),
+            1,
+            "instance B must not absorb increments memoized for A"
+        );
     }
 
     #[test]
