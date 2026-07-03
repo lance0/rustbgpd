@@ -2157,7 +2157,7 @@ impl BgpMetrics {
     /// Hot path (fires per route × policy evaluation): a thread-local
     /// single-slot memo of the resolved child skips the prometheus
     /// `RwLock` + label hashing when consecutive calls carry the same
-    /// labels — see [`PolicyRoutesMemo`]. Totals and label sets are
+    /// labels — see `PolicyRoutesMemo`. Totals and label sets are
     /// identical to unmemoized `with_label_values(..).inc()`.
     pub fn record_policy_routes(&self, peer: &str, policy: &str, direction: &str, action: &str) {
         let reap_epoch = POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire);
