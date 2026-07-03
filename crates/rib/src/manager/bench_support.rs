@@ -91,6 +91,9 @@ impl RibManager {
             affected.insert(route.prefix);
             rib.insert(route);
         }
+        for prefix in &affected {
+            self.register_unicast_announcer(source, *prefix);
+        }
         self.recompute_best(&affected);
     }
 

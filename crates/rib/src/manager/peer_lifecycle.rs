@@ -851,6 +851,7 @@ impl RibManager {
                 let mut policy_filtered = Vec::new();
                 Self::distribute_multipath_prefix(
                     &self.ribs,
+                    &self.unicast_prefix_peers,
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
@@ -884,6 +885,7 @@ impl RibManager {
                 let mut policy_filtered = Vec::new();
                 Self::distribute_orr_best_prefix(
                     &self.ribs,
+                    &self.unicast_prefix_peers,
                     &initial_view,
                     &self.peer_is_rr_client,
                     orr_topology,

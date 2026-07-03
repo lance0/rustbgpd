@@ -33,6 +33,23 @@ use crate::update::{
 
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
 
+/// Reverse index of unicast announcing peers: prefix → the peers whose
+/// Adj-RIB-In currently holds at least one route for it. `FxHash` +
+/// peer-fed keys: same deliberate `HashDoS` tradeoff as the route maps (see the
+/// rationale block at the top of `adj_rib_in.rs`).
+///
+/// Maintenance contract (load-bearing): the index may OVER-count but must
+/// never UNDER-count — `recompute_best` collects candidates only from the
+/// indexed peers, so a missing entry would silently drop a live candidate
+/// from best-path selection. Every seam that inserts a unicast route into
+/// an Adj-RIB-In must call [`RibManager::register_unicast_announcer`]
+/// (announce chunks, local injection, bench seeding — the only three
+/// insert sites). Removal seams (withdraw, session down, GR/LLGR sweeps,
+/// `EoR` clears, max-prefix teardown) need no hook: a peer that no longer
+/// holds the prefix is pruned lazily by the next `recompute_best` probe,
+/// costing one wasted Adj-RIB-In lookup until then.
+type UnicastPrefixPeers = rustc_hash::FxHashMap<Prefix, smallvec::SmallVec<[IpAddr; 1]>>;
+
 #[cfg(test)]
 use helpers::{ERR_REFRESH_TIMEOUT, LOCAL_PEER, validate_route_rpki};
 
@@ -69,6 +86,8 @@ impl RtcMembership {
 /// No `Arc<RwLock>` — all state is owned by this task.
 pub struct RibManager {
     ribs: HashMap<IpAddr, AdjRibIn>,
+    /// See [`UnicastPrefixPeers`] for the maintenance contract.
+    unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
@@ -570,6 +589,7 @@ impl RibManager {
         }
         Self {
             ribs: HashMap::new(),
+            unicast_prefix_peers: UnicastPrefixPeers::default(),
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
@@ -1393,6 +1413,7 @@ impl RibManager {
         let explanation = Self::explain_single_best_prefix(
             &self.loc_rib,
             &self.ribs,
+            &self.unicast_prefix_peers,
             &self.peer_is_rr_client,
             prefix,
             peer,
