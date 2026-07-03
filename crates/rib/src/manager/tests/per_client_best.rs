@@ -388,6 +388,175 @@ async fn route_refresh_replays_filtered_best() {
     handle.await.unwrap();
 }
 
+/// An rpol chain with a named term denying `65000:99`-tagged routes —
+/// the explain tests assert the term label surfaces per candidate.
+fn rpol_deny_tagged_chain() -> PolicyChain {
+    const RPOL: &str = r"
+policy no-tagged {
+    term block-tagged {
+        if route.communities has 65000:99 { reject }
+    }
+}
+";
+    let file = rustbgpd_policy::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let mut store = rustbgpd_policy::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("no-tagged", &[], &mut store)
+        .expect("policy exists");
+    PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "no-tagged".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+/// The slice-1 known gap, fixed: `ExplainAdvertisedRoute` for a
+/// per-client-best peer dry-runs the filtered-best walk live staging
+/// performs — when the Loc-RIB best is policy-denied it explains the
+/// advertised runner-up (candidate ladder with per-candidate term
+/// labels), not a false "denied". A single-best sibling with the same
+/// chain keeps its truthful Deny.
+#[tokio::test]
+async fn explain_names_runner_up_selection_with_term_labels() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    announce_from(&tx, SOURCE_A, vec![best_route()]).await;
+    announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+
+    let mitigated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut mitigated_rx =
+        client_peer_up(&tx, mitigated, Some(rpol_deny_tagged_chain()), true).await;
+    let dump = mitigated_rx.recv().await.unwrap();
+    assert_eq!(dump.announce.len(), 1, "live sends the runner-up");
+    assert_eq!(dump.announce[0].peer, IpAddr::V4(SOURCE_B));
+
+    let hidden = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut hidden_rx = client_peer_up(&tx, hidden, Some(rpol_deny_tagged_chain()), false).await;
+    drain_eor(&mut hidden_rx).await;
+
+    // Per-client-best explain: agrees with the wire — the runner-up IS
+    // advertised, with the denied best named per candidate.
+    let explain = query_explain_advertised_route(&tx, mitigated, Prefix::V4(prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(explain.route_peer, Some(IpAddr::V4(SOURCE_B)));
+    assert_eq!(explain.next_hop, Some(IpAddr::V4(SOURCE_B)));
+    assert!(
+        explain.already_advertised,
+        "live already advertised the filtered best — explain must report in-sync"
+    );
+    let selection = explain
+        .gates
+        .iter()
+        .find(|step| step.code == "per_client_best")
+        .expect("per-client selection gate present");
+    assert_eq!(selection.gate, "best_route");
+    assert!(
+        selection.detail.contains("candidate 2 of 2"),
+        "selection names the ladder position, got {:?}",
+        selection.detail
+    );
+    let denial = explain
+        .reasons
+        .iter()
+        .find(|reason| reason.code == "per_client_candidate_denied")
+        .expect("denied candidate recorded");
+    assert!(
+        denial.message.contains("no-tagged:block-tagged"),
+        "per-candidate verdict names the rpol term, got {:?}",
+        denial.message
+    );
+    assert!(
+        denial.message.contains("candidate 1 of 2"),
+        "denial names the rank, got {:?}",
+        denial.message
+    );
+    // The winner's own policy gate passed with the chain named.
+    assert!(
+        explain
+            .gates
+            .iter()
+            .any(|step| step.code == "policy_permitted"),
+        "winner passes the export-policy rung"
+    );
+
+    // Single-best sibling: same chain, truthful Deny (path hiding).
+    let hidden_explain = query_explain_advertised_route(&tx, hidden, Prefix::V4(prefix())).await;
+    assert_eq!(
+        hidden_explain.decision,
+        crate::update::ExplainDecision::Deny
+    );
+    assert!(
+        hidden_explain
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "policy_denied"),
+        "single-best explain unchanged"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Every candidate denied: the explain ladder stops at selection with
+/// one recorded verdict per candidate — mirroring the live walk, which
+/// stages nothing.
+#[tokio::test]
+async fn explain_reports_every_denied_candidate_when_nothing_is_advertised() {
+    const RPOL: &str = r"
+policy deny-all {
+    term block-everything { reject }
+}
+";
+    let file = rustbgpd_policy::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let mut store = rustbgpd_policy::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("deny-all", &[], &mut store)
+        .expect("policy exists");
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "deny-all".to_string(),
+        Arc::new(compiled),
+    )]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    announce_from(&tx, SOURCE_A, vec![best_route()]).await;
+    announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut client_rx = client_peer_up(&tx, client, Some(chain), true).await;
+    drain_eor(&mut client_rx).await; // nothing staged: EoR only
+
+    let explain = query_explain_advertised_route(&tx, client, Prefix::V4(prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    let stop = explain
+        .gates
+        .iter()
+        .find(|step| step.verdict == crate::update::ExportGateVerdict::Stop)
+        .expect("ladder stops");
+    assert_eq!(
+        (stop.gate, stop.code),
+        ("best_route", "per_client_all_denied")
+    );
+    let denials: Vec<_> = explain
+        .reasons
+        .iter()
+        .filter(|reason| reason.code == "per_client_candidate_denied")
+        .collect();
+    assert_eq!(denials.len(), 2, "one verdict per candidate");
+    assert!(
+        denials
+            .iter()
+            .all(|reason| reason.message.contains("deny-all:block-everything")),
+        "each verdict names the term"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// With no denying chain, per-client-best selects the same route
 /// single-best would — the modes agree on the common path (differential
 /// pin against mode drift, design risk 4).

@@ -115,14 +115,23 @@ fn config_examples_parse() {
         let source = fs::read_to_string(&path).unwrap_or_else(|err| {
             panic!("failed to read example config {label}: {err}");
         });
-        // parse_strict (not parse) so every shipped example is validated under
-        // the production v0.24.0 `enforcement = "tier"` default. parse() would
-        // auto-inject `enforcement = "legacy"` for configs lacking a
-        // [security.grpc] block, masking examples that cannot actually start
-        // under defaults — the gap that shipped all examples unstartable until
-        // the v0.33.0 fixup. This guard fails closed if a new example omits the
-        // gRPC authorization config.
-        parse_strict(&source).unwrap_or_else(|err| {
+        // Strict parse (not the legacy-injecting `parse`) so every shipped
+        // example is validated under the production v0.24.0
+        // `enforcement = "tier"` default. Injection would mask examples that
+        // cannot actually start under defaults — the gap that shipped all
+        // examples unstartable until the v0.33.0 fixup. This guard fails
+        // closed if a new example omits the gRPC authorization config.
+        // Referenced .rpol files compile against the example's directory,
+        // exactly like the production load path, so chains resolve against
+        // the combined TOML + rpol namespace (e.g. route-server's
+        // hygiene.rpol).
+        let mut config: Config = toml::from_str(&source).unwrap_or_else(|err| {
+            panic!("example config {label} failed to parse: {err}");
+        });
+        config.load_rpol_files(path.parent()).unwrap_or_else(|err| {
+            panic!("example config {label} failed to load rpol files: {err}");
+        });
+        config.validate().unwrap_or_else(|err| {
             panic!("example config {label} failed validation under the tier default: {err}");
         });
     }

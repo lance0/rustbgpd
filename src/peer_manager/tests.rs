@@ -3466,6 +3466,39 @@ fn build_transport_config_preserves_route_server_client() {
     assert!(transport.route_server_client);
 }
 
+/// RFC 9234 OTC for dynamic/gRPC-added peers: `local_role` set on a
+/// runtime `PeerConfig` (the `AddNeighbor` / dynamic-range path) reaches
+/// the transport session config verbatim — transport attaches OTC on
+/// eBGP egress for `Provider`/`Peer`/`RouteServer` roles from exactly
+/// this field (`otc_egress_adds_local_asn_for_provider_peer_and_route_server`
+/// in the transport crate pins the attach itself).
+#[test]
+fn build_transport_config_preserves_local_role_for_otc() {
+    let (_, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    config.route_server_client = true;
+    config.local_role = Some(rustbgpd_wire::BgpRole::RouteServer);
+
+    let transport = mgr.build_transport_config(&config);
+    assert_eq!(
+        transport.peer.local_role,
+        Some(rustbgpd_wire::BgpRole::RouteServer)
+    );
+}
+
 #[tokio::test]
 async fn policy_events_publish_successful_policy_mutations() {
     use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};

@@ -188,6 +188,12 @@ IXP member C (AS 64503) ──┘
   peer directly via the exchange fabric)
 - **Add-Path send** — members see all candidate paths, not just the best,
   enabling their own best-path selection
+- **Per-client best-path** (`per_client_best`, RFC 7947 §2.3.2) — the
+  path-hiding mitigation for members that cannot do Add-Path: when a
+  member's export policy denies the best path, it receives the best
+  *permitted* candidate instead of nothing (the BIRD-`secondary`
+  equivalent), and `rbgp rib advertised --explain` shows the per-candidate
+  verdict ladder
 - **RPKI validation** — drop RPKI-invalid routes, prefer valid over not-found
 - **Receive-side Prefix ORF** — let members push prefix filters that constrain
   what the route server advertises back to them

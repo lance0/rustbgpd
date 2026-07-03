@@ -240,6 +240,9 @@ pub struct JsonNeighborDetail {
     pub route_server_client: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub per_client_best: bool,
+    /// Unicast distribution mode: `single-best`, `add-path`, `orr`, or
+    /// `per-client-best`.
+    pub distribution_mode: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
     pub strict_role: bool,
@@ -790,6 +793,7 @@ mod tests {
             peer_group: "rs-clients".to_string(),
             route_server_client: true,
             per_client_best: false,
+            distribution_mode: "add-path".to_string(),
             role: "rs".to_string(),
             strict_role: true,
             remote_role: "rs-client".to_string(),

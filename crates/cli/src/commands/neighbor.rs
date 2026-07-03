@@ -64,6 +64,19 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         .into_inner();
 
     let cfg = n.config.as_ref();
+    // Unicast distribution mode, mirroring the RIB's mode ladder
+    // (negotiated Add-Path send outranks the per-client-best fallback).
+    // An ORR vantage is not on the runtime NeighborConfig surface, so
+    // it is recognized via the update-group ungrouped reason.
+    let distribution_mode = if cfg.map(|c| c.add_path_send).unwrap_or(false) {
+        "add-path"
+    } else if cfg.map(|c| c.per_client_best).unwrap_or(false) {
+        "per-client-best"
+    } else if n.update_group == "orr_vantage" {
+        "orr"
+    } else {
+        "single-best"
+    };
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -87,6 +100,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
             per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
+            distribution_mode: distribution_mode.to_string(),
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
             add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
@@ -142,6 +156,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         if cfg.map(|c| c.per_client_best).unwrap_or(false) {
             println!("Per-Client Best:       true");
         }
+        println!("Distribution Mode:     {distribution_mode}");
         let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
         if !role.is_empty() {
             println!("BGP Role:              {role}");

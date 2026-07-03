@@ -52,7 +52,7 @@ diversity scripts remain local / manual gates. See
 - **Cloud / AI-scale data-center fabrics** — API-first BGP control, BFD, ECMP,
   EVPN/VXLAN alpha, and whitebox-friendly interop surfaces
 - **Hosting provider prefix management** — API-driven customer prefix announcements
-- **Internet exchange route servers** — transparent mode, Add-Path, RPKI, Prefix ORF, per-member policy
+- **Internet exchange route servers** — transparent mode, Add-Path, per-client best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member policy
 - **SDN / network automation controllers** — programmable BGP control plane
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
@@ -310,7 +310,7 @@ and more explicit internal architecture.
 |---------|-------------|
 | [`examples/docker-compose/`](examples/docker-compose/) | Quick-start with Docker Compose — rustbgpd + FRR peer with sample routes |
 | [`examples/minimal/`](examples/minimal/) | Smallest working config — single eBGP peer |
-| [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path, policy chains |
+| [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path + per-client best-path, rpol hygiene policy |
 | [`examples/ddos-mitigation/`](examples/ddos-mitigation/) | FlowSpec + RTBH for automated DDoS mitigation |
 | [`examples/hosting-provider/`](examples/hosting-provider/) | iBGP route injector for customer prefix management |
 | [`examples/linux-edge-fib/`](examples/linux-edge-fib/) | Linux edge host with explicit ADR-0061 `[[fib_tables]]` unicast FIB programming |
