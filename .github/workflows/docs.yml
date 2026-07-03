@@ -1,0 +1,36 @@
+name: docs
+
+# Docs-as-code: kura.toml + this workflow render docs/ into a searchable, agent-native static site via
+# the kurajs/pages action, deployed to GitHub Pages. The repo's docs/ also holds generated soak-test
+# artifacts and dated postmortems; those are pruned from the build copy here (the repo itself is never
+# modified) so the site stays focused on the reference docs.
+
+on:
+  push:
+    branches: [main, master, docs/kura-site]
+    paths:
+      - "docs/**"
+      - "kura.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Trim generated artifacts and internal logs from the docs build copy
+        run: |
+          rm -rf docs/artifacts docs/images docs/perf
+          rm -f docs/soak-*.md docs/RECEIPTS.md docs/OPERATIONAL_PROOF.md docs/evpn-alpha-soak.md \
+                docs/milestones.md docs/upstream-findings.md docs/RELEASE_CHECKLIST.md docs/FUZZING.md
+
+      - uses: kurajs/pages@v1

@@ -1,0 +1,56 @@
+# rustbgpd docs site — the ONLY config. The kurajs/pages action reads this + renders docs/ into the
+# site. The repo is Rust, so nothing at the root is touched. Deployed by .github/workflows/docs.yml.
+
+markdown  = "commonmark"
+base_path = ""
+[site]
+name        = "rustbgpd"
+description = "An API-first BGP daemon in Rust for programmable route-server and control-plane use cases."
+[deploy]
+target = "github-pages"
+[content]
+sources = []
+[[nav.tabs]]
+title  = "Guide"
+groups = ["guide"]
+[[nav.tabs]]
+title  = "Reference"
+groups = ["api", "evpn"]
+[[nav.tabs]]
+title  = "Cookbook"
+groups = ["cookbook"]
+[[nav.tabs]]
+title  = "Internals"
+groups = ["design", "adr"]
+[nav.groups.guide]
+title = "Guide"
+pages = [
+  { slug = "deployment", title = "Deployment" }, { slug = "CONFIGURATION", title = "Configuration" },
+  { slug = "OPERATIONS", title = "Operations" }, { slug = "USE_CASES", title = "Use cases" },
+  { slug = "SECURITY", title = "Security posture" }, { slug = "EMBEDDING", title = "Embedding (library map)" },
+]
+[nav.groups.api]
+title = "API & telemetry"
+pages = [
+  { slug = "API", title = "gRPC API reference" }, { slug = "rpol-language", title = "Policy language (.rpol)" },
+  { slug = "grpc-method-inventory", title = "gRPC method inventory" }, { slug = "GNMI", title = "gNMI / OpenConfig" },
+  { slug = "GRAFANA", title = "Grafana dashboard" },
+]
+[nav.groups.evpn]
+title = "EVPN"
+pages = [
+  { slug = "evpn-vtep-setup", title = "VTEP setup" }, { slug = "evpn-vtep-troubleshooting", title = "VTEP troubleshooting" },
+  { slug = "evpn-enablement", title = "Enablement roadmap" },
+]
+[nav.groups.cookbook]
+title = "Cookbook"
+[nav.groups.design]
+title = "Design & comparisons"
+pages = [
+  { slug = "DESIGN", title = "Design document" }, { slug = "COMPARISON", title = "BGP comparison" },
+  { slug = "gobgp-parity", title = "GoBGP parity" }, { slug = "BENCHMARKS", title = "Benchmarks" },
+  { slug = "INTEROP", title = "Interop results" }, { slug = "RFC_NOTES", title = "RFC notes" },
+  { slug = "reload-matrix", title = "Reload matrix" }, { slug = "kernel-dataplane-runner", title = "Kernel dataplane runner" },
+]
+[nav.groups.adr]
+title = "Design records (ADR)"
