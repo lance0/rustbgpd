@@ -1,0 +1,95 @@
+# Containerlab topology: GoBGP PEs ↔ rustbgpd RR + three BMP collectors
+# (M81 — BMP trio receipt: RFC 8671 Adj-RIB-Out + RFC 9069 Loc-RIB +
+# BMPv4 TLV framing + Path Marking)
+#
+# rustbgpd reflects unicast v4/v6 + VPNv4 between two GoBGP clients and
+# streams all three BMP views (rib_in_pre / rib_out_post / loc_rib) to:
+#   - pmacct  (pmbmpd bleeding-edge, version = 3): semantic v3 oracle
+#   - gobmp   (version = 3): second, independent v3 oracle
+#   - bmpsink (raw byte sink, one version = 3 and one version = 4
+#     collector): byte-level assertions + tshark 4.4 pcap dissection
+#     (the only oracle that decodes tlv-20 TLV structure and the
+#     path-status TLV — see the oracle-support matrix in the test
+#     script header).
+#
+# Collector images are pinned by digest: both are moving tags
+# (bleeding-edge / latest) and the oracle-support matrix in the test
+# script was validated against exactly these builds:
+#   - pmacct/pmbmpd:bleeding-edge = pmbmpd 1.8.1-git 20260513 (cd619f58)
+#   - sbezverk/gobmp:latest       = master 2026-06-24
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   docker build -t bmpsink:m81 -f tests/interop/Dockerfile.bmpsink tests/interop
+#   containerlab deploy -t tests/interop/m81-bmp-trio-gobgp.clab.yml
+#   bash tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
+#   containerlab destroy -t tests/interop/m81-bmp-trio-gobgp.clab.yml
+
+name: m81-bmp-trio-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m81-bmp-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-pe1:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m81-pe1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-pe2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m81-pe2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    # BMP collectors live on the containerlab management network only;
+    # their addresses are resolved and patched into the rustbgpd config
+    # at test time (M24 pattern).
+    pmacct:
+      kind: linux
+      image: pmacct/pmbmpd@sha256:4739c866c868ab605c4da7659e8921c5e04fbff4075580ab811e65518da0071b
+      cmd: -L 0.0.0.0 -l 1790 -o /tmp/bmp-msglog.json -d
+
+    gobmp:
+      kind: linux
+      image: sbezverk/gobmp@sha256:20e00b3a2d9d1ca2620970490159997817ac5cf19d47412ff36ad580e377e6ee
+      cmd: --source-port=5000 --dump=console --v=3
+
+    bmpsink:
+      kind: linux
+      image: bmpsink:m81
+      cmd: sleep infinity
+      binds:
+        - ./scripts/bmp-raw-sink.py:/usr/local/bin/bmp-raw-sink.py:ro
+        - ./scripts/m81-bmp-assert.py:/usr/local/bin/m81-bmp-assert.py:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-pe1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-pe2:eth1"]
+
+# BGP: 10.0.0.0/24 (pe1), 10.0.1.0/24 (pe2); AS 65001 iBGP throughout.
+# BMP: management network — pmacct :1790, gobmp :5000,
+#      bmpsink :11019 (v3 raw) + :11020 (v4 raw).

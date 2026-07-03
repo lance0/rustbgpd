@@ -1,0 +1,13 @@
+# M81 BMP byte-sink + capture container: python3 for the raw dual-port
+# BMP sink (scripts/bmp-raw-sink.py) and tshark for pcap capture +
+# dissection.
+#
+# tshark is version-critical: the BMPv4 TLV dissection
+# (draft-ietf-grow-bmp-tlv + path-status TLV) landed in Wireshark 4.4 —
+# ubuntu-24.04's tshark 4.2 does not have it. alpine 3.22 ships
+# Wireshark 4.4.x, keeping local runs and CI on the same dissector.
+FROM alpine:3.22
+
+RUN apk add --no-cache tshark python3
+
+CMD ["sleep", "infinity"]

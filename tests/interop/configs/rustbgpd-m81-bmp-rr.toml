@@ -1,0 +1,72 @@
+# M81 — BMP trio receipt: rustbgpd as RR with four BMP collectors.
+# Collector addresses are placeholders patched at test time (M24
+# pattern): PMACCT_ADDR / GOBMP_ADDR / SINK_ADDR resolve to the
+# containerlab management IPs.
+
+[global]
+asn = 65001
+router_id = "10.255.0.1"
+listen_port = 179
+cluster_id = "10.255.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[bmp]
+sys_name = "rustbgpd-m81"
+sys_descr = "m81 bmp trio receipt"
+
+# Collector A — pmacct pmbmpd (bleeding-edge), v3 semantic oracle for
+# all three streams. Phase 0 pinned pmacct to v3: it accepts version-4
+# common headers but expects the pre-tlv-20 BGP PDU TLV code point 4,
+# so it discards every tlv-20 v4 Route Monitoring message
+# ("BMPv4 BGP PDU TLV != 1").
+[[bmp.collectors]]
+address = "PMACCT_ADDR:1790"
+reconnect_interval = 5
+monitor = ["rib_in_pre", "rib_out_post", "loc_rib"]
+
+# Collector B — gobmp, second independent v3 oracle (hard-rejects any
+# version != 3 at the common header, so v3 only).
+[[bmp.collectors]]
+address = "GOBMP_ADDR:5000"
+reconnect_interval = 5
+monitor = ["rib_in_pre", "rib_out_post", "loc_rib"]
+
+# Collector C — raw byte sink, v3 slot: reference bytes for the
+# v3-vs-v4 byte-equality assertions.
+[[bmp.collectors]]
+address = "SINK_ADDR:11019"
+reconnect_interval = 5
+monitor = ["rib_in_pre", "rib_out_post", "loc_rib"]
+
+# Collector D — raw byte sink, v4 slot: BMPv4 TLV framing + path
+# marking, asserted byte-level and via tshark 4.4 pcap dissection.
+[[bmp.collectors]]
+address = "SINK_ADDR:11020"
+reconnect_interval = 5
+version = 4
+monitor = ["rib_in_pre", "rib_out_post", "loc_rib"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "gobgp-pe1"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "gobgp-pe2"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast"]
+
+[security.grpc]
+enforcement = "legacy"
