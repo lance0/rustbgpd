@@ -1,0 +1,35 @@
+# M82 interop: rustbgpd as EVPN Route Reflector for VLAN-aware-bundle
+# (non-zero Ethernet Tag) routes. Shared by both M82 legs: the bundle
+# originator at 10.0.0.2 is Nokia SR Linux (vendor leg) or GoBGP
+# (synthetic CI leg); the reflector client at 10.0.1.2 is GoBGP in both.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.100"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "bundle-originator"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65000
+description = "gobgp-sink"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[security.grpc]
+enforcement = "legacy"

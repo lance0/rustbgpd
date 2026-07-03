@@ -1,0 +1,80 @@
+# Containerlab topology: Nokia SR Linux bundle VTEP ↔ rustbgpd RR ↔ GoBGP sink
+# (M82 leg 1 — EVPN VLAN-aware-bundle vendor-NOS receipt, ADR-0092 Decision 6)
+#
+# rustbgpd's first vendor-NOS interop leg. SR Linux (25.10) runs two
+# mac-vrf bridge domains in VLAN-aware-bundle interoperability mode
+# (vlan-aware-bundle-eth-tag 10 / 20, shared RT target:65000:100, VNIs
+# 10010 / 10020, the same static MAC in both bridge domains) and
+# originates Type 3 IMET + Type 2 MAC/IP routes with non-zero Ethernet
+# Tags. rustbgpd route-reflects them tag-verbatim to a GoBGP client.
+#
+# Local-only (not wired into CI): the SR Linux image is ~750 MB
+# compressed / 3.2 GB on disk and boots a full NOS; the CI-gated proof
+# is the synthetic leg (m82-evpn-bundle-synthetic-gobgp.clab.yml).
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   docker pull ghcr.io/nokia/srlinux:latest
+#   containerlab deploy -t tests/interop/m82-evpn-bundle-srlinux.clab.yml
+#   bash tests/interop/scripts/test-m82-evpn-bundle-srlinux.sh
+#   containerlab destroy -t tests/interop/m82-evpn-bundle-srlinux.clab.yml
+
+name: m82-evpn-bundle-srlinux
+
+topology:
+  nodes:
+    srl:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+      startup-config: ./configs/srl-m82-bundle.cli
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m82-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-sink:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m82-sink.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    # Access-side link partner for SR Linux ethernet-1/2 so the bridged
+    # VLAN subinterfaces have carrier; also carries tagged host
+    # interfaces for optional dynamic-MAC experiments.
+    client:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      exec:
+        - ip link set eth1 up
+        - ip link add link eth1 name eth1.10 type vlan id 10
+        - ip link add link eth1 name eth1.20 type vlan id 20
+        - ip addr add 10.82.10.99/24 dev eth1.10
+        - ip addr add 10.82.20.99/24 dev eth1.20
+        - ip link set eth1.10 up
+        - ip link set eth1.20 up
+
+  links:
+    - endpoints: ["srl:e1-1", "rustbgpd:eth1"]
+    - endpoints: ["srl:e1-2", "client:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp-sink:eth1"]
+
+# Underlay: srl 10.0.0.2 (system0 192.0.2.2/32 as VTEP source), rustbgpd
+# RR 10.0.0.1 / 10.0.1.1 (cluster-id 10.0.0.100), gobgp-sink 10.0.1.2,
+# all AS 65000 (iBGP L2VPN/EVPN, both RR clients).
