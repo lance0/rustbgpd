@@ -360,6 +360,27 @@ impl Config {
         }
     }
 
+    /// Emit the startup deprecation warning for the in-daemon
+    /// birdwatcher-compatible looking glass HTTP server, if configured.
+    ///
+    /// The daemon's durable API identity is gRPC + rbgp; the birdwatcher
+    /// REST surface moved to the external `examples/birdwatcher-adapter`
+    /// binary, which serves the identical contract over gRPC. The
+    /// in-daemon server keeps working unchanged until removal.
+    pub fn warn_if_deprecated_looking_glass(&self) {
+        if self.global.telemetry.looking_glass.is_some() {
+            tracing::warn!(
+                "DEPRECATED: the in-daemon looking glass HTTP server \
+                 ([global.telemetry.looking_glass]) is deprecated and will be \
+                 removed in a future release. Run the external adapter instead: \
+                 examples/birdwatcher-adapter serves the same birdwatcher REST \
+                 endpoints from the daemon's gRPC API — see \
+                 docs/CONFIGURATION.md \"[global.telemetry.looking_glass] \
+                 (deprecated)\" and the CHANGELOG Deprecated entry."
+            );
+        }
+    }
+
     /// Resolve the global import policy chain.
     ///
     /// If `import_chain` is set, resolves named policies. Otherwise wraps

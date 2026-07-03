@@ -11808,16 +11808,18 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
     }
 }
 
-fn capture_deprecation_warning(config: &Config) -> String {
+fn capture_warnings(f: impl FnOnce()) -> String {
     let writer = CaptureWriter::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(writer.clone())
         .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        config.warn_if_deprecated_global_inline_policy();
-    });
+    tracing::subscriber::with_default(subscriber, f);
     let bytes = writer.0.lock().unwrap().clone();
     String::from_utf8(bytes).unwrap()
+}
+
+fn capture_deprecation_warning(config: &Config) -> String {
+    capture_warnings(|| config.warn_if_deprecated_global_inline_policy())
 }
 
 #[test]
@@ -11856,5 +11858,36 @@ fn config_without_global_inline_policy_does_not_warn() {
     let config = parse(&toml_str).unwrap();
     assert!(!config.uses_deprecated_global_inline_policy());
     let output = capture_deprecation_warning(&config);
+    assert!(output.is_empty(), "no warning expected: {output}");
+}
+
+// ── In-daemon looking glass deprecation (Item: surface reduction) ────
+
+#[test]
+fn looking_glass_emits_deprecation_warning() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.looking_glass]\naddr = \"127.0.0.1:8080\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let output = capture_warnings(|| config.warn_if_deprecated_looking_glass());
+    assert!(
+        output.contains("WARN"),
+        "expected a warn-level log: {output}"
+    );
+    assert!(
+        output.contains("DEPRECATED") && output.contains("[global.telemetry.looking_glass]"),
+        "warning must name the deprecated surface: {output}"
+    );
+    assert!(
+        output.contains("birdwatcher-adapter"),
+        "warning must point at the external adapter: {output}"
+    );
+}
+
+#[test]
+fn config_without_looking_glass_does_not_warn() {
+    let config = parse(valid_toml()).unwrap();
+    let output = capture_warnings(|| config.warn_if_deprecated_looking_glass());
     assert!(output.is_empty(), "no warning expected: {output}");
 }

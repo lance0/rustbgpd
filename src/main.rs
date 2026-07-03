@@ -1209,6 +1209,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         "starting rustbgpd"
     );
     config.warn_if_deprecated_global_inline_policy();
+    config.warn_if_deprecated_looking_glass();
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {

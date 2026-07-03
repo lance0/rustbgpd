@@ -17,6 +17,7 @@ members = [
     "crates/event-history",
     "bench/evpn-load",
     "examples/event-bridge",
+    "examples/birdwatcher-adapter",
 ]
 resolver = "2"
 
