@@ -310,10 +310,33 @@ pub struct RibManager {
     /// re-arm) becomes deterministically observable. `None` in
     /// production — the only cost when unset is an `is_some()` check.
     test_ingest_stall: Option<std::time::Duration>,
-    /// Update-group fingerprint registry (shadow mode, slice 1):
-    /// records which peers *could* share staged output and why the
-    /// rest can't. Distribution never reads it yet.
+    /// Update-group fingerprint registry (slice 1): membership (group
+    /// id or ungrouped reason) per registered peer. Since slice 2 the
+    /// distribution path reads it: grouped peers share the staged
+    /// tables in `group_ribs`; ungrouped peers keep the per-peer path.
     update_groups: update_groups::UpdateGroupRegistry,
+    /// Group-owned staged outbound tables, keyed by group id. One per
+    /// non-empty group; created (and built with a single shared staging
+    /// pass) at the first member's join, dropped at the last member's
+    /// leave. See [`update_groups::GroupRibOut`].
+    group_ribs: HashMap<usize, update_groups::GroupRibOut>,
+    /// A regrouped member's previously-advertised unicast view (old
+    /// group table minus own-sourced, or the per-peer Adj-RIB-Out),
+    /// held until its one-shot resync diff succeeds. Transient —
+    /// regroups are config-time events.
+    pending_regroup_baseline:
+        HashMap<IpAddr, rustc_hash::FxHashMap<(Prefix, u32), crate::route::Route>>,
+    /// Extra (over-)withdraw keys a member must emit on its next
+    /// resync: tombstones carried across a regroup by a member that was
+    /// dirty when it moved (its missed withdrawals are unknown —
+    /// over-withdraw is the safe direction). Cleared on resync success.
+    pending_extra_withdraws: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
+    /// Differential-oracle test hook: disqualify every peer from
+    /// grouping so identical scenarios can be driven through the
+    /// per-peer path (the correctness oracle) and compared against a
+    /// grouped run.
+    #[cfg(test)]
+    test_force_ungrouped: bool,
 }
 
 /// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
@@ -634,6 +657,11 @@ impl RibManager {
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
             update_groups: update_groups::UpdateGroupRegistry::default(),
+            group_ribs: HashMap::new(),
+            pending_regroup_baseline: HashMap::new(),
+            pending_extra_withdraws: HashMap::new(),
+            #[cfg(test)]
+            test_force_ungrouped: false,
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
@@ -1378,11 +1406,14 @@ impl RibManager {
         peer: IpAddr,
         reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
     ) {
-        let routes: Vec<_> = self
-            .adj_ribs_out
-            .get(&peer)
-            .map(|rib| rib.iter().cloned().collect())
-            .unwrap_or_default();
+        // A grouped member holds no per-peer unicast Adj-RIB-Out; its
+        // advertised set is synthesized: group table − own-sourced.
+        let routes: Vec<_> = self.grouped_advertised_routes(peer).unwrap_or_else(|| {
+            self.adj_ribs_out
+                .get(&peer)
+                .map(|rib| rib.iter().cloned().collect())
+                .unwrap_or_default()
+        });
 
         if reply.send(routes).is_err() {
             warn!("query caller dropped before receiving response");
@@ -1877,7 +1908,10 @@ impl RibManager {
         peer: IpAddr,
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
-        let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
+        // Grouped members synthesize: group table len − own-sourced.
+        let count = self
+            .grouped_advertised_count(peer)
+            .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len));
         let _ = reply.send(count);
     }
 
@@ -1885,11 +1919,27 @@ impl RibManager {
         &mut self,
         reply: tokio::sync::oneshot::Sender<crate::update::AdjRibOutCounts>,
     ) {
-        let counts = self
+        let mut counts: crate::update::AdjRibOutCounts = self
             .adj_ribs_out
             .iter()
             .map(|(peer, rib)| (*peer, rib.family_counts()))
             .collect();
+        // Grouped members hold no per-peer unicast entries: synthesize
+        // their unicast family counts from the group tables (BMP RFC
+        // 8671 stat type 17 must not report zero for them).
+        for (&peer, membership) in &self.update_groups.members {
+            let update_groups::GroupMembership::Grouped(gid) = membership else {
+                continue;
+            };
+            let Some(group) = self.group_ribs.get(gid) else {
+                continue;
+            };
+            let synthesized = group.family_counts_for(peer);
+            if synthesized.is_empty() {
+                continue;
+            }
+            counts.entry(peer).or_default().extend(synthesized);
+        }
         let _ = reply.send(counts);
     }
 
@@ -2208,7 +2258,7 @@ impl RibManager {
         }
         self.peer_rt_membership.insert(peer, membership);
         if self.outbound_peers.contains_key(&peer) {
-            self.dirty_peers.insert(peer);
+            self.mark_outbound_dirty(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
     }

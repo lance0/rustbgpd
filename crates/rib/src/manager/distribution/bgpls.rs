@@ -270,7 +270,7 @@ impl RibManager {
                 )
             {
                 warn!(%peer, "outbound channel full — BGP-LS update deferred");
-                self.dirty_peers.insert(peer);
+                self.mark_outbound_dirty(peer);
             }
         }
     }

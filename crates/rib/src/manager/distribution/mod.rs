@@ -94,6 +94,78 @@ fn route_type_message(route_type: RouteType) -> &'static str {
     }
 }
 
+/// The consumer identity for the shared single-best export tail
+/// ([`RibManager::distribute_single_best_prefix`]): a concrete peer
+/// (today's per-peer path — split horizon against the peer,
+/// peer-context policy fields, direct per-peer counter recording) or a
+/// whole update group (shared staging — split horizon deferred to
+/// member emit via the source-flip matrix, peer-context-free chain by
+/// group eligibility, evaluations accumulated once and replayed per
+/// member as integer adds). ONE body serves both paths: the per-peer
+/// path stays the correctness oracle for the group path forever
+/// (design risk 1 — parameterized, never copied).
+pub(in crate::manager) enum ExportTarget<'a> {
+    Peer {
+        peer: IpAddr,
+        peer_asn: Option<u32>,
+        peer_group: Option<&'a str>,
+        metrics: &'a BgpMetrics,
+        policy_stats: &'a mut NeighborPolicyStats,
+        peer_label: &'a str,
+    },
+    Group {
+        evals: &'a mut super::update_groups::GroupEvalAccumulator,
+    },
+}
+
+impl ExportTarget<'_> {
+    /// The peer to apply split horizon against; `None` for group
+    /// staging (lifted out — applied per member at emit time).
+    fn split_horizon_peer(&self) -> Option<IpAddr> {
+        match self {
+            Self::Peer { peer, .. } => Some(*peer),
+            Self::Group { .. } => None,
+        }
+    }
+
+    /// Peer-context fields for the policy `RouteContext`. Group-staged
+    /// chains never read them (`requires_peer_context` disqualifies).
+    fn ctx_peer(&self) -> (Option<IpAddr>, Option<u32>, Option<&str>) {
+        match self {
+            Self::Peer {
+                peer,
+                peer_asn,
+                peer_group,
+                ..
+            } => (Some(*peer), *peer_asn, *peer_group),
+            Self::Group { .. } => (None, None, None),
+        }
+    }
+
+    /// Record one export-chain evaluation: directly per peer, or into
+    /// the group accumulator for per-member replay.
+    fn record_eval(&mut self, evaluation: &PolicyEvaluation, source: IpAddr) {
+        match self {
+            Self::Peer {
+                metrics,
+                policy_stats,
+                peer_label,
+                ..
+            } => record_export_policy_eval(metrics, policy_stats, peer_label, evaluation),
+            Self::Group { evals } => evals.record(evaluation, source),
+        }
+    }
+
+    /// Target stamped on policy-denial records; group records carry the
+    /// `LOCAL_PEER` placeholder and are restamped per member.
+    fn policy_filtered_target(&self) -> IpAddr {
+        match self {
+            Self::Peer { peer, .. } => *peer,
+            Self::Group { .. } => LOCAL_PEER,
+        }
+    }
+}
+
 fn record_export_policy_eval(
     metrics: &BgpMetrics,
     stats: &mut NeighborPolicyStats,
@@ -149,6 +221,12 @@ impl RibManager {
             return false;
         };
 
+        // A grouped member's unicast advertised state is group-owned
+        // (design §2: NO per-peer unicast storage) — skip the per-peer
+        // unicast commit and synthesize its gauge from the group table.
+        // Non-unicast families always commit per peer.
+        let grouped_unicast_count = self.grouped_advertised_count(peer);
+
         if !announce.is_empty()
             || !withdraw.is_empty()
             || !flowspec_announce.is_empty()
@@ -169,11 +247,13 @@ impl RibManager {
                 .adj_ribs_out
                 .entry(peer)
                 .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
-            for route in &announce {
-                rib_out.insert(route.clone());
-            }
-            for (prefix, path_id) in &withdraw {
-                rib_out.withdraw(prefix, *path_id);
+            if grouped_unicast_count.is_none() {
+                for route in &announce {
+                    rib_out.insert(route.clone());
+                }
+                for (prefix, path_id) in &withdraw {
+                    rib_out.withdraw(prefix, *path_id);
+                }
             }
             for route in &flowspec_announce {
                 rib_out.insert_flowspec(route.clone());
@@ -214,7 +294,7 @@ impl RibManager {
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
                 "all",
-                gauge_val(rib_out.len()),
+                gauge_val(grouped_unicast_count.unwrap_or_else(|| rib_out.len())),
             );
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
@@ -285,13 +365,22 @@ impl RibManager {
         }
 
         self.peer_export_policies.insert(peer, export_policy);
-        // Shadow-mode update-group fingerprint: recompute on the policy
-        // replacement seam (per-peer gRPC edits, ADR-0076 live-impact
-        // txns, and SIGHUP rpol overlays all funnel through this
-        // handler). Content-equality keying makes a reinstall of an
-        // identical chain key-stable — no regroup is recorded.
+        // Update-group membership recompute on the policy replacement
+        // seam (per-peer gRPC edits, ADR-0076 live-impact txns, and
+        // SIGHUP rpol overlays all funnel through this handler).
+        // Content-equality keying makes a reinstall of an identical
+        // chain key-stable — no regroup, and (key-stable fast path) NO
+        // resync either: a grouped member's staged output is a pure
+        // function of the key, so re-emitting would be a no-op flood.
+        // Everything else — regrouped members (one-shot baseline diff)
+        // and ungrouped peers (per-peer equality-suppressed diff) —
+        // takes the dirty resync exactly as before.
+        let before = self.grouped_member_of(peer);
         self.recompute_update_group(peer);
-        self.dirty_peers.insert(peer);
+        let key_stable = before.is_some() && before == self.grouped_member_of(peer);
+        if !key_stable {
+            self.mark_outbound_dirty(peer);
+        }
         self.distribute_changes(&HashSet::new(), &HashSet::new());
         let _ = reply.send(Ok(()));
     }
@@ -412,7 +501,7 @@ impl RibManager {
                     self.gr_deferred_eor.remove(&peer);
                 }
                 self.pending_eor.entry(peer).or_default().insert(family);
-                self.dirty_peers.insert(peer);
+                self.mark_outbound_dirty(peer);
             }
             self.force_outbound_peers.insert(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
@@ -863,7 +952,14 @@ impl RibManager {
         // this outlives the per-peer iteration deliberately, since the
         // win is identical modified attrs across peers sharing a chain.
         let mut export_memo = ExportMemo::default();
+        // Update-group shared staging: ONE export-tail pass per (group,
+        // changed prefix), committed to the group tables. The per-peer
+        // loop below emits the deltas per member via the source-flip
+        // matrix; disqualified peers take the per-peer staging path
+        // exactly as before.
+        let group_stage = self.stage_update_groups(best_changed, &mut export_memo);
         for peer in peers {
+            let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
             // `is_force` peers are dirty-equivalent for prefix enumeration AND
@@ -874,16 +970,34 @@ impl RibManager {
             let resync = is_dirty || is_force;
             let effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                 let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
-                // For multi-path dirty resync, also include all Adj-RIB-In prefixes
-                if self.peer_has_any_add_path_send(peer) {
-                    for rib in self.ribs.values() {
-                        all.extend(rib.iter().map(|r| r.prefix));
+                if let Some(gid) = member_of {
+                    // A grouped member's advertised state is the group
+                    // table (plus any pending withdraw residue); the
+                    // per-peer Adj-RIB-Out holds no unicast for it.
+                    if let Some(group) = self.group_ribs.get(&gid) {
+                        all.extend(group.table.iter().map(|r| r.prefix));
+                        all.extend(group.tombstones.iter().map(|(p, _)| *p));
+                    }
+                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                        all.extend(base.keys().map(|(p, _)| *p));
+                    }
+                } else {
+                    // For multi-path dirty resync, also include all Adj-RIB-In prefixes
+                    if self.peer_has_any_add_path_send(peer) {
+                        for rib in self.ribs.values() {
+                            all.extend(rib.iter().map(|r| r.prefix));
+                        }
+                    }
+                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                        all.extend(rib_out.iter().map(|r| r.prefix));
                     }
                 }
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(rib_out.iter().map(|r| r.prefix));
-                }
                 Cow::Owned(all)
+            } else if member_of.is_some() {
+                // Grouped peers have no ORR / Add-Path extras (both are
+                // grouping disqualifiers): the group deltas cover
+                // exactly the best-changed set.
+                Cow::Borrowed(best_changed)
             } else {
                 // An RFC 9107 ORR peer selects from the per-target
                 // candidate set, not the Loc-RIB best — a candidate
@@ -1031,6 +1145,9 @@ impl RibManager {
                 // semantics. Same shape for `dirty_peers` for symmetry.
                 if is_dirty {
                     self.dirty_peers.remove(&peer);
+                    if member_of.is_some() {
+                        self.clear_grouped_member_synced(peer);
+                    }
                 }
                 if is_force {
                     self.force_outbound_peers.remove(&peer);
@@ -1055,6 +1172,46 @@ impl RibManager {
             let mut rtc_withdraw = Vec::new();
             let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
                 HashSet::new();
+
+            // Grouped member: the unicast portion comes from the group —
+            // source-flip matrix over this pass's deltas for a clean
+            // member, full-table replay (tombstone withdraws / regroup
+            // one-shot diff) for a resyncing one. No per-prefix staging,
+            // no policy eval: the shared group pass already ran once.
+            // Non-unicast families ride the per-peer path below
+            // unchanged, in the same OutboundRouteUpdate.
+            if let Some(gid) = member_of {
+                if let Some(group) = self.group_ribs.get(&gid) {
+                    if resync {
+                        Self::assemble_group_resync(
+                            group,
+                            peer,
+                            is_dirty,
+                            is_force,
+                            self.pending_regroup_baseline.get(&peer),
+                            self.pending_extra_withdraws.get(&peer),
+                            &mut announce,
+                            &mut withdraw,
+                            &mut nh_override_flags,
+                        );
+                    } else if let Some(stage) = group_stage.get(&gid) {
+                        super::update_groups::emit_group_deltas_for_member(
+                            &stage.deltas,
+                            peer,
+                            &mut announce,
+                            &mut withdraw,
+                            &mut nh_override_flags,
+                        );
+                    }
+                    current_policy_filtered_routes
+                        .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
+                }
+                // Per-member export-policy counters from the group
+                // verdict — integer adds, no per-(prefix × peer) work.
+                if !resync && let Some(stage) = group_stage.get(&gid) {
+                    self.apply_group_policy_counters(peer, &stage.evals);
+                }
+            }
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -1105,8 +1262,16 @@ impl RibManager {
                 .entry(peer)
                 .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
 
-            // Stage: compute delta without mutating AdjRibOut
-            for prefix in &*effective_prefixes {
+            // Stage: compute delta without mutating AdjRibOut. Grouped
+            // members skip the per-prefix staging wholesale — their
+            // unicast update was assembled from the group table above.
+            let empty_prefixes: HashSet<Prefix> = HashSet::new();
+            let staging_prefixes: &HashSet<Prefix> = if member_of.is_none() {
+                &effective_prefixes
+            } else {
+                &empty_prefixes
+            };
+            for prefix in staging_prefixes {
                 let family = prefix_family(prefix);
                 // RFC 5291 §6 gate: suppress this family's advertisement (incl.
                 // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.
@@ -1187,14 +1352,20 @@ impl RibManager {
                     current_policy_filtered_routes.extend(policy_filtered);
                 } else {
                     let mut policy_filtered = Vec::new();
+                    let mut target = ExportTarget::Peer {
+                        peer,
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        metrics: &metrics,
+                        policy_stats: &mut *policy_stats,
+                        peer_label: &target_peer_label,
+                    };
                     Self::distribute_single_best_prefix(
                         loc_rib,
                         rib_out,
                         &self.peer_is_rr_client,
                         prefix,
-                        peer,
-                        target_peer_asn,
-                        target_peer_group,
+                        &mut target,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,
@@ -1203,9 +1374,6 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf,
                         &mut export_memo,
-                        &metrics,
-                        policy_stats,
-                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
@@ -1436,6 +1604,9 @@ impl RibManager {
                         );
                         if is_dirty {
                             self.dirty_peers.remove(&peer);
+                            if member_of.is_some() {
+                                self.clear_grouped_member_synced(peer);
+                            }
                             if pending_eor.is_empty() {
                                 self.flush_pending_eor(peer);
                             } else {
@@ -1453,7 +1624,17 @@ impl RibManager {
                 } else {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
-                    self.dirty_peers.insert(peer);
+                    self.mark_outbound_dirty(peer);
+                    // A grouped member that just went dirty missed this
+                    // pass's withdrawals: record them as tombstones so
+                    // its resync can (over-)withdraw them.
+                    if let Some(gid) = member_of
+                        && let Some(stage) = group_stage.get(&gid)
+                        && let Some(group) = self.group_ribs.get_mut(&gid)
+                    {
+                        let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys().collect();
+                        group.tombstones.extend(withdrawn);
+                    }
                 }
             } else {
                 self.update_policy_filtered_routes_for_prefixes(
@@ -1466,6 +1647,9 @@ impl RibManager {
                     debug!(%peer, "outbound routes unchanged after resync");
                     if is_dirty {
                         self.dirty_peers.remove(&peer);
+                        if member_of.is_some() {
+                            self.clear_grouped_member_synced(peer);
+                        }
                         self.flush_pending_eor(peer);
                         self.retry_pending_refresh(peer);
                     }
