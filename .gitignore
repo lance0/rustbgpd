@@ -16,6 +16,10 @@ crates/evpn/fuzz/corpus/
 crates/evpn/fuzz/target/
 crates/evpn/fuzz/Cargo.lock
 crates/evpn/fuzz/artifacts/
+crates/policy/fuzz/corpus/
+crates/policy/fuzz/target/
+crates/policy/fuzz/Cargo.lock
+crates/policy/fuzz/artifacts/
 
 # Profiling artifacts
 dhat-heap*.json

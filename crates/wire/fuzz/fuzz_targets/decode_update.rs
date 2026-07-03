@@ -25,5 +25,26 @@ fuzz_target!(|data: &[u8]| {
             false,
             &[(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast)],
         );
+        // All-families Add-Path: exercises the path-ID-prefixed decode
+        // branches for every MP family (VPN, labeled-unicast, BGP-LS, RTC).
+        use rustbgpd_wire::{Afi, Safi};
+        let _ = update.parse(
+            true,
+            true,
+            &[
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv6, Safi::Unicast),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv6, Safi::MplsVpn),
+                (Afi::Ipv4, Safi::LabeledUnicast),
+                (Afi::Ipv6, Safi::LabeledUnicast),
+                (Afi::BgpLs, Safi::BgpLs),
+                (Afi::BgpLs, Safi::BgpLsVpn),
+                (Afi::Ipv4, Safi::RtConstrain),
+                (Afi::L2Vpn, Safi::Evpn),
+                (Afi::Ipv4, Safi::FlowSpec),
+                (Afi::Ipv6, Safi::FlowSpec),
+            ],
+        );
     }
 });
