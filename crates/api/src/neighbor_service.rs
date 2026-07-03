@@ -169,6 +169,23 @@ async fn query_export_policy_stats(
         .map_err(|_| Status::internal("RIB manager dropped reply"))
 }
 
+async fn query_update_group(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    peer: std::net::IpAddr,
+) -> Result<String, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryPeerUpdateGroup {
+            peer,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("RIB manager unavailable"))?;
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("RIB manager dropped reply"))
+}
+
 fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
     match error {
         DynamicRangeError::AlreadyExists(message) => Status::already_exists(message),
@@ -410,6 +427,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         import_policy_routes_denied: info.import_policy_routes_denied,
         export_policy_routes_permitted: info.export_policy_routes_permitted,
         export_policy_routes_denied: info.export_policy_routes_denied,
+        update_group: String::new(),
     }
 }
 
@@ -689,6 +707,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
             state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
             state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
+            state.update_group = query_update_group(&self.rib_tx, info.address).await?;
             neighbors.push(state);
         }
 
@@ -721,6 +740,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
         state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
         state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
+        state.update_group = query_update_group(&self.rib_tx, info.address).await?;
         Ok(Response::new(state))
     }
 
@@ -1683,6 +1703,9 @@ mod tests {
                             ..Default::default()
                         });
                     }
+                    RibUpdate::QueryPeerUpdateGroup { reply, .. } => {
+                        let _ = reply.send("group:0".to_string());
+                    }
                     _ => {}
                 }
             }
@@ -1700,6 +1723,7 @@ mod tests {
         assert_eq!(resp.prefixes_sent, 7);
         assert_eq!(resp.export_policy_routes_permitted, 3);
         assert_eq!(resp.export_policy_routes_denied, 4);
+        assert_eq!(resp.update_group, "group:0");
     }
 
     #[test]

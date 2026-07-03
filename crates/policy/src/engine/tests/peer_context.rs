@@ -242,3 +242,96 @@ fn next_hop_match_requires_exact_address() {
     route_ctx.next_hop = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
     assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Permit);
 }
+
+// --- requires_peer_context (update-group fingerprinting) ---
+
+#[test]
+fn requires_peer_context_true_for_toml_neighbor_set() {
+    let mut statement = stmt(None, PolicyAction::Deny, vec![]);
+    statement.match_neighbor_set = Some(NeighborSetMatch {
+        addresses: vec![],
+        remote_asns: vec![65020],
+        peer_groups: vec![],
+    });
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }]);
+    assert!(chain.requires_peer_context());
+    // Second call goes through the cached (OnceLock) compiled chain.
+    assert!(chain.requires_peer_context());
+}
+
+#[test]
+fn requires_peer_context_false_without_peer_set_terms() {
+    let statement = stmt(
+        Some(v4_prefix([192, 0, 2, 0], 24)),
+        PolicyAction::Deny,
+        vec![],
+    );
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }]);
+    assert!(!chain.requires_peer_context());
+    assert!(!chain.requires_peer_context());
+    assert!(!PolicyChain::default().requires_peer_context());
+}
+
+#[test]
+fn requires_peer_context_for_rpol_compiled_chains() {
+    use std::sync::Arc;
+
+    use crate::rpol::RpolFile;
+    use crate::sets::SetStore;
+
+    let with_peer = r#"
+policy peer-gate {
+    term drop-leaf { if peer.group == "leaf" { reject } }
+}
+"#;
+    let without_peer = r"
+policy med-tag {
+    term tag { if route.med >= 10 { set med 5; accept } }
+}
+";
+    let mut store = SetStore::new();
+    let compiled = RpolFile::parse(with_peer)
+        .expect("clean rpol")
+        .compile_policy("peer-gate", &[], &mut store)
+        .expect("policy exists");
+    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "peer-gate".to_string(),
+        Arc::new(compiled),
+    )]);
+    assert!(chain.requires_peer_context());
+
+    let mut store = SetStore::new();
+    let compiled = RpolFile::parse(without_peer)
+        .expect("clean rpol")
+        .compile_policy("med-tag", &[], &mut store)
+        .expect("policy exists");
+    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "med-tag".to_string(),
+        Arc::new(compiled),
+    )]);
+    assert!(!chain.requires_peer_context());
+}
+
+#[test]
+fn requires_peer_context_survives_share_and_clone() {
+    let mut statement = stmt(None, PolicyAction::Deny, vec![]);
+    statement.match_neighbor_set = Some(NeighborSetMatch {
+        addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))],
+        remote_asns: vec![],
+        peer_groups: vec![],
+    });
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }]);
+    assert!(chain.requires_peer_context());
+    // `share()` reuses the compiled IR; `clone()` recompiles fresh.
+    assert!(chain.share().requires_peer_context());
+    assert!(chain.clone().requires_peer_context());
+}

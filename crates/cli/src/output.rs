@@ -256,6 +256,9 @@ pub struct JsonNeighborDetail {
     pub add_path_send: bool,
     #[serde(skip_serializing_if = "is_zero")]
     pub add_path_send_max: u32,
+    /// Update-group membership: `group:N` or the ungrouped reason.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub update_group: String,
 }
 
 #[cfg(test)]
@@ -770,6 +773,7 @@ mod tests {
             add_path_receive: true,
             add_path_send: true,
             add_path_send_max: 4,
+            update_group: "group:0".to_string(),
         };
 
         let value: Value =

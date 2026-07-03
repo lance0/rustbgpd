@@ -121,6 +121,12 @@ pub struct BgpMetrics {
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_ingest_channel_depth: IntGauge,
+
+    // ── Update groups (shadow-mode fingerprint registry) ────────
+    update_groups: IntGauge,
+    update_group_members: IntGaugeVec,
+    update_group_regroups: IntCounter,
+    update_group_fallback_peers: IntGauge,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -545,6 +551,43 @@ impl BgpMetrics {
             "Queued RibUpdate messages in the RIB manager ingest channel, sampled \
              once per manager loop iteration. Pegged at the channel capacity means \
              producers (sessions, local originators) are parked on backpressure.",
+        )
+        .expect("valid metric definition");
+
+        let update_groups = IntGauge::new(
+            "bgp_update_groups",
+            "Update groups with at least one member peer in the RIB manager's \
+             fingerprint registry (shadow mode: membership is recorded and \
+             observable, but distribution still runs per peer).",
+        )
+        .expect("valid metric definition");
+
+        let update_group_members = IntGaugeVec::new(
+            Opts::new(
+                "bgp_update_group_members",
+                "Member peers per update group. The group label is the registry's \
+                 stable group id; a group's series is removed when its last member \
+                 leaves.",
+            ),
+            &["group"],
+        )
+        .expect("valid metric definition");
+
+        let update_group_regroups = IntCounter::new(
+            "bgp_update_group_regroups_total",
+            "Times an already-registered peer's update-group membership changed \
+             (moved between groups, or between grouped and ungrouped). A no-op \
+             policy reload that reinstalls content-identical chains must NOT \
+             increment this: content-equality keying keeps the group key stable.",
+        )
+        .expect("valid metric definition");
+
+        let update_group_fallback_peers = IntGauge::new(
+            "bgp_update_group_fallback_peers",
+            "Peers ungrouped by a v1 disqualifier (peer-context policy, Add-Path \
+             send, ORR vantage, or negotiated ORF) and therefore permanently on \
+             the per-peer distribution path. Per-peer reasons surface in the \
+             neighbor status API.",
         )
         .expect("valid metric definition");
 
@@ -1258,6 +1301,18 @@ impl BgpMetrics {
             .register(Box::new(rib_ingest_channel_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_groups.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(update_group_members.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(update_group_regroups.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(update_group_fallback_peers.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -1508,6 +1563,10 @@ impl BgpMetrics {
             rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_ingest_channel_depth,
+            update_groups,
+            update_group_members,
+            update_group_regroups,
+            update_group_fallback_peers,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -1934,6 +1993,34 @@ impl BgpMetrics {
     /// for outbound route distribution.
     pub fn set_rib_outbound_registered_peers(&self, count: i64) {
         self.rib_outbound_registered_peers.set(count);
+    }
+
+    /// Set the number of update groups with at least one member.
+    pub fn set_update_groups(&self, count: i64) {
+        self.update_groups.set(count);
+    }
+
+    /// Set the member count of one update group.
+    pub fn set_update_group_members(&self, group: &str, count: i64) {
+        self.update_group_members
+            .with_label_values(&[group])
+            .set(count);
+    }
+
+    /// Remove an emptied update group's member-count series.
+    pub fn remove_update_group_members(&self, group: &str) {
+        // Removal fails only if the series never existed — fine either way.
+        let _ = self.update_group_members.remove_label_values(&[group]);
+    }
+
+    /// Record an update-group membership change for a registered peer.
+    pub fn record_update_group_regroup(&self) {
+        self.update_group_regroups.inc();
+    }
+
+    /// Set the number of peers on the ungrouped (per-peer) fallback path.
+    pub fn set_update_group_fallback_peers(&self, count: i64) {
+        self.update_group_fallback_peers.set(count);
     }
 
     /// Record a `PeerUp` that replaced a still-registered outbound sender

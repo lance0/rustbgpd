@@ -364,6 +364,11 @@ message NeighborState {
   uint64 export_policy_routes_permitted = 20;
   // Export policy evaluations that denied a route.
   uint64 export_policy_routes_denied = 21;
+  // Update-group membership (shadow mode): "group:N" when the RIB
+  // fingerprint grouped this peer, or the ungrouped reason
+  // ("policy_peer_context", "add_path_send", "orr_vantage",
+  // "orf_installed"). Empty when the peer has no outbound registration.
+  string update_group = 22;
 }
 
 message DynamicNeighborRange {

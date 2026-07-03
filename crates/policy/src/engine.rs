@@ -1036,6 +1036,16 @@ impl PolicyChain {
         self.requires_rpki_validation() || self.requires_aspa_validation()
     }
 
+    /// Whether evaluating this chain depends on the evaluation peer's
+    /// identity (peer address / ASN / peer-group matching, TOML
+    /// `match_neighbor_set` or rpol `peer.*` comparisons). Update-group
+    /// fingerprinting treats such chains as ungroupable: content-equal
+    /// chains can still yield peer-different verdicts.
+    #[must_use]
+    pub fn requires_peer_context(&self) -> bool {
+        self.compiled().requires_peer_context()
+    }
+
     /// Evaluate a route against this chain of policies.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
