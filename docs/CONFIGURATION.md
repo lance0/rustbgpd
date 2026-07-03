@@ -208,7 +208,15 @@ Required. Configures observability and management endpoints.
 `prometheus_addr`, when present, must be a valid `ip:port` socket address. The
 same listener serves `/metrics`, `/livez`, and `/readyz`.
 
-### `[global.telemetry.looking_glass]`
+### `[global.telemetry.looking_glass]` (deprecated)
+
+> **Deprecated — will be removed in a future release.** The daemon's
+> durable API is gRPC + `rbgp`; the birdwatcher REST surface moved to a
+> maintained external adapter, `examples/birdwatcher-adapter`, which
+> serves the identical endpoints and response shapes from the daemon's
+> gRPC API. Configuring this section logs a deprecation warning at
+> startup; behavior is otherwise unchanged until removal. See the
+> adapter README for the endpoint→gRPC mapping and migration notes.
 
 Optional birdwatcher-compatible HTTP server for looking glass frontends
 (Alice-LG, etc.).

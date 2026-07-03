@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
+- **The in-daemon birdwatcher looking glass
+  (`[global.telemetry.looking_glass]`) is deprecated and will be
+  removed in a future release.** Partial compatibility with an external
+  REST contract does not belong in daemon core; the daemon's durable
+  API is gRPC + `rbgp`. The same birdwatcher-compatible REST surface
+  (identical endpoints and response shapes, consumed by Alice-LG and
+  similar frontends) is now served by a maintained external adapter,
+  `examples/birdwatcher-adapter`, which sources everything from the
+  daemon's gRPC API — point it at a gRPC TCP listener and keep the same
+  frontend config. The daemon logs a deprecation warning at startup
+  while the section is present; behavior is otherwise unchanged. An
+  end-to-end smoke test pins adapter-vs-in-daemon response equality.
 - **Global inline policy (`[[policy.import]]` / `[[policy.export]]`)
   is deprecated and will be removed in a future release.** It is the
   legacy pre-chain fallback: restart-required on change (no SIGHUP
