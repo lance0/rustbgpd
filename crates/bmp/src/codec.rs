@@ -1,14 +1,26 @@
-//! BMP message encoding (RFC 7854).
+//! BMP message encoding (RFC 7854, plus BMP version 4 framing per
+//! draft-ietf-grow-bmp-tlv-20).
 //!
 //! Encodes BMP messages for transmission to collectors.
 //! No decode is needed — BMP is unidirectional (router → collector).
+//!
+//! Every encoder takes a [`BmpVersion`]. Under `V3` the output is
+//! byte-identical to the pre-v4 encoders. Under `V4` (§3 of the
+//! draft) the common-header version byte is 4 on every message type;
+//! Route Monitoring wraps the UPDATE PDU in the BGP Message TLV
+//! (§5.2) and Stats Reports wrap count + stats in the Stats TLV
+//! (§5.4). All other message types already provision TLV data in v3
+//! (§5.5), so only their version byte changes.
 
 use std::net::IpAddr;
 use std::time::UNIX_EPOCH;
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::types::{BmpLocRibConfig, BmpPeerInfo, BmpPeerType, LOC_RIB_TABLE_NAME, PeerDownReason};
+use crate::tlv;
+use crate::types::{
+    BmpLocRibConfig, BmpPeerInfo, BmpPeerType, BmpVersion, LOC_RIB_TABLE_NAME, PeerDownReason,
+};
 
 // BMP message types (RFC 7854 §4.1)
 const BMP_MSG_ROUTE_MONITORING: u8 = 0;
@@ -17,9 +29,6 @@ const BMP_MSG_PEER_DOWN: u8 = 2;
 const BMP_MSG_PEER_UP: u8 = 3;
 const BMP_MSG_INITIATION: u8 = 4;
 const BMP_MSG_TERMINATION: u8 = 5;
-
-// BMP version
-const BMP_VERSION: u8 = 3;
 
 // BMP common header length: version(1) + length(4) + type(1) = 6
 const BMP_COMMON_HEADER_LEN: usize = 6;
@@ -144,8 +153,8 @@ fn encode_per_peer_header(info: &BmpPeerInfo, buf: &mut BytesMut) {
 }
 
 /// Write the BMP common header (6 bytes) at the beginning of a buffer.
-fn write_common_header(buf: &mut [u8], msg_type: u8) {
-    buf[0] = BMP_VERSION;
+fn write_common_header(buf: &mut [u8], msg_type: u8, version: BmpVersion) {
+    buf[0] = version.header_byte();
     #[expect(
         clippy::cast_possible_truncation,
         reason = "BMP common header length is a 32-bit field and callers build bounded in-memory messages"
@@ -197,8 +206,9 @@ fn put_ipaddr_16(buf: &mut BytesMut, addr: IpAddr) {
 }
 
 /// Encode BMP Initiation message (Type 4, RFC 7854 §4.3).
+/// Already TLV-based in v3 — v4 changes only the version byte.
 #[must_use]
-pub fn encode_initiation(sys_name: &str, sys_descr: &str) -> Bytes {
+pub fn encode_initiation(sys_name: &str, sys_descr: &str, version: BmpVersion) -> Bytes {
     let tlv_len = tlv_string_wire_len(sys_name) + tlv_string_wire_len(sys_descr);
     let total = BMP_COMMON_HEADER_LEN + tlv_len;
 
@@ -207,11 +217,12 @@ pub fn encode_initiation(sys_name: &str, sys_descr: &str) -> Bytes {
     put_tlv_string(&mut buf, BMP_INIT_TLV_SYS_DESCR, sys_descr);
     put_tlv_string(&mut buf, BMP_INIT_TLV_SYS_NAME, sys_name);
 
-    write_common_header(&mut buf, BMP_MSG_INITIATION);
+    write_common_header(&mut buf, BMP_MSG_INITIATION, version);
     buf.freeze()
 }
 
 /// Encode BMP Peer Up Notification (Type 3, RFC 7854 §4.10).
+/// Already TLV-provisioned in v3 — v4 changes only the version byte.
 #[must_use]
 pub fn encode_peer_up(
     info: &BmpPeerInfo,
@@ -220,6 +231,7 @@ pub fn encode_peer_up(
     remote_port: u16,
     local_open: &[u8],
     remote_open: &[u8],
+    version: BmpVersion,
 ) -> Bytes {
     let total =
         BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 20 + local_open.len() + remote_open.len();
@@ -233,13 +245,15 @@ pub fn encode_peer_up(
     buf.put_slice(local_open);
     buf.put_slice(remote_open);
 
-    write_common_header(&mut buf, BMP_MSG_PEER_UP);
+    write_common_header(&mut buf, BMP_MSG_PEER_UP, version);
     buf.freeze()
 }
 
 /// Encode BMP Peer Down Notification (Type 2, RFC 7854 §4.9).
+/// In v4 optional TLV data may trail the reason (draft §5.3); we emit
+/// none, so only the version byte changes.
 #[must_use]
-pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason) -> Bytes {
+pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason, version: BmpVersion) -> Bytes {
     let reason_len = match reason {
         PeerDownReason::LocalNotification(pdu) | PeerDownReason::RemoteNotification(pdu) => {
             1 + pdu.len()
@@ -271,7 +285,7 @@ pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason) -> Bytes {
         }
     }
 
-    write_common_header(&mut buf, BMP_MSG_PEER_DOWN);
+    write_common_header(&mut buf, BMP_MSG_PEER_DOWN, version);
     buf.freeze()
 }
 
@@ -284,7 +298,11 @@ pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason) -> Bytes {
 /// VRF/Table Name Information TLV (type 3) carries `"global"` for the
 /// default Loc-RIB instance.
 #[must_use]
-pub fn encode_loc_rib_peer_up(cfg: &BmpLocRibConfig, timestamp: std::time::SystemTime) -> Bytes {
+pub fn encode_loc_rib_peer_up(
+    cfg: &BmpLocRibConfig,
+    timestamp: std::time::SystemTime,
+    version: BmpVersion,
+) -> Bytes {
     let info = cfg.peer_info(timestamp);
     let table_name = LOC_RIB_TABLE_NAME.as_bytes();
     let total = BMP_COMMON_HEADER_LEN
@@ -306,7 +324,7 @@ pub fn encode_loc_rib_peer_up(cfg: &BmpLocRibConfig, timestamp: std::time::Syste
     buf.put_u16(u16::try_from(table_name.len()).unwrap_or(u16::MAX));
     buf.put_slice(table_name);
 
-    write_common_header(&mut buf, BMP_MSG_PEER_UP);
+    write_common_header(&mut buf, BMP_MSG_PEER_UP, version);
     buf.freeze()
 }
 
@@ -314,7 +332,11 @@ pub fn encode_loc_rib_peer_up(cfg: &BmpLocRibConfig, timestamp: std::time::Syste
 /// instance peer: reason code 6 ("Local system closed, TLV data
 /// follows") with the VRF/Table Name TLV echoed from the Peer Up.
 #[must_use]
-pub fn encode_loc_rib_peer_down(cfg: &BmpLocRibConfig, timestamp: std::time::SystemTime) -> Bytes {
+pub fn encode_loc_rib_peer_down(
+    cfg: &BmpLocRibConfig,
+    timestamp: std::time::SystemTime,
+    version: BmpVersion,
+) -> Bytes {
     let info = cfg.peer_info(timestamp);
     let table_name = LOC_RIB_TABLE_NAME.as_bytes();
     let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 1 + 4 + table_name.len();
@@ -327,23 +349,44 @@ pub fn encode_loc_rib_peer_down(cfg: &BmpLocRibConfig, timestamp: std::time::Sys
     buf.put_u16(u16::try_from(table_name.len()).unwrap_or(u16::MAX));
     buf.put_slice(table_name);
 
-    write_common_header(&mut buf, BMP_MSG_PEER_DOWN);
+    write_common_header(&mut buf, BMP_MSG_PEER_DOWN, version);
     buf.freeze()
 }
 
 /// Encode BMP Route Monitoring message (Type 0, RFC 7854 §4.6).
 ///
-/// Wraps a raw BGP UPDATE PDU (including 19-byte header).
+/// Carries a raw BGP UPDATE PDU (including 19-byte header): bare
+/// after the per-peer header in v3; enclosed in the mandatory BGP
+/// Message TLV (type 7, index 0) in v4 (draft §5.2).
 #[must_use]
-pub fn encode_route_monitoring(info: &BmpPeerInfo, update_pdu: &[u8]) -> Bytes {
-    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + update_pdu.len();
+pub fn encode_route_monitoring(
+    info: &BmpPeerInfo,
+    update_pdu: &[u8],
+    version: BmpVersion,
+) -> Bytes {
+    // v4 adds type(2) + length(2) + index(2) around the PDU.
+    let tlv_overhead = match version {
+        BmpVersion::V3 => 0,
+        BmpVersion::V4 => 6,
+    };
+    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + tlv_overhead + update_pdu.len();
 
     let mut buf = BytesMut::with_capacity(total);
     buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
     encode_per_peer_header(info, &mut buf);
-    buf.put_slice(update_pdu);
+    match version {
+        BmpVersion::V3 => buf.put_slice(update_pdu),
+        BmpVersion::V4 => {
+            tlv::put_indexed_tlv(
+                &mut buf,
+                tlv::RM_TLV_BGP_MESSAGE,
+                tlv::INDEX_ALL_NLRI,
+                update_pdu,
+            );
+        }
+    }
 
-    write_common_header(&mut buf, BMP_MSG_ROUTE_MONITORING);
+    write_common_header(&mut buf, BMP_MSG_ROUTE_MONITORING, version);
     buf.freeze()
 }
 
@@ -352,11 +395,16 @@ pub fn encode_route_monitoring(info: &BmpPeerInfo, update_pdu: &[u8]) -> Bytes {
 /// `counters` are RFC 7854 numeric stat types (0-8, 11-13).
 /// `afi_counters` are AFI/SAFI-qualified stat types (9-10).
 /// Stat types placed in the wrong list are silently skipped.
+///
+/// In v4 the Stats Count and stats data are enclosed in the mandatory
+/// Stats TLV, code point 1 (draft §5.4; not indexed — indexed TLVs
+/// apply only to Route Monitoring, §4.3).
 #[must_use]
 pub fn encode_stats_report(
     info: &BmpPeerInfo,
     counters: &[StatCounter],
     afi_counters: &[AfiStatCounter],
+    version: BmpVersion,
 ) -> Bytes {
     let numeric_len: usize = counters
         .iter()
@@ -376,11 +424,22 @@ pub fn encode_stats_report(
             .iter()
             .filter(|c| is_afi_stat(c.stat_type))
             .count();
-    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 4 + numeric_len + afi_len;
+    let stats_body_len = 4 + numeric_len + afi_len; // Stats Count + stats data
+    // v4 adds the Stats TLV header: type(2) + length(2).
+    let tlv_overhead = match version {
+        BmpVersion::V3 => 0,
+        BmpVersion::V4 => 4,
+    };
+    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + tlv_overhead + stats_body_len;
 
     let mut buf = BytesMut::with_capacity(total);
     buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
     encode_per_peer_header(info, &mut buf);
+
+    if version == BmpVersion::V4 {
+        buf.put_u16(tlv::STATS_TLV_STATS);
+        buf.put_u16(u16::try_from(stats_body_len).unwrap_or(u16::MAX));
+    }
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -415,13 +474,14 @@ pub fn encode_stats_report(
         }
     }
 
-    write_common_header(&mut buf, BMP_MSG_STATS_REPORT);
+    write_common_header(&mut buf, BMP_MSG_STATS_REPORT, version);
     buf.freeze()
 }
 
 /// Encode BMP Termination message (Type 5, RFC 7854 §4.5).
+/// Already TLV-based in v3 — v4 changes only the version byte.
 #[must_use]
-pub fn encode_termination(reason: u16, message: &str) -> Bytes {
+pub fn encode_termination(reason: u16, message: &str, version: BmpVersion) -> Bytes {
     let reason_tlv_len = 4 + 2; // type(2) + len(2) + value(2)
     let msg_tlv_len = tlv_string_wire_len(message);
     let total = BMP_COMMON_HEADER_LEN + reason_tlv_len + msg_tlv_len;
@@ -435,7 +495,7 @@ pub fn encode_termination(reason: u16, message: &str) -> Bytes {
     buf.put_u16(2);
     buf.put_u16(reason);
 
-    write_common_header(&mut buf, BMP_MSG_TERMINATION);
+    write_common_header(&mut buf, BMP_MSG_TERMINATION, version);
     buf.freeze()
 }
 
@@ -462,7 +522,7 @@ mod tests {
 
     fn verify_common_header(buf: &[u8], expected_type: u8) {
         assert!(buf.len() >= BMP_COMMON_HEADER_LEN);
-        assert_eq!(buf[0], BMP_VERSION, "version");
+        assert_eq!(buf[0], 3, "version");
         let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
         assert_eq!(len as usize, buf.len(), "length");
         assert_eq!(buf[5], expected_type, "message type");
@@ -487,7 +547,7 @@ mod tests {
 
     #[test]
     fn initiation_message_encoding() {
-        let msg = encode_initiation("rustbgpd", "test daemon");
+        let msg = encode_initiation("rustbgpd", "test daemon", BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_INITIATION);
 
         let payload = &msg[BMP_COMMON_HEADER_LEN..];
@@ -512,6 +572,7 @@ mod tests {
             12345,
             &[0xFF; 29],
             &[0xFE; 29],
+            BmpVersion::V3,
         );
         verify_common_header(&msg, BMP_MSG_PEER_UP);
         verify_per_peer_header(&msg[BMP_COMMON_HEADER_LEN..], &info);
@@ -521,11 +582,233 @@ mod tests {
         );
     }
 
+    fn hex(b: &[u8]) -> String {
+        use std::fmt::Write;
+        b.iter().fold(String::new(), |mut s, x| {
+            let _ = write!(s, "{x:02x}");
+            s
+        })
+    }
+
+    /// draft-ietf-grow-bmp-tlv-20 pin: v3 output stays byte-identical.
+    /// Full-message hex fixtures captured from the pre-v4 encoders —
+    /// any diff here is a v3 wire regression.
+    #[test]
+    fn v3_golden_bytes_regression() {
+        let info = sample_peer_info();
+        assert_eq!(
+            hex(&encode_route_monitoring(&info, &[0xAB; 23], BmpVersion::V3)),
+            "030000004700000000000000000000000000000000000000000000000a0000020000fdea0a00\
+             00026553f10000000000ababababababababababababababababababababababab"
+        );
+        let counters = vec![StatCounter {
+            stat_type: 7,
+            value: 42,
+        }];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 17,
+            afi: 1,
+            safi: 1,
+            value: 10,
+        }];
+        assert_eq!(
+            hex(&encode_stats_report(
+                &info,
+                &counters,
+                &afi_counters,
+                BmpVersion::V3
+            )),
+            "030000004f01000000000000000000000000000000000000000000000a0000020000fdea0a00\
+             00026553f100000000000000000200070008000000000000002a0011000b00010100000000000\
+             0000a"
+        );
+        assert_eq!(
+            hex(&encode_peer_up(
+                &info,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                179,
+                54321,
+                &[0xFF; 21],
+                &[0xFE; 21],
+                BmpVersion::V3,
+            )),
+            "030000006e03000000000000000000000000000000000000000000000a0000020000fdea0a00\
+             00026553f100000000000000000000000000000000000a00000100b3d431ffffffffffffffff\
+             fffffffffffffffffffffffffffefefefefefefefefefefefefefefefefefefefefe"
+        );
+        assert_eq!(
+            hex(&encode_peer_down(
+                &info,
+                &PeerDownReason::LocalNoNotification(6),
+                BmpVersion::V3
+            )),
+            "030000003302000000000000000000000000000000000000000000000a0000020000fdea0a00\
+             00026553f10000000000020006"
+        );
+        assert_eq!(
+            hex(&encode_initiation("rustbgpd", "test", BmpVersion::V3)),
+            "030000001a040001000474657374000200087275737462677064"
+        );
+        assert_eq!(
+            hex(&encode_termination(0, "bye", BmpVersion::V3)),
+            "03000000130500000003627965000100020000"
+        );
+    }
+
+    /// draft-ietf-grow-bmp-tlv-20 §5.2: v4 Route Monitoring golden
+    /// bytes — version byte 4, per-peer header, then the mandatory BGP
+    /// Message TLV (type 7, index 0) whose value is the exact UPDATE
+    /// PDU.
+    #[test]
+    fn v4_route_monitoring_wraps_pdu_in_bgp_message_tlv() {
+        let info = sample_peer_info();
+        let pdu = [0xAB; 23];
+        let msg = encode_route_monitoring(&info, &pdu, BmpVersion::V4);
+
+        assert_eq!(msg[0], 4, "BMP version 4 (draft §3)");
+        let len = u32::from_be_bytes(msg[1..5].try_into().unwrap());
+        assert_eq!(len as usize, msg.len(), "common-header length");
+        assert_eq!(
+            msg.len(),
+            BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 6 + pdu.len(),
+            "TLV adds type(2)+length(2)+index(2)"
+        );
+        assert_eq!(msg[5], BMP_MSG_ROUTE_MONITORING);
+
+        let tlv = &msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(
+            u16::from_be_bytes([tlv[0], tlv[1]]),
+            crate::tlv::RM_TLV_BGP_MESSAGE,
+            "BGP Message TLV type 7 (§5.2, §9)"
+        );
+        assert_eq!(
+            u16::from_be_bytes([tlv[2], tlv[3]]) as usize,
+            pdu.len(),
+            "length excludes the 2-byte index (§4.3)"
+        );
+        assert_eq!(
+            u16::from_be_bytes([tlv[4], tlv[5]]),
+            0,
+            "index 0 = whole message (§5.2)"
+        );
+        assert_eq!(&tlv[6..], &pdu, "value = exact UPDATE PDU");
+        // Everything before the TLV is byte-identical to v3.
+        let v3 = encode_route_monitoring(&info, &pdu, BmpVersion::V3);
+        assert_eq!(
+            &msg[5..BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN],
+            &v3[5..BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN],
+            "type + per-peer header unchanged"
+        );
+    }
+
+    /// draft-ietf-grow-bmp-tlv-20 §5.4: v4 Stats Report golden bytes —
+    /// Stats Count + stats data enclosed in the mandatory Stats TLV
+    /// (code point 1, not indexed — §4.3 scopes indexed TLVs to Route
+    /// Monitoring only).
+    #[test]
+    fn v4_stats_report_wraps_in_stats_tlv() {
+        let info = sample_peer_info();
+        let counters = vec![StatCounter {
+            stat_type: 7,
+            value: 42,
+        }];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 17,
+            afi: 1,
+            safi: 1,
+            value: 10,
+        }];
+        let v3 = encode_stats_report(&info, &counters, &afi_counters, BmpVersion::V3);
+        let msg = encode_stats_report(&info, &counters, &afi_counters, BmpVersion::V4);
+
+        assert_eq!(msg[0], 4, "BMP version 4");
+        let len = u32::from_be_bytes(msg[1..5].try_into().unwrap());
+        assert_eq!(len as usize, msg.len());
+        assert_eq!(msg.len(), v3.len() + 4, "Stats TLV adds type(2)+length(2)");
+        assert_eq!(msg[5], BMP_MSG_STATS_REPORT);
+
+        let tlv = &msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(
+            u16::from_be_bytes([tlv[0], tlv[1]]),
+            crate::tlv::STATS_TLV_STATS,
+            "Stats TLV code point 1 (§5.4, §9)"
+        );
+        let stats_body = &v3[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(
+            u16::from_be_bytes([tlv[2], tlv[3]]) as usize,
+            stats_body.len(),
+            "TLV length = Stats Count + stats data"
+        );
+        assert_eq!(
+            &tlv[4..],
+            stats_body,
+            "value = the exact v3 count + stats bytes"
+        );
+    }
+
+    /// draft-ietf-grow-bmp-tlv-20 §3 + §5.5: message types that already
+    /// provision TLV data in v3 (Peer Up/Down incl. the RFC 9069
+    /// Loc-RIB variants, Initiation, Termination) change only the
+    /// common-header version byte in v4.
+    #[test]
+    fn v4_version_byte_only_for_tlv_provisioned_messages() {
+        let info = sample_peer_info();
+        let cfg = sample_loc_rib_config();
+        let local = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let pairs: Vec<(Bytes, Bytes)> = vec![
+            (
+                encode_peer_up(
+                    &info,
+                    local,
+                    179,
+                    54321,
+                    &[0xFF; 21],
+                    &[0xFE; 21],
+                    BmpVersion::V3,
+                ),
+                encode_peer_up(
+                    &info,
+                    local,
+                    179,
+                    54321,
+                    &[0xFF; 21],
+                    &[0xFE; 21],
+                    BmpVersion::V4,
+                ),
+            ),
+            (
+                encode_peer_down(&info, &PeerDownReason::RemoteNoNotification, BmpVersion::V3),
+                encode_peer_down(&info, &PeerDownReason::RemoteNoNotification, BmpVersion::V4),
+            ),
+            (
+                encode_loc_rib_peer_up(&cfg, ts(), BmpVersion::V3),
+                encode_loc_rib_peer_up(&cfg, ts(), BmpVersion::V4),
+            ),
+            (
+                encode_loc_rib_peer_down(&cfg, ts(), BmpVersion::V3),
+                encode_loc_rib_peer_down(&cfg, ts(), BmpVersion::V4),
+            ),
+            (
+                encode_initiation("rustbgpd", "test", BmpVersion::V3),
+                encode_initiation("rustbgpd", "test", BmpVersion::V4),
+            ),
+            (
+                encode_termination(0, "bye", BmpVersion::V3),
+                encode_termination(0, "bye", BmpVersion::V4),
+            ),
+        ];
+        for (v3, v4) in pairs {
+            assert_eq!(v3[0], 3);
+            assert_eq!(v4[0], 4);
+            assert_eq!(v3[1..], v4[1..], "v4 differs only in the version byte");
+        }
+    }
+
     #[test]
     fn peer_down_local_notification() {
         let info = sample_peer_info();
         let reason = PeerDownReason::LocalNotification(Bytes::from_static(&[0xFF; 21]));
-        let msg = encode_peer_down(&info, &reason);
+        let msg = encode_peer_down(&info, &reason, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_PEER_DOWN);
         assert_eq!(msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN], 1);
     }
@@ -533,7 +816,7 @@ mod tests {
     #[test]
     fn peer_down_remote_no_notification() {
         let info = sample_peer_info();
-        let msg = encode_peer_down(&info, &PeerDownReason::RemoteNoNotification);
+        let msg = encode_peer_down(&info, &PeerDownReason::RemoteNoNotification, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_PEER_DOWN);
         let offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         assert_eq!(msg[offset], 4);
@@ -544,7 +827,7 @@ mod tests {
     fn route_monitoring_encoding() {
         let info = sample_peer_info();
         let update_pdu = vec![0xAA; 50];
-        let msg = encode_route_monitoring(&info, &update_pdu);
+        let msg = encode_route_monitoring(&info, &update_pdu, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         let pdu_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         assert_eq!(&msg[pdu_offset..], &update_pdu[..]);
@@ -563,7 +846,7 @@ mod tests {
             safi: 1,
             value: 1000,
         }];
-        let msg = encode_stats_report(&info, &counters, &afi_counters);
+        let msg = encode_stats_report(&info, &counters, &afi_counters, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         let count = u32::from_be_bytes([
@@ -583,7 +866,7 @@ mod tests {
             stat_type: 9,
             value: 42,
         }];
-        let msg = encode_stats_report(&info, &counters, &[]);
+        let msg = encode_stats_report(&info, &counters, &[], BmpVersion::V3);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         let count = u32::from_be_bytes([
             msg[count_offset],
@@ -596,13 +879,13 @@ mod tests {
 
     #[test]
     fn termination_encoding() {
-        let msg = encode_termination(0, "shutting down");
+        let msg = encode_termination(0, "shutting down", BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_TERMINATION);
     }
 
     #[test]
     fn initiation_empty_fields() {
-        let msg = encode_initiation("", "");
+        let msg = encode_initiation("", "", BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_INITIATION);
         assert_eq!(msg.len(), BMP_COMMON_HEADER_LEN);
     }
@@ -610,7 +893,7 @@ mod tests {
     #[test]
     fn initiation_oversized_tlv_string_truncates_without_length_wrap() {
         let sys_descr = "a".repeat(BMP_TLV_STRING_MAX_LEN + 1);
-        let msg = encode_initiation("rustbgpd", &sys_descr);
+        let msg = encode_initiation("rustbgpd", &sys_descr, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_INITIATION);
 
         let payload = &msg[BMP_COMMON_HEADER_LEN..];
@@ -631,7 +914,7 @@ mod tests {
     #[test]
     fn initiation_oversized_tlv_string_truncates_on_char_boundary() {
         let sys_descr = format!("{}é", "a".repeat(BMP_TLV_STRING_MAX_LEN - 1));
-        let msg = encode_initiation("", &sys_descr);
+        let msg = encode_initiation("", &sys_descr, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_INITIATION);
 
         let payload = &msg[BMP_COMMON_HEADER_LEN..];
@@ -643,7 +926,11 @@ mod tests {
     #[test]
     fn peer_down_local_no_notification() {
         let info = sample_peer_info();
-        let msg = encode_peer_down(&info, &PeerDownReason::LocalNoNotification(6));
+        let msg = encode_peer_down(
+            &info,
+            &PeerDownReason::LocalNoNotification(6),
+            BmpVersion::V3,
+        );
         verify_common_header(&msg, BMP_MSG_PEER_DOWN);
         let offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         assert_eq!(msg[offset], 2);
@@ -655,7 +942,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.is_ipv6 = true;
         info.peer_addr = IpAddr::V6("2001:db8::2".parse().unwrap());
-        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
         assert_ne!(msg[BMP_COMMON_HEADER_LEN + 1] & PEER_FLAG_V, 0);
     }
 
@@ -668,7 +955,7 @@ mod tests {
         info.is_rib_out = true;
         info.is_post_policy = true;
         let pdu = [0xAB; 23];
-        let msg = encode_route_monitoring(&info, &pdu);
+        let msg = encode_route_monitoring(&info, &pdu, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         assert_eq!(msg[0], 3, "BMP version 3");
         assert_eq!(
@@ -692,9 +979,11 @@ mod tests {
             12345,
             &[0xFF; 29],
             &[0xFE; 29],
+            BmpVersion::V3,
         );
-        let peer_down = encode_peer_down(&info, &PeerDownReason::RemoteNoNotification);
-        let stats = encode_stats_report(&info, &[], &[]);
+        let peer_down =
+            encode_peer_down(&info, &PeerDownReason::RemoteNoNotification, BmpVersion::V3);
+        let stats = encode_stats_report(&info, &[], &[], BmpVersion::V3);
         for msg in [&peer_up, &peer_down, &stats] {
             assert_eq!(
                 msg[BMP_COMMON_HEADER_LEN + 1] & PEER_FLAG_O,
@@ -719,7 +1008,7 @@ mod tests {
             safi: 128,
             value: 77,
         }];
-        let msg = encode_stats_report(&info, &counters, &afi_counters);
+        let msg = encode_stats_report(&info, &counters, &afi_counters, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         let count = u32::from_be_bytes(msg[count_offset..count_offset + 4].try_into().unwrap());
@@ -765,7 +1054,7 @@ mod tests {
     #[test]
     fn loc_rib_per_peer_header_golden() {
         let cfg = sample_loc_rib_config();
-        let msg = encode_route_monitoring(&cfg.peer_info(ts()), &[0xCD; 23]);
+        let msg = encode_route_monitoring(&cfg.peer_info(ts()), &[0xCD; 23], BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
         let hdr = &msg[BMP_COMMON_HEADER_LEN..];
         assert_eq!(hdr[0], 3, "peer type 3 (Loc-RIB instance)");
@@ -797,7 +1086,7 @@ mod tests {
             is_as4: false,
             timestamp: ts(),
         };
-        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
         assert_eq!(msg[BMP_COMMON_HEADER_LEN + 1], 0);
     }
 
@@ -807,7 +1096,7 @@ mod tests {
     #[test]
     fn loc_rib_peer_up_fabricated_open_and_table_name_tlv() {
         let cfg = sample_loc_rib_config();
-        let msg = encode_loc_rib_peer_up(&cfg, ts());
+        let msg = encode_loc_rib_peer_up(&cfg, ts(), BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_PEER_UP);
         assert_eq!(msg[BMP_COMMON_HEADER_LEN], 3, "peer type 3");
 
@@ -836,7 +1125,7 @@ mod tests {
     #[test]
     fn loc_rib_peer_down_reason_6_with_table_name_tlv() {
         let cfg = sample_loc_rib_config();
-        let msg = encode_loc_rib_peer_down(&cfg, ts());
+        let msg = encode_loc_rib_peer_down(&cfg, ts(), BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_PEER_DOWN);
         assert_eq!(msg[BMP_COMMON_HEADER_LEN], 3, "peer type 3");
         let body = &msg[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
@@ -860,7 +1149,12 @@ mod tests {
             safi: 1,
             value: 15,
         }];
-        let msg = encode_stats_report(&cfg.peer_info(ts()), &counters, &afi_counters);
+        let msg = encode_stats_report(
+            &cfg.peer_info(ts()),
+            &counters,
+            &afi_counters,
+            BmpVersion::V3,
+        );
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         assert_eq!(
@@ -889,7 +1183,7 @@ mod tests {
 
     #[test]
     fn termination_no_message() {
-        let msg = encode_termination(1, "");
+        let msg = encode_termination(1, "", BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_TERMINATION);
         assert_eq!(msg.len(), BMP_COMMON_HEADER_LEN + 6);
     }
@@ -898,7 +1192,7 @@ mod tests {
     fn ipv4_address_encoding_uses_12_zero_bytes() {
         // RFC 7854 §4.2: IPv4 peer address is 12 zero bytes + 4-byte IPv4 (NOT IPv4-mapped ::ffff:)
         let info = sample_peer_info(); // IPv4 10.0.0.2
-        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
         // Per-peer header starts at offset 6 (after common header)
         // Address field is at offset 6 + 2 (type+flags) + 8 (distinguisher) = 16
         let addr_offset = BMP_COMMON_HEADER_LEN + 2 + 8;
@@ -921,7 +1215,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.timestamp = UNIX_EPOCH + std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
 
-        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_ROUTE_MONITORING);
 
         let timestamp_offset = BMP_COMMON_HEADER_LEN + 34;
@@ -939,7 +1233,7 @@ mod tests {
         let mut info = sample_peer_info();
         info.is_ipv6 = true;
         info.peer_addr = IpAddr::V6("2001:db8::2".parse().unwrap());
-        let msg = encode_route_monitoring(&info, &[0u8; 23]);
+        let msg = encode_route_monitoring(&info, &[0u8; 23], BmpVersion::V3);
         let addr_offset = BMP_COMMON_HEADER_LEN + 2 + 8;
         let addr_bytes = &msg[addr_offset..addr_offset + 16];
         let expected: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
@@ -956,6 +1250,7 @@ mod tests {
             12345,
             &[0xFF; 29],
             &[0xFE; 29],
+            BmpVersion::V3,
         );
         // Local address is right after per-peer header
         let local_addr_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
@@ -981,7 +1276,7 @@ mod tests {
             safi: 1,
             value: 500,
         }];
-        let msg = encode_stats_report(&info, &[], &afi_counters);
+        let msg = encode_stats_report(&info, &[], &afi_counters, BmpVersion::V3);
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         let count = u32::from_be_bytes([

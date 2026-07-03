@@ -304,6 +304,11 @@ pub struct BmpCollector {
     /// Default preserves pre-RFC 8671 behavior: pre-policy Adj-RIB-In only.
     #[serde(default = "default_bmp_monitor")]
     pub monitor: Vec<BmpMonitorView>,
+    /// BMP wire version framed for this collector: 3 (RFC 7854,
+    /// default) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-20 —
+    /// pre-IANA; code points may renumber at RFC publication).
+    #[serde(default = "default_bmp_version")]
+    pub version: u8,
 }
 
 /// A BMP route-monitoring stream selection (per collector).
@@ -345,6 +350,10 @@ fn default_bmp_sys_name() -> String {
 
 fn default_bmp_reconnect() -> u64 {
     30
+}
+
+fn default_bmp_version() -> u8 {
+    3
 }
 
 fn default_bmp_monitor() -> Vec<BmpMonitorView> {

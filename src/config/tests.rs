@@ -3168,6 +3168,30 @@ fn bmp_zero_reconnect_interval_rejected() {
 }
 
 #[test]
+fn bmp_version_defaults_to_3() {
+    let config = parse(&bmp_toml("")).unwrap();
+    assert_eq!(
+        config.bmp.as_ref().unwrap().collectors[0].version,
+        3,
+        "BMP wire version defaults to RFC 7854 v3"
+    );
+}
+
+#[test]
+fn bmp_version_4_accepted() {
+    let config = parse(&bmp_toml("version = 4")).unwrap();
+    assert_eq!(config.bmp.as_ref().unwrap().collectors[0].version, 4);
+}
+
+#[test]
+fn bmp_invalid_version_rejected() {
+    for bad in ["version = 2", "version = 5"] {
+        let err = parse(&bmp_toml(bad)).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
+    }
+}
+
+#[test]
 fn bmp_custom_reconnect_interval_accepted() {
     let config = parse(&bmp_toml("reconnect_interval = 60")).unwrap();
     let bmp = config.bmp.as_ref().unwrap();

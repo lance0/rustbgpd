@@ -106,8 +106,10 @@ impl BmpClient {
                 }
             };
 
-            // Send Initiation message
-            let init_msg = codec::encode_initiation(&self.sys_name, &self.sys_descr);
+            // Send Initiation message (framed at this collector's
+            // configured BMP version)
+            let init_msg =
+                codec::encode_initiation(&self.sys_name, &self.sys_descr, self.config.version);
             if let Err(e) = Self::write_all_with_timeout(&mut stream, &init_msg).await {
                 warn!(collector = %addr, error = %e, "failed to send BMP Initiation");
                 continue; // reconnect
@@ -164,7 +166,8 @@ impl BmpClient {
             loop {
                 let Some(msg) = self.rx.recv().await else {
                     // Channel closed — send Termination and exit
-                    let term = codec::encode_termination(0, "daemon shutting down");
+                    let term =
+                        codec::encode_termination(0, "daemon shutting down", self.config.version);
                     let _ = Self::write_all_with_timeout(&mut stream, &term).await;
                     let _ = Self::flush_with_timeout(&mut stream).await;
                     info!(collector = %addr, "BMP client shutting down");
@@ -207,6 +210,7 @@ impl BmpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::BmpVersion;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
@@ -223,6 +227,7 @@ mod tests {
                 collector_id: 7,
                 collector_addr: addr,
                 reconnect_interval: 1,
+                version: BmpVersion::V3,
             },
             msg_rx,
             "rustbgpd".to_string(),
@@ -287,6 +292,7 @@ mod tests {
                 collector_id: 7,
                 collector_addr: addr,
                 reconnect_interval: 1,
+                version: BmpVersion::V3,
             },
             msg_rx,
             "rustbgpd".to_string(),

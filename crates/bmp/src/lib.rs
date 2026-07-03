@@ -4,7 +4,9 @@
 //! session state and raw UPDATE PDUs to configured collectors,
 //! including post-policy Adj-RIB-Out monitoring (RFC 8671) and
 //! Loc-RIB instance monitoring with collector-connect table sync
-//! (RFC 9069).
+//! (RFC 9069). Collectors are framed per configured [`BmpVersion`]:
+//! v3 (default) or v4 TLV framing per draft-ietf-grow-bmp-tlv-20
+//! (pre-IANA; see [`tlv`]).
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
@@ -13,11 +15,12 @@
 pub mod client;
 pub mod codec;
 pub mod manager;
+pub mod tlv;
 pub mod types;
 
 pub use client::BmpClient;
 pub use manager::BmpManager;
 pub use types::{
     BmpClientConfig, BmpControlEvent, BmpDumpChunk, BmpDumpRequest, BmpEvent, BmpLocRibConfig,
-    BmpMonitorFilter, BmpPeerInfo, BmpPeerType, LOC_RIB_TABLE_NAME, PeerDownReason,
+    BmpMonitorFilter, BmpPeerInfo, BmpPeerType, BmpVersion, LOC_RIB_TABLE_NAME, PeerDownReason,
 };
