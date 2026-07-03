@@ -58,6 +58,8 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_server_client: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    per_client_best: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     remove_private_as: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     add_path_receive: Option<bool>,
@@ -143,6 +145,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             route_reflector_client: def.route_reflector_client,
             orr_vantage: def.orr_vantage.clone(),
             route_server_client: def.route_server_client,
+            per_client_best: def.per_client_best,
             remove_private_as: def.remove_private_as.clone(),
             add_path_receive: def.add_path_receive,
             add_path_send: def.add_path_send,
@@ -196,6 +199,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(rs) = def.route_server_client {
             println!("RS Client:             {rs}");
+        }
+        if let Some(pcb) = def.per_client_best {
+            println!("Per-Client Best:       {pcb}");
         }
         if let Some(r) = &def.remove_private_as {
             println!("Remove Private AS:     {r}");

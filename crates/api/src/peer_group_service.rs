@@ -125,6 +125,7 @@ fn proto_definition_to_input(
         route_reflector_client: definition.route_reflector_client,
         orr_vantage,
         route_server_client: definition.route_server_client,
+        per_client_best: definition.per_client_best,
         remove_private_as: if remove_private_as.is_empty() {
             None
         } else {
@@ -169,6 +170,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         route_reflector_client: definition.route_reflector_client,
         orr_vantage: definition.orr_vantage.map(|addr| addr.to_string()),
         route_server_client: definition.route_server_client,
+        per_client_best: definition.per_client_best,
         remove_private_as: definition.remove_private_as.clone(),
         add_path_receive: definition
             .add_path

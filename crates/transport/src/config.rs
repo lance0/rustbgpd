@@ -128,6 +128,12 @@ pub struct TransportConfig {
     pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP neighbor is a transparent route-server client.
     pub route_server_client: bool,
+    /// RFC 7947 §2.3.2 per-client best-path for a route-server client:
+    /// the RIB stages the first export-policy-permitted candidate for
+    /// this peer instead of the Loc-RIB best (path-hiding mitigation
+    /// for clients without Add-Path). Requires `route_server_client`;
+    /// families with negotiated Add-Path send ignore it.
+    pub per_client_best: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
@@ -176,6 +182,7 @@ impl TransportConfig {
             route_reflector_client: false,
             orr_vantage: None,
             route_server_client: false,
+            per_client_best: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
             explain_enabled: true,

@@ -116,6 +116,7 @@ async fn orf_setup() -> (
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -458,6 +459,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
     // Re-establish WITHOUT ORF: the initial dump must carry the full table.
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -535,6 +537,7 @@ async fn graceful_restart_clears_orf_filter() {
     // 10/8-only filter must not survive into the new session.
     let (out_tx, mut out_rx2) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -620,6 +623,7 @@ async fn gr_flap_and_reup(
 
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -804,6 +808,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -923,6 +928,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 1 (no ORF), then a GR flap.
     let (out_tx, _out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -952,6 +958,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     // Session 2: the restarter comes back with ORF — the deferral arms.
     let (out_tx2, _out_rx2) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,

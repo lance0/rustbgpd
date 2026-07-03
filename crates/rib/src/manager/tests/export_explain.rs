@@ -83,6 +83,7 @@ async fn explain_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -418,6 +419,7 @@ async fn orf_gates_stop_pending_family_then_filtered_prefix() {
     // first ROUTE-REFRESH (RFC 5291 §6).
     let (out_tx, _rx_t) = mpsc::channel::<OutboundRouteUpdate>(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

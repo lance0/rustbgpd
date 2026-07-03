@@ -26,6 +26,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -84,6 +85,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -138,6 +140,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -206,6 +209,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

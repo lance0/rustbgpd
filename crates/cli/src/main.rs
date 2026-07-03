@@ -606,6 +606,10 @@ enum NeighborAction {
         /// Enable transparent route-server client mode (eBGP only)
         #[arg(long)]
         route_server_client: bool,
+        /// RFC 7947 per-client best-path (path-hiding mitigation);
+        /// requires --route-server-client
+        #[arg(long, requires = "route_server_client")]
+        per_client_best: bool,
         /// Local BGP Role for RFC 9234 route-leak protection
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
@@ -1306,6 +1310,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     max_prefixes,
                     families,
                     route_server_client,
+                    per_client_best,
                     role,
                     strict_role,
                     add_path_receive,
@@ -1324,6 +1329,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         max_prefixes,
                         families,
                         route_server_client,
+                        per_client_best,
                         role,
                         strict_role,
                         add_path_receive,

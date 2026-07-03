@@ -1322,6 +1322,9 @@ pub struct PeerGroupDefinition {
     pub orr_vantage: Option<IpAddr>,
     /// Optional route-server-client override.
     pub route_server_client: Option<bool>,
+    /// Optional RFC 7947 §2.3.2 per-client best-path override
+    /// (path-hiding mitigation). Requires `route_server_client`.
+    pub per_client_best: Option<bool>,
     /// Optional private-AS removal mode.
     pub remove_private_as: Option<String>,
     /// Optional Add-Path override.
@@ -1407,6 +1410,10 @@ pub struct PeerManagerNeighborConfig {
     pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
+    /// RFC 7947 §2.3.2 per-client best-path (path-hiding mitigation
+    /// for route-server clients without Add-Path). Requires
+    /// `route_server_client`.
+    pub per_client_best: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Enable Add-Path receive capability.
@@ -1686,6 +1693,9 @@ pub struct PeerInfo {
     pub remove_private_as: RemovePrivateAs,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
+    /// RFC 7947 §2.3.2 per-client best-path enabled for this
+    /// route-server client.
+    pub per_client_best: bool,
     /// Locally configured BGP Role, if advertised.
     pub local_role: Option<BgpRole>,
     /// Require a compatible remote BGP Role.

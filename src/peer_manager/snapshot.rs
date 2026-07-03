@@ -36,6 +36,7 @@ fn build_peer_info(
         families: managed.transport_config.peer.families.clone(),
         remove_private_as: managed.transport_config.remove_private_as,
         route_server_client: managed.transport_config.route_server_client,
+        per_client_best: managed.transport_config.per_client_best,
         local_role: managed.transport_config.peer.local_role,
         strict_role: managed.transport_config.peer.strict_role,
         remote_role: session_state.and_then(|s| s.remote_role),

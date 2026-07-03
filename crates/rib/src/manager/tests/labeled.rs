@@ -13,6 +13,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -92,6 +93,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
     for (peer, is_client) in [(source, false), (client, true), (non_client, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
             session_id: 0,
             peer,
             peer_asn: 65000,
@@ -159,6 +161,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -231,6 +234,7 @@ async fn labeled_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -349,6 +353,10 @@ async fn labeled_addpath_ingest_distinct_path_ids_stored_and_withdrawn_independe
 /// candidates per prefix with outbound path IDs 1..=N ranked by the labeled
 /// tiebreak, a non-Add-Path target keeps single-best (`path_id = 0`), and
 /// a source withdraw shrinks the staged set by outbound path ID.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: Add-Path target, single-best target, and a source withdraw over the same staged set"
+)]
 #[tokio::test]
 async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let (tx, rx) = mpsc::channel(64);
@@ -358,6 +366,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let addpath_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (addpath_out_tx, mut addpath_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: addpath_target,
         peer_asn: 65000,
@@ -380,6 +389,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let plain_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let (plain_out_tx, mut plain_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: plain_target,
         peer_asn: 65000,
@@ -490,6 +500,7 @@ async fn send_initial_table_includes_labeled_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -545,6 +556,7 @@ async fn route_refresh_labeled_re_advertises_routes() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -752,6 +764,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -826,6 +839,7 @@ async fn labeled_gr_eor_clears_stale() {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

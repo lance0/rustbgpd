@@ -565,6 +565,7 @@ async fn orr_client_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -693,6 +694,7 @@ async fn rtc_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -736,6 +738,7 @@ async fn vpn_rtc_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -886,6 +889,7 @@ async fn llgr_gate_peer_up(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -922,6 +926,7 @@ mod llgr_families;
 mod multipath_fib;
 mod orf;
 mod orr;
+mod per_client_best;
 mod policy;
 mod refresh;
 mod rpki;

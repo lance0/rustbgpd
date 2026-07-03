@@ -25,6 +25,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     // Channel capacity 1: fills after one send
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -181,6 +182,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -332,6 +334,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
     drop(out_rx);
 
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -406,6 +409,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
     out_tx.send(OutboundRouteUpdate::default()).await.unwrap();
 
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -506,6 +510,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            per_client_best: false,
             peer,
             session_id,
             peer_asn: 65000,
@@ -578,6 +583,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     // the analogue of pe1's fresh Type 2 origination / drain withdrawals.
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -652,6 +658,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            per_client_best: false,
             peer,
             session_id,
             peer_asn: 65000,
@@ -695,6 +702,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     // reaches its outbound channel.
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -777,6 +785,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            per_client_best: false,
             peer,
             session_id,
             peer_asn: 65000,
@@ -904,6 +913,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     // reach W — the registration survived the whole interleaving.
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -980,6 +990,7 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            per_client_best: false,
             peer,
             session_id,
             peer_asn: 65000,
@@ -1077,6 +1088,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
     // family is receive-only from the manager's point of view.
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            per_client_best: false,
             peer,
             session_id,
             peer_asn: 65000,
@@ -1144,6 +1156,7 @@ fn session_peer_up(
     sendable_families: Vec<(Afi, Safi)>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
+        per_client_best: false,
         peer,
         session_id,
         peer_asn: 65000,

@@ -12,6 +12,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -388,6 +389,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     // Source re-establishes — route should STILL be stale
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -502,6 +504,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     // Source re-establishes — timer resets to stale_routes_time (10s)
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -876,6 +879,7 @@ async fn llgr_eor_clears_llgr_stale() {
     // Peer re-establishes during LLGR
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -1075,6 +1079,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
 fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
         session_id: 0,
         peer,
         peer_asn: 65001,

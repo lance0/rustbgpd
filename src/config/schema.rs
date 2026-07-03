@@ -673,6 +673,14 @@ pub struct Neighbor {
     /// next hop and suppress automatic local-AS prepend. Explicit export
     /// policy next-hop rewrites still apply.
     pub route_server_client: Option<bool>,
+    /// RFC 7947 §2.3.2 per-client best-path for this route-server
+    /// client: when the Loc-RIB best is denied by this peer's export
+    /// policy, advertise the best export-policy-permitted candidate
+    /// instead of hiding the prefix (path-hiding mitigation for clients
+    /// without Add-Path). Requires `route_server_client = true`.
+    /// Families where the session negotiates Add-Path send use Add-Path
+    /// instead — the negotiated capability outranks this fallback.
+    pub per_client_best: Option<bool>,
     /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
     pub role: Option<BgpRoleConfig>,
     /// Require the peer to advertise a compatible BGP Role capability.
@@ -774,6 +782,9 @@ pub struct PeerGroupConfig {
     /// neighbors in this group. See the neighbor-level `orr_vantage`.
     pub orr_vantage: Option<IpAddr>,
     pub route_server_client: Option<bool>,
+    /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
+    /// this group. See the neighbor-level `per_client_best`.
+    pub per_client_best: Option<bool>,
     pub role: Option<BgpRoleConfig>,
     pub strict_role: Option<bool>,
     /// Advertise willingness to receive Address-Prefix ORF entries (RFC

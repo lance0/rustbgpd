@@ -450,6 +450,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
+| `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
@@ -975,6 +976,47 @@ This applies to:
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
 
+#### Per-client best-path (RFC 7947 §2.3.2 path-hiding mitigation)
+
+A route server applies each member's export policy to the single Loc-RIB
+best path: when that best is denied toward a member, the member sees
+*nothing* for the prefix even though a policy-permitted alternative exists
+(RFC 7947 §2.3 "path hiding"). rustbgpd offers both mitigations the RFC
+names:
+
+- **Add-Path to clients** (preferred where the client supports Add-Path
+  receive): the server sends multiple paths and the client picks after
+  its own filters. This is what `examples/route-server/config.toml` uses.
+- **`per_client_best = true`** (the BIRD-`secondary` equivalent) for
+  clients without Add-Path: the server walks its candidate paths in
+  best-path order and advertises the first one the member's export
+  policy permits, at the ordinary single-path wire shape.
+
+```toml
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+route_server_client = true
+per_client_best = true       # this member cannot do Add-Path receive
+```
+
+Precedence: if the session negotiates Add-Path send for a family, that
+family uses Add-Path and `per_client_best` is ignored for it — the
+negotiated capability outranks the fallback (this is not an error).
+
+Notes:
+
+- Requires `route_server_client = true` (and therefore eBGP); validation
+  rejects it otherwise. It is mutually exclusive with `orr_vantage` by
+  construction (ORR requires an iBGP route-reflector client).
+- Per-client-best peers are excluded from update-group sharing (their
+  selected route is per-member); `rbgp neighbor show` reports the
+  `per_client_best` ungrouped reason and the peer counts toward
+  `bgp_update_group_fallback_peers`. Prefer Add-Path for large fleets.
+- Selection cost is O(candidate paths × export-policy evaluations) per
+  changed prefix for such peers — the same cost BIRD pays in filter runs
+  for `secondary`.
+
 ### Receive-side Prefix ORF (RFC 5291/5292)
 
 Set `prefix_orf_receive = true` on a neighbor or peer group to advertise that
@@ -1165,6 +1207,7 @@ A peer falls back to the plain per-peer path (with identical semantics
 |--------|---------|
 | `policy_peer_context` | Its export chain matches on neighbor address/ASN/group, so verdicts can differ per peer |
 | `add_path_send` | Add-Path send is negotiated (candidate ranks are per-target) |
+| `per_client_best` | RFC 7947 §2.3.2 per-client best-path is enabled (the filtered best is per-member) |
 | `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
 | `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
 
@@ -2947,6 +2990,7 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| `per_client_best` requires `route_server_client = true` | `invalid route_server_client` |
 | `disable_ipv4_unicast = true` requires at least one non-`ipv4_unicast` effective family | `invalid neighbor config` |
 | `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
@@ -2986,6 +3030,7 @@ starting:
 | `llgr_stale_time` | 0 (disabled) |
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
+| `per_client_best` | `false` |
 | `prefix_orf_receive` | `false` |
 | `disable_ipv4_unicast` | `false` |
 | `role` / `strict_role` | disabled / `false` |

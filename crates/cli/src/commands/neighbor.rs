@@ -86,6 +86,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
+            per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
             add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
@@ -138,6 +139,9 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Route Server Client:   {}",
             cfg.map(|c| c.route_server_client).unwrap_or(false)
         );
+        if cfg.map(|c| c.per_client_best).unwrap_or(false) {
+            println!("Per-Client Best:       true");
+        }
         let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
         if !role.is_empty() {
             println!("BGP Role:              {role}");
@@ -211,6 +215,7 @@ pub struct AddNeighborOpts {
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
     pub route_server_client: bool,
+    pub per_client_best: bool,
     pub role: Option<String>,
     pub strict_role: bool,
     pub add_path_receive: bool,
@@ -241,6 +246,7 @@ pub async fn add(
                 peer_group: String::new(),
                 remove_private_as: String::new(),
                 route_server_client: opts.route_server_client,
+                per_client_best: opts.per_client_best,
                 role: opts.role.unwrap_or_default(),
                 strict_role: opts.strict_role,
                 add_path_receive: opts.add_path_receive,
@@ -393,6 +399,7 @@ mod tests {
                 max_prefixes: Some(1000),
                 families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
                 route_server_client: true,
+                per_client_best: false,
                 role: Some("rs".to_string()),
                 strict_role: true,
                 add_path_receive: true,

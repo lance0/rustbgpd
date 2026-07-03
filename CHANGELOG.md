@@ -56,6 +56,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-client best-path for route-server clients (RFC 7947 §2.3.2
+  path-hiding mitigation, the BIRD-`secondary` equivalent).** New
+  per-neighbor / per-peer-group knob `per_client_best = true` (requires
+  `route_server_client`): when a member's export policy denies the
+  Loc-RIB best, the route server advertises the best *permitted*
+  candidate instead of hiding the prefix — selected per member at
+  distribution time (no shadow per-client Loc-RIBs), staged at
+  `path_id 0` so Adj-RIB-Out, BMP RIB-Out, and `ListAdvertisedRoutes`
+  keep the single-best shape. Families with negotiated Add-Path send
+  keep using Add-Path (the capability outranks the fallback). The
+  member sourcing the best gets the runner-up (split horizon inside the
+  collector). Churn contract test-pinned against the OpenBGPd
+  `rde evaluate all` bug class: unchanged filtered best ⇒ no
+  re-announcement, filtered-best flips ⇒ implicit replace (no spurious
+  withdraw+announce), no-op policy reload ⇒ zero wire churn.
+  Per-client-best peers fall back from update-group sharing with a new
+  `per_client_best` ungrouped reason. Exposed end-to-end: TOML +
+  inheritance + validation, gRPC (`NeighborConfig`/
+  `PeerGroupDefinition`/`NeighborState`), `rbgp neighbor add
+  --per-client-best` + show/JSON, config persistence, reload matrix
+  (live, effective next session).
+
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,

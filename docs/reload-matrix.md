@@ -90,6 +90,7 @@ the old neighbor is torn down, the new one starts fresh.
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |
 | `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node). Registered with the RIB manager at session establishment, so a change takes effect on the next session. Currently drives the vantage registry, cached SPF state, and `rbgp orr` status only; the per-vantage best-path selection ships with the ORR distribution switch. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
+| `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`), so a change takes effect on the next session. |
 | `role` | live (effective next session) | RFC 9234 BGP Role capability — advertised in OPEN. Compatibility check + NOTIFICATION 2/11 enforcement happen at OPEN time, so role changes require a session bounce to renegotiate. The §5 OTC procedures (driven by the local role) re-evaluate against the next received/emitted UPDATE. |
 | `strict_role` | live (effective next session) | Strict-mode toggle. Without an OPEN renegotiation, the existing session keeps whatever it negotiated. |
 | `prefix_orf_receive` | live (effective next session) | RFC 5291/5292 Address-Prefix ORF receive capability — advertised in OPEN. Like `add_path`/`role`, a toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session; an established session keeps whatever ORF it negotiated. Reported by `describe_neighbor_changes`; a transaction-model edit is a supported `[[neighbors]] modify`. |
@@ -127,6 +128,7 @@ dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 | `route_reflector_client` | live (effective next session) | |
 | `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. |
 | `route_server_client` | live (effective next session) | |
+| `per_client_best` | live (effective next session) | Inherited per-client best-path mode; same semantics as the neighbor field. |
 | `role` | live (effective next session) | |
 | `strict_role` | live (effective next session) | |
 | `prefix_orf_receive` | live (effective next session) | Group-level ORF toggle is caught by `diff_peer_groups` (whole-record compare) and named by `describe_peer_group_changes`; effective on the inheriting peer's next session. |

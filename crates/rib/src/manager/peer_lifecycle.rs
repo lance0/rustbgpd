@@ -419,6 +419,7 @@ impl RibManager {
         }
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
+        self.peer_per_client_best.remove(&peer);
         // ORF state is per-session (RFC 5291): a surviving §6 gate can never
         // be lifted by a reconnecting session that didn't negotiate ORF
         // (suppressing the family's flood indefinitely), and a surviving
@@ -474,6 +475,7 @@ impl RibManager {
         is_ebgp: bool,
         route_reflector_client: bool,
         orr_vantage: Option<IpAddr>,
+        per_client_best: bool,
         add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         add_path_send_max: u32,
         negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
@@ -522,6 +524,7 @@ impl RibManager {
             is_ebgp,
             route_reflector_client,
             orr_vantage,
+            per_client_best,
             add_path_send_families,
             add_path_send_max,
             negotiated_orf_recv,
@@ -569,6 +572,7 @@ impl RibManager {
         let is_ebgp = record.is_ebgp;
         let route_reflector_client = record.route_reflector_client;
         let orr_vantage = record.orr_vantage;
+        let per_client_best = record.per_client_best;
         let add_path_send_families = record.add_path_send_families.clone();
         let add_path_send_max = record.add_path_send_max;
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
@@ -674,6 +678,13 @@ impl RibManager {
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
+        // Per-registration like the vantage: a replacement session that
+        // dropped the knob must not inherit it.
+        if per_client_best {
+            self.peer_per_client_best.insert(peer);
+        } else {
+            self.peer_per_client_best.remove(&peer);
+        }
         // Shadow-mode update-group fingerprint (slice 1): record this
         // registration's group membership / ungrouped reason. Runs after
         // every fingerprint input map above is populated; distribution
@@ -872,6 +883,7 @@ impl RibManager {
             .get(&peer)
             .and_then(|vantage| self.orr.spf.get(vantage))
             .map(|spf| (&self.orr.topology, spf));
+        let per_client_best = self.peer_per_client_best.contains(&peer);
         let loc_rib = &self.loc_rib;
         let policy_stats = self.export_policy_stats.entry(peer).or_default();
         for prefix in staging_prefixes {
@@ -897,6 +909,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group.as_deref(),
                     prefix_send_max,
+                    false,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -907,6 +920,50 @@ impl RibManager {
                     // has no installed filter during the initial dump.
                     None,
                     orr_ctx,
+                    &mut export_memo,
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut announce,
+                    &mut withdraw,
+                    &mut nh_override_flags,
+                    &mut policy_filtered,
+                    false, // initial dump — equality check is correct
+                );
+                current_policy_filtered_routes.extend(policy_filtered);
+            } else if per_client_best {
+                // RFC 7947 §2.3.2 per-client best-path: the first
+                // export-policy-permitted candidate from the per-target
+                // candidate set, staged at path_id 0 (single-best
+                // shape). Add-Path families took the multipath arm
+                // above — a negotiated capability outranks the
+                // fallback. ORR cannot coexist: the vantage requires an
+                // iBGP route-reflector-client while per_client_best
+                // requires an eBGP route-server client
+                // (validation-enforced).
+                debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
+                let mut policy_filtered = Vec::new();
+                Self::distribute_multipath_prefix(
+                    &self.ribs,
+                    &self.unicast_prefix_peers,
+                    &initial_view,
+                    &self.peer_is_rr_client,
+                    prefix,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group.as_deref(),
+                    1,
+                    true,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    llgr.as_ref(),
+                    export_pol.as_ref(),
+                    // ORF: gated families are skipped above; a non-gated family
+                    // has no installed filter during the initial dump.
+                    None,
+                    None,
                     &mut export_memo,
                     &metrics,
                     policy_stats,

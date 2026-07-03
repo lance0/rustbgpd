@@ -159,6 +159,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
             let [_, b1, b2, b3] = (i as u32).to_be_bytes();
             let (out_tx, out_rx) = mpsc::channel(n_prefixes as usize + 64);
             tx.send(RibUpdate::PeerUp {
+                per_client_best: false,
                 session_id: 1 + i as u64,
                 peer: IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3.wrapping_add(1))),
                 peer_asn: 64_512,

@@ -43,6 +43,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         families: Vec::new(),
         remove_private_as: RemovePrivateAs::Disabled,
         route_server_client: false,
+        per_client_best: false,
         local_role: None,
         strict_role: false,
         remote_role: None,

@@ -1247,8 +1247,12 @@ impl RibManager {
                         all.extend(base.unicast.keys().map(|(p, _)| *p));
                     }
                 } else {
-                    // For multi-path dirty resync, also include all Adj-RIB-In prefixes
-                    if self.peer_has_any_add_path_send(peer) {
+                    // For multi-path (and per-client-best — same
+                    // Adj-RIB-In candidate source) dirty resync, also
+                    // include all Adj-RIB-In prefixes
+                    if self.peer_has_any_add_path_send(peer)
+                        || self.peer_per_client_best.contains(&peer)
+                    {
                         for rib in self.ribs.values() {
                             all.extend(rib.iter().map(|r| r.prefix));
                         }
@@ -1269,14 +1273,20 @@ impl RibManager {
                 // change that leaves the Loc-RIB best untouched can
                 // still flip the vantage best, so ORR peers stage every
                 // affected prefix (same reasoning as Add-Path send).
+                // Per-client-best (RFC 7947 §2.3.2) selects from the
+                // same per-target candidate set — a candidate change
+                // can flip the filtered best without moving the Loc-RIB
+                // best, so those peers stage every affected prefix too.
                 let peer_has_resolved_orr = self
                     .peer_orr_vantage
                     .get(&peer)
                     .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
+                let peer_per_client_best = self.peer_per_client_best.contains(&peer);
                 let extras: Vec<Prefix> = all_affected
                     .iter()
                     .filter(|prefix| {
                         (peer_has_resolved_orr
+                            || peer_per_client_best
                             || self.add_path_send_max_for_prefix(peer, prefix) > 0)
                             && !best_changed.contains(*prefix)
                     })
@@ -1569,6 +1579,7 @@ impl RibManager {
                 .get(&peer)
                 .and_then(|vantage| self.orr.spf.get(vantage))
                 .map(|spf| (&self.orr.topology, spf));
+            let per_client_best = self.peer_per_client_best.contains(&peer);
             let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
             let orf_gated = self
                 .peer_orf_pending
@@ -1623,6 +1634,7 @@ impl RibManager {
                         target_peer_asn,
                         target_peer_group,
                         prefix_send_max,
+                        false,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,
@@ -1631,6 +1643,48 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf,
                         orr_ctx,
+                        &mut export_memo,
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                        &mut policy_filtered,
+                        is_force,
+                    );
+                    current_policy_filtered_routes.extend(policy_filtered);
+                } else if per_client_best {
+                    // RFC 7947 §2.3.2 per-client best-path: the first
+                    // export-policy-permitted candidate from the
+                    // per-target candidate set, staged at path_id 0
+                    // (single-best shape). Add-Path families took the
+                    // multipath arm above — a negotiated capability
+                    // outranks the fallback. ORR cannot coexist: the
+                    // vantage requires an iBGP route-reflector-client
+                    // while per_client_best requires an eBGP
+                    // route-server client (validation-enforced).
+                    debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
+                    let mut policy_filtered = Vec::new();
+                    Self::distribute_multipath_prefix(
+                        &self.ribs,
+                        &self.unicast_prefix_peers,
+                        rib_out,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        peer,
+                        target_peer_asn,
+                        target_peer_group,
+                        1,
+                        true,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        llgr.as_ref(),
+                        export_pol.as_ref(),
+                        orf,
+                        None,
                         &mut export_memo,
                         &metrics,
                         policy_stats,

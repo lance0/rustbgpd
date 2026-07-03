@@ -440,6 +440,22 @@ impl Config {
                 });
             }
 
+            // RFC 7947 §2.3.2 per-client best-path is a route-server
+            // feature (eBGP-only follows transitively; ORR exclusion
+            // too — the vantage requires an iBGP RR client).
+            let per_client_best = neighbor
+                .per_client_best
+                .or_else(|| group.and_then(|g| g.per_client_best))
+                .unwrap_or(false);
+            if per_client_best && !route_server_client {
+                return Err(ConfigError::InvalidRouteServerConfig {
+                    reason: format!(
+                        "per_client_best on neighbor {} requires route_server_client = true",
+                        neighbor.address
+                    ),
+                });
+            }
+
             let role = neighbor.role.or_else(|| group.and_then(|g| g.role));
             let strict_role = neighbor
                 .strict_role

@@ -448,6 +448,13 @@ pub enum RibUpdate {
         /// for this route-reflector-client, if any: an IP identifying the
         /// client's IGP location as a BGP-LS topology node.
         orr_vantage: Option<IpAddr>,
+        /// RFC 7947 §2.3.2 per-client best-path for a route-server
+        /// client: unicast export stages the first export-policy-
+        /// permitted candidate (path-hiding mitigation) instead of the
+        /// Loc-RIB best. Families with negotiated Add-Path send take the
+        /// multipath path instead (a negotiated capability outranks the
+        /// fallback).
+        per_client_best: bool,
         /// Families for which this peer negotiated Add-Path Send/Both.
         /// Multi-path export is only enabled for these families.
         add_path_send_families: Vec<(Afi, Safi)>,
