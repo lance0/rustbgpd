@@ -654,6 +654,18 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<String>,
     },
+    /// TEST ONLY: a peer's advertised VPN view recomputed from manager
+    /// state — the Φ-filtered group table for a VPN-grouped member, the
+    /// per-peer Adj-RIB-Out otherwise. The update-groups oracle's
+    /// invariant checker (design §5) compares this against the folded
+    /// emitted stream after every scenario step.
+    #[cfg(test)]
+    TestQueryVpnAdvertised {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel: `(Debug-formatted VpnRouteKey, source peer)`.
+        reply: oneshot::Sender<Vec<(String, IpAddr)>>,
+    },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters
     /// accumulate since a chain instance was installed and reset when

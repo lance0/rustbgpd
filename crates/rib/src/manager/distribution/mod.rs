@@ -1082,8 +1082,8 @@ impl RibManager {
             // Adj-RIB-Out: its advertised VPN state is the group table
             // (plus pending withdraw residue), so the resync enumeration
             // synthesizes from those — mirroring the unicast synthesis
-            // above. RTC-negotiated groups don't stage VPN (slice-1
-            // gate), so their members keep the per-peer enumeration.
+            // above. (RTC members' Φ is applied by the resync assembly,
+            // not the enumeration — over-enumeration is harmless.)
             let vpn_grouped = self.vpn_grouped_member_of(peer);
             let effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
                 let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = self
@@ -1209,6 +1209,11 @@ impl RibManager {
             // Non-unicast families ride the per-peer path below
             // unchanged, in the same OutboundRouteUpdate.
             if let Some(gid) = member_of {
+                // The member's Φ: the VPN resync assembles under the
+                // CURRENT filter — the member may have gone dirty across
+                // a Φ change, which is why the membership-delta path
+                // defers to this (design §2.4).
+                let member_filter = self.member_rt_filter(peer);
                 if let Some(group) = self.group_ribs.get(&gid) {
                     if resync {
                         Self::assemble_group_resync(
@@ -1227,13 +1232,14 @@ impl RibManager {
                             &mut nh_override_flags,
                         );
                         // VPN portion of the resync, from the group's VPN
-                        // maps (only staged for non-RTC groups); the
-                        // per-peer VPN staging below is skipped for these
-                        // members (`vpn_grouped` gate).
+                        // maps under the member's Φ; the per-peer VPN
+                        // staging below is skipped for these members
+                        // (`vpn_grouped` gate).
                         if group.stages_vpn() {
                             Self::assemble_group_vpn_resync(
                                 group,
                                 peer,
+                                member_filter.as_ref(),
                                 is_dirty,
                                 is_force,
                                 self.pending_regroup_baseline

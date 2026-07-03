@@ -66,9 +66,9 @@ impl RibManager {
     /// the group table as `rib_out`, split horizon lifted to member emit,
     /// peer-context `RouteContext` fields `None`, and evaluations
     /// accumulated for per-member counter replay. Group targets never
-    /// carry `rtc_filter` (RTC-negotiated groups don't stage VPN in this
-    /// slice; slice 2 applies Φ at member emit), `orr_ctx`, or Add-Path —
-    /// all three disqualify from grouping.
+    /// carry `rtc_filter` (the RFC 4684 filter `Φ_m` is per-member and
+    /// applied at emit by the RT-pass matrix), `orr_ctx`, or Add-Path —
+    /// the latter two disqualify from grouping.
     ///
     /// When the target negotiated Add-Path send for the key's family (RFC
     /// 7911; RFC 9107 requires it between RRs), up to `add_path_send_max`
@@ -521,9 +521,9 @@ impl RibManager {
         // Update-group shared VPN staging: ONE export-tail pass per
         // (VPN-staging group, changed identity), committed to the group
         // tables. The per-peer loop below emits the deltas per member via
-        // the VPN source-flip matrix; RTC-negotiated groups don't stage
-        // VPN (slice-1 gate), so their members — and all ungrouped peers —
-        // take the per-peer staging path exactly as before.
+        // the RT-pass source-flip matrix (Φ applied at emit for RTC
+        // groups); ungrouped peers take the per-peer staging path exactly
+        // as before.
         let vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
@@ -533,18 +533,32 @@ impl RibManager {
                     continue;
                 };
                 // Per-member export-policy counters from the group
-                // verdict — integer adds, `totals − own-sourced`.
+                // verdict — integer adds, `totals − own-sourced`. RTC
+                // note: the per-peer path's RT gate precedes its policy
+                // eval, but group staging defers the gate to emit, so
+                // the accumulator holds one eval per key regardless of
+                // Φ — the per-key deviation for Φ-failing keys is the
+                // documented ADR carve-out (counters are aggregates,
+                // never compared by the oracle).
                 self.apply_group_policy_counters(peer, &stage.evals);
+                let member_filter = self.member_rt_filter(peer);
                 let mut vpn_announce = Vec::new();
                 let mut vpn_withdraw = Vec::new();
-                crate::manager::update_groups::emit_vpn_group_deltas_for_member(
+                let count_delta = crate::manager::update_groups::emit_vpn_group_deltas_for_member(
                     &stage.deltas,
                     peer,
+                    member_filter.as_ref(),
                     &mut vpn_announce,
                     &mut vpn_withdraw,
                 );
                 if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
                     continue;
+                }
+                // Optimistic per-member count maintenance (RTC groups
+                // only): a failed send below marks the member dirty and
+                // the resync recompute restores exactness.
+                if let Some(group) = self.group_ribs.get_mut(&gid) {
+                    group.apply_vpn_member_count_delta(peer, count_delta);
                 }
                 if !self.try_send_and_commit_outbound_update(
                     peer,
