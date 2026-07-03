@@ -1,0 +1,129 @@
+# Containerlab topology: rustbgpd route server ↔ BIRD 2 + GoBGP + FRR
+# members + StayRTR RPKI cache (M83 — route-server profile multi-stack
+# receipt, ADR-0101 proof ladder closer)
+#
+# Validates the RFC 7947 route-server profile against three member
+# stacks at once:
+#   - transparency at byte level (no 65500 in AS_PATH, NEXT_HOP =
+#     originator, MED + standard/large communities verbatim) — client
+#     views on all three stacks plus a tshark capture on the RS↔BIRD
+#     link;
+#   - RFC 9234 OTC attached toward clients (role = route_server);
+#   - per-member export policy views (a deny chain scoped to one
+#     member) + ROV reject-at-import via the StayRTR RTR fixture;
+#   - the RFC 7947 §2.3 path-hiding contrast: a member whose export
+#     chain denies the Loc-RIB best receives NOTHING in single-best
+#     mode, the runner-up after flipping to `per_client_best`
+#     (ADR-0101), and both paths on the Add-Path member;
+#   - withdraw propagation, EoR ordering, session stability through a
+#     policy reload.
+#
+# Members (each on its own /24 so NEXT_HOP preservation is
+# observable, the M19 shape):
+#   BIRD 2 (AS 65001, 10.83.1.2)  — single-best, tshark capture side
+#   GoBGP  (AS 65002, 10.83.2.2)  — Add-Path receive member
+#   FRR    (AS 65003, 10.83.3.2)  — single-best → per_client_best flip
+#
+# First-AS relaxation per stack (RFC 7947 §2.2.2.1 client-side
+# requirement):
+#   FRR 10.3.1:  per-neighbor `no neighbor X enforce-first-as`
+#                (global `no bgp enforce-first-as` alone is
+#                insufficient — the M19 finding)
+#   BIRD 2.0.12: `enforce first as off` (also the default)
+#   GoBGP 3.37:  no first-AS enforcement exists; nothing to disable
+#
+# Cross-subnet static routes + ip_forward on the RS keep the
+# preserved next hops resolvable (M19 note 1).
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
+#   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
+#   containerlab destroy -t tests/interop/m83-routeserver-multistack.clab.yml
+
+name: m83-routeserver-multistack
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m83-rs.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/m83-hygiene.rpol:/etc/rustbgpd/m83-hygiene.rpol:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.83.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.83.2.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.83.3.1/24 dev eth3
+        - ip link set eth3 up
+        - sysctl -w net.ipv4.ip_forward=1
+      env:
+        RUST_LOG: info
+
+    bird:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m83.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.83.1.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.83.2.0/24 via 10.83.1.1
+        - ip route add 10.83.3.0/24 via 10.83.1.1
+        - mkdir -p /run/bird
+
+    gobgp:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m83.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.83.2.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.83.1.0/24 via 10.83.2.1
+        - ip route add 10.83.3.0/24 via 10.83.2.1
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m83.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.83.3.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.83.1.0/24 via 10.83.3.1
+        - ip route add 10.83.2.0/24 via 10.83.3.1
+
+    stayrtr:
+      kind: linux
+      image: rpki/stayrtr:latest
+      binds:
+        - ./configs/rpki-vrps-m83.json:/data/vrps.json:ro
+      cmd: -cache /data/vrps.json -bind :3323 -checktime=false -protocol 1 -refresh 30 -log.verbose
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "bird:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr:eth1"]
+
+# RS: AS 65500, 10.83.1.1 / 10.83.2.1 / 10.83.3.1 (router-id 10.83.0.1)
+# StayRTR: management network only (RTR over TCP, no L2 link needed)
+# Prefix plan:
+#   BIRD  65001: 203.0.113.0/24 (RPKI-valid probe: MED 120, 65001:111,
+#                large 65001:1:1), 100.65.0.0/24 (overlap best, tagged
+#                65001:666 = denied toward FRR), 100.69.0.0/24
+#                (member-scoped deny toward FRR), 100.70.0.0/24
+#                (Add-Path pair)
+#   GoBGP 65002: 100.66.0.0/24 (probe: MED 77, 65002:222, large
+#                65002:2:2), 100.65.0.0/24 (overlap runner-up)
+#   FRR   65003: 100.67.0.0/24 (probe), 100.68.0.0/24 (RPKI-invalid,
+#                VRP says AS 65099), 100.70.0.0/24 (Add-Path pair)
