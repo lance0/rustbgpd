@@ -166,13 +166,39 @@ pub(in crate::manager) struct GroupDelta {
     pub(in crate::manager) policy_label: Option<String>,
 }
 
+/// The `Arc`-shared unicast announce payload of one group staging pass:
+/// the announce vector and its aligned next-hop-override flags, enqueued
+/// per member by `Arc` clone.
+pub(in crate::manager) type SharedUnicastPayload = (
+    std::sync::Arc<[Route]>,
+    std::sync::Arc<[Option<NextHopAction>]>,
+);
+
 /// Result of one shared staging pass over a group: the deltas (already
-/// committed to the group table) and the accumulated export-policy
-/// verdicts for per-member counter replay.
+/// committed to the group table), the accumulated export-policy
+/// verdicts for per-member counter replay, and the pre-built SHARED
+/// per-member emission (design §9 / slice 4).
+///
+/// The shared emission is the source-flip matrix output for any member
+/// that is neither the new source nor the displaced old source of any
+/// delta — the overwhelming majority in an RR fanout. Those members
+/// enqueue `Arc` clones of ONE announce/nh-flag vector (zero `Route`
+/// shell copies per member); the exception members (`exceptions`) fall
+/// back to the per-member matrix walk.
 #[derive(Default)]
 pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) deltas: Vec<GroupDelta>,
     pub(in crate::manager) evals: GroupEvalAccumulator,
+    /// Announce payload for non-exception members, built once per pass.
+    pub(in crate::manager) shared_announce: std::sync::Arc<[Route]>,
+    /// Next-hop-override flags aligned with `shared_announce`.
+    pub(in crate::manager) shared_nh: std::sync::Arc<[Option<NextHopAction>]>,
+    /// Withdraw keys for non-exception members.
+    pub(in crate::manager) shared_withdraw: Vec<(Prefix, u32)>,
+    /// Members whose emission differs from the shared one: the new
+    /// source of an announce delta (announce → skip/withdraw) or the
+    /// old source of a withdraw delta (withdraw → skip).
+    exceptions: HashSet<IpAddr>,
 }
 
 impl GroupStageOutput {
@@ -183,6 +209,33 @@ impl GroupStageOutput {
             .iter()
             .filter(|d| d.new.is_none())
             .map(|d| (d.prefix, d.path_id))
+    }
+
+    /// Whether the pre-built shared emission is exactly this member's
+    /// source-flip matrix output.
+    pub(in crate::manager) fn shared_applies_to(&self, member: IpAddr) -> bool {
+        !self.exceptions.contains(&member)
+    }
+
+    /// Build the shared emission from the committed deltas (one `Route`
+    /// shell clone per delta, TOTAL — not per member).
+    fn build_shared_emit(&mut self) {
+        let mut announce: Vec<Route> = Vec::new();
+        let mut nh: Vec<Option<NextHopAction>> = Vec::new();
+        for delta in &self.deltas {
+            if let Some((route, flag)) = &delta.new {
+                self.exceptions.insert(route.peer);
+                nh.push(flag.clone());
+                announce.push(route.clone());
+            } else {
+                if let Some(source) = delta.old_source {
+                    self.exceptions.insert(source);
+                }
+                self.shared_withdraw.push((delta.prefix, delta.path_id));
+            }
+        }
+        self.shared_announce = announce.into();
+        self.shared_nh = nh.into();
     }
 }
 
@@ -556,7 +609,11 @@ impl RibManager {
         }
         let gids: Vec<usize> = self.group_ribs.keys().copied().collect();
         for gid in gids {
-            staged.insert(gid, self.stage_group_prefixes(gid, best_changed, memo));
+            let mut out = self.stage_group_prefixes(gid, best_changed, memo);
+            // Built here (the fanout path) and not inside the staging
+            // pass: `join_group`'s table-build pass discards its output.
+            out.build_shared_emit();
+            staged.insert(gid, out);
         }
         staged
     }
@@ -750,8 +807,15 @@ impl RibManager {
     /// its retained terminal policy), one deny per persistent denial —
     /// own-sourced entries excluded on both sides, exactly what the
     /// per-peer initial-dump staging would have recorded, without
-    /// re-running policy.
-    pub(in crate::manager) fn apply_group_join_counters(&mut self, peer: IpAddr, gid: usize) {
+    /// re-running policy. A route-refresh replay passes its `family` so
+    /// only the refreshed family's entries count (the per-peer path
+    /// re-evaluates only that family).
+    pub(in crate::manager) fn apply_group_join_counters(
+        &mut self,
+        peer: IpAddr,
+        gid: usize,
+        family: Option<(Afi, Safi)>,
+    ) {
         let mut rows: Vec<(Option<String>, PolicyAction, u64)> = Vec::new();
         {
             let Some(group) = self.group_ribs.get(&gid) else {
@@ -767,8 +831,10 @@ impl RibManager {
                     rows.push((policy.clone(), action, 1));
                 }
             };
+            let in_family =
+                |prefix: &Prefix| family.is_none_or(|f| super::helpers::prefix_family(prefix) == f);
             for route in group.table.iter() {
-                if route.peer == peer {
+                if route.peer == peer || !in_family(&route.prefix) {
                     continue;
                 }
                 let label = group
@@ -779,7 +845,7 @@ impl RibManager {
                 bump(&label, PolicyAction::Permit);
             }
             for (key, label) in &group.policy_filtered {
-                if key.source_peer == peer {
+                if key.source_peer == peer || !in_family(&key.prefix) {
                     continue;
                 }
                 bump(label, PolicyAction::Deny);

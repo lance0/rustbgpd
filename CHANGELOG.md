@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Update groups: shared outbound staging for the RR fanout
+  (ADR-0098, #674/#676 + cold paths).** Outbound peers whose staged
+  output is provably identical — same export-chain content, eBGP/iBGP +
+  RR-client role, sendable unicast families, advertised LLGR families —
+  now automatically share ONE staged outbound table: the export tail
+  (reflection rules, policy eval, equality diff) runs once per group
+  instead of once per peer, per-member updates derive from the shared
+  delta by a source-flip matrix, and in-sync members enqueue one
+  `Arc`-shared announce payload instead of per-member `Route` clones.
+  Joins, initial dumps, RFC 2918 route-refresh responses, and
+  advertised-routes/count/BMP-stat-17 queries replay or synthesize from
+  the group table (no policy re-evaluation); per-peer unicast
+  Adj-RIB-Out storage disappears for grouped members (one table per
+  group + O(1) per member). Peers with peer-context policy, Add-Path
+  send, ORR, or ORF keep the per-peer path wholesale — no config knob,
+  and a differential oracle pins grouped output identical to the
+  per-peer path. The SipHash outbound attribute-cache keys flagged in
+  the same profile moved to FxHash (bounded-HashDoS tradeoff documented,
+  mirroring the #308 route maps). Measured (rrharness, 100k routes ×
+  256 uniform RR clients, same host): single-shot convergence 15.1 s →
+  0.54 s (~28×), sustained flood 2×; staging+AdjRibOut falls from 82.8%
+  to 30.5% of RR CPU and the pipeline is now substantially wire-bound
+  (writer+syscall 21.8%). Membership is operator-visible: `rbgp
+  neighbor show` Update Group line, `bgp_update_groups`,
+  `bgp_update_group_members{group}`, `bgp_update_group_regroups_total`,
+  `bgp_update_group_fallback_peers`.
+
 - **M81 interop receipt: the BMP trio + BMPv4, against real collectors.**
   New `interop` CI job (six-node containerlab): rustbgpd as RR reflecting
   unicast v4/v6 + VPNv4 between two GoBGP clients while streaming all

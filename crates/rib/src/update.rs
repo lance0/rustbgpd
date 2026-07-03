@@ -23,9 +23,13 @@ use crate::route::{
 pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 
 /// Routes to be sent outbound to a peer.
+#[derive(Default)]
 pub struct OutboundRouteUpdate {
-    /// Routes to announce to this peer.
-    pub announce: Vec<Route>,
+    /// Routes to announce to this peer. `Arc`-shared so an update-group
+    /// fanout enqueues ONE staged announce vector to every in-sync
+    /// member instead of cloning the `Route` shells per member
+    /// (transport only ever reads it).
+    pub announce: Arc<[Route]>,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
     pub withdraw: Vec<(Prefix, u32)>,
@@ -35,8 +39,8 @@ pub struct OutboundRouteUpdate {
     /// `BoRR` markers are sent before route payloads; `EoRR` markers after.
     pub refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
     /// Per-route next-hop override from export policy. Parallel to `announce` —
-    /// `next_hop_override[i]` applies to `announce[i]`.
-    pub next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+    /// `next_hop_override[i]` applies to `announce[i]`. Shared alongside it.
+    pub next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
     /// `FlowSpec` routes to announce (RFC 8955).
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.

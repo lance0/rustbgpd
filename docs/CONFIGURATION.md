@@ -1128,6 +1128,33 @@ remote_asn = 65001
 See [ADR-0029](adr/0029-route-reflector.md) for reflection rules and
 ORIGINATOR_ID/CLUSTER_LIST handling.
 
+### Update groups (automatic)
+
+There is no configuration knob for update groups — rustbgpd groups
+outbound peers automatically whenever their staged output is provably
+identical: same export-policy chain **content**, same eBGP/iBGP and
+RR-client role, same sendable unicast families, same advertised LLGR
+families. Grouped peers share one staged outbound table, so the export
+tail (reflection rules, policy evaluation, equality diff) runs once per
+group instead of once per peer — the difference between ~15 s and
+sub-second 100k-route convergence at 256 uniform RR clients (measured;
+see [ADR-0098](adr/0098-update-groups.md)).
+
+A peer falls back to the plain per-peer path (with identical semantics
+— grouping is purely an optimization) when any of these apply:
+
+| Reason | Meaning |
+|--------|---------|
+| `policy_peer_context` | Its export chain matches on neighbor address/ASN/group, so verdicts can differ per peer |
+| `add_path_send` | Add-Path send is negotiated (candidate ranks are per-target) |
+| `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
+| `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
+
+`rbgp neighbor show <peer>` prints the membership (`group:N`) or the
+fallback reason on its `Update Group` line. Metrics:
+`bgp_update_groups`, `bgp_update_group_members{group}`,
+`bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`.
+
 ---
 
 ## `[rpki]`

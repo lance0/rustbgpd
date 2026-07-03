@@ -403,29 +403,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
     // but keep the channel recoverable (unlike closed).
     let (out_tx, mut out_rx) = mpsc::channel(1);
     // Fill the channel so send_initial_table's try_send fails
-    out_tx
-        .send(OutboundRouteUpdate {
-            next_hop_override: vec![],
-            announce: vec![],
-            withdraw: vec![],
-            end_of_rib: vec![],
-            refresh_markers: vec![],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-            bgpls_announce: vec![],
-            bgpls_withdraw: vec![],
-            vpn_announce: vec![],
-            labeled_announce: vec![],
-            rtc_announce: vec![],
-            vpn_withdraw: vec![],
-            labeled_withdraw: vec![],
-            rtc_withdraw: vec![],
-            request_refresh_all_negotiated: false,
-        })
-        .await
-        .unwrap();
+    out_tx.send(OutboundRouteUpdate::default()).await.unwrap();
 
     tx.send(RibUpdate::PeerUp {
         session_id: 0,

@@ -6,8 +6,21 @@ use super::{
     RouteRefreshSubtype, RtcRibRoute, Safi, UpdateMessage, VpnRibRoute, debug, info,
     is_ipv6_link_local, is_private_asn, warn,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
+
+// The per-batch outbound maps (`PreparedAttrCacheKey` cache + the
+// `AttrGroupKey` UPDATE-grouping indices) use FxHash rather than the
+// default SipHash: keying is once per announced route, and SipHash on
+// these wide keys was the top prepare+encode line in the RR fanout
+// flamegraph. HashDoS tradeoff (deliberate), mirroring the route-map
+// rationale block at the top of `rib::adj_rib_in`: the key material
+// (attribute Arc pointers, next hops, router ids) derives from route
+// data of explicitly configured peers, each map lives only for one
+// `send_route_update` batch, and per-peer route count is bounded by
+// enforced `max_prefixes` — so a collision chain is short-lived and
+// capped. A peer able to craft colliding attribute sets already has
+// strictly higher-impact vectors (churn flood, hijack).
+use rustc_hash::FxHashMap as HashMap;
 fn has_otc(attrs: &[PathAttribute]) -> bool {
     attrs.iter().any(|attr| match attr {
         PathAttribute::OnlyToCustomer(_) => true,
@@ -406,7 +419,7 @@ impl PeerSession {
             IpAddr::V4(_) => None,
         });
         let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue> =
-            HashMap::new();
+            HashMap::default();
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
@@ -580,7 +593,7 @@ impl PeerSession {
         if use_extended_nexthop_ipv4 {
             let ebgp_ipv6_nh = self
                 .usable_ipv4_extended_nexthop_ipv6(self.config.local_ipv6_nexthop.or(local_ipv6));
-            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
             let mut v4_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override_ref) in &v4_routes {
                 let nh_override = *nh_override_ref;
@@ -674,7 +687,7 @@ impl PeerSession {
                 );
             }
         } else {
-            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
             let mut v4_groups: Vec<V4BodyGroup> = Vec::new();
             for (route, nh_override) in &v4_routes {
                 let attrs = Arc::clone(
@@ -735,7 +748,7 @@ impl PeerSession {
             Self::usable_ipv6_unicast_next_hop(self.config.local_ipv6_nexthop.or(local_ipv6));
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
-        let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+        let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
         let mut v6_groups: Vec<MpGroup> = Vec::new();
         for (route, nh_override_ref) in &v6_routes {
             let nh_override = *nh_override_ref;

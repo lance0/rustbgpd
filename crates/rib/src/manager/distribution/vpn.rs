@@ -595,8 +595,8 @@ impl RibManager {
             if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![],
-                    vec![],
+                    vec![].into(),
+                    vec![].into(),
                     vec![],
                     vec![],
                     vec![],

@@ -196,8 +196,8 @@ impl RibManager {
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
-        next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
-        announce: Vec<crate::route::Route>,
+        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: Arc<[crate::route::Route]>,
         withdraw: Vec<(Prefix, u32)>,
         end_of_rib: Vec<(Afi, Safi)>,
         refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -248,7 +248,7 @@ impl RibManager {
                 .entry(peer)
                 .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
             if grouped_unicast_count.is_none() {
-                for route in &announce {
+                for route in announce.iter() {
                     rib_out.insert(route.clone());
                 }
                 for (prefix, path_id) in &withdraw {
@@ -1158,6 +1158,10 @@ impl RibManager {
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
             let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+            // Set for an in-sync grouped member covered by the group's
+            // pre-built shared emission: the announce payload is an Arc
+            // clone shared across members, not a per-member Vec build.
+            let mut shared_unicast: Option<super::update_groups::SharedUnicastPayload> = None;
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
             let mut evpn_announce = Vec::new();
@@ -1195,13 +1199,21 @@ impl RibManager {
                             &mut nh_override_flags,
                         );
                     } else if let Some(stage) = group_stage.get(&gid) {
-                        super::update_groups::emit_group_deltas_for_member(
-                            &stage.deltas,
-                            peer,
-                            &mut announce,
-                            &mut withdraw,
-                            &mut nh_override_flags,
-                        );
+                        if stage.shared_applies_to(peer) {
+                            // Common case: this member's matrix output IS
+                            // the shared emission — enqueue Arc clones.
+                            shared_unicast =
+                                Some((stage.shared_announce.clone(), stage.shared_nh.clone()));
+                            withdraw.extend_from_slice(&stage.shared_withdraw);
+                        } else {
+                            super::update_groups::emit_group_deltas_for_member(
+                                &stage.deltas,
+                                peer,
+                                &mut announce,
+                                &mut withdraw,
+                                &mut nh_override_flags,
+                            );
+                        }
                     }
                     current_policy_filtered_routes
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
@@ -1536,6 +1548,19 @@ impl RibManager {
                 );
             }
 
+            // The outbound payload: the group-shared Arc for a covered
+            // member, otherwise this peer's own staged vectors. A shared
+            // member never stages per-peer unicast (grouped + in-sync),
+            // so the locals are empty by construction when it is taken.
+            debug_assert!(
+                shared_unicast.is_none() || (announce.is_empty() && nh_override_flags.is_empty()),
+                "shared group payload must not coexist with per-peer staged unicast"
+            );
+            let (announce, nh_override_flags): super::update_groups::SharedUnicastPayload =
+                match shared_unicast {
+                    Some(shared) => shared,
+                    None => (announce.into(), nh_override_flags.into()),
+                };
             if !announce.is_empty()
                 || !withdraw.is_empty()
                 || !fs_announce.is_empty()

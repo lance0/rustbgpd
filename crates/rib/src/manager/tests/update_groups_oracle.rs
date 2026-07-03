@@ -284,6 +284,21 @@ impl Oracle {
         reply_rx.await.unwrap().unwrap();
     }
 
+    /// RFC 2918 ROUTE-REFRESH from the peer: the grouped path replays
+    /// the group table, the per-peer path re-runs full staging.
+    async fn route_refresh(&mut self, peer: Ipv4Addr, afi: Afi, safi: Safi) {
+        self.tx
+            .send(RibUpdate::RouteRefreshRequest {
+                peer: IpAddr::V4(peer),
+                session_id: SESSION,
+                afi,
+                safi,
+            })
+            .await
+            .unwrap();
+        self.quiesce().await;
+    }
+
     async fn refresh_outbound(&mut self, peer: Ipv4Addr) {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -422,6 +437,14 @@ async fn oracle_streams_identical_across_rr_mix() {
 
         // Late joiner into the client group: replay, not restage.
         o.peer_up(F, false, true, None, 64).await;
+
+        // RFC 2918 route refresh, both group shapes: a grouped RR
+        // client with own-sourced entries (split-horizon exclusion in
+        // the replay) and the eBGP peer whose chain modifies attributes
+        // + sets a next-hop override (the replay must reproduce both
+        // from the staged residue without re-running policy).
+        o.route_refresh(A, Afi::Ipv4, Safi::Unicast).await;
+        o.route_refresh(E, Afi::Ipv4, Safi::Unicast).await;
 
         // Best withdraw: p1 goes away entirely.
         o.routes(A, vec![], vec![pfx(1, 0)]).await;
