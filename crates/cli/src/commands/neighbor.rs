@@ -82,6 +82,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             last_error: n.last_error.clone(),
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
+            send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
@@ -120,6 +121,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         println!(
             "Hold Time:             {}",
             cfg.map(|c| c.hold_time).unwrap_or(0)
+        );
+        println!(
+            "Send Hold Time:        {}",
+            cfg.and_then(|c| c.send_hold_time).unwrap_or(0)
         );
         println!(
             "Families:              {}",
@@ -202,6 +207,7 @@ pub struct AddNeighborOpts {
     pub asn: u32,
     pub description: Option<String>,
     pub hold_time: Option<u32>,
+    pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
     pub route_server_client: bool,
@@ -229,6 +235,7 @@ pub async fn add(
                 remote_asn: opts.asn,
                 description: opts.description.unwrap_or_default(),
                 hold_time: opts.hold_time.unwrap_or(0),
+                send_hold_time: opts.send_hold_time,
                 max_prefixes: opts.max_prefixes.unwrap_or(0),
                 families: opts.families,
                 peer_group: String::new(),
@@ -382,6 +389,7 @@ mod tests {
                 asn: 65002,
                 description: Some("peer-2".to_string()),
                 hold_time: Some(90),
+                send_hold_time: Some(480),
                 max_prefixes: Some(1000),
                 families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
                 route_server_client: true,

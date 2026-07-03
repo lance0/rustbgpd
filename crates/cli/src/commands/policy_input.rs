@@ -158,6 +158,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub hold_time: Option<u32>,
     #[serde(default)]
+    pub send_hold_time: Option<u32>,
+    #[serde(default)]
     pub max_prefixes: Option<u32>,
     #[serde(default)]
     pub md5_password: Option<String>,
@@ -208,6 +210,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             .or_else(|| j.md5_password.as_ref().map(|_| true));
         proto::PeerGroupDefinition {
             hold_time: j.hold_time,
+            send_hold_time: j.send_hold_time,
             max_prefixes: j.max_prefixes,
             md5_password: j.md5_password,
             ttl_security: j.ttl_security,

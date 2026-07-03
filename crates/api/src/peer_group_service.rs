@@ -112,6 +112,7 @@ fn proto_definition_to_input(
 
     Ok(PeerGroupDefinition {
         hold_time,
+        send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password,
         ttl_security: definition.ttl_security,
@@ -153,6 +154,7 @@ fn proto_definition_to_input(
 fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGroupDefinition {
     proto::PeerGroupDefinition {
         hold_time: definition.hold_time.map(u32::from),
+        send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         // Read RPCs expose the group shape, not credential material.
         md5_password: None,
@@ -671,6 +673,19 @@ mod tests {
         let err = proto_definition_to_input(invalid).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("orr_vantage"));
+    }
+
+    /// RFC 9687 `send_hold_time` round-trips proto -> input -> proto.
+    /// (The `>hold_time` / 0=disabled rule is enforced by the config
+    /// validation the `SetPeerGroup` apply path re-runs.)
+    #[test]
+    fn send_hold_time_round_trips() {
+        let mut definition = sample_definition();
+        definition.send_hold_time = Some(500);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.send_hold_time, Some(500));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.send_hold_time, Some(500));
     }
 
     #[tokio::test]

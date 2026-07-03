@@ -38,6 +38,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         enabled: true,
         prefix_count: 0,
         hold_time: None,
+        send_hold_time: 0,
         max_prefixes: None,
         families: Vec::new(),
         remove_private_as: RemovePrivateAs::Disabled,

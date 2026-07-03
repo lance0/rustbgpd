@@ -7,8 +7,14 @@
 //! fetches `/status`, `/protocols/bgp`, and `/routes/peer/{peer}`
 //! from both and asserts structural equality after blanking the
 //! clock-dependent fields (`current_server`, `last_reboot`,
-//! `state_changed`, `state` — the configured peer has no live
-//! counterpart, so its FSM state cycles).
+//! `state_changed`, `state` — the configured 192.0.2.10 peer has no
+//! live counterpart, so its FSM state cycles).
+//!
+//! A second neighbor (127.0.0.1) is driven by a minimal in-test BGP
+//! speaker that establishes a real session and announces one route, so
+//! the per-route `age` field is exercised end-to-end: both servers
+//! must render a non-empty receive timestamp for the same route, equal
+//! within clock-recovery jitter.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -100,7 +106,7 @@ fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
     );
 }
 
-fn write_config(dir: &Path, grpc_port: u16, lg_port: u16) -> PathBuf {
+fn write_config(dir: &Path, grpc_port: u16, lg_port: u16, bgp_port: u16) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     let config_path = dir.join("rustbgpd.toml");
@@ -112,7 +118,7 @@ enforcement = "legacy"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
-listen_port = 0
+listen_port = {bgp_port}
 runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
@@ -128,11 +134,86 @@ addr = "127.0.0.1:{lg_port}"
 address = "192.0.2.10"
 remote_asn = 65010
 description = "smoke peer"
+
+[[neighbors]]
+address = "127.0.0.1"
+remote_asn = 65020
+description = "live peer"
 "#,
         runtime_dir = runtime_dir.display()
     );
     std::fs::write(&config_path, config).expect("write test config");
     config_path
+}
+
+/// Minimal BGP speaker: connect to the daemon's listen port, complete
+/// the OPEN/KEEPALIVE handshake as legacy AS 65020 (no capabilities —
+/// implicit IPv4 unicast), and announce one route. The returned stream
+/// must stay alive for the session to survive; the daemon's own
+/// messages are left unread (a handful of bytes, well within the
+/// socket buffer for the test's lifetime).
+fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
+    use rustbgpd_wire::attribute::{AsPath, AsPathSegment, Origin, PathAttribute};
+    use rustbgpd_wire::message::{Message, encode_message};
+    use rustbgpd_wire::open::OpenMessage;
+    use rustbgpd_wire::update::UpdateMessage;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", bgp_port)).expect("connect to BGP port");
+    let open = Message::Open(OpenMessage {
+        version: 4,
+        my_as: 65020,
+        hold_time: 90,
+        bgp_identifier: "10.0.0.2".parse().unwrap(),
+        capabilities: Vec::new(),
+    });
+    let mut attrs = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65020])],
+            }),
+            // Non-loopback: the daemon's UPDATE validation rejects a
+            // loopback NEXT_HOP (subcode 8).
+            PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
+        ],
+        &mut attrs,
+        false,
+        false,
+    )
+    .expect("encode path attributes");
+    let update = Message::Update(UpdateMessage {
+        withdrawn_routes: bytes::Bytes::new(),
+        path_attributes: attrs.into(),
+        // 10.99.0.0/24
+        nlri: bytes::Bytes::from_static(&[24, 10, 99, 0]),
+    });
+    for msg in [&open, &Message::Keepalive, &update] {
+        let encoded = encode_message(msg).expect("encode BGP message");
+        stream.write_all(&encoded).expect("write BGP message");
+    }
+    stream
+}
+
+/// Inverse of the servers' `format_epoch_secs` (`"YYYY-MM-DD HH:MM:SS"`
+/// → Unix epoch seconds) so two `age` renderings can be compared with
+/// clock-recovery jitter tolerance. Howard Hinnant's `days_from_civil`.
+fn epoch_from_timestamp(s: &str) -> u64 {
+    let parts: Vec<u64> = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse().expect("numeric timestamp field"))
+        .collect();
+    let [y, m, d, h, mi, se] = parts[..] else {
+        panic!("unexpected timestamp shape: {s:?}");
+    };
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + h * 3_600 + mi * 60 + se
 }
 
 /// Blank the clock-dependent fields so the two responses (taken at
@@ -165,7 +246,8 @@ fn adapter_matches_in_daemon_looking_glass() {
     let grpc_port = free_port();
     let lg_port = free_port();
     let adapter_port = free_port();
-    let config_path = write_config(temp.path(), grpc_port, lg_port);
+    let bgp_port = free_port();
+    let config_path = write_config(temp.path(), grpc_port, lg_port, bgp_port);
 
     // Spawn the daemon (serves both gRPC and the in-daemon looking
     // glass). Structured logs go to stdout, the banner to stderr.
@@ -245,4 +327,47 @@ fn adapter_matches_in_daemon_looking_glass() {
     let core = get_json(lg_port, "/routes/protocol/bgp_192.0.2.10", "in-daemon");
     let ext = get_json(adapter_port, "/routes/protocol/bgp_192.0.2.10", "adapter");
     assert_eq!(core, ext, "/routes/protocol must match exactly");
+
+    // Establish a real session from the in-test BGP speaker and
+    // announce one route, then compare the non-empty route sets —
+    // including the `age` receive timestamp both servers must now
+    // derive from the same RIB receive instant.
+    let _bgp_session = establish_bgp_and_announce(bgp_port);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (mut core, mut ext) = loop {
+        let core = get_json(lg_port, "/routes/peer/127.0.0.1", "in-daemon");
+        let ext = get_json(adapter_port, "/routes/peer/127.0.0.1", "adapter");
+        if core["routes"].as_array().is_some_and(|r| r.len() == 1)
+            && ext["routes"].as_array().is_some_and(|r| r.len() == 1)
+        {
+            break (core, ext);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "announced route did not appear on both servers\nin-daemon: {core}\nadapter: {ext}\ndaemon stderr:\n{}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
+
+    // Non-empty age on both sides, equal within clock-recovery jitter
+    // (each server independently truncates `now - elapsed` to seconds).
+    let core_age = core["routes"][0]["age"].as_str().unwrap_or_default();
+    let ext_age = ext["routes"][0]["age"].as_str().unwrap_or_default();
+    assert!(!core_age.is_empty(), "in-daemon age must be populated");
+    assert!(!ext_age.is_empty(), "adapter age must be populated");
+    let delta = epoch_from_timestamp(core_age).abs_diff(epoch_from_timestamp(ext_age));
+    assert!(
+        delta <= 2,
+        "age must agree within jitter: in-daemon {core_age:?} vs adapter {ext_age:?}"
+    );
+
+    // With age blanked, the live-route responses must match exactly.
+    core["routes"][0]["age"] = "".into();
+    ext["routes"][0]["age"] = "".into();
+    assert_eq!(core, ext, "/routes/peer for the live peer must match");
+    assert_eq!(
+        core["routes"][0]["network"], "10.99.0.0/24",
+        "announced route must be served"
+    );
 }

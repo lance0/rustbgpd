@@ -100,6 +100,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stay restart-required by design (kernel VRF identity lifecycle); the
   rationale is recorded in the ADR-0063 amendment and
   docs/reload-matrix.md.
+- **Routes served over gRPC now carry their receive time.** The
+  `Route` message gains `received_at_epoch_seconds` (wall clock,
+  recovered at query time from the monotonic RIB receive instant — the
+  same recovery the RFC 9069 BMP Loc-RIB dump uses), populated by
+  `ListReceivedRoutes` / `ListBestRoutes` / `ListAdvertisedRoutes` and
+  the explain RPCs that embed `Route`. The birdwatcher adapter
+  (`examples/birdwatcher-adapter`) now serves a real per-route `age`
+  from it, closing its last field-level gap vs the deprecated
+  in-daemon looking glass; the smoke test drives a live BGP session
+  and pins non-empty age equality between the two servers.
+- **`send_hold_time` (RFC 9687) is now settable over gRPC.**
+  `AddNeighbor`'s `NeighborConfig` and `PeerGroupDefinition` gain an
+  optional `send_hold_time` field with config-path validation parity
+  (0 = disabled; non-zero must exceed the effective hold time; unset =
+  the RFC 9687 §6 derived default), persisted like the config knob.
+  `ListNeighbors` reports the effective value, `rbgp neighbor <addr>
+  add` gains `--send-hold-time`, and `rbgp neighbor show` /
+  `peer-group show` render it.
+
 - **Export-side explain: "why did/didn't route X go to peer Y?" now
   gets a full, truthful gate-ladder answer.** `ExplainAdvertisedRoute`
   (and `rbgp rib advertised <peer> --explain --prefix X`) now reports

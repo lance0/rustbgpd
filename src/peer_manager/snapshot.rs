@@ -31,6 +31,7 @@ fn build_peer_info(
         enabled: managed.enabled,
         prefix_count: session_state.map_or(0, |s| s.prefix_count),
         hold_time: managed.hold_time,
+        send_hold_time: managed.transport_config.peer.send_hold_time,
         max_prefixes: managed.max_prefixes,
         families: managed.transport_config.peer.families.clone(),
         remove_private_as: managed.transport_config.remove_private_as,

@@ -15,12 +15,6 @@
 //! Response shapes match birdwatcher field names so Alice-LG can parse
 //! them without adapter code. Fields that have no rustbgpd equivalent
 //! are present but empty/zero.
-//!
-//! Known field-level gap vs the in-daemon server: the gRPC `Route`
-//! message carries no received-at timestamp, so the per-route `age`
-//! field is an empty string (Alice-LG parses that as zero time, the
-//! same benign fallback the in-daemon server already uses for
-//! `last_reconfig`). See the README gap table.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -299,15 +293,22 @@ fn route_to_birdwatcher(route: &proto::Route) -> Value {
 
     let from_protocol = format!("bgp_{}", route.peer_address).replace(':', "_");
 
+    // Receive wall time, same source and format as the in-daemon
+    // server's `age`. 0 (unknown) renders as the empty string, which
+    // Alice-LG parses as zero time (benign).
+    let age = if route.received_at_epoch_seconds > 0 {
+        format_epoch_secs(route.received_at_epoch_seconds)
+    } else {
+        String::new()
+    };
+
     serde_json::json!({
         "network": format!("{}/{}", route.prefix, route.prefix_length),
         "gateway": route.next_hop,
         "from_protocol": from_protocol,
         "interface": "",
         "metric": 0,
-        // Gap: the gRPC Route message carries no received-at timestamp.
-        // Empty string parses as zero time in Alice-LG (benign).
-        "age": "",
+        "age": age,
         "type": ["BGP", "unicast", "univ"],
         "primary": false,
         "learnt_from": route.peer_address,
@@ -383,6 +384,8 @@ mod tests {
             med: 50,
             communities: vec![(65001 << 16) | 100],
             large_communities: vec!["65001:1:2".to_string()],
+            // 2026-01-02 03:04:05 UTC
+            received_at_epoch_seconds: 1_767_323_045,
             ..Default::default()
         };
         let json = route_to_birdwatcher(&route);
@@ -391,7 +394,7 @@ mod tests {
         assert_eq!(json["gateway"], "192.0.2.1");
         assert_eq!(json["from_protocol"], "bgp_192.0.2.1");
         assert_eq!(json["learnt_from"], "192.0.2.1");
-        assert_eq!(json["age"], "");
+        assert_eq!(json["age"], "2026-01-02 03:04:05");
         assert_eq!(json["primary"], false);
         assert_eq!(json["type"], serde_json::json!(["BGP", "unicast", "univ"]));
         assert_eq!(json["bgp"]["origin"], "Incomplete");
@@ -420,6 +423,8 @@ mod tests {
         };
         let json = route_to_birdwatcher(&route);
         assert_eq!(json["network"], "2001:db8::/32");
+        // No receive timestamp → empty age (Alice-LG zero-time fallback).
+        assert_eq!(json["age"], "");
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
         assert_eq!(json["learnt_from"], "2001:db8::1");
         assert_eq!(json["bgp"]["origin"], "IGP");

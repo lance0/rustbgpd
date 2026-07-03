@@ -34,6 +34,8 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     hold_time: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    send_hold_time: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_prefixes: Option<u32>,
     has_md5_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +130,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         let detail = JsonPeerGroupDetail {
             name: resp.name.clone(),
             hold_time: def.hold_time,
+            send_hold_time: def.send_hold_time,
             max_prefixes: def.max_prefixes,
             has_md5_password: def.has_md5_password.unwrap_or(false),
             ttl_security: def.ttl_security,
@@ -154,6 +157,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         println!("Name:                  {}", resp.name);
         if let Some(h) = def.hold_time {
             println!("Hold Time:             {h}");
+        }
+        if let Some(h) = def.send_hold_time {
+            println!("Send Hold Time:        {h}");
         }
         if let Some(m) = def.max_prefixes {
             println!("Max Prefixes:          {m}");
