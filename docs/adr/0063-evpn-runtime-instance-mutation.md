@@ -262,25 +262,45 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   build-up also permits an existing ES row to expand `member_vnis` only when
   every new member VNI is added by the same candidate; ES member removal, ES
   non-member field changes, and existing-VNI membership expansion still fail
-  closed. The two shape families that remain non-live are by design:
-  **L3VNI/device/table IP-VRF identity changes** stay restart-required (a kernel
-  VRF lifecycle operation — a runtime drain/recreate would risk a dual-state
-  window; `router_mac` is still live-redefinable), and **broader ES/IP-VRF mixed
-  edits** fail closed with an operator-actionable "split the request or apply
-  the L2VNI-only change separately" error, pending a generalized
-  converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
-- Issue #133 (design) is resolved and closed; the remaining implementation is
-  tracked in #268.
+  closed *as single-shot shapes* but are covered by the plan decomposer below.
+- **Amendment (#268, plan decomposer).** A mixed candidate the dispatch
+  rejects now decomposes into an ordered sequence of already-supported
+  primitive plans — deletes → redefines (L2VNI batch, then per-IP-VRF, then
+  per-ES) → `ip_vrf` relink → adds — each applied through the unchanged
+  converge path and each committing **its own runtime generation**: operators
+  see N generations for one SIGHUP / `ApplyEvpnRuntime`. Every step is
+  validated as a supported primitive shape up front, before anything commits;
+  a candidate with an unsupported step (or a shape the fixed phase order
+  cannot express, e.g. relink-away-then-delete-IP-VRF, relink onto an IP-VRF
+  added in the same candidate, or an ES left memberless mid-sequence) fails
+  closed naming the offending step. A residual mid-sequence converge failure
+  is **fail-stop**: earlier generations stay committed (no cross-step
+  rollback), the coordinator pins the last good model, and a re-SIGHUP after
+  fixing the config replans from the committed model and converges only the
+  remainder. See the `src/evpn_plan_decomposer.rs` module doc for the full
+  ordering contract.
+- **L3VNI/device/table IP-VRF identity changes stay restart-required by
+  design** — this closes the #268 identity-redefine bullet with a rationale
+  rather than code: the L3VNI, VRF device, L3VXLAN device, and table id are
+  the IP-VRF's *kernel-object identity*; changing one is a VRF lifecycle
+  operation (destroy + recreate the kernel VRF), and a runtime
+  drain/recreate would risk a dual-state window where the kernel still holds
+  the old identity while the Type 5 originator publishes the new one.
+  `router_mac` is not identity and remains live-redefinable. The decomposer
+  deliberately refuses to "help" here: a candidate mixing an identity
+  redefine fails closed before any step commits.
+- Issue #133 (design) is resolved and closed; #268 is closed by the plan
+  decomposer plus the documented identity-redefine rationale above.
 
 ## Non-goals
 
 - No per-instance `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface;
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
-- No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
-  L3VNI/device/table IP-VRF identity changes, ES/IP-VRF row mixed edits beyond
-  additive ES member expansion and the supported L2VNI-only composer, and
-  runtime applies on daemons without the required EVPN actors remain
-  fail-closed.
+- No hot SIGHUP apply outside the ADR-0063 supported shape set and its #268
+  primitive decomposition. In particular, L3VNI/device/table IP-VRF identity
+  changes, mixed candidates whose decomposition would need a different phase
+  order (see the amendment above), and runtime applies on daemons without
+  the required EVPN actors remain fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.
 - No change to EVPN dataplane defaults such as `apply_bum_enforcement` or
