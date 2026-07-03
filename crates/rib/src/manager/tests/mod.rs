@@ -343,6 +343,26 @@ async fn query_explain_advertised_route(
     tx.send(RibUpdate::ExplainAdvertisedRoute {
         peer,
         prefix,
+        rd: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap()
+}
+
+/// VPN-key export explain helper (`rd` set) for the export-explain tests.
+async fn query_explain_advertised_vpn_route(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    prefix: Prefix,
+    rd: rustbgpd_wire::RouteDistinguisher,
+) -> crate::update::ExplainAdvertisedRoute {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: Some(rd),
         reply: reply_tx,
     })
     .await
@@ -892,6 +912,7 @@ mod bmp;
 mod events_metrics;
 mod evpn;
 mod explain_mrt;
+mod export_explain;
 mod flowspec;
 mod gr_llgr;
 mod incremental_best;

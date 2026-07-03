@@ -125,8 +125,9 @@ software-diversity funding). Two findings converge:
    peer X" — with the ADR-0096 policy-language arc shipped (import
    explain, live-RIB policy dry-run, ORR explain, per-term traces +
    live hit counters; M80 parity receipt), export-side explain
-   completion is the one slice left in a moat no competitor has
-   started.
+   completion (now shipped — the gate-ladder
+   `ExplainAdvertisedRoute`) closed the trilogy in a moat no
+   competitor has started.
 
 **The BMP arc — shipped 2026-07-02/03 (#660–#665, ADR-0097)**: RFC 8671
 Adj-RIB-Out + RFC 9069 Loc-RIB on the existing exporter → BMPv4 TLV
@@ -138,9 +139,6 @@ Details in the "Recently shipped" section below and ADR-0097.
 
 **Next, in rough order** (each research-backed, sized about one slice):
 
-- **Export-side explain completion** — the GoBGP-demand item; composes
-  with per-term policy traces and `BestPathReason`, and later exports on
-  the wire via the path-marking TLV.
 - **Secure-by-default route-server profile** — OTC/RFC 9234 + ASPA + ROV
   + reject-AS_SET as one documented preset (the pieces are shipped; gaps
   are OTC-on-dynamic-neighbors + a curated example). Deployed precedent:
@@ -183,6 +181,19 @@ rustbgpd ships across families), Flowspec v2 (codepoint churn), BGP-CT/CAR
 gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ### Recently shipped (2026-07-01/03, condensed — details in CHANGELOG/ADRs)
+
+- **Export-side explain completion (the GoBGP-demand item)** —
+  `ExplainAdvertisedRoute` / `rbgp rib advertised <peer> --explain` now
+  answers "why did/didn't route X go to peer Y" with the full export
+  gate ladder in live evaluation order (split horizon, RFC 4456
+  reflection, family, RFC 9494 LLGR, RFC 5291 ORF + initial-ORF gate,
+  export policy with `.rpol` per-term labels, Adj-RIB-Out
+  staged-vs-in-sync diff), plus a `--rd` VPN form adding the RFC 4684
+  RT-membership gate. Truthful by construction: a read-only dry run of
+  the same staging body live export executes (`ExportTarget::Explain`),
+  update-grouped peers included (grouped-vs-ungrouped verdict equality
+  is test-pinned); explain never skews policy counters. Later exports
+  on the wire via the BMPv4 path-marking TLV.
 
 - **The BMP arc (ADR-0097, #660–#665 + M81)** — the full monitoring
   trio on one exporter with per-collector view selection: RFC 8671

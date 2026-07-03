@@ -9,7 +9,7 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
-    ExplainDecision, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
+    ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
     ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse,
     ListLabeledRoutesRequest, ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, Route,
     RtcRouteEntry, VpnRouteEntry,
@@ -1005,6 +1005,29 @@ fn explain_to_json(
                 selected: candidate.selected,
             })
             .collect(),
+        gates: explain
+            .gates
+            .iter()
+            .map(|step| output::JsonExportGateStep {
+                gate: step.gate.clone(),
+                code: step.code.clone(),
+                verdict: gate_verdict_label(step.verdict).to_string(),
+                detail: step.detail.clone(),
+            })
+            .collect(),
+        update_group_id: explain.update_group_id,
+        already_advertised: explain.already_advertised,
+        rd: explain.rd.clone(),
+    }
+}
+
+/// Render an export gate verdict for text/JSON output.
+fn gate_verdict_label(verdict: i32) -> &'static str {
+    match ExportGateVerdict::try_from(verdict).unwrap_or(ExportGateVerdict::Unspecified) {
+        ExportGateVerdict::Pass => "pass",
+        ExportGateVerdict::Stop => "stop",
+        ExportGateVerdict::NotApplicable => "not_applicable",
+        ExportGateVerdict::Unspecified => "unspecified",
     }
 }
 
@@ -1034,6 +1057,12 @@ fn print_explain_advertised(
         "{decision}: {}/{} to {}",
         explain.prefix, explain.prefix_length, explain.peer_address
     );
+    if !explain.rd.is_empty() {
+        println!("RD:         {}", explain.rd);
+    }
+    if let Some(group_id) = explain.update_group_id {
+        println!("Update group: {group_id} (shared staging; split horizon applied per member)");
+    }
     if !explain.route_peer_address.is_empty() {
         println!("Route peer: {}", explain.route_peer_address);
     }
@@ -1064,6 +1093,22 @@ fn print_explain_advertised(
                 }
             );
         }
+    }
+    if !explain.gates.is_empty() {
+        println!("Gate ladder (live evaluation order):");
+        for step in &explain.gates {
+            let mark = match ExportGateVerdict::try_from(step.verdict)
+                .unwrap_or(ExportGateVerdict::Unspecified)
+            {
+                ExportGateVerdict::Pass => "pass",
+                ExportGateVerdict::Stop => "STOP",
+                ExportGateVerdict::NotApplicable | ExportGateVerdict::Unspecified => "n/a ",
+            };
+            println!("  [{mark}] {:<14} {}", step.gate, step.detail);
+        }
+    }
+    if explain.already_advertised {
+        println!("In sync: identical route already advertised - nothing would be re-sent");
     }
     if !explain.reasons.is_empty() {
         println!("Reasons:");
@@ -1531,6 +1576,7 @@ pub async fn explain_advertised(
     connection: Connection,
     address: &str,
     prefix: &str,
+    rd: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -1541,6 +1587,7 @@ pub async fn explain_advertised(
             peer_address: address.to_string(),
             prefix: addr,
             prefix_length: len,
+            rd: rd.unwrap_or_default().to_string(),
         })
         .await?
         .into_inner();
@@ -1710,7 +1757,7 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        explain_advertised(connection, "192.0.2.1", "203.0.113.0/24", false)
+        explain_advertised(connection, "192.0.2.1", "203.0.113.0/24", None, false)
             .await
             .unwrap();
 
@@ -1724,6 +1771,33 @@ mod tests {
         assert_eq!(req.peer_address, "192.0.2.1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
+        assert_eq!(req.rd, "");
+    }
+
+    #[tokio::test]
+    async fn explain_advertised_vpn_passes_rd() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        explain_advertised(
+            connection,
+            "192.0.2.1",
+            "10.0.7.0/24",
+            Some("65000:1"),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let req = server
+            .state
+            .last_explain_advertised
+            .lock()
+            .await
+            .clone()
+            .expect("explain request captured");
+        assert_eq!(req.rd, "65000:1");
+        assert_eq!(req.prefix, "10.0.7.0");
     }
 
     #[tokio::test]
@@ -2094,6 +2168,58 @@ mod tests {
         let value = serde_json::to_value(explain_to_json(&resp)).unwrap();
         assert!(value.get("orr_vantage").is_none());
         assert!(value.get("orr_candidates").is_none());
+        // The gate-ladder fields are likewise absent when unset, so the
+        // pre-ladder JSON shape is unchanged.
+        assert!(value.get("gates").is_none());
+        assert!(value.get("update_group_id").is_none());
+        assert!(value.get("already_advertised").is_none());
+        assert!(value.get("rd").is_none());
+    }
+
+    #[test]
+    fn explain_advertised_json_maps_gate_ladder_fields() {
+        let resp = crate::proto::ExplainAdvertisedRouteResponse {
+            decision: ExplainDecision::Deny as i32,
+            peer_address: "10.0.0.3".to_string(),
+            prefix: "198.51.100.0".to_string(),
+            prefix_length: 24,
+            rd: "65000:1".to_string(),
+            update_group_id: Some(2),
+            already_advertised: true,
+            gates: vec![
+                crate::proto::ExportGateStep {
+                    gate: "family".to_string(),
+                    code: "family".to_string(),
+                    verdict: crate::proto::ExportGateVerdict::Pass as i32,
+                    detail: "peer negotiated ipv4 mpls_vpn".to_string(),
+                },
+                crate::proto::ExportGateStep {
+                    gate: "rt_membership".to_string(),
+                    code: "rt_membership_miss".to_string(),
+                    verdict: crate::proto::ExportGateVerdict::Stop as i32,
+                    detail: "no Route Target of this route falls inside the peer's \
+                             advertised RT-Constrain membership (RFC 4684)"
+                        .to_string(),
+                },
+                crate::proto::ExportGateStep {
+                    gate: "orf".to_string(),
+                    code: "orf".to_string(),
+                    verdict: crate::proto::ExportGateVerdict::NotApplicable as i32,
+                    detail: "peer installed no Outbound Route Filter".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(explain_to_json(&resp)).unwrap();
+        assert_eq!(value["rd"], "65000:1");
+        assert_eq!(value["update_group_id"], 2);
+        assert_eq!(value["already_advertised"], true);
+        assert_eq!(value["gates"][0]["gate"], "family");
+        assert_eq!(value["gates"][0]["verdict"], "pass");
+        assert_eq!(value["gates"][1]["code"], "rt_membership_miss");
+        assert_eq!(value["gates"][1]["verdict"], "stop");
+        assert_eq!(value["gates"][2]["verdict"], "not_applicable");
     }
 
     #[test]

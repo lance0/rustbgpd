@@ -56,6 +56,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Export-side explain: "why did/didn't route X go to peer Y?" now
+  gets a full, truthful gate-ladder answer.** `ExplainAdvertisedRoute`
+  (and `rbgp rib advertised <peer> --explain --prefix X`) now reports
+  every export gate in the exact order the live export path evaluates
+  it — best-route, split horizon, RFC 4456 reflection, sendable
+  family, RFC 9494 LLGR export restriction, RFC 5291 ORF (both the
+  installed filter and the initial-advertisement gate), export policy
+  (labeled `policy:term` for `.rpol` members via the per-term trace
+  machinery), and the Adj-RIB-Out diff (`staged_announce` vs
+  `already_advertised` = peer in sync) — each rung pass/stop/n-a with
+  detail. A new `--rd` flag (request field `rd`) explains VPNv4/VPNv6
+  (SAFI 128) identities instead, adding the RFC 4684 RT-Constrain
+  membership gate. Truthfulness by construction: the explanation is a
+  read-only dry run of the *same* staging body live distribution
+  executes (`ExportTarget::Explain`), including update-grouped peers
+  (explained against their group table; the response carries
+  `update_group_id`), and never counts toward policy metrics or
+  per-term hit counters. Response additions are purely additive
+  (`gates`, `update_group_id`, `already_advertised`, `rd`); existing
+  `reasons` output is unchanged. Completes the explain trilogy next to
+  import explain (ADR-0073) and best-path explain.
 - **RFC 9687 Send Hold Timer: a peer that stops draining its TCP socket
   can no longer wedge a session forever.** The per-peer writer task
   bounds each `write_all + flush` by the session's `SendHoldTime`;

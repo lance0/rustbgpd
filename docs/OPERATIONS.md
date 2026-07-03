@@ -1219,6 +1219,50 @@ rbgp rib --prefix 203.0.113.0/24 --explain
 rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 ```
 
+### Explain an export decision ("why did/didn't route X go to peer Y?")
+
+```bash
+# The full export gate ladder for one prefix toward one peer, in the
+# exact order the live export path evaluates it. Each rung reports
+# pass / STOP / n/a with detail; a STOP names the gate that held the
+# route back.
+rbgp rib advertised 10.0.0.2 --explain --prefix 203.0.113.0/24
+
+# VPNv4/VPNv6 (SAFI 128): explain the (RD, prefix) identity instead --
+# the ladder additionally includes the RFC 4684 RT-Constrain
+# membership gate.
+rbgp rib advertised 10.0.0.2 --explain --prefix 10.1.0.0/24 --rd 65000:1
+
+# JSON for scripting
+rbgp rib advertised 10.0.0.2 --explain --prefix 203.0.113.0/24 --json
+```
+
+The gate ladder, in live evaluation order (unicast single-best):
+`best_route` (Loc-RIB best exists) -> `split_horizon` (not sent back to
+its source) -> `rr_reflection` (iBGP split horizon / RFC 4456
+client/cluster rules) -> `family` (peer negotiated the AFI/SAFI) ->
+`llgr` (RFC 9494 stale-export restriction) -> `orf` (peer-pushed
+RFC 5291 filter) -> `export_policy` (per-chain verdict, labeled
+`policy:term` for `.rpol` members) -> `adj_rib_out` (diff against the
+advertised state: `staged_announce` = would send, `already_advertised`
+= identical route already advertised, peer in sync). The VPN ladder
+follows the live VPN staging order and adds `rt_membership`
+(RFC 4684). A family still held by the initial-ORF gate (RFC 5291
+section 6) stops at `orf_gate` before any per-prefix work.
+
+Truthfulness: the explanation is produced by a read-only dry run of
+the *same staging body* live distribution executes -- including for
+update-grouped peers, which are explained against their group table
+with split horizon applied per member exactly like the emit-time
+source-flip matrix. The response carries `update_group_id` when the
+peer's export is group-staged. Explain queries never count toward
+`bgp_policy_routes_total` or per-term policy hit counters.
+
+An RFC 9107 ORR peer's explain ranks the per-vantage candidate set the
+ORR export uses (with per-candidate cost output); an Add-Path-send
+peer's explain covers the best path -- per-rank advertisement detail
+lives in `rbgp rib --prefix X --explain --explain-peer`.
+
 ### Manage policies, peer groups, and neighbor sets
 
 ```bash

@@ -13,9 +13,9 @@ use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot, OrrNodeSnapshot,
-    OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route, RouteEventType,
-    RtcRibRoute, VpnRibRoute,
+    ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot,
+    OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route,
+    RouteEventType, RtcRibRoute, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -233,12 +233,14 @@ impl RibService {
         &self,
         peer: IpAddr,
         prefix: Prefix,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
     ) -> Result<Option<ExplainAdvertisedRoute>, Status> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::ExplainAdvertisedRoute {
                 peer,
                 prefix,
+                rd,
                 reply: reply_tx,
             })
             .await
@@ -927,6 +929,25 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
                 selected: candidate.selected,
             })
             .collect(),
+        gates: explain
+            .gates
+            .into_iter()
+            .map(|step| proto::ExportGateStep {
+                gate: step.gate.to_string(),
+                code: step.code.to_string(),
+                verdict: match step.verdict {
+                    ExportGateVerdict::Pass => proto::ExportGateVerdict::Pass as i32,
+                    ExportGateVerdict::Stop => proto::ExportGateVerdict::Stop as i32,
+                    ExportGateVerdict::NotApplicable => {
+                        proto::ExportGateVerdict::NotApplicable as i32
+                    }
+                },
+                detail: step.detail,
+            })
+            .collect(),
+        update_group_id: explain.update_group_id,
+        already_advertised: explain.already_advertised,
+        rd: explain.rd.map_or_else(String::new, |rd| rd.to_string()),
     }
 }
 
@@ -1210,7 +1231,19 @@ impl proto::rib_service_server::RibService for RibService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
-        let Some(explain) = self.query_explain_advertised_route(peer, prefix).await? else {
+        let rd = if req.rd.is_empty() {
+            None
+        } else {
+            Some(
+                req.rd
+                    .parse::<rustbgpd_wire::RouteDistinguisher>()
+                    .map_err(|e| Status::invalid_argument(format!("invalid rd: {e}")))?,
+            )
+        };
+        let Some(explain) = self
+            .query_explain_advertised_route(peer, prefix, rd)
+            .await?
+        else {
             return Err(Status::not_found(
                 "peer not registered for outbound updates",
             ));
@@ -3676,6 +3709,7 @@ mod tests {
             peer_address: "not-an-ip".to_string(),
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
+            rd: String::new(),
         });
         let err = svc.explain_advertised_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -3689,6 +3723,7 @@ mod tests {
             peer_address: "192.0.2.1".to_string(),
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
+            rd: String::new(),
         });
 
         let call = tokio::spawn(async move { svc.explain_advertised_route(req).await });
@@ -3697,9 +3732,11 @@ mod tests {
             RibUpdate::ExplainAdvertisedRoute {
                 peer,
                 prefix,
+                rd,
                 reply,
             } => {
                 assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
+                assert_eq!(rd, None);
                 assert_eq!(
                     prefix,
                     Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24))
@@ -3739,6 +3776,15 @@ mod tests {
                         selected: false,
                     },
                 ],
+                gates: vec![rustbgpd_rib::ExportGateStep {
+                    gate: "export_policy",
+                    code: "policy_permitted",
+                    verdict: rustbgpd_rib::ExportGateVerdict::Pass,
+                    detail: "export policy permitted this route".to_string(),
+                }],
+                update_group_id: Some(3),
+                already_advertised: true,
+                rd: None,
             }))
             .unwrap();
 
@@ -3759,6 +3805,13 @@ mod tests {
             "unreachable maps to absent"
         );
         assert!(!resp.orr_candidates[1].selected);
+        assert_eq!(resp.gates.len(), 1);
+        assert_eq!(resp.gates[0].gate, "export_policy");
+        assert_eq!(resp.gates[0].code, "policy_permitted");
+        assert_eq!(resp.gates[0].verdict, proto::ExportGateVerdict::Pass as i32);
+        assert_eq!(resp.update_group_id, Some(3));
+        assert!(resp.already_advertised);
+        assert_eq!(resp.rd, "");
     }
 
     #[test]

@@ -667,6 +667,11 @@ enum RibAction {
         /// Explain whether this exact prefix would be advertised to the peer
         #[arg(long)]
         explain: bool,
+        /// Route Distinguisher ("asn:nn" or "ip:nn") - explain the
+        /// VPNv4/VPNv6 export ladder for the (RD, prefix) identity,
+        /// including the RFC 4684 RT-Constrain membership gate
+        #[arg(long, requires = "explain")]
+        rd: Option<String>,
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
@@ -1560,6 +1565,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     address,
                     family: fam,
                     explain: explain_advertised,
+                    rd,
                 }) => {
                     if explain {
                         return Err(CliError::Argument(
@@ -1587,7 +1593,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                                 "--explain requires --prefix with an exact CIDR".into(),
                             ));
                         };
-                        commands::rib::explain_advertised(connection, &address, prefix, json).await
+                        commands::rib::explain_advertised(
+                            connection,
+                            &address,
+                            prefix,
+                            rd.as_deref(),
+                            json,
+                        )
+                        .await
                     } else {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }

@@ -988,8 +988,9 @@ impl RibManager {
             RibUpdate::ExplainAdvertisedRoute {
                 peer,
                 prefix,
+                rd,
                 reply,
-            } => self.handle_explain_advertised_route(peer, prefix, reply),
+            } => self.handle_explain_advertised_route(peer, prefix, rd, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }
@@ -1427,43 +1428,263 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         prefix: Prefix,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
         reply: tokio::sync::oneshot::Sender<Option<ExplainAdvertisedRoute>>,
     ) {
-        let Some(sendable) = self.peer_sendable_families.get(&peer) else {
+        if !self.peer_sendable_families.contains_key(&peer) {
             let _ = reply.send(None);
             return;
+        }
+        let explanation = match rd {
+            Some(rd) => self.explain_vpn_export(peer, prefix, rd),
+            None => self.explain_unicast_export(peer, prefix),
         };
+        if reply.send(Some(explanation)).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// A gate-ladder explanation for a family whose advertisement is
+    /// still held by the RFC 5291 §6 initial-ORF gate — live staging
+    /// skips the family wholesale, before any per-prefix work.
+    fn orf_gated_explain(
+        peer: IpAddr,
+        prefix: Prefix,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
+    ) -> ExplainAdvertisedRoute {
+        let mut trace = distribution::ExportGateTrace::default();
+        trace.gates.push(crate::update::ExportGateStep {
+            gate: "orf_gate",
+            code: "orf_pending",
+            verdict: crate::update::ExportGateVerdict::Stop,
+            detail: "peer negotiated ORF for this family; advertisement is deferred until \
+                     its first ROUTE-REFRESH lifts the gate (RFC 5291 §6)"
+                .to_string(),
+        });
+        trace.into_explain(peer, prefix, rd, None)
+    }
+
+    /// Explain the unicast export ladder for `(prefix, peer)`.
+    ///
+    /// Truthfulness mechanism: for the single-best shapes — per-peer
+    /// AND update-grouped — this dry-runs the very staging body live
+    /// distribution executes (`distribute_single_best_prefix`) with an
+    /// explain-only `ExportTarget` that records the gate ladder and
+    /// counts nothing; a grouped member is explained against its group
+    /// table (its real advertised state) with split horizon applied
+    /// against the member, exactly like the source-flip matrix does at
+    /// emit time. ORR-vantage and Add-Path-send peers (never grouped —
+    /// both disqualify) take the dedicated explain that shares its
+    /// candidate collection and gate helpers with the live
+    /// ORR/multipath bodies.
+    fn explain_unicast_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
+        let family = prefix_family(&prefix);
+        if self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&family))
+        {
+            return Self::orf_gated_explain(peer, prefix, None);
+        }
+
+        let sendable = self.peer_sendable_families.get(&peer);
+        let llgr = self.peer_advertised_llgr_families.get(&peer);
+        let orf = self
+            .peer_orf_filters
+            .get(&peer)
+            .and_then(|filters| filters.get(&family));
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+        let peer_asn = self.peer_asn.get(&peer).copied();
+        let peer_group = self.peer_group.get(&peer).map(String::as_str);
 
         // Same resolved-vantage gate as live distribution: an ORR peer
         // whose vantage did not resolve falls back to the standard
-        // Loc-RIB-best explain, exactly like `flush_pending_distribution`.
+        // Loc-RIB-best explain, exactly like the distribution loop.
         let orr_ctx = self.peer_orr_vantage.get(&peer).and_then(|vantage| {
             self.orr
                 .spf
                 .get(vantage)
                 .map(|spf| (&self.orr.topology, spf, *vantage))
         });
+        let add_path_send_max = self.add_path_send_max_for_prefix(peer, &prefix);
 
-        let explanation = Self::explain_single_best_prefix(
+        if orr_ctx.is_some() || add_path_send_max > 0 {
+            return Self::explain_single_best_prefix(
+                &self.loc_rib,
+                &self.ribs,
+                &self.unicast_prefix_peers,
+                &self.peer_is_rr_client,
+                self.adj_ribs_out.get(&peer),
+                prefix,
+                peer,
+                peer_asn,
+                peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                self.cluster_id,
+                sendable,
+                llgr,
+                orf,
+                add_path_send_max,
+                self.export_policy_for(peer),
+                orr_ctx,
+            );
+        }
+
+        // Dry run of the live single-best staging body. A grouped
+        // member's advertised state is the group table (update-groups
+        // design §2: members hold no per-peer unicast Adj-RIB-Out).
+        let member_of = self.grouped_member_of(peer);
+        let empty_rib_out;
+        let rib_out = if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
+            &group.table
+        } else if let Some(out) = self.adj_ribs_out.get(&peer) {
+            out
+        } else {
+            empty_rib_out = AdjRibOut::new(peer);
+            &empty_rib_out
+        };
+
+        let mut trace = distribution::ExportGateTrace::default();
+        let mut target = distribution::ExportTarget::Explain {
+            peer,
+            peer_asn,
+            peer_group,
+            trace: &mut trace,
+        };
+        let mut memo = distribution::ExportMemo::default();
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut nh_override_flags = Vec::new();
+        let mut policy_filtered = Vec::new();
+        Self::distribute_single_best_prefix(
+            &self.loc_rib,
+            rib_out,
+            &self.peer_is_rr_client,
+            &prefix,
+            &mut target,
+            target_is_ebgp,
+            target_is_rr_client,
+            self.cluster_id,
+            sendable,
+            llgr,
+            self.export_policy_for(peer),
+            orf,
+            &mut memo,
+            &mut announce,
+            &mut withdraw,
+            &mut nh_override_flags,
+            &mut policy_filtered,
+            false,
+        );
+        trace.into_explain(peer, prefix, None, member_of.map(|gid| gid as u64))
+    }
+
+    /// Explain the VPNv4/VPNv6 (SAFI 128) export ladder for
+    /// `(rd, prefix, peer)` by dry-running the live VPN staging body
+    /// (`stage_vpn_routes`) over the singleton identity with an
+    /// explain-only target — the RT-Constrain membership gate, RR
+    /// suppression, LLGR restriction, export policy, and the
+    /// advertised-state diff all come from the same code live
+    /// reflection runs. A VPN-staging group member is diffed against
+    /// its group table under its own RT filter `Φ_m`, matching the
+    /// emit-time matrix.
+    fn explain_vpn_export(
+        &mut self,
+        peer: IpAddr,
+        prefix: Prefix,
+        rd: rustbgpd_wire::RouteDistinguisher,
+    ) -> ExplainAdvertisedRoute {
+        let vpn_prefix = match prefix {
+            Prefix::V4(p) => rustbgpd_wire::VpnPrefix::V4 {
+                addr: p.addr,
+                len: p.len,
+            },
+            Prefix::V6(p) => rustbgpd_wire::VpnPrefix::V6 {
+                addr: p.addr,
+                len: p.len,
+            },
+        };
+        let key = rustbgpd_wire::VpnRouteKey {
+            route_distinguisher: rd,
+            prefix: vpn_prefix,
+        };
+        let family = match key.prefix {
+            rustbgpd_wire::VpnPrefix::V4 { .. } => (Afi::Ipv4, Safi::MplsVpn),
+            rustbgpd_wire::VpnPrefix::V6 { .. } => (Afi::Ipv6, Safi::MplsVpn),
+        };
+        if self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&family))
+        {
+            return Self::orf_gated_explain(peer, prefix, Some(rd));
+        }
+
+        let sendable = self.peer_sendable_families.get(&peer);
+        let llgr = self.peer_advertised_llgr_families.get(&peer);
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+        let peer_asn = self.peer_asn.get(&peer).copied();
+        let peer_group = self.peer_group.get(&peer).map(String::as_str);
+        let rtc_filter = self.rtc_vpn_filter(peer, sendable);
+        let orr_ctx = self
+            .peer_orr_vantage
+            .get(&peer)
+            .and_then(|vantage| self.orr.spf.get(vantage))
+            .map(|spf| (&self.orr.topology, spf));
+        let add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+        let add_path_send_families = self
+            .peer_add_path_send_families
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+
+        let vpn_grouped = self.vpn_grouped_member_of(peer);
+        let empty_rib_out;
+        let rib_out = if let Some(group) = vpn_grouped.and_then(|gid| self.group_ribs.get(&gid)) {
+            &group.table
+        } else if let Some(out) = self.adj_ribs_out.get(&peer) {
+            out
+        } else {
+            empty_rib_out = AdjRibOut::new(peer);
+            &empty_rib_out
+        };
+
+        let mut trace = distribution::ExportGateTrace::default();
+        let mut target = distribution::ExportTarget::Explain {
+            peer,
+            peer_asn,
+            peer_group,
+            trace: &mut trace,
+        };
+        let mut keys = HashSet::new();
+        keys.insert(key);
+        let mut vpn_announce = Vec::new();
+        let mut vpn_withdraw = Vec::new();
+        Self::stage_vpn_routes(
             &self.loc_rib,
             &self.ribs,
-            &self.unicast_prefix_peers,
+            rib_out,
             &self.peer_is_rr_client,
-            prefix,
-            peer,
-            self.peer_asn.get(&peer).copied(),
-            self.peer_group.get(&peer).map(String::as_str),
-            self.peer_is_ebgp.get(&peer).copied().unwrap_or(true),
-            self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            &keys,
+            &mut target,
+            target_is_ebgp,
+            target_is_rr_client,
             self.cluster_id,
-            Some(sendable),
-            self.export_policy_for(peer),
+            sendable,
+            llgr,
+            rtc_filter.as_ref(),
             orr_ctx,
+            add_path_send_max,
+            &add_path_send_families,
+            self.export_policy_for(peer),
+            &mut vpn_announce,
+            &mut vpn_withdraw,
+            false,
         );
-
-        if reply.send(Some(explanation)).is_err() {
-            warn!("query caller dropped before receiving response");
-        }
+        trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64))
     }
 
     #[expect(

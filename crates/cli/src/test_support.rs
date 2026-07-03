@@ -1004,6 +1004,33 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 }),
                 orr_vantage: String::new(),
                 orr_candidates: vec![],
+                gates: vec![
+                    server_proto::ExportGateStep {
+                        gate: "best_route".to_string(),
+                        code: "ebgp_route".to_string(),
+                        verdict: server_proto::ExportGateVerdict::Pass as i32,
+                        detail: "best route was learned from an eBGP peer (Loc-RIB best \
+                                 from 198.51.100.2)"
+                            .to_string(),
+                    },
+                    server_proto::ExportGateStep {
+                        gate: "export_policy".to_string(),
+                        code: "policy_permitted".to_string(),
+                        verdict: server_proto::ExportGateVerdict::Pass as i32,
+                        detail: "export policy \"lp200\" permitted this route".to_string(),
+                    },
+                    server_proto::ExportGateStep {
+                        gate: "adj_rib_out".to_string(),
+                        code: "already_advertised".to_string(),
+                        verdict: server_proto::ExportGateVerdict::Pass as i32,
+                        detail: "identical route already advertised - peer is in sync, no \
+                                 re-announcement"
+                            .to_string(),
+                    },
+                ],
+                update_group_id: Some(1),
+                already_advertised: true,
+                rd: String::new(),
             },
         ))
     }

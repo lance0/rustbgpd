@@ -120,9 +120,21 @@ impl RibManager {
             };
 
             if !sendable.is_some_and(|f| f.contains(&family)) {
+                target.gate(
+                    "family",
+                    "family_not_sendable",
+                    crate::update::ExportGateVerdict::Stop,
+                    || format!("peer cannot receive {} routes", super::family_label(family)),
+                );
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
+            target.gate(
+                "family",
+                "family",
+                crate::update::ExportGateVerdict::Pass,
+                || format!("peer negotiated {}", super::family_label(family)),
+            );
 
             let key_send_max = if add_path_send_max > 0 && add_path_send_families.contains(&family)
             {
@@ -132,6 +144,21 @@ impl RibManager {
             };
 
             if key_send_max > 0 {
+                // ponytail: the multipath arm stages a ranked top-N and is
+                // not gate-traced per candidate — an explain dry run gets
+                // this summary note instead of a per-rank ladder.
+                target.gate(
+                    "add_path",
+                    "add_path_send",
+                    crate::update::ExportGateVerdict::NotApplicable,
+                    || {
+                        format!(
+                            "peer negotiated Add-Path send for this family (up to \
+                             {key_send_max} paths); the gate ladder explains single-best \
+                             export only"
+                        )
+                    },
+                );
                 // Multi-path: collect the per-target candidate set (every
                 // Adj-RIB-In entry for the identity, any received path ID,
                 // that survives split horizon and RFC 4456 reflection),
@@ -225,8 +252,7 @@ impl RibManager {
                         local_pref: candidate.local_pref_attr(),
                         med: candidate.med_attr(),
                     };
-                    let (result, evaluation) =
-                        rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+                    let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
                     target.record_eval(&evaluation, candidate.peer);
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
                         continue;
@@ -301,17 +327,55 @@ impl RibManager {
                         )
                     });
                 let Some(winner) = winner else {
+                    target.gate(
+                        "best_route",
+                        "no_orr_candidate",
+                        crate::update::ExportGateVerdict::Stop,
+                        || {
+                            "no candidate for this identity survives split-horizon / \
+                             reflection filtering for this ORR peer"
+                                .to_string()
+                        },
+                    );
                     withdraw_existing(vpn_withdraw, existing_path_ids);
                     continue;
                 };
+                target.gate(
+                    "best_route",
+                    "orr_vantage_best",
+                    crate::update::ExportGateVerdict::Pass,
+                    || format!("per-vantage best from {}", winner.peer),
+                );
                 winner
             } else {
                 let Some(best) = loc_rib.get_vpn(key) else {
+                    target.gate(
+                        "best_route",
+                        "no_best_route",
+                        crate::update::ExportGateVerdict::Stop,
+                        || "no best route exists for this RD+prefix identity".to_string(),
+                    );
                     withdraw_existing(vpn_withdraw, existing_path_ids);
                     continue;
                 };
                 best
             };
+            if let (Some(trace), None) = (target.trace(), orr_ctx) {
+                trace.push(
+                    "best_route",
+                    super::route_type_label(route_type(best.origin_type)),
+                    crate::update::ExportGateVerdict::Pass,
+                    format!(
+                        "{} (Loc-RIB best from {})",
+                        super::route_type_message(route_type(best.origin_type)),
+                        best.peer
+                    ),
+                );
+            }
+            if let Some(trace) = target.trace() {
+                trace.best_peer = Some(best.peer);
+                trace.best_route_type = Some(route_type(best.origin_type));
+            }
 
             // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
@@ -322,9 +386,26 @@ impl RibManager {
                 target_is_ebgp,
                 llgr,
             ) {
+                target.gate(
+                    "llgr",
+                    "llgr_stale_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "LLGR-stale route suppressed toward an eBGP peer that did not \
+                         advertise the Long-Lived Graceful Restart capability for this \
+                         family (RFC 9494 §4.4)"
+                            .to_string()
+                    },
+                );
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
+            target.gate(
+                "llgr",
+                "llgr",
+                crate::update::ExportGateVerdict::Pass,
+                || "route is not suppressed by the RFC 9494 LLGR export restriction".to_string(),
+            );
 
             // RFC 4684 outbound gate: a peer that negotiated RT-Constrain
             // only receives VPN routes whose Route Targets fall inside its
@@ -335,11 +416,38 @@ impl RibManager {
             // peer the gate applies to the vantage WINNER's extended
             // communities — the route actually being advertised — not the
             // Loc-RIB best's.
-            if let Some(membership) = rtc_filter
-                && !membership.matches_any(best.extended_communities())
-            {
-                withdraw_existing(vpn_withdraw, existing_path_ids);
-                continue;
+            if let Some(membership) = rtc_filter {
+                if !membership.matches_any(best.extended_communities()) {
+                    target.gate(
+                        "rt_membership",
+                        "rt_membership_miss",
+                        crate::update::ExportGateVerdict::Stop,
+                        || {
+                            "no Route Target of this route falls inside the peer's \
+                             advertised RT-Constrain membership (RFC 4684)"
+                                .to_string()
+                        },
+                    );
+                    withdraw_existing(vpn_withdraw, existing_path_ids);
+                    continue;
+                }
+                target.gate(
+                    "rt_membership",
+                    "rt_membership",
+                    crate::update::ExportGateVerdict::Pass,
+                    || {
+                        "a Route Target of this route falls inside the peer's advertised \
+                         RT-Constrain membership (RFC 4684)"
+                            .to_string()
+                    },
+                );
+            } else {
+                target.gate(
+                    "rt_membership",
+                    "rt_membership",
+                    crate::update::ExportGateVerdict::NotApplicable,
+                    || "peer did not negotiate RT-Constrain — VPN export is unfiltered".to_string(),
+                );
             }
 
             // The two suppression checks below are no-ops for an ORR
@@ -348,9 +456,25 @@ impl RibManager {
             // staging has no single target — the VPN source-flip matrix
             // applies split horizon per member at emit time.
             if split_horizon_peer == Some(best.peer) {
+                target.gate(
+                    "split_horizon",
+                    "ibgp_split_horizon",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "route is suppressed by split horizon because it originated from \
+                         the target peer"
+                            .to_string()
+                    },
+                );
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
+            target.gate(
+                "split_horizon",
+                "split_horizon",
+                crate::update::ExportGateVerdict::Pass,
+                || "route did not originate from the target peer".to_string(),
+            );
 
             if should_suppress_ibgp_inner(
                 &vpn_suppression_probe(best),
@@ -359,9 +483,30 @@ impl RibManager {
                 cluster_id,
                 peer_is_rr_client,
             ) {
+                if let Some(trace) = target.trace() {
+                    let (code, detail) = super::rr_suppression_reason(
+                        &vpn_suppression_probe(best),
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        peer_is_rr_client,
+                    );
+                    trace.push(
+                        "rr_reflection",
+                        code,
+                        crate::update::ExportGateVerdict::Stop,
+                        detail.to_string(),
+                    );
+                }
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
+            target.gate(
+                "rr_reflection",
+                "rr_reflection",
+                crate::update::ExportGateVerdict::Pass,
+                || "iBGP split-horizon / RFC 4456 reflection rules permit this route".to_string(),
+            );
 
             let aspath_str = if needs_as_path_string {
                 best.as_path()
@@ -392,12 +537,46 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
-            let (result, evaluation) =
-                rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+            let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
             target.record_eval(&evaluation, best.peer);
+            if let Some(trace) = target.trace() {
+                trace.policy_label = export_pol.map(|chain| {
+                    super::policy_label_with_term(
+                        Some(chain),
+                        &ctx,
+                        evaluation.matched_policy.as_deref(),
+                    )
+                });
+                trace.modifications = result.modifications.clone();
+            }
             if result.action != rustbgpd_policy::PolicyAction::Permit {
+                if let Some(trace) = target.trace() {
+                    let label = trace.policy_label.clone().unwrap_or_default();
+                    trace.push(
+                        "export_policy",
+                        "policy_denied",
+                        crate::update::ExportGateVerdict::Stop,
+                        format!("export policy {label:?} denied this route"),
+                    );
+                }
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
+            }
+            if let Some(trace) = target.trace() {
+                match trace.policy_label.clone() {
+                    Some(label) => trace.push(
+                        "export_policy",
+                        "policy_permitted",
+                        crate::update::ExportGateVerdict::Pass,
+                        format!("export policy {label:?} permitted this route"),
+                    ),
+                    None => trace.push(
+                        "export_policy",
+                        "export_policy",
+                        crate::update::ExportGateVerdict::NotApplicable,
+                        "no export policy configured (default permit)".to_string(),
+                    ),
+                }
             }
 
             let mut modified = best.clone();
@@ -421,7 +600,34 @@ impl RibManager {
                     .get_vpn(&out_key)
                     .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
             {
+                if let Some(trace) = target.trace() {
+                    trace.staged_next_hop = Some(modified.next_hop);
+                    trace.staged_path_id = modified.path_id;
+                    trace.suppressed_identical = false;
+                    trace.push(
+                        "adj_rib_out",
+                        "staged_announce",
+                        crate::update::ExportGateVerdict::Pass,
+                        if rib_out.get_vpn(&out_key).is_some() {
+                            "staged route differs from the advertised state — would re-announce"
+                                .to_string()
+                        } else {
+                            "identity not yet advertised to this peer — would announce".to_string()
+                        },
+                    );
+                }
                 vpn_announce.push(modified);
+            } else if let Some(trace) = target.trace() {
+                trace.staged_next_hop = Some(modified.next_hop);
+                trace.staged_path_id = modified.path_id;
+                trace.suppressed_identical = true;
+                trace.push(
+                    "adj_rib_out",
+                    "already_advertised",
+                    crate::update::ExportGateVerdict::Pass,
+                    "identical route already advertised — peer is in sync, no re-announcement"
+                        .to_string(),
+                );
             }
 
             // Clean up stale multi-path entries if this identity was

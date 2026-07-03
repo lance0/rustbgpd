@@ -174,6 +174,64 @@ pub struct ExplainAdvertisedRoute {
     /// first — the same candidate set and order distribution would
     /// use. Empty for non-ORR explains.
     pub orr_candidates: Vec<OrrExplainCandidate>,
+    /// The full export gate ladder in the exact order the live export
+    /// path evaluates it, one step per gate with a pass/stop verdict.
+    /// The single-best unicast and VPN ladders come from a dry-run of
+    /// the *same* staging body live distribution uses.
+    pub gates: Vec<ExportGateStep>,
+    /// Update group the target peer's unicast export is staged under,
+    /// when grouped (shared staging + per-member source-flip emit).
+    /// `None` = per-peer export path.
+    pub update_group_id: Option<u64>,
+    /// `true` when the decision is `Advertise` but an identical route
+    /// already sits in the advertised state (Adj-RIB-Out / group
+    /// table), so the live path suppresses re-announcement. `false` on
+    /// `Advertise` means the staged route differs and would be sent.
+    pub already_advertised: bool,
+    /// Route Distinguisher for a VPN explain; `None` for unicast.
+    pub rd: Option<rustbgpd_wire::RouteDistinguisher>,
+}
+
+/// Verdict of one export gate for one (route, peer) explain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportGateVerdict {
+    /// The route cleared this gate.
+    Pass,
+    /// This gate stopped the route — nothing past it was evaluated.
+    Stop,
+    /// The gate does not apply to this peer (e.g. no export policy
+    /// configured, no ORF filter installed).
+    NotApplicable,
+}
+
+impl ExportGateVerdict {
+    /// Stable lowercase label used by the API/CLI surfaces.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Stop => "stop",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// One rung of the export decision ladder a route traverses toward a
+/// peer, in live evaluation order.
+#[derive(Debug, Clone)]
+pub struct ExportGateStep {
+    /// Stable gate name (ladder rung), e.g. `split_horizon`,
+    /// `export_policy`, `adj_rib_out`.
+    pub gate: &'static str,
+    /// Reason code for this step — matches the legacy
+    /// `ExplainReason::code` vocabulary where one existed (e.g.
+    /// `rr_non_client_to_non_client`, `policy_denied`).
+    pub code: &'static str,
+    /// Verdict for this gate.
+    pub verdict: ExportGateVerdict,
+    /// Human-readable detail (which ORF entry semantics, which policy
+    /// term decided, the compared advertised state, ...).
+    pub detail: String,
 }
 
 /// One candidate in an ORR (RFC 9107) advertised-route explanation.
@@ -527,8 +585,12 @@ pub enum RibUpdate {
     ExplainAdvertisedRoute {
         /// The target peer.
         peer: IpAddr,
-        /// Prefix to explain.
+        /// Prefix to explain. For a VPN explain (`rd` set) this is the
+        /// RD-scoped inner prefix.
         prefix: Prefix,
+        /// `Some` = explain the VPNv4/VPNv6 (SAFI 128) route identified
+        /// by `(rd, prefix)` instead of the plain unicast prefix.
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
         /// Response channel.
         reply: oneshot::Sender<Option<ExplainAdvertisedRoute>>,
     },

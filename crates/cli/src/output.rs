@@ -327,6 +327,29 @@ pub struct JsonExplainAdvertisedRoute {
     pub orr_vantage: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub orr_candidates: Vec<JsonOrrExplainCandidate>,
+    /// Export gate ladder in live evaluation order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<JsonExportGateStep>,
+    /// Update group the peer's export is staged under; absent when the
+    /// peer takes the per-peer export path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_group_id: Option<u64>,
+    /// True on an advertise decision when the identical route already
+    /// sits in the advertised state (peer in sync, nothing re-sent).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub already_advertised: bool,
+    /// Route Distinguisher for a VPN explain; absent for unicast.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub rd: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonExportGateStep {
+    pub gate: String,
+    pub code: String,
+    /// `pass`, `stop`, or `not_applicable`.
+    pub verdict: String,
+    pub detail: String,
 }
 
 #[derive(Serialize)]

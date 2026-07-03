@@ -29,8 +29,8 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
-    ExplainAdvertisedRoute, ExplainDecision, ExplainReason, NeighborPolicyStats,
-    OutboundRouteUpdate, RibCommandError,
+    ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict,
+    NeighborPolicyStats, OutboundRouteUpdate, RibCommandError,
 };
 
 mod bgpls;
@@ -94,6 +94,77 @@ fn route_type_message(route_type: RouteType) -> &'static str {
     }
 }
 
+/// Human-readable `(AFI, SAFI)` label for explain output.
+fn family_label(family: (Afi, Safi)) -> String {
+    let afi = match family.0 {
+        Afi::Ipv4 => "ipv4",
+        Afi::Ipv6 => "ipv6",
+        Afi::L2Vpn => "l2vpn",
+        Afi::BgpLs => "bgpls",
+    };
+    let safi = match family.1 {
+        Safi::Unicast => "unicast",
+        Safi::FlowSpec => "flowspec",
+        Safi::Multicast => "multicast",
+        Safi::LabeledUnicast => "labeled_unicast",
+        Safi::Evpn => "evpn",
+        Safi::BgpLs => "bgpls",
+        Safi::BgpLsVpn => "bgpls_vpn",
+        Safi::MplsVpn => "mpls_vpn",
+        Safi::RtConstrain => "rtc",
+    };
+    format!("{afi} {safi}")
+}
+
+/// Reason code + message for a route stopped by
+/// [`should_suppress_ibgp_inner`] — distinguishes the RFC 4456
+/// non-client-to-non-client reflection case from plain iBGP split
+/// horizon. Explain-only; inputs mirror the suppression check exactly.
+fn rr_suppression_reason(
+    best: &crate::route::Route,
+    target_is_ebgp: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    peer_is_rr_client: &HashMap<IpAddr, bool>,
+) -> (&'static str, &'static str) {
+    if !target_is_ebgp
+        && !best.is_ebgp()
+        && cluster_id.is_some()
+        && !peer_is_rr_client.get(&best.peer).copied().unwrap_or(false)
+        && !target_is_rr_client
+    {
+        (
+            "rr_non_client_to_non_client",
+            "route reflector will not reflect a non-client iBGP route to another non-client",
+        )
+    } else {
+        (
+            "ibgp_split_horizon",
+            "iBGP split horizon suppresses advertisement of this route",
+        )
+    }
+}
+
+/// `"<policy>"` or `"<policy>:<term>"` label of the deciding export
+/// chain member, enriched with the rpol term name via the statement
+/// trace (explain-only re-walk, pinned to agree with the counted
+/// evaluation by the policy crate's agreement tests). TOML members
+/// carry no term name and render unchanged.
+fn policy_label_with_term(
+    chain: Option<&PolicyChain>,
+    ctx: &RouteContext<'_>,
+    matched_policy: Option<&str>,
+) -> String {
+    let term_suffix = rustbgpd_policy::explain_chain_statements(chain, ctx)
+        .steps
+        .last()
+        .filter(|step| step.policy_name.as_deref() == matched_policy)
+        .and_then(|step| step.term_name.as_deref())
+        .map(|term| format!(":{term}"))
+        .unwrap_or_default();
+    format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
+}
+
 /// The consumer identity for the shared single-best export tail
 /// ([`RibManager::distribute_single_best_prefix`]): a concrete peer
 /// (today's per-peer path — split horizon against the peer,
@@ -116,23 +187,157 @@ pub(in crate::manager) enum ExportTarget<'a> {
     Group {
         evals: &'a mut super::update_groups::GroupEvalAccumulator,
     },
+    /// Explain-only dry run of the shared staging body: behaves like
+    /// `Peer` for every decision input (split horizon, policy peer
+    /// context) but records NOTHING into metrics/counters — a one-shot
+    /// operator query must not skew `bgp_policy_routes_total` or the
+    /// per-term hit counters — and captures the gate ladder into
+    /// `trace` instead. The explain handler passes scratch output
+    /// vectors and never commits, so the run is fully side-effect-free.
+    Explain {
+        peer: IpAddr,
+        peer_asn: Option<u32>,
+        peer_group: Option<&'a str>,
+        trace: &'a mut ExportGateTrace,
+    },
 }
 
-impl ExportTarget<'_> {
+/// Explain-only capture of one dry-run pass through the shared export
+/// staging body (`distribute_single_best_prefix` / `stage_vpn_routes`).
+/// Filled through [`ExportTarget::Explain`]; every field is written by
+/// the same code that stages live exports, so the explanation cannot
+/// drift from the real decision.
+#[derive(Debug, Default)]
+pub(in crate::manager) struct ExportGateTrace {
+    /// Gate ladder in live evaluation order.
+    pub gates: Vec<ExportGateStep>,
+    /// Source peer of the selected best route (once the ladder reached it).
+    pub best_peer: Option<IpAddr>,
+    /// Route type of the selected best route.
+    pub best_route_type: Option<RouteType>,
+    /// Export-policy modifications of the permitting chain verdict.
+    pub modifications: rustbgpd_policy::RouteModifications,
+    /// `"<policy>"` or `"<policy>:<term>"` label of the deciding chain
+    /// member (rpol term via the statement trace), `None` = no chain.
+    pub policy_label: Option<String>,
+    /// Post-modification next hop the route would be staged with.
+    pub staged_next_hop: Option<IpAddr>,
+    /// Post-modification Add-Path identifier (always 0 on single-best).
+    pub staged_path_id: u32,
+    /// `true` when the staged route equals the advertised state and the
+    /// live path would suppress re-announcement.
+    pub suppressed_identical: bool,
+}
+
+impl ExportGateTrace {
+    fn push(
+        &mut self,
+        gate: &'static str,
+        code: &'static str,
+        verdict: ExportGateVerdict,
+        detail: String,
+    ) {
+        self.gates.push(ExportGateStep {
+            gate,
+            code,
+            verdict,
+            detail,
+        });
+    }
+
+    /// Stop code of the gate that halted the ladder, if any.
+    pub(in crate::manager) fn stopped(&self) -> Option<&ExportGateStep> {
+        self.gates
+            .iter()
+            .find(|step| step.verdict == ExportGateVerdict::Stop)
+    }
+
+    /// Assemble the operator-facing explanation from a completed dry
+    /// run. The legacy `reasons` list keeps its pre-ladder shape (one
+    /// decisive stop reason, or route-type + policy-permit on
+    /// advertise) so existing consumers see unchanged output.
+    pub(in crate::manager) fn into_explain(
+        self,
+        peer: IpAddr,
+        prefix: Prefix,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        update_group_id: Option<u64>,
+    ) -> ExplainAdvertisedRoute {
+        let (decision, reasons) = if let Some(step) = self.stopped() {
+            let decision = match step.code {
+                "no_best_route" | "no_orr_candidate" => ExplainDecision::NoBestRoute,
+                "family_not_sendable" => ExplainDecision::UnsupportedFamily,
+                _ => ExplainDecision::Deny,
+            };
+            (
+                decision,
+                vec![ExplainReason {
+                    code: step.code,
+                    message: step.detail.clone(),
+                }],
+            )
+        } else {
+            let mut reasons = Vec::new();
+            if let Some(route_type) = self.best_route_type {
+                reasons.push(ExplainReason {
+                    code: route_type_label(route_type),
+                    message: route_type_message(route_type).to_string(),
+                });
+            }
+            if let Some(label) = &self.policy_label {
+                reasons.push(ExplainReason {
+                    code: "policy_permitted",
+                    message: format!("export policy {label:?} permitted this route"),
+                });
+            }
+            (ExplainDecision::Advertise, reasons)
+        };
+        ExplainAdvertisedRoute {
+            decision,
+            peer,
+            prefix,
+            next_hop: self.staged_next_hop,
+            path_id: self.staged_path_id,
+            route_peer: self.best_peer,
+            route_type: self.best_route_type,
+            reasons,
+            modifications: self.modifications,
+            orr_vantage: None,
+            orr_candidates: Vec::new(),
+            gates: self.gates,
+            update_group_id,
+            already_advertised: self.suppressed_identical,
+            rd,
+        }
+    }
+}
+
+impl<'a> ExportTarget<'a> {
     /// The peer to apply split horizon against; `None` for group
-    /// staging (lifted out — applied per member at emit time).
+    /// staging (lifted out — applied per member at emit time; the
+    /// explain dry run applies it against the member directly, which is
+    /// exactly what the source-flip matrix does per member at emit).
     fn split_horizon_peer(&self) -> Option<IpAddr> {
         match self {
-            Self::Peer { peer, .. } => Some(*peer),
+            Self::Peer { peer, .. } | Self::Explain { peer, .. } => Some(*peer),
             Self::Group { .. } => None,
         }
     }
 
     /// Peer-context fields for the policy `RouteContext`. Group-staged
     /// chains never read them (`requires_peer_context` disqualifies).
-    fn ctx_peer(&self) -> (Option<IpAddr>, Option<u32>, Option<&str>) {
+    /// Returns `'a`-lived data (not `&self`-lived) so a built
+    /// `RouteContext` doesn't pin the target while explain trace hooks
+    /// need it mutably.
+    fn ctx_peer(&self) -> (Option<IpAddr>, Option<u32>, Option<&'a str>) {
         match self {
             Self::Peer {
+                peer,
+                peer_asn,
+                peer_group,
+                ..
+            }
+            | Self::Explain {
                 peer,
                 peer_asn,
                 peer_group,
@@ -143,7 +348,9 @@ impl ExportTarget<'_> {
     }
 
     /// Record one export-chain evaluation: directly per peer, or into
-    /// the group accumulator for per-member replay.
+    /// the group accumulator for per-member replay. Explain dry runs
+    /// record nothing — counting a one-shot operator query would skew
+    /// `bgp_policy_routes_total` and the per-term hit counters.
     fn record_eval(&mut self, evaluation: &PolicyEvaluation, source: IpAddr) {
         match self {
             Self::Peer {
@@ -153,6 +360,7 @@ impl ExportTarget<'_> {
                 ..
             } => record_export_policy_eval(metrics, policy_stats, peer_label, evaluation),
             Self::Group { evals } => evals.record(evaluation, source),
+            Self::Explain { .. } => {}
         }
     }
 
@@ -160,8 +368,58 @@ impl ExportTarget<'_> {
     /// `LOCAL_PEER` placeholder and are restamped per member.
     fn policy_filtered_target(&self) -> IpAddr {
         match self {
-            Self::Peer { peer, .. } => *peer,
+            Self::Peer { peer, .. } | Self::Explain { peer, .. } => *peer,
             Self::Group { .. } => LOCAL_PEER,
+        }
+    }
+
+    /// Evaluate the export chain for one route. Live targets take the
+    /// counting walker (ADR-0096 per-term hit counters + eval totals);
+    /// an explain dry run takes the IR-level non-counting evaluation so
+    /// a one-shot operator query cannot skew `rbgp policy stats` — the
+    /// two are pinned to agree by the policy crate's parity tests.
+    fn evaluate_export_chain(
+        &self,
+        export_pol: Option<&PolicyChain>,
+        ctx: &RouteContext<'_>,
+    ) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation) {
+        match self {
+            Self::Peer { .. } | Self::Group { .. } => {
+                evaluate_chain_with_attribution(export_pol, ctx)
+            }
+            Self::Explain { .. } => match export_pol {
+                Some(chain) => chain.compiled().evaluate_with_attribution(ctx),
+                None => (
+                    rustbgpd_policy::PolicyResult::permit(),
+                    PolicyEvaluation {
+                        action: PolicyAction::Permit,
+                        matched_policy: None,
+                    },
+                ),
+            },
+        }
+    }
+
+    /// Explain trace sink; `None` for live targets, making every
+    /// `gate(...)` recording call a no-op on the hot path.
+    fn trace(&mut self) -> Option<&mut ExportGateTrace> {
+        match self {
+            Self::Explain { trace, .. } => Some(trace),
+            Self::Peer { .. } | Self::Group { .. } => None,
+        }
+    }
+
+    /// Record one gate-ladder step (explain dry runs only). The detail
+    /// closure keeps live staging free of format!/allocation cost.
+    fn gate(
+        &mut self,
+        gate: &'static str,
+        code: &'static str,
+        verdict: ExportGateVerdict,
+        detail: impl FnOnce() -> String,
+    ) {
+        if let Some(trace) = self.trace() {
+            trace.push(gate, code, verdict, detail());
         }
     }
 }
