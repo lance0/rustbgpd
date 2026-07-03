@@ -729,6 +729,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`bmp_collector_drops_total`) remain the documented lossy layer,
   healed by the collector's own reconnect (RFC 7854 state discard +
   PeerUp replay).
+- **The BMP Loc-RIB collector-connect dump no longer materializes the
+  whole table on the RIB task.** The RFC 9069 dump handler synthesized
+  every Loc-RIB UPDATE PDU into one vector before chunking — an
+  O(table) allocation burst (hundreds of MB transient at full-DFZ
+  scale) during which no other RIB command ran. The dump is now
+  resumable: the BMP dump forwarder requests one 256-message chunk at
+  a time and hands back a key-based cursor ("smallest keys strictly
+  greater than the last emitted"), so per-request allocation is
+  bounded by the chunk size, live route processing and queries
+  interleave between chunks, and the cursor stays valid across
+  mid-dump insertions and withdrawals (surviving routes dump exactly
+  once; a route added behind the cursor reaches the collector on the
+  live stream — the accepted dump/live overlap race, ADR-0097).
+  Peer-up replay → dump → per-family End-of-RIB → live ordering is
+  unchanged and remains test-pinned.
+
 - **An enhanced route refresh no longer purges GR/LLGR-stale routes
   awaiting End-of-RIB (LAN-187).** RFC 7313's end-of-refresh sweep
   removes routes not re-advertised inside the BoRR..EoRR window — but a

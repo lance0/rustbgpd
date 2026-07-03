@@ -17,8 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::codec;
 use crate::types::{
-    BmpControlEvent, BmpDumpChunk, BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter,
-    BmpVersion,
+    BmpControlEvent, BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter, BmpVersion,
 };
 
 /// Per-message send timeout for a Loc-RIB dump forwarder. Paces the dump
@@ -405,24 +404,11 @@ impl BmpManager {
         let Some(ref dump_tx) = self.dump_tx else {
             return;
         };
-        let (chunk_tx, chunk_rx) = mpsc::channel::<BmpDumpChunk>(4);
-        if let Err(e) = dump_tx.try_send(BmpDumpRequest { reply: chunk_tx }) {
-            let reason = trysend_reason(&e);
-            self.metrics
-                .record_bmp_collector_drop(&addr_label, "loc_rib_dump", reason, 1);
-            warn!(
-                collector = %addr,
-                error = %e,
-                "Loc-RIB dump request channel full or closed; collector starts live-only"
-            );
-            return;
-        }
-
         let cfg = cfg.clone();
         let collector_tx = collector_tx.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(forward_loc_rib_dump(
-            chunk_rx,
+            dump_tx.clone(),
             collector_tx,
             cfg,
             version,
@@ -464,22 +450,42 @@ impl BmpManager {
     }
 }
 
-/// Forward one Loc-RIB dump — chunks of `(synthesized UPDATE PDU,
-/// install time)` from the RIB manager — to a single collector as
-/// Route Monitoring messages. The bounded collector channel plus a
-/// per-message send timeout pace the dump at the collector's drain
-/// rate; a timeout or closed channel aborts the dump (a fresh one runs
-/// on the next reconnect).
+/// Forward one Loc-RIB dump to a single collector as Route Monitoring
+/// messages, driving the resumable chunk loop against the RIB manager:
+/// request one bounded chunk, forward it, then request the next from
+/// the returned cursor. The RIB manager synthesizes at most one chunk
+/// per request, so live route processing interleaves between chunks
+/// and no full-table dump vector ever materializes.
+///
+/// The bounded collector channel plus a per-message send timeout pace
+/// the dump at the collector's drain rate; a timeout or closed channel
+/// aborts the dump (a fresh one runs on the next reconnect).
 async fn forward_loc_rib_dump(
-    mut chunk_rx: mpsc::Receiver<BmpDumpChunk>,
+    dump_tx: mpsc::Sender<BmpDumpRequest>,
     collector_tx: mpsc::Sender<Bytes>,
     cfg: BmpLocRibConfig,
     version: BmpVersion,
     metrics: BgpMetrics,
     addr_label: String,
 ) {
+    let mut cursor = None;
     let mut sent: u64 = 0;
-    while let Some(chunk) = chunk_rx.recv().await {
+    loop {
+        let (reply, chunk_rx) = tokio::sync::oneshot::channel();
+        if dump_tx
+            .send(BmpDumpRequest { cursor, reply })
+            .await
+            .is_err()
+        {
+            metrics.record_bmp_collector_drop(&addr_label, "loc_rib_dump", "channel_closed", 1);
+            warn!(collector = %addr_label, "Loc-RIB dump request channel closed, aborting dump");
+            return;
+        }
+        let Ok(chunk) = chunk_rx.await else {
+            metrics.record_bmp_collector_drop(&addr_label, "loc_rib_dump", "channel_closed", 1);
+            warn!(collector = %addr_label, "RIB manager dropped Loc-RIB dump chunk reply, aborting dump");
+            return;
+        };
         for (pdu, timestamp, path_status) in chunk.messages {
             let msg = codec::encode_route_monitoring(
                 &cfg.peer_info(timestamp),
@@ -510,6 +516,10 @@ async fn forward_loc_rib_dump(
                     return;
                 }
             }
+        }
+        match chunk.next {
+            Some(next) => cursor = Some(next),
+            None => break,
         }
     }
     debug!(collector = %addr_label, messages = sent, "Loc-RIB dump forwarded");
@@ -1438,13 +1448,21 @@ mod tests {
         assert_eq!(peer_up[6], 3, "peer type 3");
         assert_eq!(&peer_up[peer_up.len() - 6..], b"global");
 
-        // 2. The manager requested a dump; answer with two chunks
-        // playing the RIB manager's role (2 routes + 1 "EoR" PDU).
+        // 2. The manager requested the first dump chunk (fresh cursor);
+        // answer with a resumable chunk playing the RIB manager's role,
+        // then serve the follow-up request from the returned cursor
+        // (1 route + 1 "EoR" PDU) — proving the forwarder drives the
+        // request→forward→request-next loop and round-trips the cursor.
         let request = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
             .await
             .expect("dump requested on connect")
             .expect("dump channel open");
+        assert!(request.cursor.is_none(), "fresh dump starts cursor-less");
         let install = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        let resume = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 2, 0, 0),
+            16,
+        ));
         request
             .reply
             .send(crate::types::BmpDumpChunk {
@@ -1452,17 +1470,26 @@ mod tests {
                     (Bytes::from_static(&[0xD1; 23]), install, None),
                     (Bytes::from_static(&[0xD2; 23]), install, None),
                 ],
+                next: Some(crate::types::BmpDumpCursor::Unicast(resume)),
             })
-            .await
             .unwrap();
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("follow-up chunk requested")
+            .expect("dump channel open");
+        match request.cursor {
+            Some(crate::types::BmpDumpCursor::Unicast(p)) => {
+                assert_eq!(p, resume, "cursor round-trips verbatim");
+            }
+            other => panic!("expected the returned cursor back, got {other:?}"),
+        }
         request
             .reply
             .send(crate::types::BmpDumpChunk {
                 messages: vec![(Bytes::from_static(&[0xE0; 23]), install, None)],
+                next: None,
             })
-            .await
             .unwrap();
-        drop(request);
 
         for expected in [0xD1u8, 0xD2, 0xE0] {
             let msg = c_rx.recv().await.unwrap();

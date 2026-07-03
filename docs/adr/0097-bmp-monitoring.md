@@ -80,6 +80,24 @@ This ADR records the decisions of that arc as shipped.
    already handles it; ordering (dump → EoR → live per collector) is
    test-pinned.
 
+   *As-built amendment (post-review):* the dump is **resumable**, not
+   pre-materialized. The original handler synthesized the whole table
+   into one vector on the RIB task before chunking — an O(table)
+   allocation burst that stalled route processing at DFZ scale. Now
+   each `BmpDumpRequest` carries an optional `BmpDumpCursor` and the
+   RIB manager answers with exactly one bounded chunk (unicast phase,
+   then VPN, then the End-of-RIB markers) plus the next cursor; the
+   per-collector forwarder task drives the request→forward→request-next
+   loop. The cursor names a *key* ("smallest keys strictly greater than
+   the last emitted", selected per chunk with a size-capped max-heap
+   over the unordered map), so it stays valid across mid-dump
+   insertions and withdrawals without snapshot isolation — surviving
+   routes are emitted exactly once, and an insertion behind the cursor
+   is covered by the live stream under the same accepted overlap race.
+   Every other RIB command interleaves between chunk requests. Known
+   ceiling: each chunk re-scans the family's key set (O(table) per
+   chunk); a sorted index is the upgrade path if dump CPU ever bites.
+
 3. **Rib-out table dumps were rejected.** AdjRibOut stores routes
    *pre*-transport-stamping — ORIGINATOR_ID/CLUSTER_LIST, GShut, and
    LLGR stripping apply session-side at encode. A dump synthesized from

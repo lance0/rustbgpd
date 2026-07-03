@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 /// BMP event sent from transport to BMP manager.
 #[derive(Debug)]
@@ -116,16 +116,39 @@ impl BmpLocRibConfig {
     }
 }
 
-/// A Loc-RIB table-dump request from the BMP manager to the RIB manager,
-/// issued when a collector monitoring `loc_rib` (re)connects.
+/// Resume position within a resumable Loc-RIB table dump.
 ///
-/// The RIB manager answers with bounded [`BmpDumpChunk`]s (synthesized
-/// UPDATE PDUs with per-route install timestamps, ending with one
-/// End-of-RIB PDU per dumped AFI/SAFI) and then drops the sender.
+/// Produced by the RIB manager (the last key it emitted per family
+/// phase) and round-tripped verbatim by the BMP dump forwarder on the
+/// next [`BmpDumpRequest`]. Because it names a *key*, not a table
+/// position, it stays valid across route insertions and removals
+/// between chunks: each chunk is "the smallest keys strictly greater
+/// than the cursor", so a surviving route is emitted exactly once and
+/// mutations land on the live stream (the accepted dump-vs-live race).
+#[derive(Debug, Clone, Copy)]
+pub enum BmpDumpCursor {
+    /// Resuming the unicast Loc-RIB walk after this prefix.
+    Unicast(rustbgpd_wire::Prefix),
+    /// Unicast walk done; resuming the VPN walk after this key
+    /// (`None` = VPN walk not yet started).
+    Vpn(Option<rustbgpd_wire::VpnRouteKey>),
+}
+
+/// One bounded Loc-RIB table-dump chunk request from the BMP manager to
+/// the RIB manager: the first is issued when a collector monitoring
+/// `loc_rib` (re)connects (`cursor: None`), follow-ups resume from the
+/// cursor returned in the previous [`BmpDumpChunk`].
+///
+/// The RIB manager answers each request with one bounded chunk
+/// (synthesized UPDATE PDUs with per-route install timestamps; the
+/// final chunk ends with one End-of-RIB PDU per dumped AFI/SAFI) and
+/// yields back to live route processing between requests.
 #[derive(Debug)]
 pub struct BmpDumpRequest {
-    /// Chunk reply channel. Bounded — the dump producer paces on it.
-    pub reply: mpsc::Sender<BmpDumpChunk>,
+    /// Resume position; `None` starts a fresh dump.
+    pub cursor: Option<BmpDumpCursor>,
+    /// Reply channel for this chunk.
+    pub reply: oneshot::Sender<BmpDumpChunk>,
 }
 
 /// One bounded chunk of a Loc-RIB table dump.
@@ -134,6 +157,9 @@ pub struct BmpDumpChunk {
     /// Synthesized UPDATE PDUs with their route install times and the
     /// Path Marking payload (`None` on the End-of-RIB markers).
     pub messages: Vec<(Bytes, SystemTime, Option<BmpPathStatus>)>,
+    /// Where the next request should resume; `None` = dump complete
+    /// (this chunk carries the End-of-RIB markers).
+    pub next: Option<BmpDumpCursor>,
 }
 
 /// Path Marking TLV payload (draft-ietf-grow-bmp-path-marking-tlv-05

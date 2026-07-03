@@ -168,7 +168,11 @@ impl fmt::Display for Ipv6Prefix {
 }
 
 /// A prefix that can be either IPv4 or IPv6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The derived total order (all V4 before V6, then by address/length)
+/// carries no routing meaning; it exists so stable cursors can be cut
+/// through unordered prefix-keyed tables (e.g. resumable BMP dumps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Prefix {
     /// IPv4 prefix.
     V4(Ipv4Prefix),
