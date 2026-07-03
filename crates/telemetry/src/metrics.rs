@@ -1965,11 +1965,15 @@ impl BgpMetrics {
     /// Record a confirmed config transaction lifecycle transition.
     ///
     /// Labels are deliberately bounded:
-    /// - `operation`: `"confirm"`, `"abort"`, or `"auto_revert"`.
+    /// - `operation`: `"confirm"`, `"abort"`, `"auto_revert"`, or
+    ///   `"boot_revert"` (unconfirmed journal reverted at daemon startup).
     /// - `outcome`: `"success"` or `"failure"`.
     pub fn record_config_transaction_lifecycle(&self, operation: &str, outcome: &str) {
         debug_assert!(
-            matches!(operation, "confirm" | "abort" | "auto_revert"),
+            matches!(
+                operation,
+                "confirm" | "abort" | "auto_revert" | "boot_revert"
+            ),
             "unbounded config-transaction lifecycle operation label: {operation:?}"
         );
         debug_assert!(

@@ -56,6 +56,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Durable commit-confirm: a restart inside the confirm window now
+  reverts at boot instead of making the unconfirmed config permanent
+  (ADR-0076 Decision 6 amendment).** Before a confirmed transaction
+  commits, the daemon atomically journals the pre-commit config
+  snapshot, confirm handle, and deadline to
+  `<runtime_state_dir>/commit-confirm-journal.json`
+  (write-tmp+fsync+rename+fsync-dir); confirm, abort, and timeout
+  auto-revert consume the journal, and a failed rollback deliberately
+  retains it. At startup, an unconfirmed journal triggers a boot-time
+  revert BEFORE the on-disk config is adopted — regardless of remaining
+  confirm time, per NETCONF (RFC 6241 §8.4) cancel-on-session-loss
+  semantics — restoring the pre-transaction config to the config file,
+  saving the unconfirmed candidate aside as `<config>.unconfirmed`, and
+  logging a loud ERROR + banner notice
+  (`config_transaction_lifecycle{operation="boot_revert"}` metric). A
+  torn/unreadable journal or an unusable embedded config refuses boot
+  naming both files (fail closed). Applies to both the gRPC
+  `ApplyConfigTransaction` and gNMI commit-confirmed paths (shared
+  controller). Proven by real-binary SIGKILL-mid-window integration
+  tests (`tests/commit_confirm_binary.rs`); closes the KNOWN_ISSUES
+  "commit-confirmed does not survive a daemon restart" row.
+
 - **Per-client best-path for route-server clients (RFC 7947 §2.3.2
   path-hiding mitigation, the BIRD-`secondary` equivalent).** New
   per-neighbor / per-peer-group knob `per_client_best = true` (requires

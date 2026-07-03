@@ -22,6 +22,7 @@ mod blackhole;
 mod config;
 mod config_persister;
 mod config_transaction_control;
+mod confirm_journal;
 mod evpn_dataplane;
 mod evpn_es_drain;
 mod evpn_es_link_drain;
@@ -967,7 +968,7 @@ fn main() {
         process::exit(1);
     }
 
-    let config = match Config::load_with_diagnostics(&config_path) {
+    let mut config = match Config::load_with_diagnostics(&config_path) {
         Ok(c) => c,
         Err(diagnostic) => {
             eprintln!("{diagnostic}");
@@ -1004,6 +1005,29 @@ fn main() {
         process::exit(i32::from(diff.has_actionable_changes()));
     }
 
+    // Durable commit-confirm (ADR-0076 Decision 6): if the last run stopped
+    // inside a commit-confirmed window, an unconfirmed revert journal exists
+    // and the on-disk config is the unconfirmed candidate. Revert BEFORE the
+    // daemon adopts it — otherwise a config bad enough to crash the daemon
+    // would become permanent via the crash ("confirmed-by-restart"). A
+    // journal that exists but cannot drive a revert refuses boot (fail
+    // closed). Runs only for real daemon startup: --check/--diff returned
+    // above and must never mutate config files.
+    let boot_revert_notice = match confirm_journal::boot_revert_check(
+        &confirm_journal::journal_path(&config.runtime_state_dir()),
+        Path::new(&config_path),
+    ) {
+        Ok(None) => None,
+        Ok(Some(revert)) => {
+            config = *revert.config;
+            Some(revert.notice)
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            process::exit(1);
+        }
+    };
+
     let log_directives = config.per_peer_log_directives();
     if let Err(e) = init_logging(&log_directives) {
         eprintln!("error: failed to initialize logging: {e}");
@@ -1026,7 +1050,7 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
-    rt.block_on(run(config, profiler));
+    rt.block_on(run(config, boot_revert_notice, profiler));
 }
 
 /// Default tokio worker-thread cap when neither env nor config specifies one.
@@ -1129,7 +1153,11 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run<T>(mut config: Config, profiler: Option<T>) {
+async fn run<T>(
+    mut config: Config,
+    boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
+    profiler: Option<T>,
+) {
     // Snapshot the gRPC listener config as it was at process start.
     // The live TCP/UDS listeners bind once and are not rebuilt on
     // SIGHUP; this snapshot is what they're actually serving. Reload
@@ -1220,6 +1248,25 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
     // Startup banner — human-friendly topology summary on stderr.
     print_startup_banner(&config, &grpc_listeners);
+    if let Some(notice) = &boot_revert_notice {
+        // Boot-time revert of an unconfirmed commit-confirmed transaction
+        // (ADR-0076 Decision 6). Loud on purpose: the operator's last change
+        // was undone and its candidate saved aside.
+        error!(
+            confirm_id = %notice.confirm_id,
+            unconfirmed_candidate = %notice.backup_path.display(),
+            "commit-confirmed transaction was never confirmed before the last shutdown — reverted to the pre-transaction config at boot; the unconfirmed candidate config was saved aside"
+        );
+        eprintln!(
+            "!! commit-confirm boot revert: transaction {:?} was never confirmed before the last shutdown.",
+            notice.confirm_id
+        );
+        eprintln!(
+            "!! Booted from the pre-transaction config; the unconfirmed candidate was saved to {}.",
+            notice.backup_path.display()
+        );
+        metrics.record_config_transaction_lifecycle("boot_revert", "success");
+    }
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
         error!(
             router_id = %config.global.router_id,
@@ -2340,6 +2387,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 lock: runtime_config_lock.clone(),
                 config_mutation_gate: None,
                 startup_tables: config.fib_tables.clone(),
+                confirm_journal_path: Some(confirm_journal::journal_path(
+                    &config.runtime_state_dir(),
+                )),
             },
             metrics.clone(),
         );
@@ -2513,6 +2563,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 lock: runtime_config_lock.clone(),
                 config_mutation_gate: Some(config_mutation_gate.clone()),
                 startup_tables: config.fib_tables.clone(),
+                // FIB CRUD never journals; only the transaction controller
+                // above owns commit-confirm durability.
+                confirm_journal_path: None,
             },
         )),
         gnmi_set: Some(config_transaction_controller.gnmi_set_fn()),

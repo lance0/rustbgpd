@@ -2175,6 +2175,13 @@ Confirm handles are operator-chosen correlation IDs. They must be non-empty, at
 most 128 characters, and free of control characters; the CLI validates those
 constraints before reading the candidate file or calling the daemon.
 
+The confirm window is durable: the daemon journals the pre-commit config
+snapshot to `<runtime_state_dir>/commit-confirm-journal.json` before the
+candidate commits, and a restart that finds an unconfirmed journal reverts to
+the journaled config at boot, saving the unconfirmed candidate aside as
+`<config>.unconfirmed`. See `docs/OPERATIONS.md` (config transactions) for the
+boot-revert semantics.
+
 ```console
 $ rbgp fib-table set edge --table-id 1000 --metric 200 \
     --families ipv4_unicast,ipv6_unicast --max-routes 50000
