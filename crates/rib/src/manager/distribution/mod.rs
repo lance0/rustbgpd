@@ -20,7 +20,10 @@ use super::helpers::{
     prefix_family, routes_equal, rtc_routes_equal, should_suppress_ibgp_inner, validate_route_aspa,
     validate_route_rpki, vpn_routes_equal,
 };
-use super::{PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager};
+use super::{
+    PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager,
+    UnicastPrefixPeers,
+};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
@@ -524,6 +527,172 @@ impl RibManager {
         self.distribute_changes(&changed, &affected);
     }
 
+    /// Register `peer` as a unicast announcer for `prefix` in the reverse
+    /// index. MUST be called by every seam that inserts a unicast route
+    /// into an Adj-RIB-In — see the [`UnicastPrefixPeers`] contract.
+    pub(in crate::manager) fn register_unicast_announcer(&mut self, peer: IpAddr, prefix: Prefix) {
+        let peers = self.unicast_prefix_peers.entry(prefix).or_default();
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+
+    /// All Adj-RIB-In candidates for `prefix`, collected via the announcing-
+    /// peers reverse index: only peers indexed for the prefix are probed,
+    /// instead of every peer's Adj-RIB-In (mostly misses at RR scale). A
+    /// stale index entry (peer withdrew / went down and was not yet pruned)
+    /// yields no candidates and is skipped — over-counting is benign.
+    pub(in crate::manager) fn unicast_candidates<'a>(
+        ribs: &'a HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &'a UnicastPrefixPeers,
+        prefix: &'a Prefix,
+    ) -> impl Iterator<Item = &'a crate::route::Route> {
+        prefix_peers
+            .get(prefix)
+            .into_iter()
+            .flatten()
+            .filter_map(move |peer| ribs.get(peer))
+            .flat_map(move |rib| rib.iter_prefix(prefix))
+    }
+
+    /// Announce fast path: full per-prefix rescans only where the
+    /// announce could actually have changed the Loc-RIB best.
+    ///
+    /// All changes in an announce chunk are inserts/replacements in ONE
+    /// peer's Adj-RIB-In (already applied when this runs). Per prefix the
+    /// challenger is the announcing peer's own best candidate (its
+    /// `iter_prefix` minimum under `best_path_cmp`), compared against the
+    /// RIB-RESIDENT current best — not the Loc-RIB clone — so the decision
+    /// is grounded in the same objects a full rescan would compare.
+    /// Enumerated cases, with anything doubtful falling back to the full
+    /// (indexed) rescan:
+    ///
+    /// 1. No current best exists → full rescan (the announce almost
+    ///    certainly installs one; also re-establishes the "a best exists
+    ///    iff any candidate exists" invariant cheaply — few candidates).
+    /// 2. The announcing peer OWNS the current best → full rescan: the
+    ///    best itself may have been replaced (payload change, possibly now
+    ///    losing to another candidate), and same-peer Add-Path candidates
+    ///    are the only ones that can TIE it (`best_path_cmp` is a total
+    ///    order whose final step compares peer addresses), which only the
+    ///    full enumeration + `LocRib::recompute` payload arbitration
+    ///    resolves.
+    /// 3. The current best's own Adj-RIB-In entry is missing → full rescan
+    ///    (defensive; unreachable while every mutation seam recomputes its
+    ///    affected set).
+    /// 4. The challenger strictly LOSES to the rib-resident best → skip
+    ///    entirely. Sound: every candidate of the announcing peer loses
+    ///    (the challenger is their minimum), all other candidates are
+    ///    untouched and still lose to the best, and no payload changed —
+    ///    a full rescan would compute `did_change == false` (no Loc-RIB
+    ///    write, no route event, no BMP emission).
+    /// 5. The challenger strictly BEATS the rib-resident best → install it
+    ///    directly, no rescan: it beats the old minimum, hence every
+    ///    untouched candidate, and its own peer's other candidates by
+    ///    construction (within-peer ties resolve to the same first-in-
+    ///    `iter_prefix`-order object a full scan would pick, cross-peer
+    ///    ties are impossible) — so it IS the full scan's winner.
+    ///    `LocRib::recompute` over the singleton keeps the change
+    ///    detection identical. Only taken with the BMP Loc-RIB tap off:
+    ///    BMP path-marking needs the runner-up, which requires the full
+    ///    candidate enumeration anyway.
+    /// 6. Challenger ties the best → unreachable cross-peer (case 2 covers
+    ///    same-peer) → conservative full rescan.
+    pub(super) fn recompute_best_after_announce(
+        &mut self,
+        peer: IpAddr,
+        affected: &HashSet<Prefix>,
+    ) -> HashSet<Prefix> {
+        use std::cmp::Ordering;
+
+        // Some(true): install the challenger directly (case 5).
+        // Some(false): provably unchanged, skip (case 4).
+        // None: full rescan (cases 1-3, 6).
+        let mut changed = HashSet::new();
+        let mut needs_full = HashSet::new();
+        for prefix in affected {
+            let verdict = 'fast: {
+                let Some(best) = self.loc_rib.get(prefix) else {
+                    break 'fast None; // case 1
+                };
+                if best.peer == peer {
+                    break 'fast None; // case 2
+                }
+                let Some(best_in_rib) = self
+                    .ribs
+                    .get(&best.peer)
+                    .and_then(|rib| rib.get(prefix, best.path_id))
+                else {
+                    break 'fast None; // case 3
+                };
+                let challenger = self.ribs.get(&peer).and_then(|rib| {
+                    rib.iter_prefix(prefix)
+                        .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
+                });
+                let Some(challenger) = challenger else {
+                    break 'fast None; // announce raced a removal: rescan
+                };
+                match crate::best_path::best_path_cmp(challenger, best_in_rib) {
+                    Ordering::Greater => Some(false),                      // case 4
+                    Ordering::Less if self.bmp_tx.is_none() => Some(true), // case 5
+                    _ => None, // case 5 with BMP on, or case 6
+                }
+            };
+            match verdict {
+                Some(false) => {}
+                None => {
+                    needs_full.insert(*prefix);
+                }
+                Some(true) => {
+                    let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
+                    // Re-resolve the winner (the classification borrows
+                    // ended above): the announcing peer's best candidate.
+                    let Some(winner) = self.ribs.get(&peer).and_then(|rib| {
+                        rib.iter_prefix(prefix)
+                            .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
+                    }) else {
+                        needs_full.insert(*prefix);
+                        continue;
+                    };
+                    // Singleton recompute: the winner is provably the full
+                    // scan's minimum, and `LocRib::recompute` keeps the
+                    // payload-change detection identical to the full path.
+                    if self.loc_rib.recompute(*prefix, std::iter::once(winner)) {
+                        changed.insert(*prefix);
+                        self.publish_best_change_events(*prefix, previous_best);
+                    }
+                }
+            }
+        }
+        changed.extend(self.recompute_best(&needs_full));
+        changed
+    }
+
+    /// Withdraw fast path: the withdrawals (already applied to ONE peer's
+    /// Adj-RIB-In) only *removed* candidates — no payloads changed. If the
+    /// current best's own Adj-RIB-In entry still exists, the minimum of a
+    /// shrunken set that still contains the old minimum is unchanged →
+    /// skip. If the best was withdrawn (or no best exists), full rescan.
+    pub(super) fn recompute_best_after_withdraw(
+        &mut self,
+        affected: &HashSet<Prefix>,
+    ) -> HashSet<Prefix> {
+        let needs_full: HashSet<Prefix> = affected
+            .iter()
+            .filter(|prefix| {
+                let Some(best) = self.loc_rib.get(prefix) else {
+                    return true; // no best: rescan (cheap; re-checks invariant)
+                };
+                self.ribs
+                    .get(&best.peer)
+                    .and_then(|rib| rib.get(prefix, best.path_id))
+                    .is_none() // best itself withdrawn → full rescan
+            })
+            .copied()
+            .collect();
+        self.recompute_best(&needs_full)
+    }
+
     /// Recompute Loc-RIB best path for a set of affected prefixes.
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
@@ -531,97 +700,131 @@ impl RibManager {
         let mut changed = HashSet::new();
         for prefix in affected {
             let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
-            let candidates = self.ribs.values().flat_map(|rib| rib.iter_prefix(prefix));
-            let did_change = self.loc_rib.recompute(*prefix, candidates);
+            // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
+            // dropped before the `&mut self` event publication below.
+            let did_change = {
+                // One probe pass over the announcing-peers reverse index does
+                // double duty: collect the candidates AND lazily prune peers
+                // whose Adj-RIB-In no longer holds this prefix (withdraw,
+                // session down, GR/LLGR sweep, ... — removal seams have no
+                // eager hook by design, see the `UnicastPrefixPeers` contract).
+                let mut candidates: smallvec::SmallVec<[&crate::route::Route; 8]> =
+                    smallvec::SmallVec::new();
+                if let Some(peers) = self.unicast_prefix_peers.get_mut(prefix) {
+                    let ribs = &self.ribs;
+                    peers.retain(|peer| {
+                        let before = candidates.len();
+                        if let Some(rib) = ribs.get(peer) {
+                            candidates.extend(rib.iter_prefix(prefix));
+                        }
+                        candidates.len() > before
+                    });
+                    if peers.is_empty() {
+                        self.unicast_prefix_peers.remove(prefix);
+                    }
+                }
+                let did_change = self.loc_rib.recompute(*prefix, candidates.iter().copied());
+                if did_change {
+                    // RFC 9069 Loc-RIB tap: any change to the best is a
+                    // Route Monitoring announce of the new best (BGP
+                    // implicit withdraw covers replacement); a best that
+                    // disappeared is an explicit withdraw. Timestamp = the
+                    // Loc-RIB install time, i.e. now. Best-unchanged
+                    // prefixes never reach this branch.
+                    if self.bmp_tx.is_some() {
+                        let (pdu, path_status) = match self.loc_rib.get(prefix) {
+                            Some(best) => {
+                                // Path Marking reason = the decisive step
+                                // versus the runner-up (the closest
+                                // competitor), re-derived here from the
+                                // explain ladder — the hot-path comparator
+                                // records nothing, and a sole candidate
+                                // carries no reason (nothing was compared).
+                                let runner_up = candidates
+                                    .iter()
+                                    .copied()
+                                    .filter(|c| !(c.peer == best.peer && c.path_id == best.path_id))
+                                    .min_by(|a, b| crate::best_path::best_path_cmp(a, b));
+                                let reason = runner_up.map(|r| {
+                                    crate::best_path::best_path_cmp_with_reason(best, r).1
+                                });
+                                let status = crate::bmp_sync::loc_rib_path_status(
+                                    best.is_stale || best.is_llgr_stale,
+                                    reason,
+                                );
+                                (
+                                    crate::bmp_sync::synthesize_unicast_announce(best),
+                                    Some(status),
+                                )
+                            }
+                            None => (crate::bmp_sync::synthesize_unicast_withdraw(*prefix), None),
+                        };
+                        self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
+                    }
+                }
+                did_change
+            };
             if did_change {
                 changed.insert(*prefix);
-                let current_best = self.loc_rib.get(prefix);
-                // RFC 9069 Loc-RIB tap: any change to the best is a
-                // Route Monitoring announce of the new best (BGP
-                // implicit withdraw covers replacement); a best that
-                // disappeared is an explicit withdraw. Timestamp = the
-                // Loc-RIB install time, i.e. now. Best-unchanged
-                // prefixes never reach this branch.
-                if self.bmp_tx.is_some() {
-                    let (pdu, path_status) = match current_best {
-                        Some(best) => {
-                            // Path Marking reason = the decisive step
-                            // versus the runner-up (the closest
-                            // competitor), re-derived here from the
-                            // explain ladder — the hot-path comparator
-                            // records nothing, and a sole candidate
-                            // carries no reason (nothing was compared).
-                            let runner_up = self
-                                .ribs
-                                .values()
-                                .flat_map(|rib| rib.iter_prefix(prefix))
-                                .filter(|c| !(c.peer == best.peer && c.path_id == best.path_id))
-                                .min_by(|a, b| crate::best_path::best_path_cmp(a, b));
-                            let reason = runner_up
-                                .map(|r| crate::best_path::best_path_cmp_with_reason(best, r).1);
-                            let status = crate::bmp_sync::loc_rib_path_status(
-                                best.is_stale || best.is_llgr_stale,
-                                reason,
-                            );
-                            (
-                                crate::bmp_sync::synthesize_unicast_announce(best),
-                                Some(status),
-                            )
-                        }
-                        None => (crate::bmp_sync::synthesize_unicast_withdraw(*prefix), None),
-                    };
-                    self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
-                }
-                match (previous_best, current_best) {
-                    (None, Some(best)) => {
-                        debug!(%prefix, peer = %best.peer, "best path added");
-                        self.publish_route_event(RouteEvent {
-                            event_id: 0,
-                            event_type: RouteEventType::Added,
-                            prefix: *prefix,
-                            peer: Some(best.peer),
-                            previous_peer: None,
-                            target_peer: None,
-                            timestamp: crate::event::unix_timestamp_now(),
-                            path_id: best.path_id,
-                            reason: String::new(),
-                        });
-                    }
-                    (Some((old_peer, old_path_id)), None) => {
-                        debug!(%prefix, "best path removed");
-                        self.publish_route_event(RouteEvent {
-                            event_id: 0,
-                            event_type: RouteEventType::Withdrawn,
-                            prefix: *prefix,
-                            peer: None,
-                            previous_peer: Some(old_peer),
-                            target_peer: None,
-                            timestamp: crate::event::unix_timestamp_now(),
-                            path_id: old_path_id,
-                            reason: String::new(),
-                        });
-                    }
-                    (Some((old_peer, _old_path_id)), Some(best)) => {
-                        debug!(%prefix, peer = %best.peer, "best path changed");
-                        self.publish_route_event(RouteEvent {
-                            event_id: 0,
-                            event_type: RouteEventType::BestChanged,
-                            prefix: *prefix,
-                            peer: Some(best.peer),
-                            previous_peer: Some(old_peer),
-                            target_peer: None,
-                            timestamp: crate::event::unix_timestamp_now(),
-                            path_id: best.path_id,
-                            reason: String::new(),
-                        });
-                    }
-                    (None, None) => {}
-                }
+                self.publish_best_change_events(*prefix, previous_best);
             }
         }
         self.metrics
             .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));
         changed
+    }
+
+    /// Emit the route event for a Loc-RIB best change already applied
+    /// (added / withdrawn / replaced), diffing `previous_best` against the
+    /// freshly installed state. Shared by the full rescan and the announce
+    /// fast path's direct install.
+    fn publish_best_change_events(&mut self, prefix: Prefix, previous_best: Option<(IpAddr, u32)>) {
+        let current_best = self.loc_rib.get(&prefix).map(|r| (r.peer, r.path_id));
+        match (previous_best, current_best) {
+            (None, Some((peer, path_id))) => {
+                debug!(%prefix, %peer, "best path added");
+                self.publish_route_event(RouteEvent {
+                    event_id: 0,
+                    event_type: RouteEventType::Added,
+                    prefix,
+                    peer: Some(peer),
+                    previous_peer: None,
+                    target_peer: None,
+                    timestamp: crate::event::unix_timestamp_now(),
+                    path_id,
+                    reason: String::new(),
+                });
+            }
+            (Some((old_peer, old_path_id)), None) => {
+                debug!(%prefix, "best path removed");
+                self.publish_route_event(RouteEvent {
+                    event_id: 0,
+                    event_type: RouteEventType::Withdrawn,
+                    prefix,
+                    peer: None,
+                    previous_peer: Some(old_peer),
+                    target_peer: None,
+                    timestamp: crate::event::unix_timestamp_now(),
+                    path_id: old_path_id,
+                    reason: String::new(),
+                });
+            }
+            (Some((old_peer, _old_path_id)), Some((peer, path_id))) => {
+                debug!(%prefix, %peer, "best path changed");
+                self.publish_route_event(RouteEvent {
+                    event_id: 0,
+                    event_type: RouteEventType::BestChanged,
+                    prefix,
+                    peer: Some(peer),
+                    previous_peer: Some(old_peer),
+                    target_peer: None,
+                    timestamp: crate::event::unix_timestamp_now(),
+                    path_id,
+                    reason: String::new(),
+                });
+            }
+            (None, None) => {}
+        }
     }
 
     /// Distribute Loc-RIB changes to all registered outbound peers.
@@ -923,6 +1126,7 @@ impl RibManager {
                     let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
+                        &self.unicast_prefix_peers,
                         rib_out,
                         &self.peer_is_rr_client,
                         prefix,
@@ -954,6 +1158,7 @@ impl RibManager {
                     let mut policy_filtered = Vec::new();
                     Self::distribute_orr_best_prefix(
                         &self.ribs,
+                        &self.unicast_prefix_peers,
                         rib_out,
                         &self.peer_is_rr_client,
                         orr_topology,

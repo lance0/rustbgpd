@@ -2,17 +2,25 @@ use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, VrpTable, debug, evaluate_chain_with_attribution, gauge_val, prefix_family,
-    record_export_policy_eval, route_type, route_type_label, route_type_message, routes_equal,
-    should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
+    RouteContext, Safi, UnicastPrefixPeers, VrpTable, debug, evaluate_chain_with_attribution,
+    gauge_val, prefix_family, record_export_policy_eval, route_type, route_type_label,
+    route_type_message, routes_equal, should_suppress_ibgp_inner, validate_route_aspa,
+    validate_route_rpki,
 };
 
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
 /// ORR: every Adj-RIB-In entry that survives split horizon and the
 /// iBGP / RFC 4456 reflection rules. Shared by the ORR distribution and
-/// explain paths so both rank the exact same set.
+/// explain paths so both rank the exact same set. Collection goes through
+/// the announcing-peers reverse index so only peers that actually hold the
+/// prefix are probed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate collection mirrors the per-target reflection filter inputs"
+)]
 fn orr_candidates<'a>(
     ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<IpAddr, bool>,
     prefix: &'a Prefix,
     target_peer: IpAddr,
@@ -20,22 +28,20 @@ fn orr_candidates<'a>(
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
 ) -> impl Iterator<Item = &'a crate::route::Route> {
-    ribs.values()
-        .flat_map(move |rib| rib.iter_prefix(prefix))
-        .filter(move |route| {
-            // Split horizon: exclude routes from the target peer
-            if route.peer == target_peer {
-                return false;
-            }
-            // iBGP split-horizon / RFC 4456 reflection
-            !should_suppress_ibgp_inner(
-                route,
-                target_is_ebgp,
-                target_is_rr_client,
-                cluster_id,
-                peer_is_rr_client,
-            )
-        })
+    RibManager::unicast_candidates(ribs, prefix_peers, prefix).filter(move |route| {
+        // Split horizon: exclude routes from the target peer
+        if route.peer == target_peer {
+            return false;
+        }
+        // iBGP split-horizon / RFC 4456 reflection
+        !should_suppress_ibgp_inner(
+            route,
+            target_is_ebgp,
+            target_is_rr_client,
+            cluster_id,
+            peer_is_rr_client,
+        )
+    })
 }
 
 impl RibManager {
@@ -47,6 +53,7 @@ impl RibManager {
     pub(in crate::manager) fn explain_single_best_prefix(
         loc_rib: &LocRib,
         ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: Prefix,
         target_peer: IpAddr,
@@ -88,6 +95,7 @@ impl RibManager {
             explain.orr_vantage = Some(vantage);
             let mut ranked: Vec<&crate::route::Route> = orr_candidates(
                 ribs,
+                prefix_peers,
                 peer_is_rr_client,
                 &prefix,
                 target_peer,
@@ -366,7 +374,9 @@ impl RibManager {
             // partial-progress queries stay live mid-batch — but accumulate
             // the distribution and flush it once when the batch drains, so a
             // multi-chunk flood coalesces into one outbound pass per peer.
-            let changed = self.recompute_best(&affected);
+            // The withdraw fast path skips prefixes whose best provably
+            // survived (only candidates were removed).
+            let changed = self.recompute_best_after_withdraw(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
             if let Some(rib) = self.ribs.get_mut(&peer) {
@@ -430,11 +440,19 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
+            // Every inserted prefix registers in the announcing-peers
+            // reverse index BEFORE recompute — the index must never
+            // under-count (see the `UnicastPrefixPeers` contract).
+            for prefix in &affected {
+                self.register_unicast_announcer(peer, *prefix);
+            }
             // Recompute Loc-RIB now — best-path, route events, and
             // partial-progress queries stay live mid-batch — but accumulate
             // the distribution and flush it once when the batch drains, so a
             // multi-chunk flood coalesces into one outbound pass per peer.
-            let changed = self.recompute_best(&affected);
+            // The announce fast path skips prefixes where every candidate
+            // of this peer provably loses to the current best.
+            let changed = self.recompute_best_after_announce(peer, &affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
             if any_replaced && let Some(rib) = self.ribs.get_mut(&peer) {
@@ -455,8 +473,10 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let replaced = rib.insert(route);
         debug!(%prefix, "injected local route");
+        let rib_len = rib.len();
+        self.register_unicast_announcer(LOCAL_PEER, prefix);
         self.metrics
-            .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
+            .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
 
         let mut affected = HashSet::new();
         affected.insert(prefix);
@@ -510,6 +530,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn distribute_multipath_prefix(
         ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: &Prefix,
@@ -559,40 +580,40 @@ impl RibManager {
             return;
         }
 
-        // Collect all candidates across all Adj-RIB-In entries
-        let mut candidates: Vec<&crate::route::Route> = ribs
-            .values()
-            .flat_map(|rib| rib.iter_prefix(prefix))
-            .filter(|route| {
-                // Split horizon: exclude routes from the target peer
-                if route.peer == target_peer {
-                    return false;
-                }
-                // iBGP split-horizon / RFC 4456 reflection
-                if should_suppress_ibgp_inner(
-                    route,
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    peer_is_rr_client,
-                ) {
-                    return false;
-                }
-                // RFC 9494 §4.4: each staged candidate is gated
-                // individually — a stale candidate must not occupy an
-                // Add-Path rank toward a non-LLGR eBGP peer.
-                if super::llgr_stale_export_suppressed(
-                    route.is_llgr_stale,
-                    route.communities(),
-                    family,
-                    target_is_ebgp,
-                    llgr,
-                ) {
-                    return false;
-                }
-                true
-            })
-            .collect();
+        // Collect all candidates across the announcing peers' Adj-RIB-Ins
+        // (reverse-index probe, not an all-peers scan).
+        let mut candidates: Vec<&crate::route::Route> =
+            Self::unicast_candidates(ribs, prefix_peers, prefix)
+                .filter(|route| {
+                    // Split horizon: exclude routes from the target peer
+                    if route.peer == target_peer {
+                        return false;
+                    }
+                    // iBGP split-horizon / RFC 4456 reflection
+                    if should_suppress_ibgp_inner(
+                        route,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        peer_is_rr_client,
+                    ) {
+                        return false;
+                    }
+                    // RFC 9494 §4.4: each staged candidate is gated
+                    // individually — a stale candidate must not occupy an
+                    // Add-Path rank toward a non-LLGR eBGP peer.
+                    if super::llgr_stale_export_suppressed(
+                        route.is_llgr_stale,
+                        route.communities(),
+                        family,
+                        target_is_ebgp,
+                        llgr,
+                    ) {
+                        return false;
+                    }
+                    true
+                })
+                .collect();
 
         // Sort by best-path preference (best first). A target bound to a
         // resolved ORR vantage ranks by the vantage's interior cost to
@@ -871,10 +892,12 @@ impl RibManager {
     /// cache.
     #[expect(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_orr_best_prefix(
         ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         orr_topology: &crate::orr::OrrTopology,
@@ -928,6 +951,7 @@ impl RibManager {
         // so explain ranks exactly what distribution ranks.
         let candidates = orr_candidates(
             ribs,
+            prefix_peers,
             peer_is_rr_client,
             prefix,
             target_peer,
