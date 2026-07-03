@@ -374,8 +374,35 @@ pub(super) struct LiveSessionRecord {
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
-/// Synthesized messages per RFC 9069 Loc-RIB dump chunk.
+/// Synthesized messages per RFC 9069 Loc-RIB dump chunk — the
+/// per-request allocation bound of the resumable dump (the final chunk
+/// additionally carries one End-of-RIB marker per streamed family).
 const BMP_DUMP_CHUNK_SIZE: usize = 256;
+
+/// The `n` smallest keys strictly greater than `after`, ascending,
+/// selected in one pass over an unordered key iterator with a max-heap
+/// capped at `n` — the mutation-robust cursor step of the resumable
+/// BMP Loc-RIB dump. Returns fewer than `n` keys iff the walk past
+/// `after` is exhausted.
+fn smallest_keys_after<K: Ord + Copy>(
+    keys: impl Iterator<Item = K>,
+    after: Option<K>,
+    n: usize,
+) -> Vec<K> {
+    let mut heap = std::collections::BinaryHeap::with_capacity(n + 1);
+    for key in keys {
+        if after.is_some_and(|a| key <= a) {
+            continue;
+        }
+        if heap.len() < n {
+            heap.push(key);
+        } else if heap.peek().is_some_and(|&top| key < top) {
+            heap.pop();
+            heap.push(key);
+        }
+    }
+    heap.into_sorted_vec()
+}
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
@@ -1175,26 +1202,43 @@ impl RibManager {
             }
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
-            RibUpdate::QueryBmpLocRibDump { reply } => self.handle_query_bmp_loc_rib_dump(reply),
+            RibUpdate::QueryBmpLocRibDump { cursor, reply } => {
+                self.handle_query_bmp_loc_rib_dump(cursor, reply);
+            }
             RibUpdate::QueryBmpLocRibStats { reply } => {
                 self.handle_query_bmp_loc_rib_stats(reply);
             }
         }
     }
 
-    /// RFC 9069 Loc-RIB table dump: synthesize one UPDATE PDU per
-    /// Loc-RIB best route (unicast + VPN) with its install-time
-    /// timestamp, append one End-of-RIB PDU per streamed family, and
-    /// stream the lot back in bounded chunks from a spawned drain task
-    /// — the RIB task never awaits the (slow-collector-paced) reply
-    /// channel.
+    /// One bounded chunk of the RFC 9069 Loc-RIB table dump: synthesize
+    /// at most [`BMP_DUMP_CHUNK_SIZE`] UPDATE PDUs (unicast bests, then
+    /// VPN bests) resuming after `cursor`, and reply with the next
+    /// resume position. The BMP dump forwarder drives the loop, so the
+    /// full table is never materialized at once and every other RIB
+    /// command interleaves between chunk requests.
     ///
-    /// The whole table is synthesized up front in this handler; that is
-    /// the same O(table) burst the MRT snapshot query already takes.
-    // ponytail: full-table synthesis burst; switch to resumable per-chunk
-    // queries if dump CPU/memory at extreme scale ever bites.
-    fn handle_query_bmp_loc_rib_dump(&self, reply: mpsc::Sender<rustbgpd_bmp::BmpDumpChunk>) {
+    /// Cursor semantics: each chunk is "the `N` smallest keys strictly
+    /// greater than the cursor" in the key's total order, selected in
+    /// one pass over the unordered Loc-RIB map. That makes the cursor
+    /// robust to mutations between chunks — a route that survives the
+    /// dump is emitted exactly once, a removed route simply stops
+    /// matching, and an insertion behind the cursor reaches the
+    /// collector via the live stream (the accepted dump-vs-live race,
+    /// ADR-0097). A phase yielding fewer than `N` keys is exhausted:
+    /// unicast hands over to VPN, VPN closes the dump with one
+    /// End-of-RIB per streamed family (dump→EoR→live ordering).
+    // ponytail: each chunk re-scans the family's key set (O(table) per
+    // chunk, O(table²/N) per dump) — swap the scan for a sorted index
+    // or key snapshot if dump CPU at DFZ scale ever bites; allocation
+    // is already bounded per chunk.
+    fn handle_query_bmp_loc_rib_dump(
+        &self,
+        cursor: Option<rustbgpd_bmp::BmpDumpCursor>,
+        reply: tokio::sync::oneshot::Sender<rustbgpd_bmp::BmpDumpChunk>,
+    ) {
         use crate::bmp_sync;
+        use rustbgpd_bmp::BmpDumpCursor as Cursor;
         let now = std::time::SystemTime::now();
         // Install time ≈ receive wall time, recovered from the monotonic
         // receive instant (RFC 9069 per-peer header timestamp).
@@ -1208,45 +1252,78 @@ impl RibManager {
             bytes::Bytes,
             std::time::SystemTime,
             Option<rustbgpd_bmp::BmpPathStatus>,
-        )> = Vec::with_capacity(
-            self.loc_rib.len() + self.loc_rib.vpn_len() + bmp_sync::LOC_RIB_FAMILIES.len(),
-        );
-        for route in self.loc_rib.iter() {
-            if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
-                let status =
-                    bmp_sync::loc_rib_path_status(route.is_stale || route.is_llgr_stale, None);
-                messages.push((pdu, install_time(route.received_at), Some(status)));
-            }
-        }
-        for route in self.loc_rib.iter_vpn() {
-            if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
-                let status =
-                    bmp_sync::loc_rib_path_status(route.is_stale || route.is_llgr_stale, None);
-                messages.push((pdu, install_time(route.received_at), Some(status)));
-            }
-        }
-        // End-of-RIB per family closes the dump; live emission continues
-        // seamlessly after (dump→EoR→live, with the standard BMP overlap
-        // race accepted). EoR markers announce no path — nothing to mark.
-        for (afi, safi) in bmp_sync::LOC_RIB_FAMILIES {
-            if let Some(pdu) = bmp_sync::synthesize_end_of_rib(afi, safi) {
-                messages.push((pdu, now, None));
-            }
-        }
-        tokio::spawn(async move {
-            let mut iter = messages.into_iter().peekable();
-            while iter.peek().is_some() {
-                let chunk: Vec<_> = iter.by_ref().take(BMP_DUMP_CHUNK_SIZE).collect();
-                if reply
-                    .send(rustbgpd_bmp::BmpDumpChunk { messages: chunk })
-                    .await
-                    .is_err()
-                {
-                    debug!("BMP Loc-RIB dump consumer dropped, aborting dump");
-                    return;
+        )> = Vec::with_capacity(BMP_DUMP_CHUNK_SIZE);
+        let next = match cursor {
+            None | Some(Cursor::Unicast(_)) => {
+                let after = match cursor {
+                    Some(Cursor::Unicast(prefix)) => Some(prefix),
+                    _ => None,
+                };
+                let keys = smallest_keys_after(
+                    self.loc_rib.iter().map(|r| r.prefix),
+                    after,
+                    BMP_DUMP_CHUNK_SIZE,
+                );
+                for key in &keys {
+                    let Some(route) = self.loc_rib.get(key) else {
+                        continue;
+                    };
+                    if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
+                        let status = bmp_sync::loc_rib_path_status(
+                            route.is_stale || route.is_llgr_stale,
+                            None,
+                        );
+                        messages.push((pdu, install_time(route.received_at), Some(status)));
+                    }
+                }
+                match keys.last() {
+                    Some(&last) if keys.len() == BMP_DUMP_CHUNK_SIZE => Some(Cursor::Unicast(last)),
+                    _ => Some(Cursor::Vpn(None)),
                 }
             }
-        });
+            Some(Cursor::Vpn(after)) => {
+                let keys = smallest_keys_after(
+                    self.loc_rib.iter_vpn().map(|r| r.nlri.key()),
+                    after,
+                    BMP_DUMP_CHUNK_SIZE,
+                );
+                for key in &keys {
+                    let Some(route) = self.loc_rib.get_vpn(key) else {
+                        continue;
+                    };
+                    if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
+                        let status = bmp_sync::loc_rib_path_status(
+                            route.is_stale || route.is_llgr_stale,
+                            None,
+                        );
+                        messages.push((pdu, install_time(route.received_at), Some(status)));
+                    }
+                }
+                match keys.last() {
+                    Some(&last) if keys.len() == BMP_DUMP_CHUNK_SIZE => {
+                        Some(Cursor::Vpn(Some(last)))
+                    }
+                    _ => {
+                        // End-of-RIB per family closes the dump; live
+                        // emission continues seamlessly after (dump→EoR→
+                        // live). EoR markers announce no path — nothing
+                        // to mark.
+                        for (afi, safi) in bmp_sync::LOC_RIB_FAMILIES {
+                            if let Some(pdu) = bmp_sync::synthesize_end_of_rib(afi, safi) {
+                                messages.push((pdu, now, None));
+                            }
+                        }
+                        None
+                    }
+                }
+            }
+        };
+        if reply
+            .send(rustbgpd_bmp::BmpDumpChunk { messages, next })
+            .is_err()
+        {
+            debug!("BMP Loc-RIB dump consumer dropped, aborting dump");
+        }
     }
 
     /// Per-AFI/SAFI Loc-RIB route counts for the RFC 9069 BMP stats

@@ -1376,6 +1376,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 while let Some(request) = dump_rx.recv().await {
                     if dump_rib_tx
                         .send(RibUpdate::QueryBmpLocRibDump {
+                            cursor: request.cursor,
                             reply: request.reply,
                         })
                         .await

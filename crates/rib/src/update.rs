@@ -899,16 +899,20 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
-    /// RFC 9069 Loc-RIB table dump for a (re)connected BMP collector:
-    /// synthesize one UPDATE PDU per Loc-RIB best route (unicast + VPN)
-    /// with its install time, ending with an End-of-RIB PDU per dumped
-    /// family, streamed back in bounded chunks. The synthesis runs in
-    /// the handler; the chunk sends are driven by a spawned drain task
-    /// so a slow collector never blocks the RIB task.
+    /// One bounded chunk of an RFC 9069 Loc-RIB table dump for a
+    /// (re)connected BMP collector: synthesize at most one chunk of
+    /// UPDATE PDUs (unicast + VPN bests, resumed from `cursor`) with
+    /// their install times, ending with an End-of-RIB PDU per dumped
+    /// family on the final chunk. The BMP dump forwarder drives the
+    /// chunk loop, so the full table is never materialized at once and
+    /// live route processing interleaves between chunks.
     QueryBmpLocRibDump {
-        /// Bounded chunk reply channel (from the BMP manager's
-        /// `BmpDumpRequest`). Dropped when the dump completes.
-        reply: mpsc::Sender<rustbgpd_bmp::BmpDumpChunk>,
+        /// Resume position from the previous chunk's reply; `None`
+        /// starts a fresh dump.
+        cursor: Option<rustbgpd_bmp::BmpDumpCursor>,
+        /// Reply channel for this chunk (from the BMP manager's
+        /// `BmpDumpRequest`).
+        reply: oneshot::Sender<rustbgpd_bmp::BmpDumpChunk>,
     },
     /// Query per-AFI/SAFI Loc-RIB route counts for the RFC 9069 BMP
     /// statistics report (stat type 10 entries; type 8 is their sum).
