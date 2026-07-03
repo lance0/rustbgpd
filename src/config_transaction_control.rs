@@ -332,17 +332,50 @@ impl ConfigTransactionController {
                 "failed to serialize confirmed transaction rollback snapshot: {error}"
             ))
         })?;
-        let mut response = apply_config_transaction_locked(&self.deps, request).await?;
-        if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
-            return Ok(response);
-        }
 
         let timeout = Duration::from_secs(u64::from(confirmed.timeout_seconds));
-        let deadline = tokio::time::Instant::now() + timeout;
         let deadline_unix_seconds = SystemTime::now()
             .checked_add(timeout)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_secs());
+
+        // Durable commit-confirm (ADR-0076 Decision 6): journal the revert
+        // state BEFORE the candidate commits, so a crash at any later point
+        // inside the confirm window is repaired by the boot-time revert. If
+        // the journal cannot be written, refuse the confirmed apply up front
+        // (nothing has committed yet) rather than run an unprotected window.
+        if let Some(journal_path) = &self.deps.confirm_journal_path {
+            crate::confirm_journal::write(
+                journal_path,
+                &crate::confirm_journal::ConfirmJournal {
+                    confirm_id: confirmed.confirm_id.clone(),
+                    deadline_unix_seconds,
+                    rollback_toml: rollback_toml.clone(),
+                },
+            )
+            .map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "refusing confirmed apply: failed to persist the commit-confirm revert journal {}: {error}",
+                    journal_path.display()
+                ))
+            })?;
+        }
+
+        let mut response = match apply_config_transaction_locked(&self.deps, request).await {
+            Ok(response) => response,
+            Err(error) => {
+                // Nothing committed — a stale journal would only trigger a
+                // harmless same-content boot revert, but clean it up anyway.
+                self.remove_confirm_journal_best_effort("confirmed apply failed");
+                return Err(error);
+            }
+        };
+        if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
+            self.remove_confirm_journal_best_effort("confirmed apply did not commit");
+            return Ok(response);
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
         let pending = PendingConfirmedTransaction {
             confirm_id: confirmed.confirm_id.clone(),
             rollback_toml,
@@ -386,6 +419,21 @@ impl ConfigTransactionController {
         &self,
         confirm_id: String,
     ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
+        // Validate the handle against the pending transaction before touching
+        // the journal, then delete the journal BEFORE clearing the pending
+        // state: if deletion fails the confirm must fail while the fence and
+        // timer stay armed — a leftover journal would boot-revert a config
+        // the operator explicitly confirmed.
+        let _ = self.matching_pending(&confirm_id).await?;
+        if let Some(journal_path) = &self.deps.confirm_journal_path {
+            crate::confirm_journal::remove(journal_path).map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "confirm not recorded: failed to remove the commit-confirm revert journal {}: {error}; \
+                     the transaction is still pending and will roll back on timeout",
+                    journal_path.display()
+                ))
+            })?;
+        }
         let pending = self.take_matching_pending(&confirm_id).await?;
         let record = ConfirmedTransactionRecord {
             confirm_id: pending.confirm_id,
@@ -468,6 +516,9 @@ impl ConfigTransactionController {
         confirm_id: String,
         timeout_seconds: u32,
     ) -> Result<(), ConfigTransactionApplyError> {
+        // The revert journal is NOT rewritten here: its deadline field is
+        // informational only — boot revert fires on any unconfirmed journal
+        // regardless of remaining time (see `confirm_journal` module docs).
         let timeout = Duration::from_secs(u64::from(timeout_seconds));
         let deadline = tokio::time::Instant::now() + timeout;
         let deadline_unix_seconds = SystemTime::now()
@@ -768,6 +819,24 @@ impl ConfigTransactionController {
         }
     }
 
+    /// Best-effort journal removal for paths where a leftover journal is
+    /// harmless-but-noisy rather than dangerous: after a successful abort or
+    /// auto-revert rollback the persisted config already equals the journaled
+    /// snapshot, so a boot revert from a stale journal restores identical
+    /// content. Log loudly so the operator can delete it.
+    fn remove_confirm_journal_best_effort(&self, context: &'static str) {
+        if let Some(journal_path) = &self.deps.confirm_journal_path
+            && let Err(error) = crate::confirm_journal::remove(journal_path)
+        {
+            error!(
+                journal = %journal_path.display(),
+                error = %error,
+                context,
+                "failed to remove the commit-confirm revert journal; delete it manually or the next daemon boot will re-run the revert"
+            );
+        }
+    }
+
     async fn remove_pending_after_rollback(
         &self,
         confirm_id: &str,
@@ -776,6 +845,18 @@ impl ConfigTransactionController {
         human_text: &'static str,
         abort_timer: bool,
     ) {
+        // Journal disposition mirrors the rollback outcome: a successful
+        // rollback re-persisted the pre-transaction config, so the journal is
+        // consumed. A FAILED rollback leaves the unconfirmed candidate
+        // running AND persisted — the journal is deliberately retained so the
+        // next daemon boot repairs what the running process could not.
+        if matches!(
+            status,
+            proto::ConfigTransactionConfirmationStatus::Aborted
+                | proto::ConfigTransactionConfirmationStatus::AutoReverted
+        ) {
+            self.remove_confirm_journal_best_effort("post-rollback cleanup");
+        }
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending.take() else {
             return;
@@ -3346,6 +3427,7 @@ peer_group = "{group}"
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,
             startup_tables,
+            confirm_journal_path: None,
         }
     }
 
@@ -3523,6 +3605,18 @@ remote_asn = 65010
         Arc<Mutex<String>>,
         tokio::task::JoinHandle<()>,
     ) {
+        confirmed_dynamic_controller_with_journal(previous_toml, candidate_toml, None).await
+    }
+
+    async fn confirmed_dynamic_controller_with_journal(
+        previous_toml: String,
+        candidate_toml: String,
+        confirm_journal_path: Option<std::path::PathBuf>,
+    ) -> (
+        ConfigTransactionController,
+        Arc<Mutex<String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let snapshot_toml = Arc::new(Mutex::new(previous_toml));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
@@ -3538,7 +3632,10 @@ remote_asn = 65010
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
         let controller = ConfigTransactionController::new(
-            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            FibTableControlDeps {
+                confirm_journal_path,
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
             BgpMetrics::new(),
         );
 
@@ -3576,6 +3673,238 @@ remote_asn = 65010
             Config::load_toml_with_diagnostics(expected_toml, "expected runtime snapshot")
                 .expect("expected snapshot must parse");
         assert_eq!(snapshot, expected);
+    }
+
+    fn dynamic_candidate_toml() -> String {
+        base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        )
+    }
+
+    fn read_journal(path: &std::path::Path) -> crate::confirm_journal::ConfirmJournal {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("journal must be readable"))
+            .expect("journal must parse")
+    }
+
+    #[tokio::test]
+    async fn confirmed_apply_writes_revert_journal_and_confirm_consumes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let (controller, _snapshot_toml, ack_task) = confirmed_dynamic_controller_with_journal(
+            previous_toml.clone(),
+            dynamic_candidate_toml(),
+            Some(journal_path.clone()),
+        )
+        .await;
+
+        // Pending window: the journal holds the pre-commit snapshot.
+        let journal = read_journal(&journal_path);
+        assert_eq!(journal.confirm_id, "deploy-1");
+        assert!(journal.deadline_unix_seconds > 0);
+        assert_snapshot_matches_config(&journal.rollback_toml, &previous_toml);
+
+        controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("confirm must succeed");
+        assert!(
+            !journal_path.exists(),
+            "confirm must consume the revert journal"
+        );
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_abort_consumes_revert_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let (controller, _snapshot_toml, ack_task) = confirmed_dynamic_controller_with_journal(
+            base_toml(""),
+            dynamic_candidate_toml(),
+            Some(journal_path.clone()),
+        )
+        .await;
+        assert!(journal_path.exists());
+
+        controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("abort must succeed");
+        assert!(
+            !journal_path.exists(),
+            "successful abort rollback must consume the revert journal"
+        );
+        ack_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_timeout_auto_revert_consumes_revert_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-1",
+                1,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+        assert!(journal_path.exists());
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let status = controller.status().await.expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+        );
+        assert!(
+            !journal_path.exists(),
+            "successful timeout auto-revert must consume the revert journal"
+        );
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_abort_rollback_retains_revert_journal_for_boot_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        // First stage (confirmed apply) succeeds; second (abort rollback) fails,
+        // leaving the unconfirmed candidate running.
+        let stage_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err(StageConfigSnapshotError::InvalidCandidate(
+                "stage rollback failed".to_string(),
+            )),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_stage_results(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+            stage_results,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+
+        controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect_err("abort rollback failure must be reported");
+        assert!(
+            journal_path.exists(),
+            "a failed rollback must retain the journal so the next boot repairs it"
+        );
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_confirmed_apply_leaves_no_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let snapshot_toml = Arc::new(Mutex::new(base_toml("")));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(RuntimeConfigTransactionStatus::Rejected, Vec::new()),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        let response = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect("apply must return a rejected plan, not an error");
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Rejected as i32
+        );
+        assert!(
+            !journal_path.exists(),
+            "a rejected confirmed apply must not leave a journal behind"
+        );
+        ack_task.abort();
     }
 
     #[tokio::test]

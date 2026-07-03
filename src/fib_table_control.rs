@@ -67,6 +67,11 @@ pub struct FibTableControlDeps {
     /// static while the reconciler is absent (mutations are rejected and SIGHUP
     /// can't hot-apply), so it stays accurate.
     pub startup_tables: Vec<FibTableConfig>,
+    /// Commit-confirm revert journal path (ADR-0076 Decision 6 durability):
+    /// `<runtime_state_dir>/commit-confirm-journal.json`. Only the config
+    /// transaction controller uses it; `None` disables journaling (unit tests
+    /// and non-transaction consumers of these deps).
+    pub confirm_journal_path: Option<std::path::PathBuf>,
 }
 
 /// Build the `FibTableControlFn` the RIB service calls for FIB-table CRUD.
@@ -567,6 +572,7 @@ mod tests {
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
+            confirm_journal_path: None,
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
             .await
@@ -635,6 +641,7 @@ mod tests {
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
+            confirm_journal_path: None,
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
             .await

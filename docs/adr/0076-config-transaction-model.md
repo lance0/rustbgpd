@@ -130,10 +130,11 @@ section executors behind that public contract.
    later ad hoc config write. Pending confirmed state is not persisted across
    daemon restart; after restart, clients must re-plan and re-apply. The confirm
    timer is
-   in-memory, so a restart during the confirm window leaves the already-committed
-   candidate live (effectively confirmed-by-restart) and the auto-revert never
-   fires: the timer is a safety net against a bad-but-running config, not against
-   a daemon crash.
+   in-memory, so a restart during the confirm window originally left the
+   already-committed candidate live (effectively confirmed-by-restart) and the
+   auto-revert never fired. *Superseded by the 2026-07-03 amendment below: a
+   restart inside the confirm window now reverts at boot via an on-disk
+   journal.*
 7. **gNMI Set is an adapter, not a second commit model.** gNMI mutation must
    map to this transaction model rather than invent a parallel commit path. The
    gNMI service can normalize Set requests, redact Set audit summaries, and
@@ -205,3 +206,50 @@ section executors behind that public contract.
 See also ADR-0043 (config persistence and SIGHUP reload), ADR-0061 (unicast FIB
 integration), ADR-0064 (gRPC authorization), ADR-0074 (FIB-table CRUD tier), and
 `docs/GNMI.md` for the current gNMI Set supported-path matrix.
+
+## Amendment (2026-07-03): durable commit-confirm — boot-time revert journal
+
+Decision 6 originally held the confirm timer and the pre-commit rollback
+snapshot in memory only, so a daemon restart inside the confirm window made the
+unconfirmed candidate permanent (confirmed-by-restart) — the exact config a
+commit-confirmed deploy exists to protect against (one bad enough to take the
+daemon down) was the one the mechanism could not revert. That hole is closed:
+
+- **Journal at commit.** Before the confirmed candidate commits, the daemon
+  atomically persists (write temp file, fsync, rename, fsync directory) a
+  revert journal — `confirm_id`, deadline, and the full pre-commit config TOML
+  snapshot — to `<runtime_state_dir>/commit-confirm-journal.json`. If the
+  journal cannot be written, the confirmed apply is refused up front; a
+  confirm window never runs unprotected. Confirm deletes the journal (and the
+  confirm fails, keeping the fence and timer armed, if deletion fails — a
+  leftover journal must never boot-revert an explicitly confirmed config).
+  Abort and timeout auto-revert delete it after a successful rollback; a
+  FAILED rollback deliberately retains it so the next boot repairs what the
+  running process could not.
+- **Boot-time revert, unconditionally.** Before adopting the on-disk config,
+  startup checks for the journal. If an unconfirmed journal exists, the daemon
+  boots from the journal's pre-transaction config, restores it to the config
+  file, saves the unconfirmed candidate aside as `<config>.unconfirmed`, and
+  logs a loud ERROR plus a startup-banner notice. The revert fires regardless
+  of how much confirm time remained: the operator's confirming session and the
+  in-memory timer died with the old process, and resuming a half-elapsed timer
+  in a fresh process invites split-brain between the operator's view and the
+  daemon's. This matches NETCONF (RFC 6241 §8.4) semantics, where loss of the
+  session that issued a confirmed commit cancels it.
+- **Fail closed on a damaged journal.** Any journal that exists is treated as
+  an unconfirmed window that must be reverted. If the journal is torn or
+  unreadable, or its embedded previous config is unusable, that revert cannot
+  be completed — the daemon then refuses to boot with a message naming both
+  the journal and the config file, and touches neither. It never silently
+  proceeds with a possibly-unconfirmed candidate. (The atomic
+  write-then-rename makes a torn journal a should-not-happen case: a crash
+  during the write leaves either no journal or a complete one.)
+- **Config-plane only.** No RIB manager involvement; the boot revert happens
+  in `main` before the runtime starts, and the journal lives entirely in the
+  transaction controller (`src/confirm_journal.rs`).
+
+Proven by real-binary SIGKILL tests in `tests/commit_confirm_binary.rs`:
+SIGKILL mid-window then restart boots the previous config with the candidate
+saved aside; confirm-then-SIGKILL retains the new config with no journal;
+in-process timeout auto-revert consumes the journal; a torn journal refuses
+boot naming both files.

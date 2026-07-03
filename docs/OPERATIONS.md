@@ -132,11 +132,20 @@ snapshot was re-applied), or one of the two rollback-failure terminal states,
 the pre-commit snapshot, the fence has been cleared, and the running config
 needs manual correction.
 
-The confirm timer is in-memory: a daemon restart inside the confirm window
-leaves the already-committed candidate live (effectively confirmed-by-restart)
-and the auto-revert never fires. Commit-confirmed guards a bad-but-running
-config, not a crash — validate with `rustbgpd --check` or `config plan` before
-applying anything that could itself prevent recovery.
+Commit-confirmed also survives a daemon restart or crash inside the confirm
+window. Before the candidate commits, the daemon journals the pre-commit config
+snapshot to `<runtime_state_dir>/commit-confirm-journal.json` (atomic
+write-tmp+rename+fsync); confirm, abort, and timeout auto-revert consume the
+journal. If the daemon starts and finds an unconfirmed journal, it reverts at
+boot — before adopting the on-disk config, and regardless of how much confirm
+time was left, because the operator's confirming session died with the old
+process (the NETCONF RFC 6241 §8.4 rule: session loss cancels a confirmed
+commit). The unconfirmed candidate config file is saved aside as
+`<config>.unconfirmed` and the boot banner + an ERROR log name the transaction
+and that file; re-plan and re-apply to retry it. A torn or unreadable journal,
+or one whose embedded config no longer parses, refuses boot with a message
+naming both the journal and the config file — delete the journal manually only
+if you are sure the on-disk config is the one you want.
 
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
