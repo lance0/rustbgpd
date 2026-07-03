@@ -235,24 +235,8 @@ impl RibManager {
             return;
         };
         let update = OutboundRouteUpdate {
-            announce: vec![],
-            withdraw: vec![],
-            end_of_rib: vec![],
-            refresh_markers: vec![],
-            next_hop_override: vec![],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-            bgpls_announce: vec![],
-            bgpls_withdraw: vec![],
-            vpn_announce: vec![],
-            labeled_announce: vec![],
-            rtc_announce: vec![],
-            vpn_withdraw: vec![],
-            labeled_withdraw: vec![],
-            rtc_withdraw: vec![],
             request_refresh_all_negotiated: true,
+            ..OutboundRouteUpdate::default()
         };
         if record.outbound_tx.try_send(update).is_err() {
             warn!(
@@ -848,7 +832,7 @@ impl RibManager {
         if let Some(gid) = member_of {
             // Export counters for the join, reconstructed from the
             // group's staged residue (per-peer initial-dump parity).
-            self.apply_group_join_counters(peer, gid);
+            self.apply_group_join_counters(peer, gid, None);
         }
         let empty_prefixes: HashSet<Prefix> = HashSet::new();
         let staging_prefixes = if member_of.is_none() {
@@ -1246,8 +1230,8 @@ impl RibManager {
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update(
                 peer,
-                nh_override_flags,
-                announce,
+                nh_override_flags.into(),
+                announce.into(),
                 withdraw,
                 vec![],
                 vec![],
@@ -1284,24 +1268,8 @@ impl RibManager {
             && let Some(tx) = self.outbound_peers.get(&peer)
         {
             let eor = OutboundRouteUpdate {
-                next_hop_override: vec![],
-                announce: vec![],
-                withdraw: vec![],
                 end_of_rib: eor_families.clone(),
-                refresh_markers: vec![],
-                flowspec_announce: vec![],
-                flowspec_withdraw: vec![],
-                evpn_announce: vec![],
-                evpn_withdraw: vec![],
-                bgpls_announce: vec![],
-                bgpls_withdraw: vec![],
-                vpn_announce: vec![],
-                labeled_announce: vec![],
-                rtc_announce: vec![],
-                vpn_withdraw: vec![],
-                labeled_withdraw: vec![],
-                rtc_withdraw: vec![],
-                request_refresh_all_negotiated: false,
+                ..OutboundRouteUpdate::default()
             };
             if tx.try_send(eor).is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");

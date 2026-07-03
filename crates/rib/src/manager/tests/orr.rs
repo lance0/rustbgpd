@@ -445,7 +445,7 @@ fn drain_final_unicast(
 ) -> HashMap<(Prefix, u32), Route> {
     let mut state = HashMap::new();
     while let Ok(update) = rx.try_recv() {
-        for route in &update.announce {
+        for route in update.announce.iter() {
             state.insert((route.prefix, route.path_id), route.clone());
         }
         for (prefix, path_id) in &update.withdraw {

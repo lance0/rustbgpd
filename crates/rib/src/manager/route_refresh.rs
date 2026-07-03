@@ -628,6 +628,7 @@ impl RibManager {
         let loc_rib = &self.loc_rib;
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
+        let member_of = self.grouped_member_of(peer);
         let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         let mut all_prefixes: HashSet<Prefix> = self
@@ -866,6 +867,29 @@ impl RibManager {
                     false, // route refresh re-emits via empty refresh_view
                 );
             }
+        } else if let Some(gid) = member_of {
+            // A grouped member's refresh replay comes from the group
+            // table — family-filtered, own-sourced excluded — with NO
+            // policy re-evaluation: the export tail already ran when the
+            // table was staged (same shape as the join replay in
+            // `send_initial_table`). BoRR/EoRR markers stay per-peer via
+            // the send below. ORF disqualifies from grouping, so the
+            // deferred-ORF withdraw sweep in the per-peer arm can never
+            // apply to a grouped member.
+            if let Some(group) = self.group_ribs.get(&gid) {
+                for route in group.table.iter() {
+                    if route.peer == peer || prefix_family(&route.prefix) != family {
+                        continue;
+                    }
+                    nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
+                    announce.push(route.clone());
+                }
+                current_policy_filtered_routes
+                    .extend(group.policy_filtered_for_member(peer, &all_prefixes));
+            }
+            // Export counters for the replayed family, from the group's
+            // staged residue (per-peer refresh re-eval parity).
+            self.apply_group_join_counters(peer, gid, Some(family));
         } else {
             // Pass-scoped export memo: one refresh is a single peer, but
             // routes sharing an inbound attribute set still share the
@@ -995,8 +1019,8 @@ impl RibManager {
         if self.outbound_peers.contains_key(&peer) {
             if !self.try_send_and_commit_outbound_update(
                 peer,
-                nh_override_flags,
-                announce,
+                nh_override_flags.into(),
+                announce.into(),
                 withdraw,
                 if deferred_eor { vec![] } else { vec![family] },
                 vec![
@@ -1067,24 +1091,8 @@ impl RibManager {
             return;
         };
         let eor = OutboundRouteUpdate {
-            next_hop_override: vec![],
-            announce: vec![],
-            withdraw: vec![],
             end_of_rib: families.iter().copied().collect(),
-            refresh_markers: vec![],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-            bgpls_announce: vec![],
-            bgpls_withdraw: vec![],
-            vpn_announce: vec![],
-            labeled_announce: vec![],
-            rtc_announce: vec![],
-            vpn_withdraw: vec![],
-            labeled_withdraw: vec![],
-            rtc_withdraw: vec![],
-            request_refresh_all_negotiated: false,
+            ..OutboundRouteUpdate::default()
         };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");

@@ -27,6 +27,7 @@ prometheus.workspace = true
 socket2.workspace = true
 libc.workspace = true
 lru.workspace = true
+rustc-hash.workspace = true
 
 [features]
 # Exposes `RouteAttrBundle` + `materialize_attrs` (inbound attribute

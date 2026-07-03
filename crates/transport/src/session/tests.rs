@@ -485,11 +485,11 @@ async fn read_single_raw_bgp_message(stream: &mut TcpStream) -> Vec<u8> {
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -534,8 +534,8 @@ async fn outbound_update_emits_rib_out_bmp_route_monitoring() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let mut update = empty_outbound_update();
-    update.announce = vec![make_route(100)];
-    update.next_hop_override = vec![None];
+    update.announce = vec![make_route(100)].into();
+    update.next_hop_override = vec![None].into();
     session.send_route_update(update);
     let wire = read_single_raw_bgp_message(&mut server).await;
     let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
@@ -589,8 +589,8 @@ async fn rib_out_tap_default_off_and_skips_non_update_messages() {
     session.negotiated = Some(negotiated);
     // Default: bmp_rib_out is false — outbound UPDATE not tapped.
     let mut update = empty_outbound_update();
-    update.announce = vec![make_route(100)];
-    update.next_hop_override = vec![None];
+    update.announce = vec![make_route(100)].into();
+    update.next_hop_override = vec![None].into();
     session.send_route_update(update);
     let _ = read_single_raw_bgp_message(&mut server).await;
     assert!(
@@ -698,8 +698,8 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
     // 17th tapped UPDATE hits Full and must count a source drop.
     for _ in 0..17 {
         let mut update = empty_outbound_update();
-        update.announce = vec![make_route(100)];
-        update.next_hop_override = vec![None];
+        update.announce = vec![make_route(100)].into();
+        update.next_hop_override = vec![None].into();
         session.send_route_update(update);
     }
     let drops: u64 = session
@@ -1049,11 +1049,11 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         ..route1.clone()
     };
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![route1, route2],
+        announce: vec![route1, route2].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None, None],
+        next_hop_override: vec![None, None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1088,11 +1088,11 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1124,11 +1124,11 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.next_hop, route.next_hop);
     assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1179,11 +1179,11 @@ async fn oversized_bgpls_output_tears_down_session() {
     )
     .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1287,11 +1287,11 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
     let route = make_labeled_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1333,11 +1333,11 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         "MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1398,11 +1398,11 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
     route.path_id = 2;
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1439,11 +1439,11 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
         "announcement must carry the outbound path ID"
     );
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1631,11 +1631,11 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     let route = make_vpn_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1677,11 +1677,11 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         "RD + MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1743,11 +1743,11 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
     route.path_id = 2;
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -1784,11 +1784,11 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
         "announcement must carry the outbound path ID"
     );
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2048,11 +2048,11 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2105,11 +2105,11 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         "local default must be emitted with the session-local address, got {seen_next_hops:?}"
     );
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2193,11 +2193,11 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2247,11 +2247,11 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![],
+        announce: vec![].into(),
         withdraw: vec![],
         end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
         refresh_markers: vec![],
-        next_hop_override: vec![],
+        next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2316,11 +2316,11 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         ..route1.clone()
     };
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![route1, route2],
+        announce: vec![route1, route2].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None, None],
+        next_hop_override: vec![None, None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -2378,11 +2378,11 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let override_nh =
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
     session.send_route_update(OutboundRouteUpdate {
-        announce: vec![route],
+        announce: vec![route].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![Some(override_nh)],
+        next_hop_override: vec![Some(override_nh)].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3518,11 +3518,12 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }],
+        }]
+        .into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3567,11 +3568,11 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let update = OutboundRouteUpdate {
-        announce: vec![make_route(100)],
+        announce: vec![make_route(100)].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3622,11 +3623,11 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     route.next_hop = IpAddr::V6(remote_ll);
     route.link_local_next_hop = Some(remote_ll);
     let update = OutboundRouteUpdate {
-        announce: vec![route],
+        announce: vec![route].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3677,11 +3678,11 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
-        announce: vec![route],
+        announce: vec![route].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3727,11 +3728,11 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let update = OutboundRouteUpdate {
-        announce: vec![make_route(100)],
+        announce: vec![make_route(100)].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3790,11 +3791,12 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-        }],
+        }]
+        .into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3843,11 +3845,11 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let mut route = make_v6_unicast_route(remote_global);
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
-        announce: vec![route],
+        announce: vec![route].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![None],
+        next_hop_override: vec![None].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
@@ -3898,11 +3900,11 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     session.negotiated = Some(negotiated);
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
-        announce: vec![make_v6_unicast_route(route_next_hop)],
+        announce: vec![make_v6_unicast_route(route_next_hop)].into(),
         withdraw: vec![],
         end_of_rib: vec![],
         refresh_markers: vec![],
-        next_hop_override: vec![Some(rustbgpd_policy::NextHopAction::Self_)],
+        next_hop_override: vec![Some(rustbgpd_policy::NextHopAction::Self_)].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
         evpn_announce: vec![],

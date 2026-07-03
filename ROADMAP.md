@@ -943,16 +943,19 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     precompute would shave ~1-2 ns — below the bench noise floor and not worth
     the ~66-site `PolicyStatement` construction churn. Revisit only if a future
     `prefix_heavy` run shows prefix matching as a real bottleneck.
-  - Export-policy fanout batching: investigate whether peers with identical
-    effective export policy/context can share evaluation results during full
-    dirty resyncs or route-server fanout. Design-gated: peer address/ASN/group,
-    negotiated family, route type, RPKI/ASPA state, policy counters,
-    `policy_filtered_routes`, and export modifications all affect correctness.
-    The manager-level `fanout` Criterion bench shipped in #350 and is the
-    baseline: first-advertise distribution is ~178 ns per advertisement with no
-    policy, and a cheap scalar-guard export chain adds ~18%. Use that harness
-    for any batching/coalescing PR, adding heavy-policy variants if the proposed
-    optimization targets AS_PATH-regex or large-community chains.
+  - Export-policy fanout batching: **shipped as RIB-level update groups**
+    (ADR-0098, #674/#676 + cold-path/payload slice). Peers with identical
+    staged output (export-chain content, eBGP/RR-client role, unicast
+    families, LLGR families) share one staging pass, one group-owned
+    outbound table, and one Arc-shared announce payload; joins/refreshes/
+    queries replay or synthesize from the group table. Structural per-peer
+    fallback for peer-context policy / Add-Path send / ORR / ORF — no
+    knob — with a differential oracle pinning identical output. Measured
+    ~28× single-shot 100k-route convergence at 256 uniform RR clients
+    (15.1 s → 0.54 s); staging falls from 82.8% to 30.5% of RR CPU.
+    Remaining v2 refinements, demand-gated: per-family group keying,
+    grouping Add-Path peers with identical (max, families), per-(vantage,
+    key) ORR groups, RT-filter-aware VPN grouping.
   - Adj-RIB-In attribute interning: explore storing a stable fingerprint beside
     interned `Arc<Vec<PathAttribute>>` sets to avoid hashing every attribute on
     each insert, with full equality fallback. Gate on `adj_rib_in_insert`,

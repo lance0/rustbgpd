@@ -106,6 +106,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0095](0095-optimal-route-reflection.md) | Optimal Route Reflection via BGP-LS-sourced SPF (RFC 9107) | Accepted | 2026-07-02 |
 | [0096](0096-policy-language.md) | A typed, compiled policy language (`.rpol`) | Accepted | 2026-07-02 |
 | [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 |
+| [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 |
 
 ## Template
 
