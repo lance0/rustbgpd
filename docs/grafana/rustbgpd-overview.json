@@ -549,7 +549,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 13
       },
@@ -608,8 +608,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 13
       },
       "fieldConfig": {
@@ -667,8 +667,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 13
       },
       "fieldConfig": {
@@ -712,6 +712,56 @@
           "expr": "sum by (peer) (rate(bfd_session_flaps_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
           "legendFormat": "flaps {{peer}}",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Send hold expirations (RFC 9687)",
+      "description": "bgp_send_hold_expirations_total: sessions torn down because the peer stopped draining its TCP socket and outbound data could not be written within SendHoldTime (terminated locally without a NOTIFICATION).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (peer) (rate(bgp_send_hold_expirations_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
         }
       ]
     },
@@ -1070,7 +1120,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 47
       },
@@ -1119,6 +1169,56 @@
       ]
     },
     {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Adj-RIB-Out VPN prefixes per peer",
+      "description": "bgp_rib_adj_out_prefixes{afi_safi=\"vpn\"}: VPNv4/VPNv6 advertised-route counts per peer. For update-grouped members (ADR-0099) this is synthesized from the group table under the member's RFC 4684 RT filter.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (peer) (bgp_rib_adj_out_prefixes{instance=~\"$instance\",peer=~\"$peer\",afi_safi=\"vpn\"})",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 22,
       "type": "timeseries",
       "title": "RIB ingest pressure",
@@ -1129,8 +1229,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 12,
         "y": 47
       },
       "fieldConfig": {
@@ -1197,8 +1297,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 18,
         "y": 47
       },
       "fieldConfig": {

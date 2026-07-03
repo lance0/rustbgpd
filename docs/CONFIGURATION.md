@@ -1142,12 +1142,21 @@ ORIGINATOR_ID/CLUSTER_LIST handling.
 There is no configuration knob for update groups — rustbgpd groups
 outbound peers automatically whenever their staged output is provably
 identical: same export-policy chain **content**, same eBGP/iBGP and
-RR-client role, same sendable unicast families, same advertised LLGR
-families. Grouped peers share one staged outbound table, so the export
-tail (reflection rules, policy evaluation, equality diff) runs once per
-group instead of once per peer — the difference between ~15 s and
-sub-second 100k-route convergence at 256 uniform RR clients (measured;
-see [ADR-0098](adr/0098-update-groups.md)).
+RR-client role, same sendable families (unicast, and since v2 the
+VPNv4/VPNv6 and RT-Constrain-negotiation dimensions), same advertised
+LLGR families. Grouped peers share one staged outbound table, so the
+export tail (reflection rules, policy evaluation, equality diff) runs
+once per group instead of once per peer — the difference between ~15 s
+and sub-second 100k-route convergence at 256 uniform RR clients
+(measured; see [ADR-0098](adr/0098-update-groups.md)).
+
+VPNv4/VPNv6 routes are grouped too ([ADR-0099](adr/0099-update-groups-v2.md)),
+**including for RT-Constrain-negotiated peers**: RTC no longer implies
+the per-peer path for VPN. The RFC 4684 RT filter is applied per
+member at emit time, so PE clients with entirely different RT
+memberships still share one group and one staging pass, and a
+member's RT-membership change emits its minimal wire delta from one
+group-table walk with zero policy re-evaluations.
 
 A peer falls back to the plain per-peer path (with identical semantics
 — grouping is purely an optimization) when any of these apply:
@@ -1158,6 +1167,11 @@ A peer falls back to the plain per-peer path (with identical semantics
 | `add_path_send` | Add-Path send is negotiated (candidate ranks are per-target) |
 | `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
 | `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
+
+RT-Constrain negotiation is deliberately **not** in this table: since
+v2 it is part of the group key, not a fallback reason. Add-Path send
+remains a fallback for all families (ADR-0099 records why per-member
+path-id correction is unsound without per-member state).
 
 `rbgp neighbor show <peer>` prints the membership (`group:N`) or the
 fallback reason on its `Update Group` line. Metrics:

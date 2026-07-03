@@ -3,7 +3,8 @@
 **Status:** Accepted — shipped across #674 (fingerprint registry, shadow
 mode), #676 (group staging + source-flip fanout + lifecycle), and the
 cold-path/payload slice (route-refresh replay, `Arc` announce payload,
-FxHash outbound caches).
+FxHash outbound caches). Extended to VPNv4/VPNv6 with per-member RT
+filtering by [ADR-0099](0099-update-groups-v2.md).
 **Date:** 2026-07-03
 
 ## Context

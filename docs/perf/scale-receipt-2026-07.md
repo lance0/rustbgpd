@@ -160,11 +160,59 @@ each of the 100 keeps a full private Adj-RIB-Out (100k `Route`s +
 prefix trie), the structure grouped members no longer have. A fleet's
 memory/CPU scales with its *fallback* count, not its size.
 
+## Scenario E — VPNv4 at scale (update-groups v2, #685/#686)
+
+Measured at the v2 close slice (`2ba6ce52` + the channel-full
+source-flip fix — a failure-path-only change). Same harness, new
+modes: `vpnflood` (100k VPNv4, distinct RDs, RTs from a 64-pool, no
+RTC negotiated) and `vpnfloodhet` (RTC negotiated on every client,
+each client's Φ = 6/64 RTs ≈ 10%, memberships installed before the
+flood, SAFI-132 excluded from the wire gauge). 1000-client values are
+3-run medians from this slice; 256-client values are the 3-run-median
+A/Bs from the #685/#686 PRs, same host. Wire targets: 100 M NLRI
+uniform, 9.38 M heterogeneous (each client decodes only its Φ share).
+
+| Scenario | 256 per-peer (measured) | 256 grouped (measured) | 1000 per-peer (**extrapolated**) | 1000 grouped (measured) |
+|---|---|---|---|---|
+| Uniform VPN flood, converge (wire) | 18.66 s | 3.75 s | ~73 s | **12.60 s** |
+| Uniform VPN flood, RSS converged | 8227 MiB | 492 MiB | ~31 GiB | **625 MiB** |
+| Heterogeneous ~10% Φ, converge (wire) | 3.21 s | 1.10 s | ~12.5 s | **3.92 s** |
+| Heterogeneous ~10% Φ, RSS converged | 1481 MiB | 482 MiB | ~5.7 GiB | **636 MiB** |
+
+The 1000-client per-peer baselines are the 256-client baselines scaled
+linearly in peers (the same model the unicast receipt used, and the
+same caveat: **extrapolated, never measured** — the per-peer VPN
+Adj-RIB-Out and the per-peer staging pass both scale with peers, so
+linear is the honest first-order shape). One update group forms in
+every run (`GROUPS {"group:0": 1000}`); heterogeneous Φ does NOT
+shatter the group — the RT filter is applied per member at emit
+(ADR-0099), never keyed. The heterogeneous flood converges faster
+than uniform because each client's wire share is ~10% of the table;
+its RSS is slightly higher than uniform's because every client also
+carries SAFI-132 state and the per-member advertised counters.
+
+**Membership-flip latency at scale** (the ADR-0099 membership-delta
+path, end to end): with 100k VPNv4 staged and 1000 clients converged,
+one member widens its Φ by one RT (1600 matching routes) and then
+narrows it back. Time from the RTC UPDATE hitting the manager to the
+member-scoped delta fully decoded on that member's wire, 3-run
+medians:
+
+| Flip | routes in delta | latency (median) | runs |
+|---|---|---|---|
+| Widen (announce-only delta) | 1600 | **15.1 ms** | 16.2 / 15.1 / 12.3 ms |
+| Narrow (withdraw-only delta) | 1600 | **11.7 ms** | 53.3 / 11.4 / 11.7 ms |
+
+Zero export-policy evaluations, group table untouched (pinned by a
+manager test at the same scale); the one 53 ms outlier was the first
+narrow after the profiler detached. The pre-v2 shape for the same
+event was a full per-peer VPN restage (policy eval over 100k keys).
+
 ## The storyline — profile → fix → receipt
 
 The 2026-07-03 profiles (dhat heap pass + pprof CPU pass, both
 in-tree-methodology, artifacts in the perf-thread reports) indicted,
-and the arc fixed:
+and the arc (#667–#686) fixed:
 
 | Indictment (measured pre-arc) | Fix | Receipt (this document) |
 |---|---|---|
@@ -174,6 +222,8 @@ and the arc fixed:
 | `recompute_best` full candidate rescan: 40–45% of churn CPU, growing with candidate count | Incremental best-path + announcing-peers index (#675) | Churn recompute share at 1000 candidates/prefix: 1.6% |
 | SipHash on outbound attr-cache keys dominated the prepare+encode bucket | FxHash outbound caches (#677) | SipHash gone from the top frames; prepare+encode is now the honest per-peer encode work (42–45%) |
 | BMP loc-rib synthesis deep-cloned attrs per emission (11.6× alloc multiplier) | Borrowed-attr encode (#668) | Not re-measured here (BMP not attached); receipt is the #668 A/B in that PR |
+| Per-peer VPN staging: `stage_vpn_routes` 27.3% + per-peer commit 40.2% of vpnflood CPU at 256; 18.7 s / 8.2 GiB at 256 × 100k VPNv4 | Update-groups v2 slice 1: family-extended key, shared VPN group staging + source-flip emit (#685, ADR-0099) | Scenario E: 256 grouped 3.75 s / 492 MiB (~5× / ~17×); 1000 grouped 12.60 s / 625 MiB vs ~73 s / ~31 GiB extrapolated per-peer |
+| RTC negotiation forced the whole VPN family per-peer (the RFC 4684 Φ filter was a staging exclusion); het-256 3.21 s / 1481 MiB | v2 slice 2: Φ per member at emit + the zero-eval membership-delta path (#686, ADR-0099) | Scenario E: het-256 1.10 s / 482 MiB; het-1000 3.92 s / 636 MiB; one-RT membership flip at 100k staged delivers its 1600-route delta in ~15 ms (widen) / ~12 ms (narrow) with zero policy evals |
 
 Pre-arc baselines were measured at 64/256 peers on the same harness,
 same host (flood-64 3.5 s, flood-256 15.1–15.2 s, ~linear in peers).
@@ -226,8 +276,12 @@ a primary-channel `QueryLocRibCount` FIFO barrier for pacing,
 NLRI counting for the wire gauge. Scenario knobs:
 
 ```text
-rrharness <flood|churn> <n_peers> <n_prefixes> <churn_n> <secs> <out_prefix> [none|policy|mixed]
+rrharness <flood|vpnflood|vpnfloodhet|churn> <n_peers> <n_prefixes> <churn_n> <secs> <out_prefix> [none|policy|mixed]
   flood: 100k cold flood + sustained fresh-block rounds for <secs>
+  vpnflood: single-shot VPNv4 flood (distinct RDs, RTs from a 64-pool, no RTC)
+  vpnfloodhet: RTC negotiated on every client, Φ = 6/64 RTs installed
+          pre-flood; after convergence, a one-RT widen/narrow flip on
+          client 0 timed to full wire decode (the Scenario E flip probe)
   churn: prime <n_peers> candidates × <churn_n> prefixes, then LP-flip waves for <secs>
   policy: M80 fixture export chain (tests/interop/configs/rustbgpd-m80-policy.rpol,
           customer-in(200) + edge-out) on every client

@@ -858,6 +858,56 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
     );
 }
 
+/// A source-flip member-scoped withdraw lost to a full channel: the
+/// member is the delta's NEW source (its own route displaces another
+/// peer's), so its emission is a pure withdraw while the key stays IN
+/// the group table — tombstones (which only track table withdrawals)
+/// never see it. It must ride the member's extra-withdraw residue or
+/// the stale route strands until the next covering event.
+#[tokio::test]
+async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // p1 from A lands in C's channel (fills it).
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // Source flip ONTO the jammed member: C's own route displaces
+        // A's as best. C's member-scoped emission is a pure withdraw —
+        // lost to the full channel, and NOT a table withdrawal.
+        o.routes(C, vec![ibgp_route(pfx(1, 0), C, 200, vec![])], vec![])
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        let first = o.drain_one(C).await;
+        assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "the source-flip withdraw lost to the full channel must be recovered by the resync"
+    );
+}
+
 /// A second peer joining an existing group whose chain sets a next-hop
 /// override: the join replay must reproduce the override flags without
 /// re-running policy (they ride the group table residue).
@@ -1062,6 +1112,65 @@ async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
     assert!(
         c_final.contains_key(&key2),
         "the update lost to the full channel must be recovered by the resync"
+    );
+}
+
+/// VPN sibling of the source-flip-lost-withdraw scenario: the jammed
+/// member's own VPN route displaces another peer's for the same RD +
+/// prefix identity, its member-scoped withdraw is lost to the full
+/// channel, and the key stays IN the group table (invisible to VPN
+/// tombstones) — the resync must still withdraw it.
+#[tokio::test]
+async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(B, false, true, None, 64, vpn_sendable())
+            .await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        o.peer_up_families(C, false, true, None, 1, vpn_sendable())
+            .await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.vpn_announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Identity 1 from A lands in C's channel (fills it).
+        o.vpn_routes(A, vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![])], vec![])
+            .await;
+        // Source flip ONTO the jammed member: C's own path displaces
+        // A's. C's member-scoped emission is a pure withdraw — lost to
+        // the full channel, and NOT a table withdrawal.
+        o.vpn_routes(C, vec![vpn_route(vpn_nlri(1, 100), C, 200, vec![])], vec![])
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        let first = o.drain_one(C).await;
+        assert_eq!(
+            first.vpn_announce.len(),
+            1,
+            "identity 1 was delivered before the jam"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // The adv(m) invariant recomputed from manager state must match
+        // the folded emitted streams once the resync has run.
+        o.check_vpn_invariant("post source-flip resync").await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold_vpn(&grouped),
+        fold_vpn(&ungrouped),
+        "final advertised VPN state must converge on both paths"
+    );
+    let c_final = fold_vpn(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    let key1 = format!("{:?}", vpn_nlri(1, 100).key());
+    assert!(
+        !c_final.contains_key(&key1),
+        "the source-flip VPN withdraw lost to the full channel must be recovered by the resync"
     );
 }
 
