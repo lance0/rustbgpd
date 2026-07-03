@@ -1757,11 +1757,28 @@ provision TLV data in v3 and differ only in the version byte. Framing is
 per collector — v3 and v4 collectors can be mixed freely, and v3 output is
 byte-identical to previous releases.
 
+**Path marking (automatic, no knob):** on `loc_rib` Route Monitoring
+messages a v4 collector also receives the Path Marking TLV
+(draft-ietf-grow-bmp-path-marking-tlv-05): a Path Status bitmap marking
+every announced Loc-RIB route `Best` (plus `Stale` when the GR/LLGR
+machinery holds it stale) and, when a competing path was compared, the
+optional Reason Code naming the decisive best-path step (local
+preference, AS path length, origin, MED, peer type, router ID, peer
+address). Bits a route reflector cannot attest to (Primary/Backup/
+Non-installed/Filtered/Suppressed — FIB, policy-drop, and damping
+concepts) are never set. `rib_in_pre` and `rib_out_post` streams carry
+no marking: the rib-in tap fires before best-path selection and rib-out
+is per-peer staged output, so neither has an honest decision status.
+Withdrawals carry no marking. v3 collectors are unaffected.
+
 **Pre-IANA caveat:** BMPv4 is an IETF draft. The TLV code points are not
 yet IANA-assigned and may be renumbered when the draft is published as an
 RFC; pick `4` only for collectors that track the same draft revision
 (e.g. bleeding-edge pmacct/gobmp builds). The default `3` is the stable
-RFC 7854 encoding.
+RFC 7854 encoding. In particular the Path Marking TLV self-assigns type
+5, which collides with tlv-20's VRF/Table Name TLV (also type 5) —
+rustbgpd never emits the latter, so its own v4 output is unambiguous,
+but expect a renumber at RFC publication.
 
 ### What is streamed
 

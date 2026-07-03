@@ -18,6 +18,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::{Bytes, BytesMut};
+use rustbgpd_bmp::{BmpPathStatus, tlv as bmp_tlv};
 use rustbgpd_wire::{
     Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4UnicastMode, MpReachNlri,
     MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage, VpnNlri,
@@ -25,6 +26,7 @@ use rustbgpd_wire::{
 };
 use tracing::warn;
 
+use crate::best_path::BestPathReason;
 use crate::route::{Route, VpnRibRoute};
 
 /// `AS_TRANS` (RFC 6793): 2-byte OPEN AS field stand-in for ASNs > 65535.
@@ -39,6 +41,52 @@ pub const LOC_RIB_FAMILIES: [(Afi, Safi); 4] = [
     (Afi::Ipv4, Safi::MplsVpn),
     (Afi::Ipv6, Safi::MplsVpn),
 ];
+
+/// Map a decisive best-path step to the draft's Reason Code
+/// (draft-ietf-grow-bmp-path-marking-tlv-05 §3.2, Table 2). Steps with
+/// no registered code (stale/RPKI/ASPA preference, cluster-list
+/// length, EVPN MAC mobility) map to `None` — the Reason Code is
+/// optional and omitting it beats mislabeling the step.
+#[must_use]
+pub fn path_marking_reason_code(reason: BestPathReason) -> Option<u16> {
+    match reason {
+        BestPathReason::HigherLocalPref => Some(bmp_tlv::REASON_LOCAL_PREF),
+        BestPathReason::ShorterAsPath => Some(bmp_tlv::REASON_AS_PATH_LEN),
+        BestPathReason::LowerOrigin => Some(bmp_tlv::REASON_ORIGIN),
+        BestPathReason::LowerMed => Some(bmp_tlv::REASON_MED),
+        BestPathReason::EbgpOverIbgp => Some(bmp_tlv::REASON_PEER_TYPE),
+        BestPathReason::OrrInteriorCost => Some(bmp_tlv::REASON_IGP_COST),
+        // RFC 4456 substitutes ORIGINATOR_ID for the BGP identifier on
+        // reflected routes — the same RFC 4271 §9.1.2.2 step the
+        // draft's "router ID" code names.
+        BestPathReason::LowerOriginatorId => Some(bmp_tlv::REASON_ROUTER_ID),
+        BestPathReason::LowerPeerAddress => Some(bmp_tlv::REASON_PEER_ADDRESS),
+        BestPathReason::StalePreference
+        | BestPathReason::RpkiPreference
+        | BestPathReason::AspaPreference
+        | BestPathReason::ShorterClusterList
+        | BestPathReason::EvpnMacMobility => None,
+    }
+}
+
+/// Path Marking payload (path-marking-05 §3.1) for a Loc-RIB best
+/// route: always Best (a Loc-RIB route is the decision-process winner
+/// by definition), plus Stale when the GR/LLGR machinery says so.
+/// `reason` is the decisive step versus the runner-up, when one was
+/// compared. Primary/Backup/Non-installed/Filtered/Suppressed bits are
+/// FIB, policy-drop, and damping concepts a route reflector without a
+/// forwarding plane cannot attest to — deliberately never set.
+#[must_use]
+pub fn loc_rib_path_status(is_stale: bool, reason: Option<BestPathReason>) -> BmpPathStatus {
+    let mut status = bmp_tlv::PATH_STATUS_BEST;
+    if is_stale {
+        status |= bmp_tlv::PATH_STATUS_STALE;
+    }
+    BmpPathStatus {
+        status,
+        reason: reason.and_then(path_marking_reason_code),
+    }
+}
 
 fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {
     MpReachNlri {
@@ -469,6 +517,59 @@ mod tests {
             .expect("MP_UNREACH present");
         assert_eq!((mp.afi, mp.safi), (Afi::Ipv6, Safi::MplsVpn));
         assert!(mp.withdrawn.is_empty() && mp.vpn_withdrawn.is_empty());
+    }
+
+    /// path-marking-05 §3.2 mapping: every decisive step with a
+    /// registered Reason Code maps to it; steps the draft has no code
+    /// for map to `None` (the field is optional — omit, don't lie).
+    #[test]
+    fn reason_code_mapping_covers_every_variant() {
+        use rustbgpd_bmp::tlv;
+
+        use crate::best_path::BestPathReason as R;
+        let cases = [
+            (R::HigherLocalPref, Some(tlv::REASON_LOCAL_PREF)),
+            (R::ShorterAsPath, Some(tlv::REASON_AS_PATH_LEN)),
+            (R::LowerOrigin, Some(tlv::REASON_ORIGIN)),
+            (R::LowerMed, Some(tlv::REASON_MED)),
+            (R::EbgpOverIbgp, Some(tlv::REASON_PEER_TYPE)),
+            (R::OrrInteriorCost, Some(tlv::REASON_IGP_COST)),
+            (R::LowerOriginatorId, Some(tlv::REASON_ROUTER_ID)),
+            (R::LowerPeerAddress, Some(tlv::REASON_PEER_ADDRESS)),
+            (R::StalePreference, None),
+            (R::RpkiPreference, None),
+            (R::AspaPreference, None),
+            (R::ShorterClusterList, None),
+            (R::EvpnMacMobility, None),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(
+                path_marking_reason_code(reason),
+                expected,
+                "mapping for {reason:?}"
+            );
+        }
+        // Numeric pins straight from Table 2 so a constant edit in the
+        // bmp crate cannot silently shift the wire values.
+        assert_eq!(path_marking_reason_code(R::HigherLocalPref), Some(0x0003));
+        assert_eq!(path_marking_reason_code(R::LowerPeerAddress), Some(0x000A));
+    }
+
+    /// path-marking-05 §3.1: Loc-RIB payloads always carry Best
+    /// (0x00000002); the GR/LLGR stale flag adds Stale (0x00000400).
+    #[test]
+    fn loc_rib_path_status_bits() {
+        let fresh = loc_rib_path_status(false, None);
+        assert_eq!(fresh.status, 0x0000_0002);
+        assert_eq!(fresh.reason, None);
+
+        let stale = loc_rib_path_status(true, Some(BestPathReason::HigherLocalPref));
+        assert_eq!(stale.status, 0x0000_0402);
+        assert_eq!(stale.reason, Some(0x0003));
+
+        // A decisive step without a registered code yields no reason.
+        let unmapped = loc_rib_path_status(false, Some(BestPathReason::RpkiPreference));
+        assert_eq!(unmapped.reason, None);
     }
 
     /// The fabricated OPEN (RFC 9069 §5.2.1) carries the 4-octet-ASN

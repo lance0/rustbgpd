@@ -464,13 +464,25 @@ impl RibManager {
             if self.loc_rib.recompute_vpn(*key, candidates.iter()) {
                 changed_keys.insert(*key);
                 if self.bmp_tx.is_some() {
-                    let pdu = match self.loc_rib.get_vpn(key) {
-                        Some(best) => crate::bmp_sync::synthesize_vpn_announce(best),
-                        None => bmp_prev_nlri
-                            .as_ref()
-                            .and_then(crate::bmp_sync::synthesize_vpn_withdraw),
+                    let (pdu, path_status) = match self.loc_rib.get_vpn(key) {
+                        Some(best) => (
+                            crate::bmp_sync::synthesize_vpn_announce(best),
+                            // Status bits only: the VPN selection ladder
+                            // (`vpn_tiebreak`) has no with-reason variant,
+                            // and the Reason Code is optional.
+                            Some(crate::bmp_sync::loc_rib_path_status(
+                                best.is_stale || best.is_llgr_stale,
+                                None,
+                            )),
+                        ),
+                        None => (
+                            bmp_prev_nlri
+                                .as_ref()
+                                .and_then(crate::bmp_sync::synthesize_vpn_withdraw),
+                            None,
+                        ),
                     };
-                    self.emit_bmp_loc_rib(pdu, std::time::SystemTime::now());
+                    self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
                 }
             }
         }

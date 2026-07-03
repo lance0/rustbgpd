@@ -675,16 +675,24 @@ impl RibManager {
     }
 
     /// Emit an RFC 9069 Loc-RIB Route Monitoring event. `pdu = None`
-    /// (synthesis failure, already warned) is a no-op. Uses `try_send`
+    /// (synthesis failure, already warned) is a no-op. `path_status`
+    /// carries the Path Marking payload for announcements (`None` on
+    /// withdrawals — a gone path has no status). Uses `try_send`
     /// — monitoring must never backpressure the RIB task; drops are
     /// surfaced with a warning.
-    fn emit_bmp_loc_rib(&self, pdu: Option<bytes::Bytes>, timestamp: std::time::SystemTime) {
+    fn emit_bmp_loc_rib(
+        &self,
+        pdu: Option<bytes::Bytes>,
+        path_status: Option<rustbgpd_bmp::BmpPathStatus>,
+        timestamp: std::time::SystemTime,
+    ) {
         let (Some(tx), Some(update_pdu)) = (self.bmp_tx.as_ref(), pdu) else {
             return;
         };
         if let Err(e) = tx.try_send(rustbgpd_bmp::BmpEvent::LocRibRouteMonitoring {
             update_pdu,
             timestamp,
+            path_status,
         }) {
             warn!(error = %e, "BMP event channel full or closed, dropping Loc-RIB route monitoring");
         }
@@ -1121,25 +1129,37 @@ impl RibManager {
         // receive instant (RFC 9069 per-peer header timestamp).
         let install_time =
             |received_at: std::time::Instant| now.checked_sub(received_at.elapsed()).unwrap_or(now);
-        let mut messages: Vec<(bytes::Bytes, std::time::SystemTime)> = Vec::with_capacity(
+        // Dump entries carry the Path Marking status bits (Best +
+        // stale flags) but no reason code — deriving one would mean a
+        // full best-path re-comparison per prefix; live emissions
+        // attach it where the comparison already ran.
+        let mut messages: Vec<(
+            bytes::Bytes,
+            std::time::SystemTime,
+            Option<rustbgpd_bmp::BmpPathStatus>,
+        )> = Vec::with_capacity(
             self.loc_rib.len() + self.loc_rib.vpn_len() + bmp_sync::LOC_RIB_FAMILIES.len(),
         );
         for route in self.loc_rib.iter() {
             if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
-                messages.push((pdu, install_time(route.received_at)));
+                let status =
+                    bmp_sync::loc_rib_path_status(route.is_stale || route.is_llgr_stale, None);
+                messages.push((pdu, install_time(route.received_at), Some(status)));
             }
         }
         for route in self.loc_rib.iter_vpn() {
             if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
-                messages.push((pdu, install_time(route.received_at)));
+                let status =
+                    bmp_sync::loc_rib_path_status(route.is_stale || route.is_llgr_stale, None);
+                messages.push((pdu, install_time(route.received_at), Some(status)));
             }
         }
         // End-of-RIB per family closes the dump; live emission continues
         // seamlessly after (dump→EoR→live, with the standard BMP overlap
-        // race accepted).
+        // race accepted). EoR markers announce no path — nothing to mark.
         for (afi, safi) in bmp_sync::LOC_RIB_FAMILIES {
             if let Some(pdu) = bmp_sync::synthesize_end_of_rib(afi, safi) {
-                messages.push((pdu, now));
+                messages.push((pdu, now, None));
             }
         }
         tokio::spawn(async move {

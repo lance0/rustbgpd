@@ -63,6 +63,10 @@ pub enum BmpEvent {
         update_pdu: Bytes,
         /// Route install time (RFC 9069 per-peer header timestamp).
         timestamp: SystemTime,
+        /// Path Marking payload for the announced route. `None` on
+        /// withdrawals (a gone path has no status to mark) and when the
+        /// RIB attaches no marking. Encoded only for v4 collectors.
+        path_status: Option<BmpPathStatus>,
     },
     /// RFC 9069 Loc-RIB statistics: per-AFI/SAFI Loc-RIB route counts.
     /// Encoded as stat type 10 entries plus their sum as type 8.
@@ -127,8 +131,24 @@ pub struct BmpDumpRequest {
 /// One bounded chunk of a Loc-RIB table dump.
 #[derive(Debug)]
 pub struct BmpDumpChunk {
-    /// Synthesized UPDATE PDUs with their route install times.
-    pub messages: Vec<(Bytes, SystemTime)>,
+    /// Synthesized UPDATE PDUs with their route install times and the
+    /// Path Marking payload (`None` on the End-of-RIB markers).
+    pub messages: Vec<(Bytes, SystemTime, Option<BmpPathStatus>)>,
+}
+
+/// Path Marking TLV payload (draft-ietf-grow-bmp-path-marking-tlv-05
+/// §2): the 4-octet Path Status bitmap plus the optional 2-octet
+/// Reason Code. Carried on Route Monitoring events by the RIB, encoded
+/// on the wire only for BMP v4 collectors (the TLV cannot be framed in
+/// RFC 7854 v3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmpPathStatus {
+    /// Path Status bitmap (§3.1) — see the `PATH_STATUS_*` constants
+    /// in [`crate::tlv`].
+    pub status: u32,
+    /// Optional Reason Code (§3.2) — see the `REASON_*` constants in
+    /// [`crate::tlv`]. Omitted from the wire when `None`.
+    pub reason: Option<u16>,
 }
 
 /// Control-plane events sent from BMP clients to the BMP manager.
