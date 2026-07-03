@@ -7,6 +7,12 @@ landed — `classify_adoption_neighbor` now requires the
 `RTPROT_BGP` stamp by default, with
 `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` as the skip-version-upgrade
 escape hatch. FDB classifiers stay prefer-mode (decision 3).
+**Update (2026-07-03):** the escape hatch is removed — the migration
+window closed at v0.38.0, strict is the only mode, and setting
+`RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY` (to any value) now hard-errors
+at daemon boot. Skip-version upgrades with pre-stamp kernel rows must
+step through a v0.38.0–v0.45.0 release once; see
+`docs/evpn-vtep-troubleshooting.md`.
 
 ## Context
 
@@ -220,7 +226,9 @@ stamp-or-legacy migration window.**
   M61 kill-and-restart job proves the strict default end-to-end: a
   planted stamp-less legacy-shaped neighbor now survives the sweep
   untouched, alongside the existing `protocol zebra` foreign-row
-  survival assert.*
+  survival assert.* *(2026-07-03: the escape hatch itself was later
+  removed — see the header update; setting the variable now aborts
+  boot.)*
 
 ## References
 

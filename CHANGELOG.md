@@ -485,6 +485,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deferred. M74 proves reflection, field preservation, withdrawal, and
   no-dataplane-install against a GoBGP source and sink.
 
+### Removed
+
+- **BREAKING — the `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY` escape hatch is
+  gone; setting it now aborts boot.** The ADR-0082 stamp-or-legacy
+  migration window closed at v0.38.0, so the strict rule — L3 neighbor
+  adoption requires the `NDA_PROTOCOL = RTPROT_BGP` ownership stamp;
+  stamp-less rows are foreign (preserved untouched, never adopted or
+  reaped) — is now the only mode. The daemon refuses to start if the
+  variable is set to **any** value (including `0`), naming the variable
+  and the upgrade path, so automation still exporting it fails loudly
+  instead of silently changing crash-restart adoption behavior. Operators
+  upgrading from v0.37.0 or earlier with EVPN L3 kernel rows still live
+  must run a v0.38.0–v0.45.0 release once (its converge re-stamps every
+  owned row) before this version — see `docs/evpn-vtep-troubleshooting.md`,
+  "Crash-restart adoption across upgrades (ADR-0082)".
+
 ### Fixed
 
 - **Label-stack withdraws no longer reset labeled-unicast and VPN
