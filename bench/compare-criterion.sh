@@ -258,12 +258,29 @@ esac
 run_dir="${out_parent}/${run_id}"
 base_dir="${run_dir}/base"
 head_dir="${run_dir}/head"
-target_dir="${run_dir}/target"
+# Per-side target dirs — never share one CARGO_TARGET_DIR between the
+# two worktrees. Cargo names a path crate's artifacts with a metadata
+# hash whose package-id component is stable-hashed RELATIVE to the
+# workspace root, so base/ and head/ produce IDENTICAL artifact
+# filenames for any crate whose name/version/features/dep-graph are
+# unchanged between the refs. Both worktrees are checked out before
+# either side builds, so whichever side builds second passes cargo's
+# mtime freshness check against the first side's rlib (sources older
+# than the artifact) and silently links it: a mixed-tree build. That
+# either fails the compile (new source against a stale rlib) or —
+# worse — quietly benches the first side's code on both sides.
+# Separate target dirs make the collision structurally impossible;
+# Criterion data still lands in one shared tree via CRITERION_HOME
+# (the attempt-N-base/-head baseline names keep the sides apart) so
+# the summariser reads a single directory.
+base_target_dir="${run_dir}/target-base"
+head_target_dir="${run_dir}/target-head"
+criterion_home="${run_dir}/criterion"
 log_dir="${run_dir}/logs"
 summary_file="${run_dir}/summary.md"
 metadata_file="${run_dir}/metadata.txt"
 
-mkdir -p "$log_dir" "$target_dir"
+mkdir -p "$log_dir" "$base_target_dir" "$head_target_dir" "$criterion_home"
 
 cleanup() {
   if [[ "$keep_worktrees" -eq 0 ]]; then
@@ -295,8 +312,9 @@ write_metadata() {
     echo "verdict_min_attempts=${verdict_min_attempts}"
     echo "governor=${governor}"
     echo "use_taskset=${use_taskset}"
-    echo "target_dir=${target_dir}"
-    echo "criterion_dir=${target_dir}/criterion"
+    echo "base_target_dir=${base_target_dir}"
+    echo "head_target_dir=${head_target_dir}"
+    echo "criterion_dir=${criterion_home}"
     echo
     uname -a
     echo
@@ -315,13 +333,15 @@ write_metadata() {
 
 run_bench() {
   local worktree="$1"
-  local log_file="$2"
-  shift 2
+  local target_dir="$2"
+  local log_file="$3"
+  shift 3
 
   (
     cd "$worktree"
     export CARGO_TARGET_DIR="$target_dir"
-    echo "+ CARGO_TARGET_DIR=$target_dir $*"
+    export CRITERION_HOME="$criterion_home"
+    echo "+ CARGO_TARGET_DIR=$target_dir CRITERION_HOME=$criterion_home $*"
     if [[ "$use_taskset" -eq 1 ]]; then
       taskset -c "$core" "$@"
     else
@@ -366,22 +386,22 @@ for attempt in $(seq 1 "$attempts"); do
 
   if [[ "$order" == "base-first" ]]; then
     echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
-    run_bench "$base_dir" "${log_dir}/attempt-${attempt}-base.log" \
+    run_bench "$base_dir" "$base_target_dir" "${log_dir}/attempt-${attempt}-base.log" \
       cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
     echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
-    run_bench "$head_dir" "${log_dir}/attempt-${attempt}-head.log" \
+    run_bench "$head_dir" "$head_target_dir" "${log_dir}/attempt-${attempt}-head.log" \
       cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
   else
     echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
-    run_bench "$head_dir" "${log_dir}/attempt-${attempt}-head.log" \
+    run_bench "$head_dir" "$head_target_dir" "${log_dir}/attempt-${attempt}-head.log" \
       cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
     echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
-    run_bench "$base_dir" "${log_dir}/attempt-${attempt}-base.log" \
+    run_bench "$base_dir" "$base_target_dir" "${log_dir}/attempt-${attempt}-base.log" \
       cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
   fi
 done
 
-CRITERION_DIR="${target_dir}/criterion" \
+CRITERION_DIR="$criterion_home" \
 SUMMARY_FILE="$summary_file" \
 ATTEMPTS="$attempts" \
 BASE_SHA="$base_sha" \
