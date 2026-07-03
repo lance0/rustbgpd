@@ -50,7 +50,7 @@ those.
 | BFD single-hop async + RFC 5882 coupling | Shipped | M51 |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
-| BMP exporter (7854), MRT dump (6396) | Shipped | EVPN + unicast |
+| BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4/path-marking drafts, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; ADR-0097, M81 receipt |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types |
 | BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077) |
 
@@ -128,16 +128,15 @@ software-diversity funding). Two findings converge:
    completion is the one slice left in a moat no competitor has
    started.
 
-**The BMP arc (next anchor)**: RFC 8671 Adj-RIB-Out + RFC 9069 Loc-RIB on
-the existing exporter → BMPv4 TLV framing → path-marking TLV (streaming
-"why this path won/lost" — the best-path/ORR reasons on the wire) → REL
-(policy-discard + validation-fail events from the policy/RPKI/ASPA
-engines) → pmacct interop receipt. One arc, three plausible
-first-implementations, and it makes the controller-feed story
-standards-shaped: BMP is how the monitoring ecosystem (pmacct, OpenBMP,
-gobmp→Kafka pipelines) already ingests.
+**The BMP arc — shipped 2026-07-02/03 (#660–#665, ADR-0097)**: RFC 8671
+Adj-RIB-Out + RFC 9069 Loc-RIB on the existing exporter → BMPv4 TLV
+framing → path-marking TLV (streaming "why this path won/lost" — the
+best-path/ORR reasons on the wire) → the M81 pmacct/gobmp/tshark interop
+receipt. REL was deferred from the arc (zero collectors decode it
+today; the policy-discard/validation inputs it needs already exist).
+Details in the "Recently shipped" section below and ADR-0097.
 
-**Then, in rough order** (each research-backed, sized about one slice):
+**Next, in rough order** (each research-backed, sized about one slice):
 
 - **Export-side explain completion** — the GoBGP-demand item; composes
   with per-term policy traces and `BestPathReason`, and later exports on
@@ -183,8 +182,26 @@ rustbgpd ships across families), Flowspec v2 (codepoint churn), BGP-CT/CAR
 (PE-scale, out of niche), custom Kafka/NATS bridges (BMP *is* the bridge;
 gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
-### Recently shipped (2026-07-01/02, condensed — details in CHANGELOG/ADRs)
+### Recently shipped (2026-07-01/03, condensed — details in CHANGELOG/ADRs)
 
+- **The BMP arc (ADR-0097, #660–#665 + M81)** — the full monitoring
+  trio on one exporter with per-collector view selection: RFC 8671
+  post-policy Adj-RIB-Out tapped at the transport byte funnel
+  (byte-exact wire PDUs, O+L flags, stats 15/17) and RFC 9069 Loc-RIB
+  synthesized at the recompute seams (peer type 3 instance peer,
+  fabricated OPEN, `"global"` table name) with a chunked non-blocking
+  collector-connect table dump + per-family EoR — **no other
+  open-source daemon ships the trio**. Plus the first router-side
+  BMPv4 implementation: per-collector `version = 3|4` (default 3,
+  v3 byte-identical, all draft code points in one module for the
+  pre-IANA renumber) and the Path Marking TLV on Loc-RIB (Best/Stale
+  bits only, reason re-derived best-vs-runner-up from the explain
+  ladder, unmappable reasons omitted). M81 proves it against pmacct +
+  gobmp + tshark at once, with v4 code points byte-pinned against the
+  drafts' wire figures (no shipped collector decodes tlv-20 yet — two
+  pmacct upstream findings recorded). Deferred: REL (zero collectors
+  decode it), BMPv4 optional TLVs, path-marking statistics,
+  Nonselected/Add-Path marking.
 - **The `.rpol` typed compiled policy language (ADR-0096, #654–#658 +
   M80)** — public typed IR with indexed match sets behind the unchanged
   engine (set-heavy matching ~270× faster; golden decision-parity corpus

@@ -147,6 +147,8 @@ IPv4/IPv6 `Prefix` routes.
 | Prometheus metrics | Yes | Yes | No | Yes | No |
 | Structured logging (JSON) | Yes | No | No | No | No |
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
+| BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) | Yes | No | No | No | No |
+| BMPv4 + Path Marking TLV (pre-IANA drafts) | Yes | No | No | No | No |
 | MRT dump (RFC 6396) | Yes | Yes | Yes | Yes | Yes |
 | Streaming route events | Yes | No | No | Yes | No |
 | OpenConfig/gNMI telemetry | Subset[^gnmi] | Partial | No | No | No |
