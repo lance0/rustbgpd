@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BMPv4 per-collector framing (draft-ietf-grow-bmp-tlv-20, pre-IANA).**
+  New per-collector `version = 3 | 4` config field (default 3). A v4
+  collector gets common-header version 4 on every message type (draft
+  §3); Route Monitoring encloses the UPDATE PDU in the mandatory BGP
+  Message TLV (type 7, index 0, §5.2) and Stats Reports enclose Stats
+  Count + stats data in the mandatory Stats TLV (code point 1, §5.4);
+  Peer Up/Down, Initiation, and Termination already provision TLV data
+  in v3 and change only their version byte (§5.5). Internal BMP events
+  stay version-agnostic — framing happens per collector at fan-out, so
+  mixed v3/v4 collector fleets each get correctly framed messages and
+  v3 output stays byte-identical (pinned by golden-bytes regression
+  tests). Indexed-TLV (§4.3) and Group-TLV (§5.2.1, type 4) encode
+  infrastructure lands with this slice for the upcoming path-marking
+  TLVs. Draft code points are pre-IANA and may renumber at RFC
+  publication; they live in one annotated module
+  (`crates/bmp/src/tlv.rs`).
+
 - **BMP Loc-RIB route monitoring with collector-connect table sync
   (RFC 9069).** New per-collector `monitor = ["loc_rib"]` view: the
   daemon streams its post-best-path Loc-RIB as Route Monitoring

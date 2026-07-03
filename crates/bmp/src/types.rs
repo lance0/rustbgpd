@@ -210,6 +210,41 @@ pub enum PeerDownReason {
     RemoteNoNotification,
 }
 
+/// BMP wire version a collector receives.
+///
+/// V3 output is the RFC 7854/8671/9069 encoding, byte-identical to
+/// pre-v4 releases. V4 frames per draft-ietf-grow-bmp-tlv-20
+/// (pre-IANA; code points may renumber at RFC publication).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BmpVersion {
+    /// RFC 7854 BMP version 3 (default).
+    #[default]
+    V3,
+    /// draft-ietf-grow-bmp-tlv-20 BMP version 4.
+    V4,
+}
+
+impl BmpVersion {
+    /// Common-header version byte (§3 of the draft: 4 for every
+    /// message type on a v4 session).
+    #[must_use]
+    pub fn header_byte(self) -> u8 {
+        match self {
+            Self::V3 => 3,
+            Self::V4 => 4,
+        }
+    }
+
+    /// Dense index for per-version memoization (0 or 1).
+    #[must_use]
+    pub fn idx(self) -> usize {
+        match self {
+            Self::V3 => 0,
+            Self::V4 => 1,
+        }
+    }
+}
+
 /// Which route-monitoring streams a collector receives.
 ///
 /// Non-monitoring messages (Peer Up/Down, Stats, Initiation,
@@ -247,4 +282,6 @@ pub struct BmpClientConfig {
     pub collector_addr: SocketAddr,
     /// Seconds between reconnection attempts (default: 30).
     pub reconnect_interval: u64,
+    /// BMP wire version framed for this collector (default: v3).
+    pub version: BmpVersion,
 }

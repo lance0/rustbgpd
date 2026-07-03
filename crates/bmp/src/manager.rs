@@ -2,6 +2,11 @@
 //!
 //! Receives `BmpEvent`s from transport, encodes them into BMP wire
 //! format, and distributes the encoded bytes to all collector channels.
+//!
+//! Internal events are version-agnostic (raw PDU + peer metadata);
+//! framing happens per collector at fan-out time — each collector is
+//! configured v3 or v4 ([`BmpVersion`]) and an event is encoded at
+//! most once per version actually in use.
 
 use std::net::SocketAddr;
 
@@ -13,6 +18,7 @@ use tracing::{debug, info, warn};
 use crate::codec;
 use crate::types::{
     BmpControlEvent, BmpDumpChunk, BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter,
+    BmpVersion,
 };
 
 /// Per-message send timeout for a Loc-RIB dump forwarder. Paces the dump
@@ -25,12 +31,19 @@ const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from
 pub struct BmpManager {
     event_rx: mpsc::Receiver<BmpEvent>,
     control_rx: mpsc::Receiver<BmpControlEvent>,
-    /// Per-collector address + sender + monitoring filter, paired by
-    /// index. The address is the operator-facing identifier used as the
-    /// `collector` label on `bmp_*` Prometheus counters.
-    collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>, BmpMonitorFilter)>,
-    /// Latest encoded `PeerUp` message per peer address.
-    peer_up_cache: std::collections::HashMap<std::net::IpAddr, Bytes>,
+    /// Per-collector address + sender + monitoring filter + BMP wire
+    /// version, paired by index. The address is the operator-facing
+    /// identifier used as the `collector` label on `bmp_*` Prometheus
+    /// counters.
+    collectors: Vec<(
+        SocketAddr,
+        mpsc::Sender<Bytes>,
+        BmpMonitorFilter,
+        BmpVersion,
+    )>,
+    /// Latest encoded `PeerUp` message per peer address, one encoding
+    /// per BMP version (indexed by [`BmpVersion::idx`]).
+    peer_up_cache: std::collections::HashMap<std::net::IpAddr, [Bytes; 2]>,
     /// RFC 9069 Loc-RIB instance-peer identity. `None` = no collector
     /// monitors `loc_rib`; Loc-RIB events are dropped.
     loc_rib: Option<BmpLocRibConfig>,
@@ -46,7 +59,12 @@ impl BmpManager {
     pub fn new(
         event_rx: mpsc::Receiver<BmpEvent>,
         control_rx: mpsc::Receiver<BmpControlEvent>,
-        collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>, BmpMonitorFilter)>,
+        collectors: Vec<(
+            SocketAddr,
+            mpsc::Sender<Bytes>,
+            BmpMonitorFilter,
+            BmpVersion,
+        )>,
         metrics: BgpMetrics,
     ) -> Self {
         Self {
@@ -106,7 +124,7 @@ impl BmpManager {
         debug!("BMP manager shutting down");
     }
 
-    fn encode_event(event: &BmpEvent) -> Bytes {
+    fn encode_event(event: &BmpEvent, version: BmpVersion) -> Bytes {
         match event {
             BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
                 unreachable!("Loc-RIB events are encoded in handle_loc_rib_event")
@@ -125,12 +143,15 @@ impl BmpManager {
                 *remote_port,
                 local_open,
                 remote_open,
+                version,
             ),
-            BmpEvent::PeerDown { peer_info, reason } => codec::encode_peer_down(peer_info, reason),
+            BmpEvent::PeerDown { peer_info, reason } => {
+                codec::encode_peer_down(peer_info, reason, version)
+            }
             BmpEvent::RouteMonitoring {
                 peer_info,
                 update_pdu,
-            } => codec::encode_route_monitoring(peer_info, update_pdu),
+            } => codec::encode_route_monitoring(peer_info, update_pdu, version),
             BmpEvent::StatsReport {
                 peer_info,
                 adj_rib_in_routes,
@@ -158,7 +179,7 @@ impl BmpManager {
                         });
                     }
                 }
-                codec::encode_stats_report(peer_info, &counters, &afi_counters)
+                codec::encode_stats_report(peer_info, &counters, &afi_counters, version)
             }
         }
     }
@@ -170,36 +191,48 @@ impl BmpManager {
         let Some(ref cfg) = self.loc_rib else {
             return;
         };
-        let encoded = match event {
-            BmpEvent::LocRibRouteMonitoring {
-                update_pdu,
-                timestamp,
-            } => codec::encode_route_monitoring(&cfg.peer_info(*timestamp), update_pdu),
-            BmpEvent::LocRibStats { per_family } => {
-                // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
-                // type 10 = its per-AFI/SAFI breakdown.
-                let counters = vec![codec::StatCounter {
-                    stat_type: 8,
-                    value: per_family.iter().map(|(_, _, count)| count).sum(),
-                }];
-                let afi_counters: Vec<codec::AfiStatCounter> = per_family
-                    .iter()
-                    .map(|&(afi, safi, value)| codec::AfiStatCounter {
-                        stat_type: 10,
-                        afi,
-                        safi,
-                        value,
-                    })
-                    .collect();
-                codec::encode_stats_report(
-                    &cfg.peer_info(std::time::SystemTime::now()),
-                    &counters,
-                    &afi_counters,
-                )
-            }
-            _ => return,
-        };
-        self.fan_out_filtered(&encoded, |f| f.loc_rib);
+        if !matches!(
+            event,
+            BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. }
+        ) {
+            return;
+        }
+        let now = std::time::SystemTime::now();
+        self.fan_out_filtered(
+            |f| f.loc_rib,
+            |version| match event {
+                BmpEvent::LocRibRouteMonitoring {
+                    update_pdu,
+                    timestamp,
+                } => {
+                    codec::encode_route_monitoring(&cfg.peer_info(*timestamp), update_pdu, version)
+                }
+                BmpEvent::LocRibStats { per_family } => {
+                    // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
+                    // type 10 = its per-AFI/SAFI breakdown.
+                    let counters = vec![codec::StatCounter {
+                        stat_type: 8,
+                        value: per_family.iter().map(|(_, _, count)| count).sum(),
+                    }];
+                    let afi_counters: Vec<codec::AfiStatCounter> = per_family
+                        .iter()
+                        .map(|&(afi, safi, value)| codec::AfiStatCounter {
+                            stat_type: 10,
+                            afi,
+                            safi,
+                            value,
+                        })
+                        .collect();
+                    codec::encode_stats_report(
+                        &cfg.peer_info(now),
+                        &counters,
+                        &afi_counters,
+                        version,
+                    )
+                }
+                _ => unreachable!("guarded above"),
+            },
+        );
     }
 
     fn handle_event(&mut self, event: &BmpEvent) {
@@ -208,33 +241,37 @@ impl BmpManager {
                 self.handle_loc_rib_event(event);
             }
             BmpEvent::PeerUp { peer_info, .. } => {
-                let encoded = Self::encode_event(event);
-                self.peer_up_cache
-                    .insert(peer_info.peer_addr, encoded.clone());
-                self.fan_out(&encoded);
+                // Encode both versions eagerly: the cache must be able
+                // to replay to any collector version on reconnect.
+                let encoded = [
+                    Self::encode_event(event, BmpVersion::V3),
+                    Self::encode_event(event, BmpVersion::V4),
+                ];
+                self.fan_out(|version| encoded[version.idx()].clone());
+                self.peer_up_cache.insert(peer_info.peer_addr, encoded);
             }
             BmpEvent::PeerDown { peer_info, .. } => {
                 self.peer_up_cache.remove(&peer_info.peer_addr);
-                let encoded = Self::encode_event(event);
-                self.fan_out(&encoded);
+                self.fan_out(|version| Self::encode_event(event, version));
             }
             // Route monitoring is the only per-collector-filtered
             // message: rib-in RM only to `rib_in_pre` collectors,
             // rib-out RM only to `rib_out_post` collectors.
             BmpEvent::RouteMonitoring { peer_info, .. } => {
-                let encoded = Self::encode_event(event);
                 let rib_out = peer_info.is_rib_out;
-                self.fan_out_filtered(&encoded, |f| {
-                    if rib_out {
-                        f.rib_out_post
-                    } else {
-                        f.rib_in_pre
-                    }
-                });
+                self.fan_out_filtered(
+                    |f| {
+                        if rib_out {
+                            f.rib_out_post
+                        } else {
+                            f.rib_in_pre
+                        }
+                    },
+                    |version| Self::encode_event(event, version),
+                );
             }
             BmpEvent::StatsReport { .. } => {
-                let encoded = Self::encode_event(event);
-                self.fan_out(&encoded);
+                self.fan_out(|version| Self::encode_event(event, version));
             }
         }
     }
@@ -272,8 +309,11 @@ impl BmpManager {
                 // RFC 9069 §5.3: the Loc-RIB instance peer goes down with
                 // reason 6 + the VRF/Table Name TLV when monitoring stops.
                 if let Some(ref cfg) = self.loc_rib {
-                    let down = codec::encode_loc_rib_peer_down(cfg, std::time::SystemTime::now());
-                    self.fan_out_filtered(&down, |f| f.loc_rib);
+                    let now = std::time::SystemTime::now();
+                    self.fan_out_filtered(
+                        |f| f.loc_rib,
+                        |version| codec::encode_loc_rib_peer_down(cfg, now, version),
+                    );
                 }
                 true
             }
@@ -281,7 +321,7 @@ impl BmpManager {
     }
 
     fn replay_peer_up_to_collector(&self, collector_id: usize) {
-        let Some((addr, tx, _)) = self.collectors.get(collector_id) else {
+        let Some((addr, tx, _, version)) = self.collectors.get(collector_id) else {
             warn!(
                 collector_id,
                 "BMP replay target collector index out of range, skipping"
@@ -295,7 +335,11 @@ impl BmpManager {
         // remaining cached-PeerUp message as dropped — otherwise a
         // single saturation event under-reports thousands of skipped
         // peers as one drop.
-        let cache_values: Vec<&Bytes> = self.peer_up_cache.values().collect();
+        let cache_values: Vec<&Bytes> = self
+            .peer_up_cache
+            .values()
+            .map(|encoded| &encoded[version.idx()])
+            .collect();
         for (idx, msg) in cache_values.iter().enumerate() {
             if let Err(e) = tx.try_send((*msg).clone()) {
                 let reason = trysend_reason(&e);
@@ -328,7 +372,7 @@ impl BmpManager {
         let Some(ref cfg) = self.loc_rib else {
             return;
         };
-        let Some((addr, collector_tx, filter)) = self.collectors.get(collector_id) else {
+        let Some((addr, collector_tx, filter, version)) = self.collectors.get(collector_id) else {
             return;
         };
         if !filter.loc_rib {
@@ -336,7 +380,8 @@ impl BmpManager {
         }
 
         let addr_label = addr.to_string();
-        let peer_up = codec::encode_loc_rib_peer_up(cfg, std::time::SystemTime::now());
+        let version = *version;
+        let peer_up = codec::encode_loc_rib_peer_up(cfg, std::time::SystemTime::now(), version);
         if let Err(e) = collector_tx.try_send(peer_up) {
             let reason = trysend_reason(&e);
             self.metrics
@@ -372,21 +417,32 @@ impl BmpManager {
             chunk_rx,
             collector_tx,
             cfg,
+            version,
             metrics,
             addr_label,
         ));
     }
 
-    fn fan_out(&self, msg: &Bytes) {
-        self.fan_out_filtered(msg, |_| true);
+    fn fan_out(&self, encode: impl Fn(BmpVersion) -> Bytes) {
+        self.fan_out_filtered(|_| true, encode);
     }
 
-    fn fan_out_filtered(&self, msg: &Bytes, want: impl Fn(&BmpMonitorFilter) -> bool) {
-        for (addr, tx, filter) in &self.collectors {
+    /// Fan out one event, framing per collector version. `encode` is
+    /// called at most once per BMP version in use (two-slot memo).
+    fn fan_out_filtered(
+        &self,
+        want: impl Fn(&BmpMonitorFilter) -> bool,
+        encode: impl Fn(BmpVersion) -> Bytes,
+    ) {
+        let mut memo: [Option<Bytes>; 2] = [None, None];
+        for (addr, tx, filter, version) in &self.collectors {
             if !want(filter) {
                 continue;
             }
-            if let Err(e) = tx.try_send(msg.clone()) {
+            let msg = memo[version.idx()]
+                .get_or_insert_with(|| encode(*version))
+                .clone();
+            if let Err(e) = tx.try_send(msg) {
                 let reason = trysend_reason(&e);
                 self.metrics
                     .record_bmp_collector_drop(&addr.to_string(), "fan_out", reason, 1);
@@ -410,13 +466,14 @@ async fn forward_loc_rib_dump(
     mut chunk_rx: mpsc::Receiver<BmpDumpChunk>,
     collector_tx: mpsc::Sender<Bytes>,
     cfg: BmpLocRibConfig,
+    version: BmpVersion,
     metrics: BgpMetrics,
     addr_label: String,
 ) {
     let mut sent: u64 = 0;
     while let Some(chunk) = chunk_rx.recv().await {
         for (pdu, timestamp) in chunk.messages {
-            let msg = codec::encode_route_monitoring(&cfg.peer_info(timestamp), &pdu);
+            let msg = codec::encode_route_monitoring(&cfg.peer_info(timestamp), &pdu, version);
             match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, collector_tx.send(msg)).await {
                 Ok(Ok(())) => sent += 1,
                 Ok(Err(_)) => {
@@ -491,8 +548,18 @@ mod tests {
             event_rx,
             control_rx,
             vec![
-                (collector_addr(0), c1_tx, BmpMonitorFilter::default()),
-                (collector_addr(1), c2_tx, BmpMonitorFilter::default()),
+                (
+                    collector_addr(0),
+                    c1_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    c2_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
             ],
             BgpMetrics::new(),
         );
@@ -524,6 +591,112 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Mixed-version fan-out (draft-ietf-grow-bmp-tlv-20): one v3 and
+    /// one v4 collector receive the same events, each framed at its
+    /// configured version. Route Monitoring: bare PDU for v3, BGP
+    /// Message TLV (type 7, index 0) for v4. Peer Up (TLV-provisioned
+    /// already in v3) differs only in the version byte — including the
+    /// cached copy replayed on reconnect.
+    #[tokio::test]
+    async fn mixed_version_collectors_get_version_correct_framing() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (v3_tx, mut v3_rx) = mpsc::channel(16);
+        let (v4_tx, mut v4_rx) = mpsc::channel(16);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (
+                    collector_addr(0),
+                    v3_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    v4_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V4,
+                ),
+            ],
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        // Peer Up: same bytes except the version byte.
+        event_tx
+            .send(BmpEvent::PeerUp {
+                peer_info: sample_peer_info(),
+                local_open: Bytes::from_static(&[0xFF; 29]),
+                remote_open: Bytes::from_static(&[0xFE; 29]),
+                local_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                local_port: 179,
+                remote_port: 54321,
+            })
+            .await
+            .unwrap();
+        let up3 = v3_rx.recv().await.unwrap();
+        let up4 = v4_rx.recv().await.unwrap();
+        assert_eq!(up3[0], 3);
+        assert_eq!(up4[0], 4);
+        assert_eq!(up3[1..], up4[1..], "Peer Up: version byte only");
+
+        // Route Monitoring: v3 bare PDU, v4 BGP Message TLV wrap.
+        let pdu = [0xAA; 23];
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: sample_peer_info(),
+                update_pdu: Bytes::copy_from_slice(&pdu),
+            })
+            .await
+            .unwrap();
+        let rm3 = v3_rx.recv().await.unwrap();
+        let rm4 = v4_rx.recv().await.unwrap();
+        assert_eq!(rm3[0], 3);
+        assert_eq!(&rm3[6 + 42..], &pdu, "v3: bare PDU after per-peer header");
+        assert_eq!(rm4[0], 4);
+        let tlv = &rm4[6 + 42..];
+        assert_eq!(u16::from_be_bytes([tlv[0], tlv[1]]), 7, "BGP Message TLV");
+        assert_eq!(u16::from_be_bytes([tlv[2], tlv[3]]) as usize, pdu.len());
+        assert_eq!(u16::from_be_bytes([tlv[4], tlv[5]]), 0, "index 0");
+        assert_eq!(&tlv[6..], &pdu);
+
+        // Stats Report: v4 wraps in the Stats TLV (code point 1).
+        event_tx
+            .send(BmpEvent::StatsReport {
+                peer_info: sample_peer_info(),
+                adj_rib_in_routes: 42,
+                adj_rib_out_post: None,
+            })
+            .await
+            .unwrap();
+        let st3 = v3_rx.recv().await.unwrap();
+        let st4 = v4_rx.recv().await.unwrap();
+        assert_eq!(st3[0], 3);
+        assert_eq!(st4[0], 4);
+        let tlv = &st4[6 + 42..];
+        assert_eq!(u16::from_be_bytes([tlv[0], tlv[1]]), 1, "Stats TLV");
+        assert_eq!(&tlv[4..], &st3[6 + 42..], "value = v3 count + stats bytes");
+
+        // Reconnect of the v4 collector replays the v4-framed Peer Up.
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 1,
+                collector_addr: collector_addr(1),
+            })
+            .await
+            .unwrap();
+        let replay = v4_rx.recv().await.unwrap();
+        assert_eq!(replay[0], 4, "replayed Peer Up framed at collector version");
+        assert_eq!(replay[..], up4[..], "replay = original v4 Peer Up");
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
     /// Per-collector monitor filtering: collector A monitors rib-in
     /// only (default), collector B monitors both. A rib-in RM reaches
     /// both; a rib-out RM reaches only B. Non-RM messages (stats)
@@ -539,7 +712,12 @@ mod tests {
             event_rx,
             control_rx,
             vec![
-                (collector_addr(0), a_tx, BmpMonitorFilter::default()),
+                (
+                    collector_addr(0),
+                    a_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
                 (
                     collector_addr(1),
                     b_tx,
@@ -548,6 +726,7 @@ mod tests {
                         rib_out_post: true,
                         loc_rib: false,
                     },
+                    BmpVersion::V3,
                 ),
             ],
             BgpMetrics::new(),
@@ -608,7 +787,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -642,7 +826,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -672,7 +861,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -715,7 +909,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -737,8 +936,18 @@ mod tests {
             event_rx,
             control_rx,
             vec![
-                (collector_addr(0), c1_tx, BmpMonitorFilter::default()),
-                (collector_addr(1), c2_tx, BmpMonitorFilter::default()),
+                (
+                    collector_addr(0),
+                    c1_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    c2_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
             ],
             BgpMetrics::new(),
         );
@@ -853,7 +1062,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(addr, c_tx, BmpMonitorFilter::default())],
+            vec![(addr, c_tx, BmpMonitorFilter::default(), BmpVersion::V3)],
             metrics.clone(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -909,7 +1118,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(addr, c_tx.clone(), BmpMonitorFilter::default())],
+            vec![(
+                addr,
+                c_tx.clone(),
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             metrics.clone(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -987,7 +1201,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(addr, c_tx, BmpMonitorFilter::default())],
+            vec![(addr, c_tx, BmpMonitorFilter::default(), BmpVersion::V3)],
             metrics.clone(),
         );
         let handle = tokio::spawn(mgr.run());
@@ -1054,8 +1268,18 @@ mod tests {
             event_rx,
             control_rx,
             vec![
-                (collector_addr(0), rib_in_tx, BmpMonitorFilter::default()),
-                (collector_addr(1), loc_rib_tx, loc_rib_filter()),
+                (
+                    collector_addr(0),
+                    rib_in_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    loc_rib_tx,
+                    loc_rib_filter(),
+                    BmpVersion::V3,
+                ),
             ],
             BgpMetrics::new(),
         )
@@ -1117,8 +1341,18 @@ mod tests {
             event_rx,
             control_rx,
             vec![
-                (collector_addr(0), rib_in_tx, BmpMonitorFilter::default()),
-                (collector_addr(1), loc_rib_tx, loc_rib_filter()),
+                (
+                    collector_addr(0),
+                    rib_in_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    loc_rib_tx,
+                    loc_rib_filter(),
+                    BmpVersion::V3,
+                ),
             ],
             BgpMetrics::new(),
         )
@@ -1169,7 +1403,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, loc_rib_filter())],
+            vec![(collector_addr(0), c_tx, loc_rib_filter(), BmpVersion::V3)],
             BgpMetrics::new(),
         )
         .with_loc_rib(loc_rib_config(), dump_tx);
@@ -1253,7 +1487,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         )
         .with_loc_rib(loc_rib_config(), dump_tx);
@@ -1297,7 +1536,7 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, loc_rib_filter())],
+            vec![(collector_addr(0), c_tx, loc_rib_filter(), BmpVersion::V3)],
             BgpMetrics::new(),
         )
         .with_loc_rib(loc_rib_config(), dump_tx);
@@ -1324,7 +1563,12 @@ mod tests {
         let mgr = BmpManager::new(
             event_rx,
             control_rx,
-            vec![(collector_addr(0), c_tx, BmpMonitorFilter::default())],
+            vec![(
+                collector_addr(0),
+                c_tx,
+                BmpMonitorFilter::default(),
+                BmpVersion::V3,
+            )],
             BgpMetrics::new(),
         );
         let mut handle = tokio::spawn(mgr.run());

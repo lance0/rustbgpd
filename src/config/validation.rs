@@ -693,6 +693,14 @@ impl Config {
                         ),
                     });
                 }
+                if !matches!(collector.version, 3 | 4) {
+                    return Err(ConfigError::InvalidBmpCollector {
+                        reason: format!(
+                            "collectors[{i}]: version must be 3 or 4 (got {})",
+                            collector.version
+                        ),
+                    });
+                }
             }
 
             // Reject duplicate collector addresses (canonicalize through SocketAddr)

@@ -1279,6 +1279,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             std::net::SocketAddr,
             mpsc::Sender<bytes::Bytes>,
             rustbgpd_bmp::BmpMonitorFilter,
+            rustbgpd_bmp::BmpVersion,
         )> = Vec::new();
         let mut client_handles = Vec::new();
         for collector in &bmp_config.collectors {
@@ -1304,12 +1305,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     .contains(&config::BmpMonitorView::RibOutPost),
                 loc_rib: collector.monitor.contains(&config::BmpMonitorView::LocRib),
             };
-            collectors.push((addr, msg_tx, filter));
+            // Validation pins collector.version to 3 | 4.
+            let version = if collector.version == 4 {
+                rustbgpd_bmp::BmpVersion::V4
+            } else {
+                rustbgpd_bmp::BmpVersion::V3
+            };
+            collectors.push((addr, msg_tx, filter, version));
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {
                     collector_id,
                     collector_addr: addr,
                     reconnect_interval: collector.reconnect_interval,
+                    version,
                 },
                 msg_rx,
                 sys_name.clone(),
@@ -1321,7 +1329,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             client_handles.push(tokio::spawn(client.run()));
         }
 
-        let loc_rib_enabled = collectors.iter().any(|(_, _, filter)| filter.loc_rib);
+        let loc_rib_enabled = collectors.iter().any(|(_, _, filter, _)| filter.loc_rib);
         let mut mgr = rustbgpd_bmp::BmpManager::new(
             bmp_event_rx,
             bmp_control_rx,

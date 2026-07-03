@@ -1744,6 +1744,24 @@ monitor = ["rib_in_pre", "rib_out_post"]   # + RFC 8671 Adj-RIB-Out
 | `address`            | string | yes      | --      | Collector `host:port` socket address  |
 | `reconnect_interval` | u64   | no       | 30      | Seconds between reconnect attempts    |
 | `monitor`            | array  | no       | `["rib_in_pre"]` | Route-monitoring streams: `rib_in_pre` (RFC 7854 pre-policy Adj-RIB-In), `rib_out_post` (RFC 8671 post-policy Adj-RIB-Out), and/or `loc_rib` (RFC 9069 Loc-RIB instance with collector-connect table sync) |
+| `version`            | u8     | no       | 3       | BMP wire version framed for this collector: `3` (RFC 7854) or `4` (BMPv4 TLV framing, see below) |
+
+### BMPv4 framing (`version = 4`)
+
+With `version = 4` on a collector, every BMP message carries common-header
+version 4 per draft-ietf-grow-bmp-tlv-20: Route Monitoring messages enclose
+the BGP UPDATE PDU in the mandatory BGP Message TLV (type 7, index 0) and
+Stats Reports enclose the Stats Count + stats data in the mandatory Stats
+TLV (code point 1). Peer Up/Down, Initiation, and Termination already
+provision TLV data in v3 and differ only in the version byte. Framing is
+per collector — v3 and v4 collectors can be mixed freely, and v3 output is
+byte-identical to previous releases.
+
+**Pre-IANA caveat:** BMPv4 is an IETF draft. The TLV code points are not
+yet IANA-assigned and may be renumbered when the draft is published as an
+RFC; pick `4` only for collectors that track the same draft revision
+(e.g. bleeding-edge pmacct/gobmp builds). The default `3` is the stable
+RFC 7854 encoding.
 
 ### What is streamed
 
