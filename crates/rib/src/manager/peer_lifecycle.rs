@@ -431,8 +431,10 @@ impl RibManager {
         // derive from the session's Adj-RIB-In): `handle_peer_up` re-creates
         // it when the new session negotiates the family — empty-strict
         // normally, or re-derived from the GR-preserved (stale) RTC routes
-        // on a graceful-restart re-establish.
-        self.peer_rt_membership.remove(&peer);
+        // on a graceful-restart re-establish. Routed through the single
+        // Φ-write function (design risk 1); no corrective emit — the
+        // registration is being torn down.
+        self.set_rt_membership(peer, None);
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
@@ -633,11 +635,13 @@ impl RibManager {
             } else {
                 super::RtcMembership::default()
             };
-            self.peer_rt_membership.insert(peer, membership);
+            // Single Φ-write function (design risk 1); pre-registration,
+            // so no corrective emit — the initial dump replays under Φ.
+            self.set_rt_membership(peer, Some(membership));
         } else {
             // A replacement session that dropped the family must not
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
-            self.peer_rt_membership.remove(&peer);
+            self.set_rt_membership(peer, None);
         }
 
         debug!(%peer, "peer up — registering for outbound updates");
@@ -827,14 +831,17 @@ impl RibManager {
                 nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
                 announce.push(route.clone());
             }
-            // VPN join replay (non-RTC groups): table minus own-sourced,
-            // export tail already paid when the table was staged. An RTC
-            // group never stages VPN — its members take the per-peer VPN
-            // staging below, where the RFC 4684 RT filter applies.
+            // VPN join replay: table minus own-sourced, filtered by the
+            // joining member's Φ (the RFC 4684 gate the per-peer dump
+            // would have applied; strict-empty membership replays
+            // nothing). Export tail already paid when the table was
+            // staged.
             if group.stages_vpn() {
                 vpn_group_replayed = true;
                 for route in group.table.iter_vpn() {
-                    if route.peer == peer {
+                    if route.peer == peer
+                        || !super::update_groups::rt_passes(rtc_filter.as_ref(), route)
+                    {
                         continue;
                     }
                     vpn_announce.push(route.clone());

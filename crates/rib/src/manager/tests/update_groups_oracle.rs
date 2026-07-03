@@ -332,6 +332,10 @@ struct Oracle {
     tx: mpsc::Sender<RibUpdate>,
     outs: BTreeMap<IpAddr, mpsc::Receiver<OutboundRouteUpdate>>,
     handle: tokio::task::JoinHandle<()>,
+    /// Messages drained so far (incremental collection so the VPN
+    /// invariant checker can fold mid-scenario); `finish` drains the
+    /// remainder into it and returns the whole stream set.
+    collected: Streams,
 }
 
 impl Oracle {
@@ -345,6 +349,7 @@ impl Oracle {
             tx,
             outs: BTreeMap::new(),
             handle,
+            collected: Streams::new(),
         }
     }
 
@@ -396,7 +401,15 @@ impl Oracle {
             })
             .await
             .unwrap();
-        self.outs.insert(IpAddr::V4(peer), out_rx);
+        // A re-registration (e.g. GR re-establish) replaces the
+        // receiver; drain the predecessor first so its messages stay in
+        // the collected stream.
+        if let Some(mut old_rx) = self.outs.insert(IpAddr::V4(peer), out_rx) {
+            let msgs = self.collected.entry(IpAddr::V4(peer)).or_default();
+            while let Ok(update) = old_rx.try_recv() {
+                msgs.push(normalize(&update));
+            }
+        }
         self.quiesce().await;
     }
 
@@ -449,8 +462,33 @@ impl Oracle {
     /// RFC 4684 RT-Constrain advertisement from a peer — rebuilds the
     /// peer's RT membership (the per-peer VPN filter).
     async fn rtc_routes(&mut self, from: Ipv4Addr, announce: Vec<RtcRibRoute>) {
+        self.rtc_routes_full(from, announce, vec![]).await;
+        self.quiesce().await;
+    }
+
+    /// RTC announce + withdraw, WITHOUT quiescing — racing scenarios
+    /// queue this back-to-back with route updates.
+    async fn rtc_routes_full(
+        &mut self,
+        from: Ipv4Addr,
+        announce: Vec<RtcRibRoute>,
+        withdraw: Vec<crate::route::RtcRibRouteKey>,
+    ) {
         self.tx
             .send(RibUpdate::RtcRoutesReceived {
+                peer: IpAddr::V4(from),
+                session_id: SESSION,
+                announced: announce,
+                withdrawn: withdraw,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// VPN announce WITHOUT quiescing (racing scenarios).
+    async fn vpn_routes_no_quiesce(&mut self, from: Ipv4Addr, announce: Vec<VpnRibRoute>) {
+        self.tx
+            .send(RibUpdate::VpnRoutesReceived {
                 peer: IpAddr::V4(from),
                 session_id: SESSION,
                 announced: announce,
@@ -458,7 +496,87 @@ impl Oracle {
             })
             .await
             .unwrap();
+    }
+
+    /// RFC 4724 graceful restart: routes (SAFI-132 interest included)
+    /// are preserved stale for the returning session.
+    async fn graceful_restart(&mut self, peer: Ipv4Addr) {
+        self.tx
+            .send(RibUpdate::PeerGracefulRestart {
+                peer: IpAddr::V4(peer),
+                session_id: SESSION,
+                restart_time: 120,
+                stale_routes_time: 300,
+                gr_families: vpn_rtc_sendable(),
+                peer_llgr_capable: false,
+                peer_llgr_families: vec![],
+                llgr_stale_time: 0,
+            })
+            .await
+            .unwrap();
         self.quiesce().await;
+    }
+
+    /// Total export-policy evaluations recorded by every installed
+    /// chain since install (ADR-0096 live counters) — the zero-eval
+    /// assertion's window.
+    async fn export_policy_evals(&mut self) -> u64 {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryExportPolicyTermHits {
+                peer: None,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().iter().map(|row| row.evals).sum()
+    }
+
+    /// Drain every receiver into the collected streams (no await — only
+    /// messages already sent).
+    fn drain_collected(&mut self) {
+        for (peer, rx) in &mut self.outs {
+            let msgs = self.collected.entry(*peer).or_default();
+            while let Ok(update) = rx.try_recv() {
+                msgs.push(normalize(&update));
+            }
+        }
+    }
+
+    /// The design §5 invariant checker: recompute `adv(m)` from manager
+    /// state (`{ e ∈ group table : e.peer ≠ m ∧ pass_m(e) }` for a
+    /// VPN-grouped member, the per-peer Adj-RIB-Out otherwise) for every
+    /// peer and compare against the folded emitted VPN state.
+    async fn check_vpn_invariant(&mut self, label: &str) {
+        self.quiesce().await;
+        self.drain_collected();
+        let folded = fold_vpn(&self.collected);
+        let peers: Vec<IpAddr> = self.outs.keys().copied().collect();
+        for peer in peers {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::TestQueryVpnAdvertised {
+                    peer,
+                    reply: reply_tx,
+                })
+                .await
+                .unwrap();
+            let advertised = reply_rx.await.unwrap();
+            let adv: BTreeMap<String, IpAddr> = advertised.into_iter().collect();
+            let fold: BTreeMap<String, IpAddr> = folded
+                .get(&peer)
+                .map(|table| {
+                    table
+                        .iter()
+                        .map(|(key, (_, _, src, _))| (key.clone(), *src))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                adv, fold,
+                "VPN invariant adv(m) != folded emitted state for {peer} at step: {label}"
+            );
+        }
     }
 
     /// The peer's update-group membership label (`group:N` or the
@@ -529,32 +647,35 @@ impl Oracle {
     }
 
     /// Drain one pending message from a peer's channel (channel-fill
-    /// scenarios).
+    /// scenarios). The message stays in the collected stream so folded
+    /// comparisons and the VPN invariant checker see the whole history.
     async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
-        self.outs
+        let update = self
+            .outs
             .get_mut(&IpAddr::V4(peer))
             .expect("peer registered")
             .recv()
             .await
-            .expect("message pending")
+            .expect("message pending");
+        self.collected
+            .entry(IpAddr::V4(peer))
+            .or_default()
+            .push(normalize(&update));
+        update
     }
 
-    /// Collect every message every peer has received so far. Messages
-    /// drained early via `drain_one` are NOT re-collected — scenarios
-    /// that pre-drain must compare folded state, not streams.
+    /// Collect every message every peer has received so far, including
+    /// those drained mid-scenario by `drain_one` and the invariant
+    /// checker — the returned streams are the complete emission history.
     async fn finish(mut self) -> Streams {
         self.quiesce().await;
-        let mut streams = Streams::new();
-        for (peer, rx) in &mut self.outs {
-            let mut msgs = Vec::new();
-            while let Ok(update) = rx.try_recv() {
-                msgs.push(normalize(&update));
-            }
-            streams.insert(*peer, msgs);
+        self.drain_collected();
+        for peer in self.outs.keys() {
+            self.collected.entry(*peer).or_default();
         }
         drop(self.tx);
         self.handle.await.unwrap();
-        streams
+        self.collected
     }
 }
 
@@ -944,15 +1065,15 @@ async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
     );
 }
 
-/// The slice-1 RTC gate: peers that negotiated RT-Constrain still group
-/// for unicast, but their VPN families ride the per-peer path where the
-/// RFC 4684 RT membership filter applies. A wildcard-interest member
-/// receives the VPN table; a strict-empty-membership member receives
-/// nothing — byte-identically on both paths (if VPN were wrongly
-/// group-staged, the filterless group table would leak routes to the
-/// empty-membership peer and the streams would diverge).
+/// RTC-negotiated peers group AND stage VPN (v2 slice 2), with the RFC
+/// 4684 RT membership filter `Φ_m` applied per member at emit. A
+/// wildcard-interest member receives the VPN table; a strict-empty-
+/// membership member receives nothing — byte-identically to the
+/// per-peer path (if Φ were dropped at any emit seam, the group table
+/// would leak routes to the empty-membership peer and the streams
+/// would diverge).
 #[tokio::test]
-async fn oracle_rtc_negotiated_vpn_rides_per_peer() {
+async fn oracle_rtc_negotiated_vpn_filtered_at_emit() {
     let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
     let scenario = async |o: &mut Oracle| {
         // Source peer: VPN-capable, no RTC (its group DOES stage VPN).
@@ -985,7 +1106,7 @@ async fn oracle_rtc_negotiated_vpn_rides_per_peer() {
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
     assert_eq!(
         grouped, ungrouped,
-        "RTC-negotiated peers' VPN streams must ride the per-peer path unchanged"
+        "RTC-negotiated peers' Φ-filtered group emit must match the per-peer path"
     );
     let vpn_count = |streams: &Streams, peer: Ipv4Addr| {
         streams[&IpAddr::V4(peer)]
@@ -1035,4 +1156,387 @@ async fn oracle_plain_ibgp_split_horizon_identical() {
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
     assert_eq!(grouped, ungrouped);
+}
+
+// ---------------------------------------------------------------------
+// RTC churn (update-groups v2 slice 2): the RT-pass emit dimension.
+// ---------------------------------------------------------------------
+
+/// RT extended community `65000:n` (two-octet-AS route target).
+const fn rt_ec(n: u64) -> u64 {
+    0x0002_FDE8_0000_0000 | n
+}
+
+/// RTC interest NLRI covering exactly RT `65000:n` (full /96 prefix).
+fn rtc_nlri_for(n: u64) -> RtcNlri {
+    RtcNlri::new(65000, rt_ec(n), 96).unwrap()
+}
+
+fn rtc_key_for(n: u64) -> crate::route::RtcRibRouteKey {
+    crate::route::RtcRibRouteKey {
+        nlri: rtc_nlri_for(n),
+        path_id: 0,
+    }
+}
+
+/// A SAFI-132 advertisement of interest in RT `65000:n` from a peer.
+fn rtc_interest(src: Ipv4Addr, n: u64) -> RtcRibRoute {
+    RtcRibRoute {
+        nlri: rtc_nlri_for(n),
+        ..rtc_default(src)
+    }
+}
+
+/// The RTC-churn kitchen sink (design §5): membership widen / narrow /
+/// default add+remove / strict-empty, RT flip via route attr change,
+/// RFC 7313 refresh under heterogeneous memberships, GR re-establish
+/// with preserved SAFI-132 state, membership change racing a source
+/// flip in the same manager queue, and a regroup join with pre-existing
+/// membership — exact per-peer streams grouped vs forced-ungrouped,
+/// with the adv(m) invariant checked after every step.
+#[tokio::test]
+async fn oracle_rtc_churn_streams_identical() {
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let modifying_chain = || {
+        permit_all_with(RouteModifications {
+            set_med: Some(42),
+            ..RouteModifications::default()
+        })
+    };
+    let scenario = async |o: &mut Oracle| {
+        // A: VPN source (no RTC). B/C/D: RTC RR clients, one group.
+        // E: RTC RR client with a modifying chain — its own group.
+        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(B, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        o.peer_up_families(C, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        o.peer_up_families(D, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        o.peer_up_families(
+            E,
+            false,
+            true,
+            Some(modifying_chain()),
+            64,
+            vpn_rtc_sendable(),
+        )
+        .await;
+
+        // Memberships: B{RT1}, C{default}, D strict-empty, E{RT2}.
+        o.rtc_routes(B, vec![rtc_interest(B, 1)]).await;
+        o.rtc_routes(C, vec![rtc_default(C)]).await;
+        o.rtc_routes(E, vec![rtc_interest(E, 2)]).await;
+        o.check_vpn_invariant("memberships installed").await;
+
+        // Flood: identities across the RT pool (incl. RT-less id 4,
+        // which only the default membership may receive).
+        o.vpn_routes(
+            A,
+            vec![
+                vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(1)]),
+                vpn_route(vpn_nlri(2, 200), A, 100, vec![rt_ec(2)]),
+                vpn_route(vpn_nlri(3, 300), A, 100, vec![rt_ec(1), rt_ec(2)]),
+                vpn_route(vpn_nlri(4, 400), A, 100, vec![]),
+                vpn_route(vpn_nlri(5, 500), A, 100, vec![rt_ec(3)]),
+            ],
+            vec![],
+        )
+        .await;
+        o.check_vpn_invariant("initial flood").await;
+
+        // Membership widen: B += RT2 (id 2 newly passes; id 3 already
+        // held via RT1 — no re-announce).
+        o.rtc_routes(B, vec![rtc_interest(B, 2)]).await;
+        o.check_vpn_invariant("widen B += RT2").await;
+
+        // Membership narrow: B −= RT1 (id 1 withdrawn; id 3 retained
+        // via RT2).
+        o.rtc_routes_full(B, vec![], vec![rtc_key_for(1)]).await;
+        o.quiesce().await;
+        o.check_vpn_invariant("narrow B -= RT1").await;
+
+        // RT flip via route attr change: id 1 moves RT1 → RT2 (into
+        // Φ_B/Φ_E, C re-announces the changed attrs, D silent); id 5
+        // moves RT3 → RT1 (out of everyone's Φ but C's default).
+        o.vpn_routes(
+            A,
+            vec![
+                vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(2)]),
+                vpn_route(vpn_nlri(5, 500), A, 100, vec![rt_ec(1)]),
+            ],
+            vec![],
+        )
+        .await;
+        o.check_vpn_invariant("RT flip via attr change").await;
+
+        // Default-NLRI remove: C collapses to strict empty (withdraws
+        // everything), then re-declares interest in RT2.
+        o.rtc_routes_full(
+            C,
+            vec![],
+            vec![crate::route::RtcRibRouteKey {
+                nlri: RtcNlri::DEFAULT,
+                path_id: 0,
+            }],
+        )
+        .await;
+        o.quiesce().await;
+        o.check_vpn_invariant("default removed from C").await;
+        o.rtc_routes(C, vec![rtc_interest(C, 2)]).await;
+        o.check_vpn_invariant("C += RT2").await;
+
+        // RFC 7313 refresh under heterogeneous memberships.
+        o.route_refresh(B, Afi::Ipv4, Safi::MplsVpn).await;
+        o.route_refresh(C, Afi::Ipv4, Safi::MplsVpn).await;
+        o.route_refresh(D, Afi::Ipv4, Safi::MplsVpn).await;
+        o.check_vpn_invariant("heterogeneous VPN refresh").await;
+
+        // GR re-establish: B's SAFI-132 interest survives as stale and
+        // the re-derived Φ gates the initial-dump replay.
+        o.graceful_restart(B).await;
+        o.peer_up_families(B, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        o.check_vpn_invariant("GR re-establish of B").await;
+
+        // Membership change racing a source flip in the same queue
+        // (FIFO-deterministic; no quiesce between).
+        o.rtc_routes_full(D, vec![rtc_interest(D, 2)], vec![]).await;
+        o.vpn_routes_no_quiesce(A, vec![vpn_route(vpn_nlri(2, 201), A, 150, vec![rt_ec(2)])])
+            .await;
+        o.quiesce().await;
+        o.check_vpn_invariant("membership racing source flip").await;
+
+        // Regroup join with pre-existing membership: E's chain reverts
+        // to the group default — the one-shot diff runs under Φ_E.
+        o.replace_policy(E, None).await;
+        o.check_vpn_invariant("E regroups with pre-existing membership")
+            .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "grouped Φ-filtered emit and per-peer RTC streams must be identical"
+    );
+    assert!(
+        grouped
+            .values()
+            .any(|msgs| msgs.iter().any(|m| !m.vpn_announce.is_empty())),
+        "scenario must exercise VPN outbound traffic"
+    );
+}
+
+/// Membership change WHILE dirty (design §2.3): the grouped path skips
+/// the delta walk (Φ updated; the pending resync emits against current
+/// Φ, over-withdrawing Φ-failing keys — the backstop term). Streams
+/// legitimately differ; the folded final VPN state must converge, the
+/// Φ-failing key must be withdrawn, and the jammed announce recovered.
+#[tokio::test]
+async fn oracle_rtc_membership_change_while_dirty_converges() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(B, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        // C: capacity-2 channel — the RTC-capable initial dump takes
+        // two messages (the default-RTC dump, then the EoR), so two
+        // slots keep C clean until the deliberate jam below.
+        o.peer_up_families(C, false, true, None, 2, vpn_rtc_sendable())
+            .await;
+        let dump = o.drain_one(C).await;
+        assert!(dump.vpn_announce.is_empty(), "got {:?}", normalize(&dump));
+        let eor = o.drain_one(C).await;
+        assert!(!eor.end_of_rib.is_empty(), "got {:?}", normalize(&eor));
+        // C interested in RT1 + RT2 (no VPN routes yet — no emission).
+        o.rtc_routes(C, vec![rtc_interest(C, 1), rtc_interest(C, 2)])
+            .await;
+        o.rtc_routes(B, vec![rtc_default(B)]).await;
+
+        // id 1 + id 2 land in C's channel; id 3 fills the second slot.
+        o.vpn_routes(
+            A,
+            vec![
+                vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(1)]),
+                vpn_route(vpn_nlri(2, 200), A, 100, vec![rt_ec(2)]),
+            ],
+            vec![],
+        )
+        .await;
+        o.vpn_routes(
+            A,
+            vec![vpn_route(vpn_nlri(3, 300), A, 100, vec![rt_ec(1)])],
+            vec![],
+        )
+        .await;
+        // id 4 announce fails for C → C goes dirty.
+        o.vpn_routes(
+            A,
+            vec![vpn_route(vpn_nlri(4, 400), A, 100, vec![rt_ec(1)])],
+            vec![],
+        )
+        .await;
+        // Membership narrows WHILE dirty: C −= RT2 (id 2 must not
+        // survive the resync).
+        o.rtc_routes_full(C, vec![], vec![rtc_key_for(2)]).await;
+        o.quiesce().await;
+
+        // Free the channel and let the resync timer fire.
+        let first = o.drain_one(C).await;
+        assert_eq!(
+            first.vpn_announce.len(),
+            2,
+            "ids 1+2 were delivered before the jam"
+        );
+        let second = o.drain_one(C).await;
+        assert_eq!(second.vpn_announce.len(), 1, "id 3 was delivered too");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+        o.check_vpn_invariant("post-resync").await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold_vpn(&grouped),
+        fold_vpn(&ungrouped),
+        "final advertised VPN state must converge on both paths"
+    );
+    let c_final = fold_vpn(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    let key = |n: u8, label: u32| format!("{:?}", vpn_nlri(n, label).key());
+    assert!(
+        c_final.contains_key(&key(1, 100)),
+        "Φ-passing id 1 must survive"
+    );
+    assert!(
+        !c_final.contains_key(&key(2, 200)),
+        "the key that left Φ while dirty must be withdrawn by the resync backstop"
+    );
+    assert!(c_final.contains_key(&key(3, 300)), "id 3 must survive");
+    assert!(
+        c_final.contains_key(&key(4, 400)),
+        "the update lost to the full channel must be recovered by the resync"
+    );
+}
+
+/// Kill criterion (b), design §6.2: a single member's membership flip
+/// at 100k staged VPN routes emits ONLY the minimal RFC 4684 delta —
+/// one message, announce-only on widen / withdraw-only on narrow, with
+/// ZERO export-policy evaluations (the ADR-0096 live eval counters of
+/// every installed chain are unchanged) and the group table untouched.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "synthetic RD/prefix bytes are deliberate low-byte extractions"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
+    const N: u32 = 100_000;
+    const RT_POOL: u64 = 64;
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let chain = || permit_all_with(RouteModifications::default());
+    let mut o = Oracle::spawn(false, cluster);
+    o.peer_up_families(A, false, true, None, 512, vpn_sendable())
+        .await;
+    // B (default interest) and C ({RT1}) group together: content-equal
+    // chains, same sendable set.
+    o.peer_up_families(B, false, true, Some(chain()), 512, vpn_rtc_sendable())
+        .await;
+    o.peer_up_families(C, false, true, Some(chain()), 512, vpn_rtc_sendable())
+        .await;
+    o.rtc_routes(B, vec![rtc_default(B)]).await;
+    o.rtc_routes(C, vec![rtc_interest(C, 1)]).await;
+
+    // Flood N identities over an RT pool of 64, in chunks.
+    let mut i = 0u32;
+    while i < N {
+        let hi = (i + 512).min(N);
+        let batch: Vec<VpnRibRoute> = (i..hi)
+            .map(|k| {
+                vpn_route(
+                    VpnNlri {
+                        labels: vec![MplsLabelEntry::try_new(16 + (k % 1000), 0, true).unwrap()],
+                        route_distinguisher: RouteDistinguisher([
+                            0,
+                            0,
+                            0xFD,
+                            0xE8,
+                            (k >> 24) as u8,
+                            (k >> 16) as u8,
+                            (k >> 8) as u8,
+                            k as u8,
+                        ]),
+                        prefix: VpnPrefix::v4(
+                            Ipv4Addr::new(
+                                10u8.wrapping_add((k >> 16) as u8),
+                                (k >> 8) as u8,
+                                k as u8,
+                                0,
+                            ),
+                            24,
+                        )
+                        .unwrap(),
+                    },
+                    A,
+                    100,
+                    vec![rt_ec(u64::from(k) % RT_POOL)],
+                )
+            })
+            .collect();
+        i = hi;
+        o.vpn_routes_no_quiesce(A, batch).await;
+    }
+    o.quiesce().await;
+    o.drain_collected();
+    let msgs_before = o.collected.get(&IpAddr::V4(C)).map_or(0, Vec::len);
+    let evals_before = o.export_policy_evals().await;
+    assert!(evals_before > 0, "the flood must have evaluated the chain");
+
+    let per_rt = |n: u64| (0..N).filter(|k| u64::from(*k) % RT_POOL == n).count();
+
+    // Widen: C += RT2 → exactly one announce-only message of the RT2
+    // share, zero evals.
+    o.rtc_routes(C, vec![rtc_interest(C, 2)]).await;
+    o.quiesce().await;
+    o.drain_collected();
+    let c_msgs = &o.collected[&IpAddr::V4(C)];
+    assert_eq!(
+        c_msgs.len(),
+        msgs_before + 1,
+        "membership widen must emit exactly one message"
+    );
+    let widen = &c_msgs[msgs_before];
+    assert_eq!(widen.vpn_announce.len(), per_rt(2), "announce-only delta");
+    assert!(widen.vpn_withdraw.is_empty(), "widen must not withdraw");
+    // The VPN membership delta itself runs ZERO evaluations. The +1 is
+    // the SAFI-132 route itself: C's new interest NLRI reflects to B
+    // (one RTC staging eval) — identical on the per-peer path, and not
+    // a VPN restage.
+    assert_eq!(
+        o.export_policy_evals().await,
+        evals_before + 1,
+        "membership widen must add only the SAFI-132 reflection eval, zero VPN evals"
+    );
+
+    // Narrow: C −= RT1 → exactly one withdraw-only message.
+    o.rtc_routes_full(C, vec![], vec![rtc_key_for(1)]).await;
+    o.quiesce().await;
+    o.drain_collected();
+    let c_msgs = &o.collected[&IpAddr::V4(C)];
+    assert_eq!(c_msgs.len(), msgs_before + 2);
+    let narrow = &c_msgs[msgs_before + 1];
+    assert!(narrow.vpn_announce.is_empty(), "narrow must not announce");
+    assert_eq!(narrow.vpn_withdraw.len(), per_rt(1), "withdraw-only delta");
+    // A SAFI-132 withdraw stages no eval (withdraw-if-present precedes
+    // the policy check), so the narrow is exactly zero evals.
+    assert_eq!(
+        o.export_policy_evals().await,
+        evals_before + 1,
+        "membership narrow must run ZERO export-policy evaluations"
+    );
+
+    o.check_vpn_invariant("post narrow").await;
+    drop(o.finish().await);
 }

@@ -744,15 +744,19 @@ impl RibManager {
             }
         } else if safi == Safi::MplsVpn {
             // A member of a VPN-staging group replays the refreshed
-            // family from the group table — own-sourced excluded, NO
-            // policy re-evaluation (same shape as the unicast grouped
-            // arm below). RTC-negotiated groups don't stage VPN, so
-            // their members keep the per-peer staging (RT filter applies
-            // there).
+            // family from the group table — own-sourced excluded,
+            // Φ-filtered (the RFC 4684 gate the per-peer refresh would
+            // have applied; RFC 7313 refresh under heterogeneous
+            // memberships stays per-member exact), NO policy
+            // re-evaluation (same shape as the unicast grouped arm
+            // below).
             if let Some(gid) = vpn_member_of {
                 if let Some(group) = self.group_ribs.get(&gid) {
                     for route in group.table.iter_vpn() {
-                        if route.peer == peer || route.afi_safi() != family {
+                        if route.peer == peer
+                            || route.afi_safi() != family
+                            || !super::update_groups::rt_passes(rtc_filter.as_ref(), route)
+                        {
                             continue;
                         }
                         vpn_announce.push(route.clone());

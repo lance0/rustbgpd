@@ -1035,6 +1035,10 @@ impl RibManager {
             RibUpdate::QueryPeerUpdateGroup { peer, reply } => {
                 self.handle_query_peer_update_group(peer, reply);
             }
+            #[cfg(test)]
+            RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
+                self.handle_test_query_vpn_advertised(peer, reply);
+            }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }
@@ -2245,18 +2249,55 @@ impl RibManager {
     }
 
     /// Rebuild `peer`'s RT-Constrain membership from its Adj-RIB-In (all
-    /// paths) and, when it changed, mark the peer dirty and run a resync so
-    /// the VPN Adj-RIB-Out restages under the new filter (the
-    /// `handle_replace_peer_export_policy` precedent — the Adj-RIB-Out
-    /// equality machinery yields the RFC 4684 minimal update set, no
-    /// session reset). An unchanged membership skips the restage entirely.
+    /// paths) and route the result through [`Self::set_rt_membership`] —
+    /// the corrective emit (grouped delta walk or per-peer restage) fires
+    /// there iff the membership actually changed.
     fn rebuild_rtc_membership_and_restage_vpn(&mut self, peer: IpAddr) {
         let membership = self.rtc_membership_from_rib(peer);
-        if self.peer_rt_membership.get(&peer) == Some(&membership) {
+        self.set_rt_membership(peer, Some(membership));
+    }
+
+    /// THE single Φ-write function (design §2.3 / risk 1): EVERY mutation
+    /// of `peer_rt_membership` routes through here, so a membership
+    /// change can never be split from its corrective emit. Sites:
+    ///
+    /// - `rebuild_rtc_membership_and_restage_vpn` (RTC routes received,
+    ///   RFC 7313 stale sweeps, GR/LLGR sweeps) → `Some(derived)`;
+    /// - `register_active_session` at `PeerUp` → `Some` (empty-strict,
+    ///   or GR-re-derived) / `None` (family not negotiated) — both run
+    ///   BEFORE the outbound registration, so no corrective emit fires
+    ///   and the Φ-filtered initial-dump replay covers delivery;
+    /// - `clear_outbound_peer_state` teardown → `None` (the outbound
+    ///   registration is going away; nothing to correct).
+    ///
+    /// Corrective emit for a changed Φ on a live registration: a member
+    /// of a VPN-staging group takes the membership-delta table walk
+    /// (zero policy evals, table untouched — design §2.3); everyone else
+    /// keeps the per-peer dirty restage (the Adj-RIB-Out equality
+    /// machinery yields the RFC 4684 minimal update set, no session
+    /// reset). An unchanged membership is a strict no-op.
+    fn set_rt_membership(&mut self, peer: IpAddr, membership: Option<RtcMembership>) {
+        // Capture BEFORE the write (design §2.3): under the invariant
+        // adv(m) = Φ-filtered group table, `old` is the true prior
+        // advertised state.
+        let old = self.peer_rt_membership.get(&peer).cloned();
+        if old == membership {
             return;
         }
-        self.peer_rt_membership.insert(peer, membership);
-        if self.outbound_peers.contains_key(&peer) {
+        let Some(new) = membership else {
+            self.peer_rt_membership.remove(&peer);
+            return;
+        };
+        self.peer_rt_membership.insert(peer, new.clone());
+        if !self.outbound_peers.contains_key(&peer) {
+            return;
+        }
+        if let Some(gid) = self.vpn_grouped_member_of(peer) {
+            // Absent prior membership on a live RTC registration
+            // resolves to strict empty — the `rtc_vpn_filter` rule.
+            let old = old.unwrap_or_default();
+            self.apply_rtc_membership_delta_to_grouped_member(peer, gid, &old, &new);
+        } else {
             self.mark_outbound_dirty(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
