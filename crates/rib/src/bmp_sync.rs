@@ -20,9 +20,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use bytes::{Bytes, BytesMut};
 use rustbgpd_bmp::{BmpPathStatus, tlv as bmp_tlv};
 use rustbgpd_wire::{
-    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4UnicastMode, MpReachNlri,
-    MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage, VpnNlri,
-    VpnNlriEntry,
+    Afi, Capability, EXTENDED_MAX_MESSAGE_LEN, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode,
+    MpReachNlri, MpUnreachNlri, NlriEntry, OpenMessage, PathAttribute, Prefix, Safi, UpdateMessage,
+    VpnNlri, VpnNlriEntry,
 };
 use tracing::warn;
 
@@ -153,6 +153,64 @@ fn build_update(
     }
 }
 
+/// Build an announcement UPDATE from the route's borrowed attribute
+/// slice with one synthesized `extra` attribute injected at
+/// `insert_pos`, without materializing a modified attribute Vec (the
+/// hot path: one PDU per Loc-RIB best change, so a full deep clone of
+/// the attributes per emission dominated BMP-on allocation).
+///
+/// [`rustbgpd_wire::attribute::encode_path_attributes`] emits
+/// attributes strictly in slice order with no cross-attribute state,
+/// so encoding `attrs[..pos]`, `extra`, `attrs[pos..]` piecewise is
+/// byte-identical to clone-and-insert followed by
+/// [`UpdateMessage::try_build`] (pinned by the `borrowed_encode_*`
+/// tests below against the clone-based oracle).
+fn build_announce_with_extra(
+    announced_v4: &[Ipv4Prefix],
+    attrs: &[PathAttribute],
+    insert_pos: usize,
+    extra: &PathAttribute,
+    what: &str,
+) -> Option<Bytes> {
+    let mut attrs_buf = Vec::new();
+    // 4-octet ASN encoding, no Add-Path (RFC 9069 §5.4) — must match
+    // `build_update`'s flags.
+    let result = rustbgpd_wire::attribute::encode_path_attributes(
+        &attrs[..insert_pos],
+        &mut attrs_buf,
+        true,
+        false,
+    )
+    .and_then(|()| {
+        rustbgpd_wire::attribute::encode_path_attributes(
+            std::slice::from_ref(extra),
+            &mut attrs_buf,
+            true,
+            false,
+        )
+    })
+    .and_then(|()| {
+        rustbgpd_wire::attribute::encode_path_attributes(
+            &attrs[insert_pos..],
+            &mut attrs_buf,
+            true,
+            false,
+        )
+    });
+    if let Err(e) = result {
+        warn!(error = %e, what, "failed to synthesize Loc-RIB BMP UPDATE, skipping");
+        return None;
+    }
+    let mut nlri_buf = Vec::new();
+    rustbgpd_wire::nlri::encode_nlri(announced_v4, &mut nlri_buf);
+    let update = UpdateMessage {
+        withdrawn_routes: Bytes::new(),
+        path_attributes: Bytes::from(attrs_buf),
+        nlri: Bytes::from(nlri_buf),
+    };
+    encode_update(&update, what)
+}
+
 /// Synthesize an announcement UPDATE for a unicast Loc-RIB best route.
 ///
 /// IPv4 with an IPv4 next-hop uses the classic body NLRI + `NEXT_HOP`
@@ -160,22 +218,19 @@ fn build_update(
 /// `MP_REACH_NLRI` with the prefix inside the attribute.
 #[must_use]
 pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
-    let mut attrs = (*route.attributes).clone();
+    let attrs = route.attributes.as_slice();
     match (route.prefix, route.next_hop) {
         (Prefix::V4(v4_prefix), IpAddr::V4(nh)) => {
-            // Insert NEXT_HOP after ORIGIN and AS_PATH (canonical order).
+            // Inject NEXT_HOP after ORIGIN and AS_PATH (canonical order).
             let insert_pos = attrs
                 .iter()
                 .position(|a| !matches!(a, PathAttribute::Origin(_) | PathAttribute::AsPath(_)))
                 .unwrap_or(attrs.len());
-            attrs.insert(insert_pos, PathAttribute::NextHop(nh));
-            build_update(
-                &[Ipv4NlriEntry {
-                    path_id: 0,
-                    prefix: v4_prefix,
-                }],
-                &[],
-                &attrs,
+            build_announce_with_extra(
+                &[v4_prefix],
+                attrs,
+                insert_pos,
+                &PathAttribute::NextHop(nh),
                 "unicast v4 announce",
             )
         }
@@ -187,8 +242,13 @@ pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
             let mut mp_reach = empty_mp_reach(afi, Safi::Unicast, next_hop);
             mp_reach.link_local_next_hop = route.link_local_next_hop;
             mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
-            attrs.push(PathAttribute::MpReachNlri(mp_reach));
-            build_update(&[], &[], &attrs, "unicast mp announce")
+            build_announce_with_extra(
+                &[],
+                attrs,
+                attrs.len(),
+                &PathAttribute::MpReachNlri(mp_reach),
+                "unicast mp announce",
+            )
         }
     }
 }
@@ -233,14 +293,19 @@ fn vpn_afi(nlri: &VpnNlri) -> Afi {
 /// prefix, preserved verbatim) with the route's VPN next-hop.
 #[must_use]
 pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
-    let mut attrs = (*route.attributes).clone();
+    let attrs = route.attributes.as_slice();
     let mut mp_reach = empty_mp_reach(vpn_afi(&route.nlri), Safi::MplsVpn, route.next_hop);
     mp_reach.vpn_announced = vec![VpnNlriEntry {
         path_id: 0,
         nlri: route.nlri.clone(),
     }];
-    attrs.push(PathAttribute::MpReachNlri(mp_reach));
-    build_update(&[], &[], &attrs, "vpn announce")
+    build_announce_with_extra(
+        &[],
+        attrs,
+        attrs.len(),
+        &PathAttribute::MpReachNlri(mp_reach),
+        "vpn announce",
+    )
 }
 
 /// Synthesize a withdrawal UPDATE for a VPN RD+prefix identity that
@@ -498,6 +563,139 @@ mod tests {
             .expect("MP_UNREACH present");
         assert_eq!(mp.vpn_withdrawn.len(), 1);
         assert_eq!(mp.vpn_withdrawn[0].nlri.key(), route.nlri.key());
+    }
+
+    /// Rich attribute set exercising multi-segment `AS_PATH`, MED,
+    /// `LOCAL_PREF`, communities of every flavor, RR attributes, and an
+    /// extended-length (>255 B value) attribute.
+    fn rich_attrs() -> Vec<PathAttribute> {
+        use rustbgpd_wire::{ExtendedCommunity, LargeCommunity};
+        vec![
+            PathAttribute::Origin(Origin::Egp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![
+                    AsPathSegment::AsSequence(vec![65001, 4_200_000_001]),
+                    AsPathSegment::AsSet(vec![65010, 65011]),
+                ],
+            }),
+            PathAttribute::Med(50),
+            PathAttribute::LocalPref(200),
+            // 128 communities = 512-byte value → extended-length flag.
+            PathAttribute::Communities((0..128).map(|i| 0x0001_0000 + i).collect()),
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(0x0002_FDE8_0000_0007)]),
+            PathAttribute::LargeCommunities(vec![LargeCommunity {
+                global_admin: 65001,
+                local_data1: 7,
+                local_data2: 9,
+            }]),
+            PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 9)),
+            PathAttribute::ClusterList(vec![Ipv4Addr::new(10, 0, 0, 1)]),
+        ]
+    }
+
+    /// The pre-borrowed-encode construction: clone the attribute Vec,
+    /// insert the extra attribute, `try_build` + encode. The M81
+    /// receipt pinned these bytes; the piecewise borrowed encode must
+    /// reproduce them exactly.
+    fn clone_based_oracle(
+        announced: &[Ipv4NlriEntry],
+        attrs: &[PathAttribute],
+        insert_pos: usize,
+        extra: PathAttribute,
+    ) -> Bytes {
+        let mut cloned = attrs.to_vec();
+        cloned.insert(insert_pos, extra);
+        let update =
+            UpdateMessage::try_build(announced, &[], &cloned, true, false, Ipv4UnicastMode::Body)
+                .unwrap();
+        let mut buf = BytesMut::with_capacity(update.encoded_len());
+        update
+            .encode_with_limit(&mut buf, EXTENDED_MAX_MESSAGE_LEN)
+            .unwrap();
+        buf.freeze()
+    }
+
+    #[test]
+    fn borrowed_encode_unicast_v4_matches_clone_based_oracle() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
+        let nh = Ipv4Addr::new(192, 0, 2, 1);
+        let mut route = unicast_route(Prefix::V4(prefix), IpAddr::V4(nh));
+        route.attributes = Arc::new(rich_attrs());
+        let insert_pos = 2; // after ORIGIN + AS_PATH
+        let expected = clone_based_oracle(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &rich_attrs(),
+            insert_pos,
+            PathAttribute::NextHop(nh),
+        );
+        assert_eq!(synthesize_unicast_announce(&route).unwrap(), expected);
+    }
+
+    #[test]
+    fn borrowed_encode_unicast_mp_matches_clone_based_oracle() {
+        // IPv6 unicast with a link-local next hop, and the RFC 8950
+        // IPv4-prefix-over-IPv6-next-hop shape.
+        for prefix in [
+            Prefix::V6(Ipv6Prefix::new(
+                "2001:db8:40::".parse::<Ipv6Addr>().unwrap(),
+                48,
+            )),
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, 0), 16)),
+        ] {
+            let nh: IpAddr = "2001:db8::1".parse().unwrap();
+            let mut route = unicast_route(prefix, nh);
+            route.attributes = Arc::new(rich_attrs());
+            route.link_local_next_hop = Some("fe80::1".parse().unwrap());
+            let afi = match prefix {
+                Prefix::V4(_) => Afi::Ipv4,
+                Prefix::V6(_) => Afi::Ipv6,
+            };
+            let mut mp_reach = empty_mp_reach(afi, Safi::Unicast, nh);
+            mp_reach.link_local_next_hop = route.link_local_next_hop;
+            mp_reach.announced = vec![NlriEntry { path_id: 0, prefix }];
+            let expected = clone_based_oracle(
+                &[],
+                &rich_attrs(),
+                rich_attrs().len(),
+                PathAttribute::MpReachNlri(mp_reach),
+            );
+            assert_eq!(synthesize_unicast_announce(&route).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn borrowed_encode_vpn_matches_clone_based_oracle() {
+        let mut route = vpn_route();
+        route.attributes = Arc::new(rich_attrs());
+        let mut mp_reach = empty_mp_reach(Afi::Ipv4, Safi::MplsVpn, route.next_hop);
+        mp_reach.vpn_announced = vec![VpnNlriEntry {
+            path_id: 0,
+            nlri: route.nlri.clone(),
+        }];
+        let expected = clone_based_oracle(
+            &[],
+            &rich_attrs(),
+            rich_attrs().len(),
+            PathAttribute::MpReachNlri(mp_reach),
+        );
+        assert_eq!(synthesize_vpn_announce(&route).unwrap(), expected);
+    }
+
+    /// Attribute-less edge: a route whose attrs are empty still emits
+    /// the injected attribute alone, identically to clone-and-insert.
+    #[test]
+    fn borrowed_encode_empty_attrs_matches_clone_based_oracle() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 16);
+        let nh = Ipv4Addr::new(192, 0, 2, 7);
+        let mut route = unicast_route(Prefix::V4(prefix), IpAddr::V4(nh));
+        route.attributes = Arc::new(vec![]);
+        let expected = clone_based_oracle(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &[],
+            0,
+            PathAttribute::NextHop(nh),
+        );
+        assert_eq!(synthesize_unicast_announce(&route).unwrap(), expected);
     }
 
     #[test]
