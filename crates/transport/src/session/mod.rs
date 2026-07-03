@@ -184,6 +184,21 @@ pub(crate) struct PeerSession {
     session_identity: SessionIdentity,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+    /// A `RouteMonitoring` event for this session was dropped on a full
+    /// BMP channel while the mirrored traffic *did* flow (the outbound
+    /// UPDATE reached the writer, or the inbound UPDATE reached the
+    /// RIB): the collectors' view of this peer has silently diverged
+    /// and — rib-in/rib-out being live-only streams with no dump — will
+    /// never self-correct. Repaired by forcing a synthetic
+    /// PeerDown/PeerUp pair ahead of the next BMP event for this peer
+    /// (an RFC 7854 peer-state reset collectors can detect), retried on
+    /// `bmp_repair_timer` so a session that goes quiet right after the
+    /// drop cannot stay diverged indefinitely.
+    bmp_stream_diverged: bool,
+    /// Bounded-latency retry for the forced peer-state reset above.
+    /// Armed whenever `bmp_stream_diverged` is set and the reset could
+    /// not be emitted yet (BMP channel still full).
+    bmp_repair_timer: Option<Pin<Box<Sleep>>>,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
     /// `None` when RPKI not configured or in tests.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -274,6 +289,12 @@ pub(crate) struct PeerSession {
 
 /// Outbound channel buffer size.
 const OUTBOUND_BUFFER: usize = 4096;
+
+/// Retry cadence for the forced BMP peer-state reset after a dropped
+/// `RouteMonitoring` event (see `PeerSession::bmp_stream_diverged`).
+/// Short enough that a diverged-then-quiet session is repaired promptly;
+/// long enough not to spin while the BMP channel stays saturated.
+const BMP_STREAM_REPAIR_RETRY: Duration = Duration::from_secs(1);
 
 /// FSM event code carried in the BMP Peer Down reason-2 body when the
 /// send hold timer expires: Event 29, `SendHoldTimer_Expires` (RFC 9687
@@ -496,6 +517,8 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             bmp_tx,
+            bmp_stream_diverged: false,
+            bmp_repair_timer: None,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -604,6 +627,8 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             bmp_tx,
+            bmp_stream_diverged: false,
+            bmp_repair_timer: None,
             validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
@@ -680,10 +705,58 @@ impl PeerSession {
         }
     }
 
-    fn emit_bmp_event(&self, event: BmpEvent) {
-        if let Some(ref tx) = self.bmp_tx
-            && let Err(e) = tx.try_send(event)
-        {
+    /// Build the BMP `PeerUp` event for this session (RFC 7854 §4.10).
+    /// Used at `SessionEstablished` and by the forced peer-state reset
+    /// after a dropped `RouteMonitoring` event.
+    fn build_bmp_peer_up_event(&self) -> BmpEvent {
+        let (local_addr, local_port, remote_port) =
+            self.read_half
+                .as_ref()
+                .map_or((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0), |h| {
+                    let local = h.local_addr().ok();
+                    let remote = h.peer_addr().ok();
+                    (
+                        local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
+                        local.map_or(0, |a| a.port()),
+                        remote.map_or(0, |a| a.port()),
+                    )
+                });
+        BmpEvent::PeerUp {
+            peer_info: self.build_bmp_peer_info(),
+            local_open: self.local_open_pdu.clone().unwrap_or_default(),
+            remote_open: self.remote_open_pdu.clone().unwrap_or_default(),
+            local_addr,
+            local_port,
+            remote_port,
+        }
+    }
+
+    /// Lossy BMP emission for the high-rate mirror events
+    /// (`RouteMonitoring`, `StatsReport`): never blocks and never
+    /// backpressures the session (ADR-0041/0097 posture). A full
+    /// channel drops the event and bumps `bmp_source_drops_total` —
+    /// but a dropped `RouteMonitoring` additionally latches
+    /// `bmp_stream_diverged`, because the mirrored traffic did flow and
+    /// the collectors' live-only rib-in/rib-out views would otherwise
+    /// be silently wrong forever. The pending divergence is repaired
+    /// (forced PeerDown/PeerUp reset) ahead of the next emission, or
+    /// from the run loop's `bmp_repair_timer` arm if the session goes
+    /// quiet first. Lifecycle events must use
+    /// [`Self::emit_bmp_event_reliable`] instead.
+    fn emit_bmp_event(&mut self, event: BmpEvent) {
+        let Some(tx) = self.bmp_tx.clone() else {
+            return;
+        };
+        if self.bmp_stream_diverged && !self.repair_bmp_stream(&tx) {
+            // The channel is still saturated: this event cannot be
+            // emitted ahead of the pending peer-state reset without
+            // presenting the collector a diverged stream as healthy.
+            self.metrics
+                .record_bmp_source_drop(&self.peer_label, "channel_full");
+            return;
+        }
+        let is_route_monitoring = matches!(event, BmpEvent::RouteMonitoring { .. });
+        if let Err(e) = tx.try_send(event) {
             let reason = match e {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
@@ -691,6 +764,97 @@ impl PeerSession {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, reason);
             debug!(peer = %self.peer_label, reason, "BMP event channel full or closed");
+            if is_route_monitoring && matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_)) {
+                self.mark_bmp_stream_diverged();
+            }
+        }
+    }
+
+    /// Reliable BMP emission for the per-peer lifecycle events
+    /// (`PeerUp`, `PeerDown`). These are the collectors' state-reset
+    /// signals — losing one leaves every collector permanently wrong
+    /// about the peer — so instead of the lossy `try_send` this awaits
+    /// channel space. Bounded: the `BmpManager` loop never blocks
+    /// (sync encode + per-collector `try_send`), so the wait is at most
+    /// one channel drain, and a dead manager surfaces as an immediate
+    /// send error (counted, session unaffected).
+    ///
+    /// A real `PeerDown` also supersedes any pending divergence repair:
+    /// it resets collector state, and the re-established session
+    /// re-floods both rib-in (peer resends) and rib-out (initial-table
+    /// walk re-enters the tap).
+    async fn emit_bmp_event_reliable(&mut self, event: BmpEvent) {
+        let Some(tx) = self.bmp_tx.clone() else {
+            return;
+        };
+        if matches!(event, BmpEvent::PeerDown { .. }) {
+            self.bmp_stream_diverged = false;
+            self.bmp_repair_timer = None;
+        }
+        if tx.send(event).await.is_err() {
+            self.metrics
+                .record_bmp_source_drop(&self.peer_label, "channel_closed");
+            debug!(peer = %self.peer_label, "BMP event channel closed");
+        }
+    }
+
+    /// Latch the divergence flag after a dropped `RouteMonitoring` and
+    /// arm the bounded-latency repair timer.
+    fn mark_bmp_stream_diverged(&mut self) {
+        if !self.bmp_stream_diverged {
+            warn!(
+                peer = %self.peer_label,
+                "BMP RouteMonitoring dropped on a full channel while the mirrored \
+                 traffic flowed — collector view diverged; forcing a BMP peer-state \
+                 reset once the channel drains"
+            );
+        }
+        self.bmp_stream_diverged = true;
+        self.bmp_repair_timer = Some(Box::pin(tokio::time::sleep(BMP_STREAM_REPAIR_RETRY)));
+    }
+
+    /// Attempt the pending RFC 7854 peer-state reset: a synthetic
+    /// `PeerDown` (reason 2 — local close, no NOTIFICATION, FSM event
+    /// code 0) followed by a fresh `PeerUp`, making the earlier
+    /// divergence collector-detectable (the collector discards its
+    /// state for this peer and rebuilds from subsequent monitoring).
+    /// Returns `true` when the pair was enqueued and the flag cleared;
+    /// `false` when the channel is still saturated (flag and retry
+    /// timer stay armed; a duplicate `PeerDown` from a partial attempt
+    /// is harmless).
+    fn repair_bmp_stream(&mut self, tx: &mpsc::Sender<BmpEvent>) -> bool {
+        let down = BmpEvent::PeerDown {
+            peer_info: self.build_bmp_peer_info(),
+            reason: PeerDownReason::LocalNoNotification(0),
+        };
+        if tx.try_send(down).is_err() {
+            return false;
+        }
+        if tx.try_send(self.build_bmp_peer_up_event()).is_err() {
+            return false;
+        }
+        self.bmp_stream_diverged = false;
+        self.bmp_repair_timer = None;
+        info!(
+            peer = %self.peer_label,
+            "BMP peer-state reset emitted after earlier RouteMonitoring drop — \
+             collector view resynchronized via PeerDown/PeerUp"
+        );
+        true
+    }
+
+    /// Run-loop timer entry for the deferred divergence repair: retry
+    /// the forced peer-state reset, re-arming the timer while the BMP
+    /// channel remains saturated.
+    fn retry_bmp_stream_repair(&mut self) {
+        if !self.bmp_stream_diverged {
+            return;
+        }
+        let Some(tx) = self.bmp_tx.clone() else {
+            return;
+        };
+        if !self.repair_bmp_stream(&tx) {
+            self.bmp_repair_timer = Some(Box::pin(tokio::time::sleep(BMP_STREAM_REPAIR_RETRY)));
         }
     }
 
@@ -854,6 +1018,7 @@ impl PeerSession {
                 connect_task,
                 outbound_rx,
                 writer_join,
+                bmp_repair_timer,
                 ..
             } = self;
 
@@ -909,6 +1074,16 @@ impl PeerSession {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
+                }
+
+                // Deferred BMP peer-state reset after a dropped
+                // RouteMonitoring event (`bmp_stream_diverged`): retry
+                // on a short timer so a session that goes quiet right
+                // after the drop cannot leave collectors silently
+                // diverged until its next update.
+                () = poll_timer(bmp_repair_timer) => {
+                    self.bmp_repair_timer = None;
+                    self.retry_bmp_stream_repair();
                 }
 
                 // In-flight outbound TCP connect completion

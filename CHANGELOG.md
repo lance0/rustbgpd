@@ -701,6 +701,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BMP monitoring can no longer diverge silently from the wire under
+  saturation.** Two per-peer holes closed in the PeerSession→BmpManager
+  path: (1) BMP `PeerUp`/`PeerDown` were emitted with the same lossy
+  `try_send` as Route Monitoring, so under a full BMP event channel the
+  one signal that tells collectors to discard a peer's state could be
+  dropped — collectors would trust a stale Adj-RIB-In/Adj-RIB-Out view
+  forever. Lifecycle events now await channel space (bounded: the
+  manager loop always drains and never blocks; a dead manager returns
+  an immediate counted error). (2) When an outbound UPDATE reached the
+  wire but its rib-out Route Monitoring mirror hit a full channel, the
+  event was dropped with only a counter — and the rib-in/rib-out
+  streams being live-only (no dump), the collector's view stayed
+  incomplete until the next real session flap. The session now latches
+  the divergence and forces a synthetic `PeerDown`/`PeerUp` pair (an
+  RFC 7854 peer-state reset, reason 2/FSM code 0) ahead of the next
+  emission — retried on a 1s timer so a session that goes quiet after
+  the drop is still repaired — making the gap collector-detectable
+  instead of silent. The outbound-writer saturation path itself was
+  verified correct and is now regression-pinned: the UPDATE that fails
+  to enqueue is never mirrored (RFC 8671 mirrors what was sent), and
+  the teardown's `PeerDown` — now truthfully reason 1 carrying the
+  `Cease/8` NOTIFICATION we send, rather than the "remote closed"
+  default — is ordered after the last mirrored event on the same
+  channel. `bmp_source_drops_total` still counts every drop; no
+  unbounded queueing anywhere. Per-collector fan-out drops
+  (`bmp_collector_drops_total`) remain the documented lossy layer,
+  healed by the collector's own reconnect (RFC 7854 state discard +
+  PeerUp replay).
 - **An enhanced route refresh no longer purges GR/LLGR-stale routes
   awaiting End-of-RIB (LAN-187).** RFC 7313's end-of-refresh sweep
   removes routes not re-advertised inside the BoRR..EoRR window — but a

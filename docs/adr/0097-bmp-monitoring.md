@@ -88,6 +88,28 @@ This ADR records the decisions of that arc as shipped.
    therefore live-only (like rib-in), and the post-policy Loc-RIB dump
    covers what dump consumers want from an RR.
 
+   *Amendment (post-review): live-only loss must be detectable, never
+   silent.* Because there is no dump to resynchronize from, the "lossy
+   try_send, monitoring never backpressures the control plane" posture
+   was refined at the session→manager seam: per-peer `PeerUp`/`PeerDown`
+   are now delivered reliably (awaited send — bounded, since the manager
+   loop only ever does sync encode + per-collector `try_send`), and a
+   `RouteMonitoring` event dropped on a full channel while the mirrored
+   traffic did flow latches a per-session divergence flag that forces a
+   synthetic `PeerDown`/`PeerUp` peer-state reset (RFC 7854 reason 2,
+   FSM code 0) ahead of the next emission, with a 1s retry timer for
+   sessions that go quiet after the drop. Collectors thus either have a
+   correct view or an explicit reset telling them to rebuild from live
+   traffic. The outbound-writer saturation path needs no BMP-side
+   compensation by construction: an UPDATE that fails to enqueue never
+   reaches the wire (not mirroring it is what RFC 8671 requires) and
+   the `Cease/8` teardown ends in an ordered reliable `PeerDown`
+   (truthful reason 1 carrying that NOTIFICATION) followed by a
+   re-establish re-flood. The manager→collector fan-out stays lossy by
+   design — that layer's reset is the collector's own reconnect (state
+   discard + PeerUp replay), and `bmp_collector_drops_total` is its
+   alert signal.
+
 4. **BMPv4 is a per-collector framing decision at fan-out, not an
    internal representation.** Internal `BmpEvent`s stay
    version-agnostic; the manager frames per collector at fan-out with a
