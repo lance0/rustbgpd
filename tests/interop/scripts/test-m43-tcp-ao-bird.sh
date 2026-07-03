@@ -10,7 +10,7 @@
 #   - BIRD image built:
 #       docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   - rustbgpd image built:
-#       docker build -t rustbgpd:dev .
+#       docker build --target dev -t rustbgpd:dev .
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
 #

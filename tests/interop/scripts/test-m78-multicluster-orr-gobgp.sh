@@ -40,7 +40,7 @@
 #   7. Neither RR installed anything into any dataplane.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m78-multicluster-orr-gobgp.clab.yml

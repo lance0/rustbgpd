@@ -7,7 +7,7 @@
 # the two-way ECMP when it returns.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m50-fib-ecmp-frr.clab.yml
 #   - grpcurl + jq installed on the host
 

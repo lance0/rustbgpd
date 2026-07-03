@@ -18,7 +18,7 @@
 #      `evpn_df_role_changes_total{...,vni="10"}` increments.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m46-evpn-df-hrw.clab.yml
 #   bash tests/interop/scripts/test-m46-evpn-df-hrw.sh
 #   sudo containerlab destroy -t tests/interop/m46-evpn-df-hrw.clab.yml

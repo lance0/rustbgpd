@@ -13,7 +13,7 @@
 # disconnected-window transitions.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   bash tests/interop/scripts/gen-m54-certs.sh   # reuses M54 certs
 #   containerlab deploy -t tests/interop/m56-gnmi-onchange-frr.clab.yml
 #   bash tests/interop/scripts/test-m56-gnmi-onchange-frr.sh

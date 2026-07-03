@@ -9,7 +9,7 @@
 # 24h receipt without claiming one in CI.
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/soak/m67-link-drain-soak.clab.yml
 #
 # Usage:

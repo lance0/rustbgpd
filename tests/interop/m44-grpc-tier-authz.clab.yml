@@ -8,7 +8,7 @@
 # ./configs/m44-certs/ before deploy and bind-mounted read-only.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   bash tests/interop/scripts/gen-m44-certs.sh
 #   containerlab deploy -t tests/interop/m44-grpc-tier-authz.clab.yml
 #   bash tests/interop/scripts/test-m44-grpc-tier-authz.sh

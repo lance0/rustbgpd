@@ -2,7 +2,7 @@
 # M42 interop test — ADR-0061 opt-in general unicast FIB runtime.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
 #   - grpcurl + jq installed on the host
 

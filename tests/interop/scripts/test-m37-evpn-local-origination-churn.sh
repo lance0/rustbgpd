@@ -8,7 +8,7 @@
 # run that captures RSS, Prometheus counters, logs, and run metadata.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
 #   M37_CHURN_MACS=1000 M37_CHURN_ROUNDS=60 \
 #     bash tests/interop/scripts/test-m37-evpn-local-origination-churn.sh

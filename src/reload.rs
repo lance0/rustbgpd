@@ -472,6 +472,7 @@ pub(crate) async fn reload_config(
             return None;
         }
     };
+    desired_config.warn_if_deprecated_global_inline_policy();
     let mut new_config = desired_config.clone();
 
     let honor_graceful_shutdown_changed =

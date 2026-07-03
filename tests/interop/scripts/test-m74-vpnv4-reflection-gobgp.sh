@@ -16,7 +16,7 @@
 #      and no kernel routes derived from the VPN family.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m74-vpnv4-reflection-gobgp.clab.yml

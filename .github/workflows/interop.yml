@@ -162,6 +162,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -196,6 +197,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -233,6 +235,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -267,6 +270,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -301,6 +305,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -335,6 +340,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -369,6 +375,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -404,6 +411,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -442,6 +450,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -480,6 +489,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -518,6 +528,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -556,6 +567,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -594,6 +606,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -632,6 +645,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -673,6 +687,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -707,6 +722,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -743,6 +759,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -786,6 +803,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -829,6 +847,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -869,6 +888,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -906,6 +926,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -943,6 +964,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -980,6 +1002,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1016,6 +1039,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1054,6 +1078,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1088,6 +1113,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1132,6 +1158,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1172,6 +1199,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1209,6 +1237,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1247,6 +1276,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1284,6 +1314,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1322,6 +1353,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 
@@ -1360,6 +1392,7 @@ jobs:
           context: .
           load: true
           tags: rustbgpd:dev
+          target: dev
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 

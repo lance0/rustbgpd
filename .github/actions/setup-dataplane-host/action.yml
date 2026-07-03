@@ -101,6 +101,7 @@ runs:
         context: .
         load: true
         tags: rustbgpd:dev
+        target: dev
         cache-from: type=gha
         # ignore-error: a flaking GHA cache backend ("error writing
         # layer blob: not_found") must cost the NEXT build its cache

@@ -33,7 +33,7 @@
 # interop tests (M30-M32). Treat M33 as the hot-path scale gate.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .  (must include evpn-tester + evpn-monitor)
+#   - docker build --target dev -t rustbgpd:dev .  (must include evpn-tester + evpn-monitor)
 #   - containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
 
 TOPO="m33-evpn-scale"

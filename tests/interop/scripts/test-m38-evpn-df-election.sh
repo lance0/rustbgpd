@@ -13,7 +13,7 @@
 #      carrying the ESI Label extcomm (RFC 7432 §7.5).
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
 #   bash tests/interop/scripts/test-m38-evpn-df-election.sh
 #   sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml

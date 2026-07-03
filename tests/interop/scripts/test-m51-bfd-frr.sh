@@ -12,7 +12,7 @@
 #   3. Recovery: watchfrr restarts bfdd; BFD and BGP re-establish.
 #
 # Prerequisites:
-#   - docker build -t rustbgpd:dev .
+#   - docker build --target dev -t rustbgpd:dev .
 #   - containerlab deploy -t tests/interop/m51-bfd-frr.clab.yml
 #   - grpcurl + jq installed on the host
 

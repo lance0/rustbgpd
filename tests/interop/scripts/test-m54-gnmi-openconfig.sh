@@ -17,7 +17,7 @@
 #      OpenConfig leaf.
 #
 # Prerequisites:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   bash tests/interop/scripts/gen-m54-certs.sh
 #   containerlab deploy -t tests/interop/m54-gnmi-openconfig.clab.yml
 #

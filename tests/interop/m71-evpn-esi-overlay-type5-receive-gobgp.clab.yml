@@ -30,7 +30,7 @@
 #   4. Withdraw: deleting the Type 5 leaves the VRF clean.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 #   containerlab deploy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m71-evpn-esi-overlay-type5-receive-gobgp.sh

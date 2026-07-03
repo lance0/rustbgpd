@@ -61,7 +61,7 @@
 #    driver-planted untagged fdb nexthop survive the whole cycle.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 #   containerlab deploy -t tests/interop/m65-evpn-single-active-failover.clab.yml
 #   bash tests/interop/scripts/test-m65-evpn-single-active-failover.sh

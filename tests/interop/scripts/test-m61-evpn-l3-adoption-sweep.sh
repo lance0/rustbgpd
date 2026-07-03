@@ -66,7 +66,7 @@
 #    (adopted == 1, reaped == 0).
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m61-evpn-l3-adoption-sweep.clab.yml
 #   bash tests/interop/scripts/test-m61-evpn-l3-adoption-sweep.sh
 #   containerlab destroy -t tests/interop/m61-evpn-l3-adoption-sweep.clab.yml

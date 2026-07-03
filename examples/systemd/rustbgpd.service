@@ -9,6 +9,11 @@ Type=simple
 ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 
+# Unprivileged service user. Create it once:
+#   useradd --system --home-dir /var/lib/rustbgpd --shell /usr/sbin/nologin rustbgpd
+User=rustbgpd
+Group=rustbgpd
+
 # State directory for GR restart markers, gRPC UDS, config persistence
 StateDirectory=rustbgpd
 RuntimeDirectory=rustbgpd
@@ -20,9 +25,14 @@ ProtectHome=yes
 ReadWritePaths=/var/lib/rustbgpd /etc/rustbgpd
 PrivateTmp=yes
 
-# BGP needs CAP_NET_BIND_SERVICE for port 179
+# Unprivileged default: CAP_NET_BIND_SERVICE only (bind port 179 as
+# non-root). This covers route-reflector / control-plane-only
+# deployments. Kernel-dataplane features ([[fib_tables]], blackhole
+# install, EVPN VTEP/IRB) additionally need CAP_NET_ADMIN — enable the
+# rustbgpd-dataplane.conf drop-in shipped next to this unit instead of
+# widening these lines.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Restart on failure, but not on clean shutdown (exit 0) or SIGTERM
 Restart=on-failure

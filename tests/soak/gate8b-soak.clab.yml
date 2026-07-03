@@ -16,7 +16,7 @@
 # updates correspondingly.
 #
 # Usage:
-#   docker build -t rustbgpd:dev .
+#   docker build --target dev -t rustbgpd:dev .
 #   sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
 #   bash tests/soak/run-gate8b-soak.sh
 #   sudo containerlab destroy -t tests/soak/gate8b-soak.clab.yml --cleanup
