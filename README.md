@@ -444,6 +444,8 @@ evolving API.**
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md) | Consolidated operational proof receipts: CI interop, dataplane, benchmarks, memory, soak |
+| [docs/RECEIPTS.md](docs/RECEIPTS.md) | Full receipts index: every M-series interop lab, perf/scale receipt, archived soak, and CI schedule |
+| [docs/GRAFANA.md](docs/GRAFANA.md) | Grafana overview dashboard: import instructions and Prometheus scrape config |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Feature comparison with FRR, BIRD, GoBGP, OpenBGPd |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/evpn-enablement.md](docs/evpn-enablement.md) | EVPN Phase 1-9 gate ladder: what each gate unlocks, work per gate, priority |
