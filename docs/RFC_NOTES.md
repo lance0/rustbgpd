@@ -558,7 +558,87 @@ implemented per ADR-0040.
 - Coordinated Termination on daemon shutdown.
 - Raw UPDATE PDU capture via `Bytes` refcount clone (zero overhead when
   unconfigured).
-- See ADR-0041.
+- Per-collector view selection: `monitor = ["rib_in_pre",
+  "rib_out_post", "loc_rib"]` (default `["rib_in_pre"]`). The full
+  monitoring trio (7854 + 8671 + 9069) ships on one exporter; M81
+  receipt.
+- See ADR-0041 and ADR-0097.
+
+---
+
+## RFC 8671 — BMP Adj-RIB-Out Monitoring
+
+- Post-policy Adj-RIB-Out Route Monitoring, tapped at the transport's
+  outbound byte funnel (`enqueue_bulk`): the BMP message wraps the exact
+  PDU sent on the wire, after transport stamping
+  (ORIGINATOR_ID/CLUSTER_LIST, GShut, LLGR §4.6) — byte-exact by
+  construction, test-pinned for VPN and EVPN.
+- O-flag 0x10 on Route Monitoring; L=post-policy under O=1; peer
+  identity stays the remote peer's; PeerUp/Down/Stats remain O=0.
+- Stats types 15 and 17 (post-policy Adj-RIB-Out counts) from one
+  batched AdjRibOut query per stats tick; unavailable counts are
+  omitted, never a false zero.
+- Live-only (no rib-out table dump): AdjRibOut stores routes
+  pre-transport-stamping, so a synthesized dump would not be
+  byte-faithful. Pre-policy rib-out deliberately skipped.
+- See ADR-0097 (Decisions 1, 3).
+
+---
+
+## RFC 9069 — BMP Local RIB Monitoring
+
+- Loc-RIB Route Monitoring synthesized at the RIB recompute commit
+  seams (`crates/rib/src/bmp_sync.rs`); announcement PDUs rebuild
+  MP_REACH the same way the MRT exporter does.
+- Emulated instance peer per §5.2.1: peer type 3, peer flags forced to
+  zero (its own registry — never V, even for v6), fabricated sent-OPEN
+  advertising exactly the streamed capability set, VRF/Table Name
+  `"global"`, Peer Down reason 6, stats types 8/10.
+- V1 family scope: IPv4/IPv6 unicast + VPNv4/VPNv6; the fabricated OPEN
+  only promises families that actually stream.
+- Collector-connect table sync: chunked non-blocking dump (256-message
+  chunks drained by a per-collector forwarder task with a send
+  timeout) → one End-of-RIB per family → live. Dump/live overlap is the
+  standard BMP initial-sync race, accepted.
+- See ADR-0097 (Decisions 1, 2).
+
+---
+
+## draft-ietf-grow-bmp-tlv-20 — BMPv4 TLV framing (pre-IANA)
+
+- Per-collector `version = 3 | 4`, default 3; v3 output byte-identical
+  to prior releases (golden-bytes pinned).
+- v4: common-header version 4 on every message; Route Monitoring wraps
+  the UPDATE in the mandatory BGP Message TLV (type 7, index 0, §5.2);
+  Stats Reports wrap in the Stats TLV (code 1, §5.4); the
+  TLV-provisioned message types change only their version byte.
+- Indexed-TLV (§4.3: 2-byte index after length, excluded from the
+  length value, G-bit) and Group TLV (type 4) encoding infrastructure.
+- All draft code points live in `crates/bmp/src/tlv.rs` with a renumber
+  note — an IANA renumber at RFC publication is a single-file change.
+  The draft's Appendix A contradicts its normative §5.2.1 on the Group
+  TLV type; we follow the normative text.
+- See ADR-0097 (Decision 4).
+
+---
+
+## draft-ietf-grow-bmp-path-marking-tlv-05 — Path Marking (pre-IANA)
+
+- Path Marking TLV on Loc-RIB Route Monitoring toward BMPv4 collectors
+  (an RM TLV — v4-gated by construction; v3 output is byte-identical
+  with or without it).
+- Status bits limited to what an RR can attest: Best + Stale (from the
+  GR/LLGR machinery). FIB/damping/filter bits are never fabricated.
+- Reason Code (§3.2) on live unicast announces: re-derived
+  best-vs-runner-up through the `best_path_cmp_with_reason` explain
+  ladder over the same candidate pool the recompute used; sole
+  candidate → no reason; decisive steps without a registered draft code
+  are omitted rather than mislabeled. VPN and dump entries carry bits
+  only.
+- Known collision: the draft self-assigns RM TLV type 5, which tlv-20
+  §9 has since taken for VRF/Table Name; rustbgpd never emits the
+  latter, and the constant carries a renumber note.
+- See ADR-0097 (Decision 5).
 
 ---
 

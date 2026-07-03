@@ -122,7 +122,9 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 |---------|:-----:|:--------:|-------|
 | Prometheus metrics | Yes | Yes | rustbgpd has more granular RIB metrics |
 | Structured logging | No | Yes | JSON via tracing-subscriber |
-| BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination |
+| BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination; per-collector view selection (`rib_in_pre` / `rib_out_post` / `loc_rib`) |
+| BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | Post-policy, byte-exact wire PDUs; with RFC 9069 Loc-RIB (collector-connect dump + EoR) this completes the trio no other open-source daemon ships (ADR-0097, M81) |
+| BMPv4 + Path Marking (drafts, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in (draft-ietf-grow-bmp-tlv-20 framing + Path Marking TLV on Loc-RIB); no other router-side implementation found (ADR-0097) |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | `WatchRoutes` + `WatchEvents` (legacy broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
 | Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
@@ -201,7 +203,7 @@ A first-class target deployment. Weighted toward what matters:
 - **Policy:** 100%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison, exact next-hop match), community match/set, and AS_PATH regex/prepend
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with unicast NEXT_HOP preservation and FlowSpec AS_PATH transparency
-- **BMP exporter:** RFC 7854 streaming to collectors, reconnect replay, periodic Stats Report
+- **BMP exporter:** the full RFC 7854 + 8671 + 9069 trio streaming to collectors, reconnect replay with Loc-RIB table sync, periodic Stats Report, optional BMPv4
 - **MRT dump:** RFC 6396 TABLE_DUMP_V2 periodic + on-demand with gzip
 - **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI — critical for large IXes
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
