@@ -9,7 +9,12 @@ async fn channel_full_marks_dirty_and_resyncs() {
     tokio::time::pause();
 
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Pin the PER-PEER path: commit-after-send is a per-peer AdjRibOut
+    // discipline (a grouped member's advertised view is synthesized from
+    // the group table, which advances at staging time and heals via the
+    // dirty resync — covered by the update-group differential tests).
+    manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -296,7 +301,12 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 #[tokio::test]
 async fn initial_dump_failure_leaves_adjribout_empty() {
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Pin the PER-PEER path: commit-after-send is a per-peer AdjRibOut
+    // discipline (a grouped member's advertised view is synthesized from
+    // the group table, which advances at staging time and heals via the
+    // dirty resync — covered by the update-group differential tests).
+    manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -363,7 +373,12 @@ async fn initial_dump_failure_resyncs_via_timer() {
     tokio::time::pause();
 
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Pin the PER-PEER path: commit-after-send is a per-peer AdjRibOut
+    // discipline (a grouped member's advertised view is synthesized from
+    // the group table, which advances at staging time and heals via the
+    // dirty resync — covered by the update-group differential tests).
+    manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));

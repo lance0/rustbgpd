@@ -705,19 +705,23 @@ impl RibManager {
         }
     }
 
+    /// Single-best export tail for one prefix. `target` selects the
+    /// consumer: a concrete peer (per-peer path) or an update group
+    /// (shared staging with `rib_out` = the group table and split
+    /// horizon lifted out to member-emit time). ONE body serves both —
+    /// the per-peer path is the group path's correctness oracle
+    /// (design risk 1: parameterized, never copied).
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "single-best export keeps peer, policy, and Adj-RIB-Out diff state together"
+        reason = "single-best export keeps target, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_single_best_prefix(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: &Prefix,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
+        target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
@@ -726,9 +730,6 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         memo: &mut super::ExportMemo,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -744,8 +745,10 @@ impl RibManager {
             return;
         };
 
-        // Split horizon: don't send route back to its source
-        if best.peer == target_peer {
+        // Split horizon: don't send route back to its source. Group
+        // staging has no single target — the source-flip matrix applies
+        // this per member at emit time.
+        if target.split_horizon_peer() == Some(best.peer) {
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
@@ -801,11 +804,15 @@ impl RibManager {
             return;
         }
 
-        // Export policy check
+        // Export policy check. Group staging passes no peer-context
+        // fields: a chain that reads them disqualifies its peers from
+        // grouping (`requires_peer_context`), so the verdict here is
+        // target-independent by construction.
         let aspath_str = export_pol
             .is_some_and(PolicyChain::requires_as_path_string)
             .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let (peer_address, peer_asn, peer_group) = target.ctx_peer();
         let ctx = RouteContext {
             prefix: Some(*prefix),
             next_hop: Some(best.next_hop),
@@ -816,19 +823,19 @@ impl RibManager {
             as_path_len: aspath_len,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
-            peer_address: Some(target_peer),
-            peer_asn: target_peer_asn,
-            peer_group: target_peer_group,
+            peer_address,
+            peer_asn,
+            peer_group,
             route_type: Some(route_type(best.origin_type)),
             evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
         let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
-        record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+        target.record_eval(&evaluation, best.peer);
         if result.action != PolicyAction::Permit {
             policy_filtered.push(PolicyFilteredRouteKey {
-                target_peer,
+                target_peer: target.policy_filtered_target(),
                 source_peer: best.peer,
                 prefix: *prefix,
                 path_id: best.path_id,

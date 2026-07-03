@@ -2276,6 +2276,28 @@ impl BgpMetrics {
         });
     }
 
+    /// Bulk variant of [`Self::record_policy_routes`]: add `n` evaluations
+    /// in one call. Used by the update-group fanout, which evaluates the
+    /// export chain once per (group, prefix) and replays the verdict to
+    /// each member as an integer add instead of per-(prefix × peer)
+    /// counter lookups. Totals and label sets are identical to calling
+    /// `record_policy_routes` `n` times.
+    pub fn record_policy_routes_by(
+        &self,
+        peer: &str,
+        policy: &str,
+        direction: &str,
+        action: &str,
+        n: u64,
+    ) {
+        if n == 0 {
+            return;
+        }
+        self.policy_routes
+            .with_label_values(&[peer, policy, direction, action])
+            .inc_by(n);
+    }
+
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).
     pub fn set_gr_active(&self, peer: &str, active: bool) {
         self.gr_active_peers

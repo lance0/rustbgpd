@@ -139,6 +139,16 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
+    /// Remove only the unicast routes and their secondary prefix index,
+    /// leaving every other family untouched. Used when a peer moves onto
+    /// the update-group path: its unicast advertised state becomes
+    /// group-owned while non-unicast families keep riding this per-peer
+    /// table.
+    pub fn clear_unicast(&mut self) {
+        self.routes.clear();
+        self.prefix_path_ids.clear();
+    }
+
     /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
     /// VPN, labeled-unicast, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {

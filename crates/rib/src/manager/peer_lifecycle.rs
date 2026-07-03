@@ -466,6 +466,8 @@ impl RibManager {
         // totals can subtract Prometheus snapshots
         // (`bgp_policy_routes_total` is monotonic per process).
         self.export_policy_stats.remove(&peer);
+        self.pending_regroup_baseline.remove(&peer);
+        self.pending_extra_withdraws.remove(&peer);
         self.remove_update_group_member(peer);
         self.clear_peer_refresh_state(peer);
     }
@@ -801,7 +803,8 @@ impl RibManager {
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let target_peer_asn = self.peer_asn.get(&peer).copied();
-        let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+        // Owned so no `&self` borrow spans the join-counters call below.
+        let target_peer_group = self.peer_group.get(&peer).cloned();
         let cluster_id = self.cluster_id;
         let peer_add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
         let peer_add_path_send_families = self
@@ -809,19 +812,8 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        // RFC 9107 ORR: a late-joining peer bound to a resolved vantage
-        // gets the per-vantage best in its initial dump (the SPF was
-        // seeded at PeerUp); an unresolved vantage falls back to the
-        // standard single-best.
-        let orr_ctx = self
-            .peer_orr_vantage
-            .get(&peer)
-            .and_then(|vantage| self.orr.spf.get(vantage))
-            .map(|spf| (&self.orr.topology, spf));
-        let loc_rib = &self.loc_rib;
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
-        let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         let mut all_prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
         for rib in self.ribs.values() {
@@ -836,7 +828,48 @@ impl RibManager {
         // set share the post-modification attributes across this dump.
         let mut export_memo = super::distribution::ExportMemo::default();
 
-        for prefix in &all_prefixes {
+        // A grouped member's initial unicast dump is a replay of the
+        // group table minus its own-sourced entries — the export tail
+        // already ran when the table was built (design §4: join pays no
+        // per-prefix staging walk). The loop below is the ungrouped
+        // path; grouped peers skip it (empty staging set).
+        let member_of = self.grouped_member_of(peer);
+        if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
+            for route in group.table.iter() {
+                if route.peer == peer {
+                    continue;
+                }
+                nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
+                announce.push(route.clone());
+            }
+            current_policy_filtered_routes
+                .extend(group.policy_filtered_for_member(peer, &all_prefixes));
+        }
+        if let Some(gid) = member_of {
+            // Export counters for the join, reconstructed from the
+            // group's staged residue (per-peer initial-dump parity).
+            self.apply_group_join_counters(peer, gid);
+        }
+        let empty_prefixes: HashSet<Prefix> = HashSet::new();
+        let staging_prefixes = if member_of.is_none() {
+            &all_prefixes
+        } else {
+            &empty_prefixes
+        };
+        // RFC 9107 ORR: a late-joining peer bound to a resolved vantage
+        // gets the per-vantage best in its initial dump (the SPF was
+        // seeded at PeerUp); an unresolved vantage falls back to the
+        // standard single-best. Resolved after the group-join counter
+        // replay above (which needs `&mut self`; ORR peers are never
+        // grouped, so ordering is free).
+        let orr_ctx = self
+            .peer_orr_vantage
+            .get(&peer)
+            .and_then(|vantage| self.orr.spf.get(vantage))
+            .map(|spf| (&self.orr.topology, spf));
+        let loc_rib = &self.loc_rib;
+        let policy_stats = self.export_policy_stats.entry(peer).or_default();
+        for prefix in staging_prefixes {
             if orf_gated.contains(&prefix_family(prefix)) {
                 continue;
             }
@@ -857,7 +890,7 @@ impl RibManager {
                     prefix,
                     peer,
                     target_peer_asn,
-                    target_peer_group,
+                    target_peer_group.as_deref(),
                     prefix_send_max,
                     target_is_ebgp,
                     target_is_rr_client,
@@ -893,7 +926,7 @@ impl RibManager {
                     prefix,
                     peer,
                     target_peer_asn,
-                    target_peer_group,
+                    target_peer_group.as_deref(),
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -916,14 +949,20 @@ impl RibManager {
                 current_policy_filtered_routes.extend(policy_filtered);
             } else {
                 let mut policy_filtered = Vec::new();
+                let mut target = super::distribution::ExportTarget::Peer {
+                    peer,
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group.as_deref(),
+                    metrics: &metrics,
+                    policy_stats: &mut *policy_stats,
+                    peer_label: &target_peer_label,
+                };
                 Self::distribute_single_best_prefix(
                     loc_rib,
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
+                    &mut target,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -934,9 +973,6 @@ impl RibManager {
                     // has no installed filter during the initial dump.
                     None,
                     &mut export_memo,
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
@@ -960,7 +996,7 @@ impl RibManager {
                 &all_flowspec_rules,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -992,7 +1028,7 @@ impl RibManager {
                 &all_evpn_keys,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1021,7 +1057,7 @@ impl RibManager {
                 &all_bgpls_keys,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1064,7 +1100,7 @@ impl RibManager {
                 &all_l3vpn_keys,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1111,7 +1147,7 @@ impl RibManager {
                 &all_labeled_keys,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1146,7 +1182,7 @@ impl RibManager {
                 &all_rtc_keys,
                 peer,
                 target_peer_asn,
-                target_peer_group,
+                target_peer_group.as_deref(),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -1234,7 +1270,7 @@ impl RibManager {
             for f in &eor_families {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }
-            self.dirty_peers.insert(peer);
+            self.mark_outbound_dirty(peer);
             return;
         }
         self.update_policy_filtered_routes_for_prefixes(
@@ -1272,7 +1308,7 @@ impl RibManager {
                 for f in &eor_families {
                     self.pending_eor.entry(peer).or_default().insert(*f);
                 }
-                self.dirty_peers.insert(peer);
+                self.mark_outbound_dirty(peer);
             }
         }
     }

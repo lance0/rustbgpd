@@ -944,14 +944,20 @@ impl RibManager {
                     current_policy_filtered_routes.extend(policy_filtered);
                 } else {
                     let mut policy_filtered = Vec::new();
+                    let mut target = super::distribution::ExportTarget::Peer {
+                        peer,
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        metrics: &metrics,
+                        policy_stats: &mut *policy_stats,
+                        peer_label: &target_peer_label,
+                    };
                     Self::distribute_single_best_prefix(
                         loc_rib,
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
-                        peer,
-                        target_peer_asn,
-                        target_peer_group,
+                        &mut target,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,
@@ -960,9 +966,6 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         &mut export_memo,
-                        &metrics,
-                        policy_stats,
-                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
@@ -1016,7 +1019,7 @@ impl RibManager {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
                 self.pending_refresh.entry(peer).or_default().insert(family);
-                self.dirty_peers.insert(peer);
+                self.mark_outbound_dirty(peer);
                 return;
             }
             self.update_policy_filtered_routes_for_prefixes(
@@ -1086,7 +1089,7 @@ impl RibManager {
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.pending_eor.insert(peer, families);
-            self.dirty_peers.insert(peer);
+            self.mark_outbound_dirty(peer);
         }
     }
 
