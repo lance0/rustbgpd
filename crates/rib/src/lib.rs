@@ -58,6 +58,6 @@ pub use route::{
 };
 pub use update::{
     AdjRibOutCounts, BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision,
-    ExplainReason, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OrrExplainCandidate,
-    OutboundRouteUpdate, RibCommandError, RibUpdate,
+    ExplainReason, ExportGateStep, ExportGateVerdict, MrtPeerEntry, MrtSnapshotData,
+    NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate, RibCommandError, RibUpdate,
 };

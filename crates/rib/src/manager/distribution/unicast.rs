@@ -3,9 +3,9 @@ use super::{
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, UnicastPrefixPeers, VrpTable, debug, evaluate_chain_with_attribution,
-    gauge_val, prefix_family, record_export_policy_eval, route_type, route_type_label,
-    route_type_message, routes_equal, should_suppress_ibgp_inner, validate_route_aspa,
-    validate_route_rpki,
+    family_label, gauge_val, policy_label_with_term, prefix_family, record_export_policy_eval,
+    route_type, route_type_label, route_type_message, routes_equal, rr_suppression_reason,
+    should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
 };
 
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
@@ -45,6 +45,17 @@ fn orr_candidates<'a>(
 }
 
 impl RibManager {
+    /// Explain the single-best export ladder for an RFC 9107 ORR peer
+    /// or an Add-Path-send peer — the two per-target selection shapes
+    /// the [`super::ExportTarget::Explain`] dry run of
+    /// `distribute_single_best_prefix` cannot serve (their best is not
+    /// the Loc-RIB best / their staging is multipath). Candidate
+    /// collection is shared with live distribution (`orr_candidates`),
+    /// and every gate reuses the same helper the live bodies call
+    /// (`llgr_stale_export_suppressed`, `OrfFilterSet::permits`,
+    /// `rr_suppression_reason`, `routes_equal`), in the live bodies'
+    /// evaluation order (family → ORF → selection → LLGR → policy →
+    /// Adj-RIB-Out diff).
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -55,6 +66,7 @@ impl RibManager {
         ribs: &HashMap<IpAddr, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
+        rib_out: Option<&AdjRibOut>,
         prefix: Prefix,
         target_peer: IpAddr,
         target_peer_asn: Option<u32>,
@@ -63,6 +75,9 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
+        add_path_send_max: u32,
         export_pol: Option<&PolicyChain>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
     ) -> ExplainAdvertisedRoute {
@@ -70,6 +85,7 @@ impl RibManager {
             BestPathReason, best_path_cmp_orr, best_path_cmp_orr_with_reason,
             best_path_reason_detail, orr_interior_cost_detail,
         };
+        use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
 
         let mut explain = ExplainAdvertisedRoute {
             decision: ExplainDecision::NoBestRoute,
@@ -83,7 +99,88 @@ impl RibManager {
             modifications: rustbgpd_policy::RouteModifications::default(),
             orr_vantage: None,
             orr_candidates: Vec::new(),
+            gates: Vec::new(),
+            update_group_id: None,
+            already_advertised: false,
+            rd: None,
         };
+        let gate = |gates: &mut Vec<crate::update::ExportGateStep>,
+                    g: &'static str,
+                    code: &'static str,
+                    verdict: crate::update::ExportGateVerdict,
+                    detail: String| {
+            gates.push(crate::update::ExportGateStep {
+                gate: g,
+                code,
+                verdict,
+                detail,
+            });
+        };
+
+        // Sendable family — first in the live ORR/multipath bodies.
+        let family = prefix_family(&prefix);
+        if !sendable.is_some_and(|f| f.contains(&family)) {
+            explain.decision = ExplainDecision::UnsupportedFamily;
+            let message = format!("peer cannot receive {} routes", super::family_label(family));
+            gate(
+                &mut explain.gates,
+                "family",
+                "family_not_sendable",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "family_not_sendable",
+                message,
+            });
+            return explain;
+        }
+        gate(
+            &mut explain.gates,
+            "family",
+            "family",
+            Pass,
+            format!("peer negotiated {}", super::family_label(family)),
+        );
+
+        // Outbound Route Filter (RFC 5291) — before selection/policy,
+        // exactly like the live bodies. Silent withdraw, not a policy
+        // denial.
+        if let Some(filter) = orf_filter {
+            if !filter.permits(&prefix) {
+                explain.decision = ExplainDecision::Deny;
+                let message = "peer-pushed Outbound Route Filter (RFC 5291) does not permit \
+                               this prefix"
+                    .to_string();
+                gate(
+                    &mut explain.gates,
+                    "orf",
+                    "orf_filtered",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "orf_filtered",
+                    message,
+                });
+                return explain;
+            }
+            gate(
+                &mut explain.gates,
+                "orf",
+                "orf",
+                Pass,
+                "peer-pushed Outbound Route Filter (RFC 5291) permits this prefix".to_string(),
+            );
+        } else {
+            gate(
+                &mut explain.gates,
+                "orf",
+                "orf",
+                NotApplicable,
+                "peer installed no Outbound Route Filter".to_string(),
+            );
+        }
 
         // Select the route to explain. An ORR-bound peer's best is NOT
         // the Loc-RIB best: rank the per-target candidate set with the
@@ -124,6 +221,15 @@ impl RibManager {
                 })
                 .collect();
             let Some(&winner) = ranked.first() else {
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "no_orr_candidate",
+                    Stop,
+                    "no candidate for this prefix survives split-horizon / reflection \
+                     filtering for this ORR peer"
+                        .to_string(),
+                );
                 explain.reasons.push(ExplainReason {
                     code: "no_orr_candidate",
                     message: "no candidate for this prefix survives split-horizon / \
@@ -132,6 +238,17 @@ impl RibManager {
                 });
                 return explain;
             };
+            gate(
+                &mut explain.gates,
+                "best_route",
+                "orr_vantage_best",
+                Pass,
+                format!(
+                    "per-vantage best from {} ({} candidate(s) ranked from vantage {vantage})",
+                    winner.peer,
+                    ranked.len()
+                ),
+            );
             // The decision the winner had to survive vs the runner-up —
             // the per-vantage counterpart of ExplainBestPath's
             // best_reason. Rendered with the compared vantage costs when
@@ -155,12 +272,30 @@ impl RibManager {
             winner
         } else {
             let Some(best) = loc_rib.get(&prefix) else {
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "no_best_route",
+                    Stop,
+                    "no best route exists for this prefix".to_string(),
+                );
                 explain.reasons.push(ExplainReason {
                     code: "no_best_route",
                     message: "no best route exists for this prefix".to_string(),
                 });
                 return explain;
             };
+            gate(
+                &mut explain.gates,
+                "best_route",
+                route_type_label(route_type(best.origin_type)),
+                Pass,
+                format!(
+                    "{} (Loc-RIB best from {})",
+                    route_type_message(route_type(best.origin_type)),
+                    best.peer
+                ),
+            );
             best
         };
 
@@ -172,12 +307,29 @@ impl RibManager {
         // decide only for the Loc-RIB best of a plain peer.
         if best.peer == target_peer {
             explain.decision = ExplainDecision::Deny;
+            let message = "route is suppressed by split horizon because it originated from \
+                           the target peer"
+                .to_string();
+            gate(
+                &mut explain.gates,
+                "split_horizon",
+                "ibgp_split_horizon",
+                Stop,
+                message.clone(),
+            );
             explain.reasons.push(ExplainReason {
                 code: "ibgp_split_horizon",
-                message: "route is suppressed by split horizon because it originated from the target peer".to_string(),
+                message,
             });
             return explain;
         }
+        gate(
+            &mut explain.gates,
+            "split_horizon",
+            "split_horizon",
+            Pass,
+            "route did not originate from the target peer".to_string(),
+        );
 
         if should_suppress_ibgp_inner(
             best,
@@ -187,54 +339,67 @@ impl RibManager {
             peer_is_rr_client,
         ) {
             explain.decision = ExplainDecision::Deny;
-            let code = if !target_is_ebgp
-                && !best.is_ebgp()
-                && cluster_id.is_some()
-                && !peer_is_rr_client.get(&best.peer).copied().unwrap_or(false)
-                && !target_is_rr_client
-            {
-                "rr_non_client_to_non_client"
-            } else {
-                "ibgp_split_horizon"
-            };
-            let message = if code == "rr_non_client_to_non_client" {
-                "route reflector will not reflect a non-client iBGP route to another non-client"
-                    .to_string()
-            } else {
-                "iBGP split horizon suppresses advertisement of this route".to_string()
-            };
-            explain.reasons.push(ExplainReason { code, message });
-            return explain;
-        }
-
-        let family = prefix_family(&prefix);
-        if !sendable.is_some_and(|f| f.contains(&family)) {
-            explain.decision = ExplainDecision::UnsupportedFamily;
+            let (code, message) = super::rr_suppression_reason(
+                best,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                peer_is_rr_client,
+            );
+            gate(
+                &mut explain.gates,
+                "rr_reflection",
+                code,
+                Stop,
+                message.to_string(),
+            );
             explain.reasons.push(ExplainReason {
-                code: "family_not_sendable",
-                message: format!(
-                    "peer cannot receive {} {} routes",
-                    match family.0 {
-                        Afi::Ipv4 => "ipv4",
-                        Afi::Ipv6 => "ipv6",
-                        Afi::L2Vpn => "l2vpn",
-                        Afi::BgpLs => "bgpls",
-                    },
-                    match family.1 {
-                        Safi::Unicast => "unicast",
-                        Safi::FlowSpec => "flowspec",
-                        Safi::Multicast => "multicast",
-                        Safi::LabeledUnicast => "labeled_unicast",
-                        Safi::Evpn => "evpn",
-                        Safi::BgpLs => "bgpls",
-                        Safi::BgpLsVpn => "bgpls_vpn",
-                        Safi::MplsVpn => "mpls_vpn",
-                        Safi::RtConstrain => "rtc",
-                    }
-                ),
+                code,
+                message: message.to_string(),
             });
             return explain;
         }
+        gate(
+            &mut explain.gates,
+            "rr_reflection",
+            "rr_reflection",
+            Pass,
+            "iBGP split-horizon / RFC 4456 reflection rules permit this route".to_string(),
+        );
+
+        // RFC 9494 §4.4 — same helper the live bodies gate with.
+        if super::llgr_stale_export_suppressed(
+            best.is_llgr_stale,
+            best.communities(),
+            family,
+            target_is_ebgp,
+            llgr,
+        ) {
+            explain.decision = ExplainDecision::Deny;
+            let message = "LLGR-stale route suppressed toward an eBGP peer that did not \
+                           advertise the Long-Lived Graceful Restart capability for this \
+                           family (RFC 9494 §4.4)"
+                .to_string();
+            gate(
+                &mut explain.gates,
+                "llgr",
+                "llgr_stale_suppressed",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "llgr_stale_suppressed",
+                message,
+            });
+            return explain;
+        }
+        gate(
+            &mut explain.gates,
+            "llgr",
+            "llgr",
+            Pass,
+            "route is not suppressed by the RFC 9494 LLGR export restriction".to_string(),
+        );
 
         let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
             best.as_path()
@@ -278,29 +443,40 @@ impl RibManager {
                 },
             ),
         };
-        // When the deciding chain member is an .rpol policy, extend
-        // the label to `<chain-ref>:<term>` via the statement trace
-        // (explain-only re-walk, pinned to agree with the evaluation
-        // by the policy crate's agreement tests). TOML members carry
-        // no term name and render unchanged.
-        let term_suffix = rustbgpd_policy::explain_chain_statements(export_pol, &ctx)
-            .steps
-            .last()
-            .filter(|step| step.policy_name == evaluation.matched_policy)
-            .and_then(|step| step.term_name.as_deref())
-            .map(|term| format!(":{term}"))
-            .unwrap_or_default();
-        let policy_label = format!(
-            "{}{term_suffix}",
-            evaluation.matched_policy.as_deref().unwrap_or("inline")
-        );
+        let policy_label =
+            super::policy_label_with_term(export_pol, &ctx, evaluation.matched_policy.as_deref());
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
+            let message = format!("export policy {policy_label:?} denied this route");
+            gate(
+                &mut explain.gates,
+                "export_policy",
+                "policy_denied",
+                Stop,
+                message.clone(),
+            );
             explain.reasons.push(ExplainReason {
                 code: "policy_denied",
-                message: format!("export policy {policy_label:?} denied this route"),
+                message,
             });
             return explain;
+        }
+        if export_pol.is_some() {
+            gate(
+                &mut explain.gates,
+                "export_policy",
+                "policy_permitted",
+                Pass,
+                format!("export policy {policy_label:?} permitted this route"),
+            );
+        } else {
+            gate(
+                &mut explain.gates,
+                "export_policy",
+                "export_policy",
+                NotApplicable,
+                "no export policy configured (default permit)".to_string(),
+            );
         }
 
         explain.decision = ExplainDecision::Advertise;
@@ -316,6 +492,60 @@ impl RibManager {
                 code: "policy_permitted",
                 message: format!("export policy {policy_label:?} permitted this route"),
             });
+        }
+
+        // Advertised-state diff. An Add-Path-send peer's staged set is
+        // the ranked multipath top-N — the single-best (path_id 0) diff
+        // below would not describe it, so the diff is skipped with a
+        // pointer at the per-candidate view.
+        if add_path_send_max > 0 {
+            gate(
+                &mut explain.gates,
+                "adj_rib_out",
+                "add_path_send",
+                NotApplicable,
+                format!(
+                    "peer negotiated Add-Path send (up to {add_path_send_max} paths); \
+                     per-candidate advertisement is shown by ExplainBestPath / \
+                     `rbgp rib best <prefix> --explain --explain-peer`"
+                ),
+            );
+        } else {
+            // Same modification application + equality the live tail
+            // uses (`ExportMemo::apply` + `routes_equal`).
+            let mut memo = super::ExportMemo::default();
+            let (mut modified, _nh_action) = memo.apply(best, &result.modifications);
+            modified.path_id = 0;
+            let existing = rib_out.and_then(|out| out.get(&prefix, 0));
+            let in_sync = existing.is_some_and(|existing| routes_equal(existing, &modified));
+            explain.already_advertised = in_sync;
+            if in_sync {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "already_advertised",
+                    Pass,
+                    "identical route already advertised — peer is in sync, no re-announcement"
+                        .to_string(),
+                );
+            } else if existing.is_some() {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "staged_announce",
+                    Pass,
+                    "staged route differs from the advertised state — would re-announce"
+                        .to_string(),
+                );
+            } else {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "staged_announce",
+                    Pass,
+                    "prefix not yet advertised to this peer — would announce".to_string(),
+                );
+            }
         }
 
         let mut next_hop = best.next_hop;
@@ -736,24 +966,50 @@ impl RibManager {
         policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
         force: bool,
     ) {
+        use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
+
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
         let Some(best) = loc_rib.get(prefix) else {
+            target.gate("best_route", "no_best_route", Stop, || {
+                "no best route exists for this prefix".to_string()
+            });
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
         };
+        if let Some(trace) = target.trace() {
+            trace.best_peer = Some(best.peer);
+            trace.best_route_type = Some(route_type(best.origin_type));
+            trace.push(
+                "best_route",
+                route_type_label(route_type(best.origin_type)),
+                crate::update::ExportGateVerdict::Pass,
+                format!(
+                    "{} (Loc-RIB best from {})",
+                    route_type_message(route_type(best.origin_type)),
+                    best.peer
+                ),
+            );
+        }
 
         // Split horizon: don't send route back to its source. Group
         // staging has no single target — the source-flip matrix applies
         // this per member at emit time.
         if target.split_horizon_peer() == Some(best.peer) {
+            target.gate("split_horizon", "ibgp_split_horizon", Stop, || {
+                "route is suppressed by split horizon because it originated from the target peer"
+                    .to_string()
+            });
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
         }
+        target.gate("split_horizon", "split_horizon", Pass, || {
+            "route did not originate from the target peer".to_string()
+        });
 
         // iBGP split-horizon / RFC 4456 reflection rules
         if should_suppress_ibgp_inner(
@@ -763,20 +1019,39 @@ impl RibManager {
             cluster_id,
             peer_is_rr_client,
         ) {
+            if let Some(trace) = target.trace() {
+                let (code, detail) = rr_suppression_reason(
+                    best,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    peer_is_rr_client,
+                );
+                trace.push("rr_reflection", code, Stop, detail.to_string());
+            }
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
         }
+        target.gate("rr_reflection", "rr_reflection", Pass, || {
+            "iBGP split-horizon / RFC 4456 reflection rules permit this route".to_string()
+        });
 
         // Sendable family check
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
+            target.gate("family", "family_not_sendable", Stop, || {
+                format!("peer cannot receive {} routes", family_label(family))
+            });
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
         }
+        target.gate("family", "family", Pass, || {
+            format!("peer negotiated {}", family_label(family))
+        });
 
         // RFC 9494 §4.4: LLGR-stale best toward a non-LLGR eBGP peer is
         // suppressed (withdraw-if-present). See `llgr_stale_export_suppressed`.
@@ -787,21 +1062,51 @@ impl RibManager {
             target_is_ebgp,
             llgr,
         ) {
+            target.gate("llgr", "llgr_stale_suppressed", Stop, || {
+                "LLGR-stale route suppressed toward an eBGP peer that did not advertise the \
+                 Long-Lived Graceful Restart capability for this family (RFC 9494 §4.4)"
+                    .to_string()
+            });
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
         }
+        target.gate("llgr", "llgr", Pass, || {
+            if best.is_llgr_stale
+                || best
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+            {
+                "LLGR-stale route permitted (peer advertised the LLGR capability or is iBGP)"
+                    .to_string()
+            } else {
+                "route is not LLGR-stale".to_string()
+            }
+        });
 
         // Outbound Route Filter check (RFC 5291): a peer-pushed prefix filter
         // applied *before* export policy. ORF denial is a silent withdraw —
         // not a policy denial — so it is deliberately not recorded in the
         // `policy_filtered` set or the export-policy counters.
-        if orf_filter.is_some_and(|f| !f.permits(prefix)) {
-            for &path_id in existing_path_ids {
-                withdraw.push((*prefix, path_id));
+        if let Some(filter) = orf_filter {
+            if !filter.permits(prefix) {
+                target.gate("orf", "orf_filtered", Stop, || {
+                    "peer-pushed Outbound Route Filter (RFC 5291) does not permit this prefix"
+                        .to_string()
+                });
+                for &path_id in existing_path_ids {
+                    withdraw.push((*prefix, path_id));
+                }
+                return;
             }
-            return;
+            target.gate("orf", "orf", Pass, || {
+                "peer-pushed Outbound Route Filter (RFC 5291) permits this prefix".to_string()
+            });
+        } else {
+            target.gate("orf", "orf", NotApplicable, || {
+                "peer installed no Outbound Route Filter".to_string()
+            });
         }
 
         // Export policy check. Group staging passes no peer-context
@@ -831,9 +1136,28 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
-        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
         target.record_eval(&evaluation, best.peer);
+        if let Some(trace) = target.trace() {
+            // Enrich the deciding chain member with the rpol term name
+            // via the statement trace (explain-only re-walk, pinned to
+            // agree with the evaluation by the policy crate's agreement
+            // tests). TOML members carry no term name.
+            trace.policy_label = export_pol.map(|chain| {
+                policy_label_with_term(Some(chain), &ctx, evaluation.matched_policy.as_deref())
+            });
+            trace.modifications = result.modifications.clone();
+        }
         if result.action != PolicyAction::Permit {
+            if let Some(trace) = target.trace() {
+                let label = trace.policy_label.clone().unwrap_or_default();
+                trace.push(
+                    "export_policy",
+                    "policy_denied",
+                    crate::update::ExportGateVerdict::Stop,
+                    format!("export policy {label:?} denied this route"),
+                );
+            }
             policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer: target.policy_filtered_target(),
                 source_peer: best.peer,
@@ -844,6 +1168,22 @@ impl RibManager {
                 withdraw.push((*prefix, path_id));
             }
             return;
+        }
+        if let Some(trace) = target.trace() {
+            match trace.policy_label.clone() {
+                Some(label) => trace.push(
+                    "export_policy",
+                    "policy_permitted",
+                    crate::update::ExportGateVerdict::Pass,
+                    format!("export policy {label:?} permitted this route"),
+                ),
+                None => trace.push(
+                    "export_policy",
+                    "export_policy",
+                    crate::update::ExportGateVerdict::NotApplicable,
+                    "no export policy configured (default permit)".to_string(),
+                ),
+            }
         }
 
         // Apply export modifications to a clone. The pass-scoped memo
@@ -865,6 +1205,35 @@ impl RibManager {
             || rib_out
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
+        if let Some(trace) = target.trace() {
+            trace.staged_next_hop = Some(match nh_action {
+                Some(rustbgpd_policy::NextHopAction::Specific(addr)) => addr,
+                _ => modified.next_hop,
+            });
+            trace.staged_path_id = modified.path_id;
+            trace.suppressed_identical = !changed;
+            if changed {
+                trace.push(
+                    "adj_rib_out",
+                    "staged_announce",
+                    crate::update::ExportGateVerdict::Pass,
+                    if rib_out.get(prefix, 0).is_some() {
+                        "staged route differs from the advertised state — would re-announce"
+                            .to_string()
+                    } else {
+                        "prefix not yet advertised to this peer — would announce".to_string()
+                    },
+                );
+            } else {
+                trace.push(
+                    "adj_rib_out",
+                    "already_advertised",
+                    crate::update::ExportGateVerdict::Pass,
+                    "identical route already advertised — peer is in sync, no re-announcement"
+                        .to_string(),
+                );
+            }
+        }
         if changed {
             nh_override_flags.push(nh_action);
             announce.push(modified);

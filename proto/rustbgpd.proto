@@ -1230,6 +1230,42 @@ message ExplainAdvertisedRouteRequest {
   string peer_address = 1;
   string prefix = 2;
   uint32 prefix_length = 3;
+  // Optional Route Distinguisher ("asn:nn" or "ip:nn"). When set, the
+  // explain runs the VPNv4/VPNv6 (SAFI 128) export ladder for the
+  // (rd, prefix) identity - including the RFC 4684 RT-Constrain
+  // membership gate - instead of the unicast ladder. Empty = unicast.
+  string rd = 4;
+}
+
+// Verdict of one export gate for one (route, peer) explain.
+enum ExportGateVerdict {
+  EXPORT_GATE_VERDICT_UNSPECIFIED = 0;
+  // The route cleared this gate.
+  EXPORT_GATE_VERDICT_PASS = 1;
+  // This gate stopped the route - nothing past it was evaluated.
+  EXPORT_GATE_VERDICT_STOP = 2;
+  // The gate does not apply to this peer (e.g. no export policy
+  // configured, no ORF filter installed).
+  EXPORT_GATE_VERDICT_NOT_APPLICABLE = 3;
+}
+
+// One rung of the export decision ladder a route traverses toward a
+// peer, in live evaluation order. The single-best unicast and VPN
+// ladders are recorded by a dry run of the same staging body live
+// distribution executes, so the explanation cannot drift from the
+// real decision.
+message ExportGateStep {
+  // Stable gate name, e.g. split_horizon, rr_reflection, family,
+  // llgr, orf, rt_membership, export_policy, adj_rib_out.
+  string gate = 1;
+  // Reason code for this step - matches the legacy ExplainReason.code
+  // vocabulary where one existed (e.g. rr_non_client_to_non_client,
+  // policy_denied, already_advertised).
+  string code = 2;
+  ExportGateVerdict verdict = 3;
+  // Human-readable detail (which policy term decided, the advertised
+  // -state comparison, ...).
+  string detail = 4;
 }
 
 message ExplainReason {
@@ -1287,6 +1323,22 @@ message ExplainAdvertisedRouteResponse {
   // orr_interior_cost when the vantage cost decided, with the compared
   // costs in the message). Empty for non-ORR explains.
   repeated OrrExplainCandidate orr_candidates = 12;
+  // The full export gate ladder in the exact order the live export
+  // path evaluates it, one step per gate. A Stop step names the gate
+  // that halted the route; an all-pass ladder ends at the
+  // adj_rib_out step (staged_announce or already_advertised).
+  repeated ExportGateStep gates = 13;
+  // Update group the peer's export is staged under, when grouped
+  // (shared staging + per-member source-flip emit). Absent = per-peer
+  // export path.
+  optional uint64 update_group_id = 14;
+  // True when the decision is ADVERTISE but an identical route already
+  // sits in the advertised state (Adj-RIB-Out / group table), so the
+  // live path suppresses re-announcement (peer is in sync).
+  bool already_advertised = 15;
+  // Route Distinguisher echoed back for a VPN explain; empty for
+  // unicast.
+  string rd = 16;
 }
 
 message ExplainBestPathRequest {

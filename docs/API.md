@@ -771,7 +771,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
-| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix to one peer |
+| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy with per-term labels, Adj-RIB-Out diff), produced by a dry run of the live staging body |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
