@@ -413,28 +413,12 @@ impl PeerSession {
                     self.negotiated = Some(*neg);
                     self.established_at = Some(Instant::now());
 
-                    // Emit BMP Peer Up event
+                    // Emit BMP Peer Up event — reliable (awaited): losing
+                    // it would leave collectors permanently blind to
+                    // this session's monitoring stream.
                     if self.bmp_tx.is_some() {
-                        let (local_addr, local_port, remote_port) = self.read_half.as_ref().map_or(
-                            (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-                            |h| {
-                                let local = h.local_addr().ok();
-                                let remote = h.peer_addr().ok();
-                                (
-                                    local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
-                                    local.map_or(0, |a| a.port()),
-                                    remote.map_or(0, |a| a.port()),
-                                )
-                            },
-                        );
-                        self.emit_bmp_event(BmpEvent::PeerUp {
-                            peer_info: self.build_bmp_peer_info(),
-                            local_open: self.local_open_pdu.clone().unwrap_or_default(),
-                            remote_open: self.remote_open_pdu.clone().unwrap_or_default(),
-                            local_addr,
-                            local_port,
-                            remote_port,
-                        });
+                        let peer_up = self.build_bmp_peer_up_event();
+                        self.emit_bmp_event_reliable(peer_up).await;
                     }
 
                     // Register with RIB manager for outbound updates
@@ -526,16 +510,23 @@ impl PeerSession {
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
 
-                    // Emit BMP Peer Down event before clearing state
+                    // Emit BMP Peer Down event before clearing state —
+                    // reliable (awaited): PeerDown is the collectors'
+                    // state-reset signal, and it must not be overtaken
+                    // or dropped after RouteMonitoring events that were
+                    // already emitted on the same channel. It also
+                    // supersedes any pending divergence repair (the
+                    // re-established session re-floods both views).
                     if self.bmp_tx.is_some() && self.established_at.is_some() {
                         let reason = self
                             .last_down_reason
                             .take()
                             .unwrap_or(PeerDownReason::RemoteNoNotification);
-                        self.emit_bmp_event(BmpEvent::PeerDown {
+                        self.emit_bmp_event_reliable(BmpEvent::PeerDown {
                             peer_info: self.build_bmp_peer_info(),
                             reason,
-                        });
+                        })
+                        .await;
                     }
 
                     // Check GR state before clearing negotiated info.

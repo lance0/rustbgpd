@@ -163,6 +163,17 @@ impl PeerSession {
         // through here as final wire bytes, so the BMP mirror is
         // byte-exact post-policy. Non-UPDATE bulk traffic (BoRR/EoRR
         // ROUTE-REFRESH markers) is not route monitoring and is skipped.
+        //
+        // Loss semantics under saturation (both directions are covered):
+        // - writer channel Full → the UPDATE never reaches the wire, so
+        //   NOT mirroring it is correct (RFC 8671 mirrors what was
+        //   sent); the saturation teardown below ends in a reliable BMP
+        //   PeerDown ordered after the last mirrored UPDATE, and the
+        //   re-established session re-floods the view.
+        // - wire send Ok but the BMP channel Full → `emit_bmp_event`
+        //   latches `bmp_stream_diverged` and forces a PeerDown/PeerUp
+        //   peer-state reset once the channel drains, so collectors
+        //   never keep a silently incomplete rib-out view.
         let bmp_rib_out_pdu =
             (self.config.bmp_rib_out && self.bmp_tx.is_some() && matches!(msg, Message::Update(_)))
                 .then(|| encoded.clone());
@@ -246,6 +257,14 @@ impl PeerSession {
             cease_subcode::OUT_OF_RESOURCES,
             bytes::Bytes::new(),
         );
+        // Classify the upcoming BMP Peer Down truthfully: reason 1
+        // (local system sent NOTIFICATION) carrying the Cease/8 PDU,
+        // instead of the reason-4 "remote closed" default.
+        if self.bmp_tx.is_some()
+            && let Ok(pdu) = rustbgpd_wire::encode_message(&Message::Notification(notif.clone()))
+        {
+            self.last_down_reason = Some(PeerDownReason::LocalNotification(pdu.freeze()));
+        }
         // Best-effort: the writer's priority channel is unbounded, so
         // this only fails if we already dropped the writer (e.g. a
         // double-trigger race). Either way, proceed with teardown.

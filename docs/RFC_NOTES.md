@@ -591,7 +591,18 @@ implemented per ADR-0040.
 - Live-only (no rib-out table dump): AdjRibOut stores routes
   pre-transport-stamping, so a synthesized dump would not be
   byte-faithful. Pre-policy rib-out deliberately skipped.
-- See ADR-0097 (Decisions 1, 3).
+- Saturation semantics: "mirror what was actually sent" is enforced in
+  both directions. An UPDATE that fails to enqueue on the saturated
+  writer is never mirrored (it never reached the wire; the `Cease/8`
+  teardown ends in a reliably delivered, correctly ordered Peer Down and
+  the re-established session re-floods the view). Conversely, a mirror
+  event dropped on a full BMP channel after the wire send succeeded
+  forces a synthetic Peer Down/Peer Up peer-state reset on the stream
+  (reason 2, FSM code 0) so the divergence is collector-detectable —
+  live-only views can never silently under-report. Per-peer Peer
+  Up/Peer Down delivery to the BMP manager is reliable (never
+  try_send-dropped).
+- See ADR-0097 (Decisions 1, 3 incl. the saturation amendment).
 
 ---
 

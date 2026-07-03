@@ -134,7 +134,18 @@ resolved.
   byte-faithful to what was advertised; pre-policy Adj-RIB-In is
   unreconstructable post-import. Collectors needing those exact views
   should connect before sessions establish (or trigger a route
-  refresh).
+  refresh). Because these streams are live-only, a Route Monitoring
+  event lost to BMP-channel saturation can never be replayed — so the
+  daemon guarantees such a loss is collector-detectable, never silent:
+  per-peer `PeerUp`/`PeerDown` delivery from sessions to the BMP
+  manager is reliable, and a Route Monitoring event dropped on a full
+  session→manager channel (counted in `bmp_source_drops_total`) forces
+  a synthetic `PeerDown`/`PeerUp` peer-state reset on the stream so
+  collectors discard the now-incomplete view and rebuild from live
+  traffic. The per-collector fan-out queue remains lossy by design
+  (`bmp_collector_drops_total`); a collector that saturates its own
+  channel diverges until its next reconnect, which per RFC 7854
+  discards all state and replays PeerUp — alert on that counter.
 
 - **Commit-confirmed config transactions do not survive a daemon restart.**
   The confirm timer and the captured pre-commit rollback snapshot are held in

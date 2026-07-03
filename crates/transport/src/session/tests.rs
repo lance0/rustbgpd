@@ -680,9 +680,12 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
     let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
     assert_eq!(pdu.as_ref(), &wire[..]);
 }
-/// The rib-out tap keeps the lossy posture: a full BMP event channel
-/// drops the event and bumps `bmp_source_drops_total` — it never blocks
-/// or tears down the session.
+/// The rib-out tap keeps the non-blocking posture: a full BMP event
+/// channel drops the event and bumps `bmp_source_drops_total` — it
+/// never blocks or tears down the session. But the drop is no longer
+/// silent: the UPDATE did reach the wire, so the session latches the
+/// divergence for the forced peer-state reset (see
+/// `bmp_channel_full_after_wire_send_forces_peer_state_reset`).
 #[tokio::test]
 async fn rib_out_tap_full_channel_increments_source_drop_counter() {
     let (mut session, _rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
@@ -720,6 +723,207 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
         })
         .sum();
     assert_eq!(drops, 1, "17th event over a 16-deep channel drops once");
+    assert!(
+        session.writer_bulk_tx.is_some(),
+        "a BMP-side drop must never tear down the BGP session"
+    );
+    assert!(
+        session.bmp_stream_diverged,
+        "a dropped rib-out RouteMonitoring must latch the divergence"
+    );
+    assert!(
+        session.bmp_repair_timer.is_some(),
+        "the bounded-latency repair timer must be armed"
+    );
+}
+/// Outbound-writer saturation ordering: the UPDATE that failed to
+/// enqueue is never mirrored to BMP (RFC 8671 mirrors what was actually
+/// sent), and the saturation teardown ends in a BMP `PeerDown` ordered
+/// after the last mirrored `RouteMonitoring` on the same channel — a
+/// collector sees an explicit resync signal (discard peer state; the
+/// re-established session re-floods), never a silent gap.
+#[tokio::test]
+async fn writer_saturation_orders_bmp_peer_down_after_last_mirrored_update() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    match bmp_rx.try_recv().unwrap() {
+        BmpEvent::PeerUp { .. } => {}
+        other => panic!("expected BMP PeerUp, got {other:?}"),
+    }
+    // Swap in a capacity-1 bulk channel that is never drained: the
+    // first UPDATE enqueues (and is mirrored), the second hits Full.
+    let (bulk_tx, _bulk_rx) = mpsc::channel(1);
+    session.writer_bulk_tx = Some(bulk_tx);
+    for lp in [100, 200] {
+        let mut update = empty_outbound_update();
+        update.announce = vec![make_route(lp)].into();
+        update.next_hop_override = vec![None].into();
+        session.send_route_update(update);
+    }
+    assert!(
+        session.writer_bulk_tx.is_none(),
+        "bulk-channel Full must trigger the saturation teardown"
+    );
+    // Run-loop follow-through: the writer exit surfaces as a TCP
+    // disconnect and drives the FSM out of Established.
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    // BMP stream order: the mirrored UPDATE, then PeerDown. Nothing
+    // for the UPDATE that never reached the wire.
+    let _mirrored = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    match bmp_rx.try_recv().unwrap() {
+        BmpEvent::PeerDown { reason, .. } => match reason {
+            PeerDownReason::LocalNotification(pdu) => {
+                // 19-byte header, then code 6 (Cease) / subcode 8
+                // (Out of Resources).
+                assert_eq!(&pdu[19..21], &[6, 8], "Cease/8 NOTIFICATION PDU");
+            }
+            other => panic!("expected reason 1 (local NOTIFICATION), got {other:?}"),
+        },
+        other => panic!("expected BMP PeerDown after the last mirrored RM, got {other:?}"),
+    }
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "no RouteMonitoring may be emitted for the UPDATE that never reached the wire"
+    );
+}
+/// The inverse saturation case — the wire send succeeded but the BMP
+/// channel was full: the divergence is repaired by forcing a synthetic
+/// PeerDown/PeerUp pair (RFC 7854 peer-state reset) ahead of the next
+/// emission, so collectors detect the reset instead of keeping a
+/// silently incomplete Adj-RIB-Out view forever.
+#[tokio::test]
+async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    session.local_open_pdu = Some(Bytes::from_static(&[1, 2, 3]));
+    session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
+    // 16 mirrored UPDATEs fill the channel; the 17th reaches the wire
+    // but its RouteMonitoring is dropped → divergence latched.
+    for _ in 0..17 {
+        let mut update = empty_outbound_update();
+        update.announce = vec![make_route(100)].into();
+        update.next_hop_override = vec![None].into();
+        session.send_route_update(update);
+    }
+    assert!(session.bmp_stream_diverged);
+    for _ in 0..16 {
+        expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    }
+    // Next emission repairs the stream first: PeerDown, PeerUp, then
+    // the new RouteMonitoring — in that order, on the same channel.
+    let mut update = empty_outbound_update();
+    update.announce = vec![make_route(300)].into();
+    update.next_hop_override = vec![None].into();
+    session.send_route_update(update);
+    assert!(!session.bmp_stream_diverged, "repair must clear the latch");
+    assert!(session.bmp_repair_timer.is_none());
+    match bmp_rx.try_recv().unwrap() {
+        BmpEvent::PeerDown { reason, .. } => assert!(
+            matches!(reason, PeerDownReason::LocalNoNotification(0)),
+            "synthetic reset uses reason 2 with FSM event code 0, got {reason:?}"
+        ),
+        other => panic!("expected synthetic BMP PeerDown, got {other:?}"),
+    }
+    match bmp_rx.try_recv().unwrap() {
+        BmpEvent::PeerUp { local_open, .. } => {
+            assert_eq!(local_open.as_ref(), &[1, 2, 3], "cached OPEN replayed");
+        }
+        other => panic!("expected synthetic BMP PeerUp, got {other:?}"),
+    }
+    expect_rib_out_rm(bmp_rx.try_recv().unwrap());
+    assert!(bmp_rx.try_recv().is_err());
+}
+/// A session that goes quiet right after the drop is repaired from the
+/// run loop's `bmp_repair_timer` arm instead of waiting for its next
+/// UPDATE: retry re-arms while the channel is saturated and emits the
+/// PeerDown/PeerUp reset once it drains.
+#[tokio::test]
+async fn bmp_repair_timer_retries_until_channel_drains() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    // Fill the 16-deep channel, then latch divergence with one more RM.
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..16 {
+        tx.try_send(BmpEvent::StatsReport {
+            peer_info: session.build_bmp_peer_info(),
+            adj_rib_in_routes: 0,
+            adj_rib_out_post: None,
+        })
+        .unwrap();
+    }
+    session.emit_bmp_event(BmpEvent::RouteMonitoring {
+        peer_info: session.build_bmp_peer_info(),
+        update_pdu: Bytes::from_static(&[0xde, 0xad]),
+    });
+    assert!(session.bmp_stream_diverged);
+    // Channel still full: the retry must keep the latch and re-arm.
+    session.bmp_repair_timer = None;
+    session.retry_bmp_stream_repair();
+    assert!(session.bmp_stream_diverged);
+    assert!(session.bmp_repair_timer.is_some(), "retry must re-arm");
+    // Drain, then retry succeeds.
+    for _ in 0..16 {
+        bmp_rx.try_recv().unwrap();
+    }
+    session.retry_bmp_stream_repair();
+    assert!(!session.bmp_stream_diverged);
+    assert!(session.bmp_repair_timer.is_none());
+    assert!(matches!(
+        bmp_rx.try_recv().unwrap(),
+        BmpEvent::PeerDown { .. }
+    ));
+    assert!(matches!(
+        bmp_rx.try_recv().unwrap(),
+        BmpEvent::PeerUp { .. }
+    ));
+}
+/// `PeerDown` is never lost to a full BMP channel: the session awaits
+/// channel space (bounded — the `BmpManager` loop always drains) rather
+/// than dropping the one signal that tells collectors to discard the
+/// peer's state.
+#[tokio::test]
+async fn bmp_peer_down_survives_full_channel() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.established_at = Some(Instant::now());
+    session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..16 {
+        tx.try_send(BmpEvent::StatsReport {
+            peer_info: session.build_bmp_peer_info(),
+            adj_rib_in_routes: 0,
+            adj_rib_out_post: None,
+        })
+        .unwrap();
+    }
+    // Consumer (the BmpManager stand-in) drains concurrently; the
+    // awaited PeerDown send completes once space frees up.
+    let drain = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        while let Some(event) = bmp_rx.recv().await {
+            if matches!(event, BmpEvent::PeerDown { .. }) {
+                return true;
+            }
+        }
+        false
+    });
+    session.execute_actions(vec![Action::SessionDown]).await;
+    drop(session);
+    assert!(
+        drain.await.unwrap(),
+        "PeerDown must be delivered even when the channel was full"
+    );
 }
 #[test]
 fn ebgp_prepends_asn() {
