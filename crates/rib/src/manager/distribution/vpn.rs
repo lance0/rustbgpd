@@ -1,7 +1,6 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib,
-    NeighborPolicyStats, PolicyChain, RibManager, RouteContext, Safi, gauge_val,
-    record_export_policy_eval, route_type, should_suppress_ibgp_inner, vpn_routes_equal, warn,
+    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, PolicyChain, RibManager,
+    RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner, vpn_routes_equal, warn,
 };
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
@@ -61,6 +60,16 @@ impl RibManager {
     /// (honest, unlike the prefixless BGP-LS placeholder) plus communities,
     /// large communities, `AS_PATH`, peer, and route type.
     ///
+    /// `target` selects the consumer (the unicast `ExportTarget` pattern —
+    /// ONE body, never copied; the per-peer path stays the group path's
+    /// correctness oracle): a concrete peer, or a whole update group with
+    /// the group table as `rib_out`, split horizon lifted to member emit,
+    /// peer-context `RouteContext` fields `None`, and evaluations
+    /// accumulated for per-member counter replay. Group targets never
+    /// carry `rtc_filter` (RTC-negotiated groups don't stage VPN in this
+    /// slice; slice 2 applies Φ at member emit), `orr_ctx`, or Add-Path —
+    /// all three disqualify from grouping.
+    ///
     /// When the target negotiated Add-Path send for the key's family (RFC
     /// 7911; RFC 9107 requires it between RRs), up to `add_path_send_max`
     /// candidates per key are ranked — with the ORR vantage comparator when
@@ -77,9 +86,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         keys: &HashSet<VpnRouteKey>,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
+        target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
@@ -90,14 +97,14 @@ impl RibManager {
         add_path_send_max: u32,
         add_path_send_families: &[(Afi, Safi)],
         export_pol: Option<&PolicyChain>,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
         force: bool,
     ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+        // `None` for group staging: split horizon is applied per member
+        // at emit time by the VPN source-flip matrix.
+        let split_horizon_peer = target.split_horizon_peer();
         for key in keys {
             let family = vpn_afi_safi(key);
             // Path IDs currently advertised for this identity — the diff
@@ -133,7 +140,7 @@ impl RibManager {
                     .values()
                     .flat_map(|rib| rib.iter_vpn_for_nlri(key))
                     .filter(|candidate| {
-                        candidate.peer != target_peer
+                        split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &vpn_suppression_probe(candidate),
                                 target_is_ebgp,
@@ -199,6 +206,7 @@ impl RibManager {
                         String::new()
                     };
                     let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let (peer_address, peer_asn, peer_group) = target.ctx_peer();
                     let ctx = RouteContext {
                         prefix: Some(candidate.inner_prefix()),
                         next_hop: Some(candidate.next_hop),
@@ -209,9 +217,9 @@ impl RibManager {
                         as_path_len: aspath_len,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                        peer_address: Some(target_peer),
-                        peer_asn: target_peer_asn,
-                        peer_group: target_peer_group,
+                        peer_address,
+                        peer_asn,
+                        peer_group,
                         route_type: Some(route_type(candidate.origin_type)),
                         evpn_route_type: None,
                         local_pref: candidate.local_pref_attr(),
@@ -219,12 +227,7 @@ impl RibManager {
                     };
                     let (result, evaluation) =
                         rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
-                    record_export_policy_eval(
-                        metrics,
-                        policy_stats,
-                        target_peer_label,
-                        &evaluation,
-                    );
+                    target.record_eval(&evaluation, candidate.peer);
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
                         continue;
                     }
@@ -280,7 +283,7 @@ impl RibManager {
                     .values()
                     .flat_map(|rib| rib.iter_vpn_for_nlri(key))
                     .filter(|candidate| {
-                        candidate.peer != target_peer
+                        split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &vpn_suppression_probe(candidate),
                                 target_is_ebgp,
@@ -341,8 +344,10 @@ impl RibManager {
 
             // The two suppression checks below are no-ops for an ORR
             // winner (its candidate set is pre-filtered above); they
-            // decide only for the Loc-RIB best of a plain peer.
-            if best.peer == target_peer {
+            // decide only for the Loc-RIB best of a plain peer. Group
+            // staging has no single target — the VPN source-flip matrix
+            // applies split horizon per member at emit time.
+            if split_horizon_peer == Some(best.peer) {
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
             }
@@ -365,6 +370,10 @@ impl RibManager {
                 String::new()
             };
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            // Group staging passes no peer-context fields: a chain that
+            // reads them disqualifies its peers from grouping, so the
+            // verdict is target-independent by construction.
+            let (peer_address, peer_asn, peer_group) = target.ctx_peer();
             let ctx = RouteContext {
                 prefix: Some(best.inner_prefix()),
                 next_hop: Some(best.next_hop),
@@ -375,9 +384,9 @@ impl RibManager {
                 as_path_len: aspath_len,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                peer_address: Some(target_peer),
-                peer_asn: target_peer_asn,
-                peer_group: target_peer_group,
+                peer_address,
+                peer_asn,
+                peer_group,
                 route_type: Some(route_type(best.origin_type)),
                 evpn_route_type: None,
                 local_pref: best.local_pref_attr(),
@@ -385,7 +394,7 @@ impl RibManager {
             };
             let (result, evaluation) =
                 rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
-            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+            target.record_eval(&evaluation, best.peer);
             if result.action != rustbgpd_policy::PolicyAction::Permit {
                 withdraw_existing(vpn_withdraw, existing_path_ids);
                 continue;
@@ -509,8 +518,71 @@ impl RibManager {
                 .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
         }
 
+        // Update-group shared VPN staging: ONE export-tail pass per
+        // (VPN-staging group, changed identity), committed to the group
+        // tables. The per-peer loop below emits the deltas per member via
+        // the VPN source-flip matrix; RTC-negotiated groups don't stage
+        // VPN (slice-1 gate), so their members — and all ungrouped peers —
+        // take the per-peer staging path exactly as before.
+        let vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
+
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            if let Some(gid) = self.vpn_grouped_member_of(peer) {
+                let Some(stage) = vpn_group_stage.get(&gid) else {
+                    continue;
+                };
+                // Per-member export-policy counters from the group
+                // verdict — integer adds, `totals − own-sourced`.
+                self.apply_group_policy_counters(peer, &stage.evals);
+                let mut vpn_announce = Vec::new();
+                let mut vpn_withdraw = Vec::new();
+                crate::manager::update_groups::emit_vpn_group_deltas_for_member(
+                    &stage.deltas,
+                    peer,
+                    &mut vpn_announce,
+                    &mut vpn_withdraw,
+                );
+                if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
+                    continue;
+                }
+                if !self.try_send_and_commit_outbound_update(
+                    peer,
+                    vec![].into(),
+                    vec![].into(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vpn_announce,
+                    vpn_withdraw,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                ) {
+                    warn!(%peer, "outbound channel full — VPN update deferred");
+                    self.mark_outbound_dirty(peer);
+                    // The member missed this pass's withdrawals: record
+                    // them as VPN tombstones so its resync can
+                    // (over-)withdraw them.
+                    if let Some(group) = self.group_ribs.get_mut(&gid) {
+                        group.vpn_tombstones.extend(
+                            stage
+                                .deltas
+                                .iter()
+                                .filter(|d| d.new.is_none())
+                                .map(|d| d.key),
+                        );
+                    }
+                }
+                continue;
+            }
             // A peer bound to a vantage that resolved this pass takes the
             // per-vantage best; an unresolved vantage silently falls back
             // to the standard Loc-RIB best (same shape as unicast).
@@ -565,15 +637,21 @@ impl RibManager {
 
             let mut vpn_announce = Vec::new();
             let mut vpn_withdraw = Vec::new();
+            let mut target = super::ExportTarget::Peer {
+                peer,
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group,
+                metrics: &metrics,
+                policy_stats: &mut *policy_stats,
+                peer_label: &target_peer_label,
+            };
             Self::stage_vpn_routes(
                 &self.loc_rib,
                 &self.ribs,
                 rib_out,
                 &self.peer_is_rr_client,
                 staged_keys,
-                peer,
-                target_peer_asn,
-                target_peer_group,
+                &mut target,
                 target_is_ebgp,
                 target_is_rr_client,
                 self.cluster_id,
@@ -584,9 +662,6 @@ impl RibManager {
                 add_path_send_max,
                 &add_path_send_families,
                 export_pol.as_ref(),
-                &metrics,
-                policy_stats,
-                &target_peer_label,
                 &mut vpn_announce,
                 &mut vpn_withdraw,
                 false,

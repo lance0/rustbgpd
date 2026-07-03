@@ -149,6 +149,15 @@ impl AdjRibOut {
         self.prefix_path_ids.clear();
     }
 
+    /// Remove only the VPN routes and their secondary key index, leaving
+    /// every other family untouched. The VPN sibling of
+    /// [`Self::clear_unicast`]: used when a peer's VPN advertised state
+    /// moves onto the update-group path.
+    pub fn clear_vpn(&mut self) {
+        self.vpn_routes.clear();
+        self.vpn_key_path_ids.clear();
+    }
+
     /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
     /// VPN, labeled-unicast, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {

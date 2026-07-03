@@ -224,8 +224,13 @@ impl RibManager {
         // A grouped member's unicast advertised state is group-owned
         // (design §2: NO per-peer unicast storage) — skip the per-peer
         // unicast commit and synthesize its gauge from the group table.
-        // Non-unicast families always commit per peer.
+        // Same for VPN when the member's group stages VPN (non-RTC
+        // groups, v2 slice 1). Other families always commit per peer.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
+        let grouped_vpn_count = self
+            .vpn_grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+            .map(|group| group.vpn_advertised_count_for(peer));
 
         if !announce.is_empty()
             || !withdraw.is_empty()
@@ -273,11 +278,13 @@ impl RibManager {
             for key in &bgpls_withdraw {
                 rib_out.remove_bgpls(key);
             }
-            for route in &vpn_announce {
-                rib_out.insert_vpn(route.clone());
-            }
-            for key in &vpn_withdraw {
-                rib_out.remove_vpn(key);
+            if grouped_vpn_count.is_none() {
+                for route in &vpn_announce {
+                    rib_out.insert_vpn(route.clone());
+                }
+                for key in &vpn_withdraw {
+                    rib_out.remove_vpn(key);
+                }
             }
             for route in &labeled_announce {
                 rib_out.insert_labeled(route.clone());
@@ -314,7 +321,7 @@ impl RibManager {
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
                 "vpn",
-                gauge_val(rib_out.vpn_len()),
+                gauge_val(grouped_vpn_count.unwrap_or_else(|| rib_out.vpn_len())),
             );
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
@@ -979,7 +986,7 @@ impl RibManager {
                         all.extend(group.tombstones.iter().map(|(p, _)| *p));
                     }
                     if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                        all.extend(base.keys().map(|(p, _)| *p));
+                        all.extend(base.unicast.keys().map(|(p, _)| *p));
                     }
                 } else {
                     // For multi-path dirty resync, also include all Adj-RIB-In prefixes
@@ -1071,21 +1078,38 @@ impl RibManager {
                 HashSet::new()
             };
 
+            // A member of a VPN-staging group holds no per-peer VPN
+            // Adj-RIB-Out: its advertised VPN state is the group table
+            // (plus pending withdraw residue), so the resync enumeration
+            // synthesizes from those — mirroring the unicast synthesis
+            // above. RTC-negotiated groups don't stage VPN (slice-1
+            // gate), so their members keep the per-peer enumeration.
+            let vpn_grouped = self.vpn_grouped_member_of(peer);
             let effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
                 let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = self
                     .loc_rib
                     .iter_vpn()
                     .map(|route| route.nlri.key())
                     .collect();
-                // For a VPN Add-Path-send resync, the staged top-N draws from
-                // every Adj-RIB-In identity, not just the Loc-RIB bests.
-                if self.peer_vpn_add_path_send(peer) {
-                    for rib in self.ribs.values() {
-                        all.extend(rib.iter_vpn().map(|route| route.nlri.key()));
+                if let Some(gid) = vpn_grouped {
+                    if let Some(group) = self.group_ribs.get(&gid) {
+                        all.extend(group.table.iter_vpn().map(|route| route.nlri.key()));
+                        all.extend(group.vpn_tombstones.iter().copied());
                     }
-                }
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(rib_out.iter_vpn().map(|route| route.nlri.key()));
+                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                        all.extend(base.vpn.keys().copied());
+                    }
+                } else {
+                    // For a VPN Add-Path-send resync, the staged top-N draws from
+                    // every Adj-RIB-In identity, not just the Loc-RIB bests.
+                    if self.peer_vpn_add_path_send(peer) {
+                        for rib in self.ribs.values() {
+                            all.extend(rib.iter_vpn().map(|route| route.nlri.key()));
+                        }
+                    }
+                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                        all.extend(rib_out.iter_vpn().map(|route| route.nlri.key()));
+                    }
                 }
                 all
             } else {
@@ -1192,12 +1216,36 @@ impl RibManager {
                             peer,
                             is_dirty,
                             is_force,
-                            self.pending_regroup_baseline.get(&peer),
-                            self.pending_extra_withdraws.get(&peer),
+                            self.pending_regroup_baseline
+                                .get(&peer)
+                                .map(|base| &base.unicast),
+                            self.pending_extra_withdraws
+                                .get(&peer)
+                                .map(|extras| &extras.unicast),
                             &mut announce,
                             &mut withdraw,
                             &mut nh_override_flags,
                         );
+                        // VPN portion of the resync, from the group's VPN
+                        // maps (only staged for non-RTC groups); the
+                        // per-peer VPN staging below is skipped for these
+                        // members (`vpn_grouped` gate).
+                        if group.stages_vpn() {
+                            Self::assemble_group_vpn_resync(
+                                group,
+                                peer,
+                                is_dirty,
+                                is_force,
+                                self.pending_regroup_baseline
+                                    .get(&peer)
+                                    .map(|base| &base.vpn),
+                                self.pending_extra_withdraws
+                                    .get(&peer)
+                                    .map(|extras| &extras.vpn),
+                                &mut vpn_announce,
+                                &mut vpn_withdraw,
+                            );
+                        }
                     } else if let Some(stage) = group_stage.get(&gid) {
                         if stage.shared_applies_to(peer) {
                             // Common case: this member's matrix output IS
@@ -1467,16 +1515,25 @@ impl RibManager {
                 );
             }
 
-            if resync && !effective_l3vpn_keys.is_empty() {
+            // A VPN-staging group member's VPN resync was assembled from
+            // the group table above — no per-peer staging, no policy
+            // re-evaluation.
+            if resync && vpn_grouped.is_none() && !effective_l3vpn_keys.is_empty() {
+                let mut target = ExportTarget::Peer {
+                    peer,
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    metrics: &metrics,
+                    policy_stats: &mut *policy_stats,
+                    peer_label: &target_peer_label,
+                };
                 Self::stage_vpn_routes(
                     loc_rib,
                     &self.ribs,
                     rib_out,
                     &self.peer_is_rr_client,
                     &effective_l3vpn_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
+                    &mut target,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -1487,9 +1544,6 @@ impl RibManager {
                     peer_add_path_send_max,
                     &peer_add_path_send_families,
                     export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
                     &mut vpn_announce,
                     &mut vpn_withdraw,
                     is_force,

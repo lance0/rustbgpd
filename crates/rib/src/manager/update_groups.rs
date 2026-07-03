@@ -36,10 +36,11 @@ use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use rustc_hash::FxHashMap;
 
-use super::helpers::{LOCAL_PEER, routes_equal};
+use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_out::AdjRibOut;
-use crate::route::Route;
+use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
+use rustbgpd_wire::{VpnAddressFamily, VpnRouteKey};
 
 /// Fingerprint of every RIB-staging input that makes per-peer staged
 /// output differ (design §1). Per-peer wire preparation (next-hop
@@ -65,6 +66,15 @@ pub(super) struct GroupKey {
     sendable_ipv4_unicast: bool,
     /// Sendable IPv6-unicast.
     sendable_ipv6_unicast: bool,
+    /// Sendable `VPNv4` (SAFI 128) — the v2 VPN-staging key dimension.
+    sendable_vpnv4: bool,
+    /// Sendable `VPNv6` (SAFI 128).
+    sendable_vpnv6: bool,
+    /// RT-Constrain negotiated (sendable ∋ `(Ipv4, RtConstrain)`). Slice 1
+    /// gate: groups with `rtc_negotiated` are EXCLUDED from VPN group
+    /// staging — their VPN families ride the per-peer path (where the RFC
+    /// 4684 RT filter applies); unicast grouping continues normally.
+    rtc_negotiated: bool,
     /// Exact set of families the peer advertised LLGR for (RFC 9494
     /// export-restriction input), sorted raw `(afi, safi)` values.
     llgr_families: Vec<(u16, u8)>,
@@ -249,10 +259,10 @@ impl GroupStageOutput {
 pub(in crate::manager) struct GroupEvalAccumulator {
     totals: Vec<(Option<String>, PolicyAction, u64)>,
     per_source: FxHashMap<IpAddr, Vec<(Option<String>, PolicyAction, u64)>>,
-    /// Verdict of the most recent evaluation, consumed per prefix by
-    /// the staging loop to label the staged entry / denial residue
-    /// (single-best stages at most one eval per prefix).
-    last: Option<(Option<String>, PolicyAction)>,
+    /// Verdict (and source peer) of the most recent evaluation, consumed
+    /// per key by the staging loops to label the staged entry / denial
+    /// residue (single-best stages at most one eval per key).
+    last: Option<(Option<String>, PolicyAction, IpAddr)>,
 }
 
 fn bump_eval_row(
@@ -283,12 +293,12 @@ impl GroupEvalAccumulator {
             evaluation.matched_policy.as_ref(),
             evaluation.action,
         );
-        self.last = Some((evaluation.matched_policy.clone(), evaluation.action));
+        self.last = Some((evaluation.matched_policy.clone(), evaluation.action, source));
     }
 
     /// Take (and clear) the last recorded verdict — the staging loop's
-    /// per-prefix label hook.
-    fn take_last(&mut self) -> Option<(Option<String>, PolicyAction)> {
+    /// per-key label / denial-residue hook.
+    fn take_last(&mut self) -> Option<(Option<String>, PolicyAction, IpAddr)> {
         self.last.take()
     }
 }
@@ -344,6 +354,85 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
     }
 }
 
+/// One entry of a shared group VPN staging pass. Unlike the unicast
+/// [`GroupDelta`] this carries the full displaced route (`old`), not just
+/// its source: slice 2's RT-pass matrix needs the displaced entry's
+/// extended communities to decide `had` per member (design §2.1). Slice 1
+/// only reads `old.peer` (`pass ≡ true` degenerate case). `path_id` is
+/// fixed at 0 — Add-Path send disqualifies from grouping.
+#[derive(Debug, Clone)]
+pub(in crate::manager) struct VpnGroupDelta {
+    pub(in crate::manager) key: VpnRouteKey,
+    /// Newly staged post-policy route (source-faithful, ADR-0077 §6), or
+    /// `None` for a withdrawal.
+    pub(in crate::manager) new: Option<VpnRibRoute>,
+    /// Prior staged entry for the key, cloned before commit (one clone
+    /// per delta, total). `None` = the key was not previously staged.
+    pub(in crate::manager) old: Option<VpnRibRoute>,
+    /// Terminal policy of the permitting evaluation — join-time counter
+    /// replay residue, exactly like [`GroupDelta::policy_label`].
+    pub(in crate::manager) policy_label: Option<String>,
+}
+
+/// Result of one shared VPN staging pass over a group: deltas (already
+/// committed to the group table) plus the accumulated export-policy
+/// verdicts for per-member counter replay. No shared-`Arc` payload — the
+/// outbound envelope's VPN queue is a `Vec`, so members clone per route
+/// either way; the receipt-proven win is collapsing the *staging* (policy
+/// eval + suppression per peer), not the emit clones.
+#[derive(Default)]
+pub(in crate::manager) struct VpnGroupStageOutput {
+    pub(in crate::manager) deltas: Vec<VpnGroupDelta>,
+    pub(in crate::manager) evals: GroupEvalAccumulator,
+}
+
+/// Per-member VPN emit for one shared staging pass — the design §2.2
+/// matrix with the slice-1 degenerate `pass ≡ true` (RTC-negotiated
+/// groups never stage VPN, so no RT filter exists here; slice 2 plugs
+/// `Φ_m` into `had`/`gets`):
+///
+/// - `had`  = `old` exists ∧ `old.peer ≠ member`
+/// - `gets` = `new` exists ∧ `new.peer ≠ member`
+/// - emit: `gets` → announce `new`; `had ∧ ¬gets` → withdraw `(key, 0)`;
+///   else skip.
+pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
+    deltas: &[VpnGroupDelta],
+    member: IpAddr,
+    vpn_announce: &mut Vec<VpnRibRoute>,
+    vpn_withdraw: &mut Vec<VpnRibRouteKey>,
+) {
+    for delta in deltas {
+        let had = delta.old.as_ref().is_some_and(|old| old.peer != member);
+        let gets = delta.new.as_ref().is_some_and(|new| new.peer != member);
+        if gets {
+            vpn_announce.push(delta.new.clone().expect("gets implies new exists"));
+        } else if had {
+            vpn_withdraw.push(VpnRibRouteKey {
+                nlri_key: delta.key,
+                path_id: 0,
+            });
+        }
+    }
+}
+
+/// A regrouped member's previously-advertised view, held until its
+/// one-shot resync diff succeeds (design §4): the unicast table plus —
+/// for a member whose VPN state is group-owned — the VPN view.
+#[derive(Debug, Default)]
+pub(in crate::manager) struct RegroupBaseline {
+    pub(in crate::manager) unicast: FxHashMap<(Prefix, u32), Route>,
+    pub(in crate::manager) vpn: FxHashMap<VpnRouteKey, VpnRibRoute>,
+}
+
+/// Extra (over-)withdraw keys a member must emit on its next resync:
+/// tombstones carried across a regroup by a member that was dirty when
+/// it moved. Over-withdraw is the safe direction.
+#[derive(Debug, Default)]
+pub(in crate::manager) struct ExtraWithdraws {
+    pub(in crate::manager) unicast: HashSet<(Prefix, u32)>,
+    pub(in crate::manager) vpn: HashSet<VpnRouteKey>,
+}
+
 /// The group-owned staged outbound table (design §2): the unicast
 /// portion of an [`AdjRibOut`] reused as substrate, plus the group's
 /// membership/dirty bookkeeping and the group-uniform staging inputs
@@ -359,15 +448,18 @@ pub(in crate::manager) struct GroupRibOut {
     /// so joins/replays don't re-run policy to recover them.
     nh_overrides: FxHashMap<(Prefix, u32), NextHopAction>,
     /// Staged-entry count per source peer — O(1) per-member advertised
-    /// count synthesis (`table.len() − own`), split (v4, v6) for the
-    /// BMP stat-17 family counts.
-    source_counts: FxHashMap<IpAddr, (usize, usize)>,
+    /// count synthesis (`len − own`), one slot per staged family
+    /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
+    /// family counts.
+    source_counts: FxHashMap<IpAddr, [usize; 4]>,
     /// Keys withdrawn from the table since the first member went dirty;
     /// empty (and unmaintained) while no member is dirty. A dirty
     /// member's resync withdraws `tombstones ∖ still-staged` — spurious
     /// withdraws of never-advertised prefixes are RFC 4271 no-ops
     /// (over-withdraw is the safe direction).
     pub(in crate::manager) tombstones: HashSet<(Prefix, u32)>,
+    /// VPN sibling of `tombstones` (`path_id` fixed at 0).
+    pub(in crate::manager) vpn_tombstones: HashSet<VpnRouteKey>,
     pub(in crate::manager) members: HashSet<IpAddr>,
     pub(in crate::manager) dirty_members: HashSet<IpAddr>,
     /// Persistent group-verdict export-policy denials (target stamped
@@ -377,6 +469,15 @@ pub(in crate::manager) struct GroupRibOut {
     /// Terminal policy label per staged entry (`None` = inline) —
     /// join-time counter replay residue.
     staged_labels: FxHashMap<(Prefix, u32), Option<String>>,
+    /// VPN sibling of `staged_labels`, keyed by RD+prefix identity.
+    vpn_staged_labels: FxHashMap<VpnRouteKey, Option<String>>,
+    /// Persistent group-verdict VPN export-policy denials: denied key →
+    /// (source peer, denying policy label). The per-peer VPN path keeps
+    /// no denial *records* (unlike unicast `policy_filtered` — VPN has
+    /// no denied-routes query), but it DOES record a deny eval per
+    /// denied key at every staging pass, so join-time counter replay
+    /// needs this residue for parity.
+    vpn_policy_denied: FxHashMap<VpnRouteKey, (IpAddr, Option<String>)>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -406,16 +507,29 @@ impl GroupRibOut {
             nh_overrides: FxHashMap::default(),
             source_counts: FxHashMap::default(),
             tombstones: HashSet::new(),
+            vpn_tombstones: HashSet::new(),
             members: HashSet::new(),
             dirty_members: HashSet::new(),
             policy_filtered: FxHashMap::default(),
             staged_labels: FxHashMap::default(),
+            vpn_staged_labels: FxHashMap::default(),
+            vpn_policy_denied: FxHashMap::default(),
             export_chain,
             is_ebgp,
             is_rr_client,
             sendable,
             llgr,
         }
+    }
+
+    /// Whether this group stages VPN routes (design §6 slice 1): `VPNv4`
+    /// or `VPNv6` sendable AND RT-Constrain NOT negotiated. RTC groups'
+    /// VPN families ride the per-peer path where the RFC 4684 filter
+    /// applies (the RT dimension is slice 2). Group-uniform — all three
+    /// inputs are in the [`GroupKey`].
+    pub(in crate::manager) fn stages_vpn(&self) -> bool {
+        !self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
+            && self.sendable.iter().any(|&(_, safi)| safi == Safi::MplsVpn)
     }
 
     fn count_slot(prefix: &Prefix) -> usize {
@@ -425,27 +539,32 @@ impl GroupRibOut {
         }
     }
 
-    fn dec_source(&mut self, peer: IpAddr, prefix: &Prefix) {
+    fn vpn_count_slot(key: &VpnRouteKey) -> usize {
+        match key.prefix.family() {
+            VpnAddressFamily::V4 => 2,
+            VpnAddressFamily::V6 => 3,
+        }
+    }
+
+    fn dec_source_slot(&mut self, peer: IpAddr, slot: usize) {
         if let Some(counts) = self.source_counts.get_mut(&peer) {
-            let slot = if Self::count_slot(prefix) == 0 {
-                &mut counts.0
-            } else {
-                &mut counts.1
-            };
-            *slot = slot.saturating_sub(1);
-            if counts.0 == 0 && counts.1 == 0 {
+            counts[slot] = counts[slot].saturating_sub(1);
+            if counts.iter().all(|&n| n == 0) {
                 self.source_counts.remove(&peer);
             }
         }
     }
 
+    fn inc_source_slot(&mut self, peer: IpAddr, slot: usize) {
+        self.source_counts.entry(peer).or_default()[slot] += 1;
+    }
+
+    fn dec_source(&mut self, peer: IpAddr, prefix: &Prefix) {
+        self.dec_source_slot(peer, Self::count_slot(prefix));
+    }
+
     fn inc_source(&mut self, peer: IpAddr, prefix: &Prefix) {
-        let counts = self.source_counts.entry(peer).or_default();
-        if Self::count_slot(prefix) == 0 {
-            counts.0 += 1;
-        } else {
-            counts.1 += 1;
-        }
+        self.inc_source_slot(peer, Self::count_slot(prefix));
     }
 
     /// Commit one staged delta into the group table, keeping the
@@ -475,49 +594,98 @@ impl GroupRibOut {
         }
     }
 
+    /// Commit one staged VPN delta into the group table's VPN maps,
+    /// keeping the source counts and label residue in sync. The VPN
+    /// sibling of [`Self::apply_delta`]; `path_id` fixed at 0.
+    fn apply_vpn_delta(&mut self, delta: &VpnGroupDelta) {
+        let rib_key = VpnRibRouteKey {
+            nlri_key: delta.key,
+            path_id: 0,
+        };
+        let slot = Self::vpn_count_slot(&delta.key);
+        if let Some(old) = self.table.get_vpn(&rib_key) {
+            let old_peer = old.peer;
+            self.dec_source_slot(old_peer, slot);
+        }
+        if let Some(route) = &delta.new {
+            self.inc_source_slot(route.peer, slot);
+            self.vpn_staged_labels
+                .insert(delta.key, delta.policy_label.clone());
+            self.table.insert_vpn(route.clone());
+        } else {
+            self.table.remove_vpn(&rib_key);
+            self.vpn_staged_labels.remove(&delta.key);
+        }
+    }
+
     /// The next-hop-override flag staged for a table entry.
     pub(in crate::manager) fn nh_override(&self, key: (Prefix, u32)) -> Option<NextHopAction> {
         self.nh_overrides.get(&key).cloned()
     }
 
-    /// Number of routes `member` currently has advertised: the group
-    /// table minus the member's own-sourced entries. O(1).
+    /// Number of unicast routes `member` currently has advertised: the
+    /// group table minus the member's own-sourced entries. O(1).
     pub(in crate::manager) fn advertised_count_for(&self, member: IpAddr) -> usize {
         let own = self
             .source_counts
             .get(&member)
-            .map_or(0, |(v4, v6)| v4 + v6);
+            .map_or(0, |counts| counts[0] + counts[1]);
         self.table.len().saturating_sub(own)
     }
 
-    /// Per-family synthesized unicast advertised counts for a member
-    /// (BMP RFC 8671 stat type 17 input). Zero-count families omitted.
-    pub(in crate::manager) fn family_counts_for(&self, member: IpAddr) -> Vec<((Afi, Safi), u64)> {
-        let (mut v4, mut v6) = (0usize, 0usize);
-        for (a, b) in self.source_counts.values() {
-            v4 += a;
-            v6 += b;
-        }
-        let own = self.source_counts.get(&member).copied().unwrap_or((0, 0));
-        let v4 = v4.saturating_sub(own.0) as u64;
-        let v6 = v6.saturating_sub(own.1) as u64;
-        let mut counts = Vec::new();
-        if v4 > 0 {
-            counts.push(((Afi::Ipv4, Safi::Unicast), v4));
-        }
-        if v6 > 0 {
-            counts.push(((Afi::Ipv6, Safi::Unicast), v6));
-        }
-        counts
+    /// Number of VPN routes `member` currently has advertised: the group
+    /// VPN table minus the member's own-sourced entries. O(1).
+    pub(in crate::manager) fn vpn_advertised_count_for(&self, member: IpAddr) -> usize {
+        let own = self
+            .source_counts
+            .get(&member)
+            .map_or(0, |counts| counts[2] + counts[3]);
+        self.table.vpn_len().saturating_sub(own)
     }
 
-    /// Snapshot of `member`'s advertised view (table minus own-sourced)
-    /// — the baseline for a regroup's one-shot diff.
+    /// Per-family synthesized advertised counts for a member (BMP RFC
+    /// 8671 stat type 17 input). Zero-count families omitted.
+    pub(in crate::manager) fn family_counts_for(&self, member: IpAddr) -> Vec<((Afi, Safi), u64)> {
+        const FAMILIES: [(Afi, Safi); 4] = [
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+        ];
+        let mut totals = [0usize; 4];
+        for counts in self.source_counts.values() {
+            for (total, n) in totals.iter_mut().zip(counts) {
+                *total += n;
+            }
+        }
+        let own = self.source_counts.get(&member).copied().unwrap_or_default();
+        FAMILIES
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &family)| {
+                let count = totals[slot].saturating_sub(own[slot]) as u64;
+                (count > 0).then_some((family, count))
+            })
+            .collect()
+    }
+
+    /// Snapshot of `member`'s advertised unicast view (table minus
+    /// own-sourced) — the baseline for a regroup's one-shot diff.
     fn member_view_snapshot(&self, member: IpAddr) -> FxHashMap<(Prefix, u32), Route> {
         self.table
             .iter()
             .filter(|route| route.peer != member)
             .map(|route| ((route.prefix, route.path_id), route.clone()))
+            .collect()
+    }
+
+    /// VPN sibling of [`Self::member_view_snapshot`]. Empty when the
+    /// group does not stage VPN (the substrate's VPN maps stay unused).
+    fn member_vpn_view_snapshot(&self, member: IpAddr) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
+        self.table
+            .iter_vpn()
+            .filter(|route| route.peer != member)
+            .map(|route| (route.nlri.key(), route.clone()))
             .collect()
     }
 
@@ -589,8 +757,35 @@ impl RibManager {
             group.dirty_members.remove(&peer);
             if group.dirty_members.is_empty() {
                 group.tombstones.clear();
+                group.vpn_tombstones.clear();
             }
         }
+    }
+
+    /// Whether `peer` is a grouped member whose VPN advertised state is
+    /// group-owned (member of a group that stages VPN). RTC-negotiated
+    /// groups return `None`: their members' VPN families ride the
+    /// per-peer path (slice-1 gate — the RT dimension is slice 2).
+    pub(in crate::manager) fn vpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
+        let gid = self.grouped_member_of(peer)?;
+        self.group_ribs
+            .get(&gid)
+            .is_some_and(GroupRibOut::stages_vpn)
+            .then_some(gid)
+    }
+
+    /// Whether `peer`'s VPN advertised state is group-owned *whenever
+    /// the peer is grouped*: VPN sendable and RT-Constrain not
+    /// negotiated. Pure function of the session's (fixed) sendable set,
+    /// so it answers membership-transition seams before the destination
+    /// group exists.
+    fn peer_vpn_groupable(&self, peer: IpAddr) -> bool {
+        self.peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| {
+                !families.contains(&(Afi::Ipv4, Safi::RtConstrain))
+                    && families.iter().any(|&(_, safi)| safi == Safi::MplsVpn)
+            })
     }
 
     /// Run the shared staging pass for every live group over the pass's
@@ -672,7 +867,7 @@ impl RibManager {
                 // Single-best stages at most one evaluation per prefix;
                 // its terminal-policy label tags the staged entry (or
                 // the denial residue) for join-time counter replay.
-                let label = out.evals.take_last().and_then(|(label, _)| label);
+                let label = out.evals.take_last().and_then(|(label, _, _)| label);
                 for (route, nh) in announce.drain(..).zip(nh_flags.drain(..)) {
                     out.deltas.push(GroupDelta {
                         prefix: *prefix,
@@ -705,6 +900,147 @@ impl RibManager {
         if !group.dirty_members.is_empty() {
             let withdrawn: Vec<(Prefix, u32)> = out.withdrawn_keys().collect();
             group.tombstones.extend(withdrawn);
+        }
+        out
+    }
+
+    /// Run the shared VPN staging pass for every VPN-staging group over
+    /// the pass's changed RD+prefix identities. Deltas are committed to
+    /// the group tables here; `recompute_and_distribute_vpn` emits them
+    /// per member via the VPN source-flip matrix. RTC-negotiated groups
+    /// are skipped by construction ([`GroupRibOut::stages_vpn`]).
+    pub(in crate::manager) fn stage_vpn_update_groups(
+        &mut self,
+        changed: &HashSet<VpnRouteKey>,
+    ) -> HashMap<usize, VpnGroupStageOutput> {
+        let mut staged = HashMap::new();
+        if changed.is_empty() || self.group_ribs.is_empty() {
+            return staged;
+        }
+        let gids: Vec<usize> = self
+            .group_ribs
+            .iter()
+            .filter(|(_, group)| group.stages_vpn())
+            .map(|(gid, _)| *gid)
+            .collect();
+        for gid in gids {
+            staged.insert(gid, self.stage_group_vpn_keys(gid, changed));
+        }
+        staged
+    }
+
+    /// One shared VPN export-tail pass for `gid` over `keys`, reusing
+    /// `stage_vpn_routes`'s single-best body with split horizon lifted
+    /// out (`ExportTarget::Group`) and the group table's VPN maps as the
+    /// diff baseline — the SAME body as the per-peer path, parameterized,
+    /// never copied (design risk 1). Deltas are committed before
+    /// returning; VPN tombstones extend when a member is already dirty.
+    fn stage_group_vpn_keys(
+        &mut self,
+        gid: usize,
+        keys: &HashSet<VpnRouteKey>,
+    ) -> VpnGroupStageOutput {
+        let mut out = VpnGroupStageOutput::default();
+        let mut denials: Vec<(VpnRouteKey, (IpAddr, Option<String>))> = Vec::new();
+        {
+            let Some(group) = self.group_ribs.get(&gid) else {
+                return out;
+            };
+            // `share()`, not `clone()` — ADR-0096 term hit counters, as
+            // in `stage_group_prefixes`.
+            let chain = group.export_chain.as_ref().map(PolicyChain::share);
+            let mut announce: Vec<VpnRibRoute> = Vec::new();
+            let mut withdraw: Vec<VpnRibRouteKey> = Vec::new();
+            // Reused single-key set: the staging body iterates a key set,
+            // but the delta needs per-key `old` capture and eval labels.
+            let mut key_set: HashSet<VpnRouteKey> = HashSet::with_capacity(1);
+            for key in keys {
+                key_set.clear();
+                key_set.insert(*key);
+                let mut target = super::distribution::ExportTarget::Group {
+                    evals: &mut out.evals,
+                };
+                Self::stage_vpn_routes(
+                    &self.loc_rib,
+                    &self.ribs,
+                    &group.table,
+                    &self.peer_is_rr_client,
+                    &key_set,
+                    &mut target,
+                    group.is_ebgp,
+                    group.is_rr_client,
+                    self.cluster_id,
+                    Some(&group.sendable),
+                    Some(&group.llgr),
+                    // RT gate deferred by structure: slice 1 never stages
+                    // VPN for RTC groups, slice 2 plugs Φ in at emit (the
+                    // delta carries `old` for exactly that).
+                    None,
+                    None, // ORR disqualifies from grouping
+                    0,    // Add-Path send disqualifies from grouping
+                    &[],
+                    chain.as_ref(),
+                    &mut announce,
+                    &mut withdraw,
+                    false,
+                );
+                // Single-best stages at most one eval per key: a Permit
+                // labels the staged entry; a Deny lands in the persistent
+                // denial residue (join-time counter replay).
+                let last = out.evals.take_last();
+                let label = match &last {
+                    Some((label, PolicyAction::Permit, _)) => label.clone(),
+                    _ => None,
+                };
+                if let Some((label, PolicyAction::Deny, source)) = last {
+                    denials.push((*key, (source, label)));
+                }
+                if announce.is_empty() && withdraw.is_empty() {
+                    continue;
+                }
+                // Prior staged entry, cloned before commit — one clone
+                // per delta, total (slice 2's Φ(old) input).
+                let old = group
+                    .table
+                    .get_vpn(&VpnRibRouteKey {
+                        nlri_key: *key,
+                        path_id: 0,
+                    })
+                    .cloned();
+                for route in announce.drain(..) {
+                    out.deltas.push(VpnGroupDelta {
+                        key: *key,
+                        new: Some(route),
+                        old: old.clone(),
+                        policy_label: label.clone(),
+                    });
+                }
+                for rib_key in withdraw.drain(..) {
+                    debug_assert_eq!(rib_key.path_id, 0, "group table stages path 0 only");
+                    out.deltas.push(VpnGroupDelta {
+                        key: *key,
+                        new: None,
+                        old: old.clone(),
+                        policy_label: None,
+                    });
+                }
+            }
+        }
+        let group = self
+            .group_ribs
+            .get_mut(&gid)
+            .expect("group staged above still exists");
+        for delta in &out.deltas {
+            group.apply_vpn_delta(delta);
+        }
+        // Denial-residue transition scope: this pass's keys replace their
+        // prior records (the `record_policy_filtered` shape).
+        group.vpn_policy_denied.retain(|key, _| !keys.contains(key));
+        group.vpn_policy_denied.extend(denials);
+        if !group.dirty_members.is_empty() {
+            group
+                .vpn_tombstones
+                .extend(out.deltas.iter().filter(|d| d.new.is_none()).map(|d| d.key));
         }
         out
     }
@@ -769,6 +1105,69 @@ impl RibManager {
             keys.extend(extra.iter().filter(|key| !member_retains(key)));
         }
         withdraw.extend(keys);
+    }
+
+    /// VPN portion of a grouped member's resync update — the VPN sibling
+    /// of [`Self::assemble_group_resync`], same three shapes (plain
+    /// dirty / regroup one-shot diff / force), assembled from the group
+    /// table's VPN maps with NO policy re-evaluation. Only called for
+    /// groups that stage VPN.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the resync assembly takes the member's full pending-withdraw context"
+    )]
+    pub(in crate::manager) fn assemble_group_vpn_resync(
+        group: &GroupRibOut,
+        member: IpAddr,
+        is_dirty: bool,
+        is_force: bool,
+        baseline: Option<&FxHashMap<VpnRouteKey, VpnRibRoute>>,
+        extras: Option<&HashSet<VpnRouteKey>>,
+        vpn_announce: &mut Vec<VpnRibRoute>,
+        vpn_withdraw: &mut Vec<VpnRibRouteKey>,
+    ) {
+        for route in group.table.iter_vpn() {
+            if route.peer == member {
+                continue;
+            }
+            if !is_force
+                && let Some(base) = baseline
+                && base
+                    .get(&route.nlri.key())
+                    .is_some_and(|old| vpn_routes_equal(old, route))
+            {
+                continue;
+            }
+            vpn_announce.push(route.clone());
+        }
+        let member_retains = |key: &VpnRouteKey| {
+            group
+                .table
+                .get_vpn(&VpnRibRouteKey {
+                    nlri_key: *key,
+                    path_id: 0,
+                })
+                .is_some_and(|route| route.peer != member)
+        };
+        let mut keys: HashSet<VpnRouteKey> = HashSet::new();
+        if let Some(base) = baseline {
+            keys.extend(base.keys().filter(|key| !member_retains(key)));
+        }
+        if is_dirty {
+            keys.extend(
+                group
+                    .vpn_tombstones
+                    .iter()
+                    .filter(|key| !member_retains(key)),
+            );
+        }
+        if let Some(extra) = extras {
+            keys.extend(extra.iter().filter(|key| !member_retains(key)));
+        }
+        vpn_withdraw.extend(keys.into_iter().map(|key| VpnRibRouteKey {
+            nlri_key: key,
+            path_id: 0,
+        }));
     }
 
     /// Bump a member's export-policy counters by the group verdict:
@@ -846,6 +1245,36 @@ impl RibManager {
             }
             for (key, label) in &group.policy_filtered {
                 if key.source_peer == peer || !in_family(&key.prefix) {
+                    continue;
+                }
+                bump(label, PolicyAction::Deny);
+            }
+            // VPN dimension (only staged for non-RTC groups): permits
+            // from the staged labels, denies from the denial residue —
+            // own-sourced excluded on both sides (the per-peer path's
+            // split horizon returns before the policy evaluation).
+            let in_vpn_family = |key: &VpnRouteKey| {
+                family.is_none_or(|f| {
+                    let afi = match key.prefix.family() {
+                        VpnAddressFamily::V4 => Afi::Ipv4,
+                        VpnAddressFamily::V6 => Afi::Ipv6,
+                    };
+                    (afi, Safi::MplsVpn) == f
+                })
+            };
+            for route in group.table.iter_vpn() {
+                if route.peer == peer || !in_vpn_family(&route.nlri.key()) {
+                    continue;
+                }
+                let label = group
+                    .vpn_staged_labels
+                    .get(&route.nlri.key())
+                    .cloned()
+                    .unwrap_or(None);
+                bump(&label, PolicyAction::Permit);
+            }
+            for (key, (source, label)) in &group.vpn_policy_denied {
+                if *source == peer || !in_vpn_family(key) {
                     continue;
                 }
                 bump(label, PolicyAction::Deny);
@@ -942,37 +1371,54 @@ impl RibManager {
             self.metrics.record_update_group_regroup();
         }
         if prev_gid != new_gid {
-            // Snapshot the member's currently-advertised unicast view
-            // before the move: the destination side diffs against it so
-            // only genuine changes reach the wire (design §4 one-shot
-            // diff). First registration has no view — the initial dump
-            // replays the destination group table.
-            let baseline: Option<FxHashMap<(Prefix, u32), Route>> = match prev_gid {
+            // Whether the peer's VPN advertised state is group-owned
+            // whenever it is grouped. Sendable families are fixed per
+            // session, so this answers for source AND destination.
+            let vpn_groupable = self.peer_vpn_groupable(peer);
+            // Snapshot the member's currently-advertised view before the
+            // move: the destination side diffs against it so only genuine
+            // changes reach the wire (design §4 one-shot diff). First
+            // registration has no view — the initial dump replays the
+            // destination group table.
+            let baseline: Option<RegroupBaseline> = match prev_gid {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
-                    let base = group.map(|g| g.member_view_snapshot(peer));
+                    let base = group.map(|g| RegroupBaseline {
+                        unicast: g.member_view_snapshot(peer),
+                        vpn: g.member_vpn_view_snapshot(peer),
+                    });
                     // A member that leaves while dirty may have missed
                     // withdrawals; carry the group tombstones along as
                     // extra (over-)withdraws for the destination resync.
                     if let Some(g) = group
                         && g.dirty_members.contains(&peer)
-                        && !g.tombstones.is_empty()
+                        && (!g.tombstones.is_empty() || !g.vpn_tombstones.is_empty())
                     {
-                        self.pending_extra_withdraws
-                            .entry(peer)
-                            .or_default()
-                            .extend(g.tombstones.iter().copied());
+                        let extras = self.pending_extra_withdraws.entry(peer).or_default();
+                        extras.unicast.extend(g.tombstones.iter().copied());
+                        extras.vpn.extend(g.vpn_tombstones.iter().copied());
                     }
                     base
                 }
                 None if previous.is_some() => Some(
                     self.adj_ribs_out
                         .get(&peer)
-                        .map(|rib_out| {
-                            rib_out
+                        .map(|rib_out| RegroupBaseline {
+                            unicast: rib_out
                                 .iter()
                                 .map(|route| ((route.prefix, route.path_id), route.clone()))
-                                .collect()
+                                .collect(),
+                            // VPN moves to group ownership only for a
+                            // VPN-groupable peer; an RTC peer's VPN state
+                            // stays per-peer and must not be captured.
+                            vpn: if vpn_groupable {
+                                rib_out
+                                    .iter_vpn()
+                                    .map(|route| (route.nlri.key(), route.clone()))
+                                    .collect()
+                            } else {
+                                FxHashMap::default()
+                            },
                         })
                         .unwrap_or_default(),
                 ),
@@ -981,11 +1427,15 @@ impl RibManager {
             if let Some(gid) = prev_gid {
                 self.leave_group(gid, peer);
             } else if previous.is_some() {
-                // Moving off the per-peer path: the unicast advertised
-                // state becomes group-owned (captured in the baseline);
-                // non-unicast families stay per-peer.
+                // Moving off the per-peer path: the unicast (and, for a
+                // VPN-groupable peer, VPN) advertised state becomes
+                // group-owned (captured in the baseline); other families
+                // stay per-peer.
                 if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
                     rib_out.clear_unicast();
+                    if vpn_groupable {
+                        rib_out.clear_vpn();
+                    }
                 }
             }
             if let Some(gid) = new_gid {
@@ -1004,8 +1454,11 @@ impl RibManager {
                         .adj_ribs_out
                         .entry(peer)
                         .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
-                    for route in base.into_values() {
+                    for route in base.unicast.into_values() {
                         rib_out.insert(route);
+                    }
+                    for route in base.vpn.into_values() {
+                        rib_out.insert_vpn(route);
                     }
                 }
                 (None, _) => {}
@@ -1039,10 +1492,21 @@ impl RibManager {
             self.group_ribs.insert(gid, group);
             let prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
             let mut memo = super::distribution::ExportMemo::default();
-            // Deltas of the build pass are discarded: there are no
+            // Deltas of the build passes are discarded: there are no
             // members yet, and the joining member replays the whole
             // table anyway.
             let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+            if self
+                .group_ribs
+                .get(&gid)
+                .is_some_and(GroupRibOut::stages_vpn)
+            {
+                let keys: HashSet<VpnRouteKey> =
+                    self.loc_rib.iter_vpn().map(|r| r.nlri.key()).collect();
+                if !keys.is_empty() {
+                    let _ = self.stage_group_vpn_keys(gid, &keys);
+                }
+            }
         }
         if let Some(group) = self.group_ribs.get_mut(&gid) {
             group.members.insert(peer);
@@ -1057,6 +1521,7 @@ impl RibManager {
         group.dirty_members.remove(&peer);
         if group.dirty_members.is_empty() {
             group.tombstones.clear();
+            group.vpn_tombstones.clear();
         }
         if group.members.is_empty() {
             self.group_ribs.remove(&gid);
@@ -1136,6 +1601,9 @@ impl RibManager {
             target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
             sendable_ipv4_unicast: contains((Afi::Ipv4, Safi::Unicast)),
             sendable_ipv6_unicast: contains((Afi::Ipv6, Safi::Unicast)),
+            sendable_vpnv4: contains((Afi::Ipv4, Safi::MplsVpn)),
+            sendable_vpnv6: contains((Afi::Ipv6, Safi::MplsVpn)),
+            rtc_negotiated: contains((Afi::Ipv4, Safi::RtConstrain)),
             llgr_families,
         };
         GroupMembership::Grouped(self.update_groups.group_for(key))
@@ -1188,7 +1656,9 @@ impl RibManager {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use rustbgpd_wire::Ipv4Prefix;
+    use rustbgpd_wire::{
+        Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix,
+    };
 
     use super::*;
     use crate::test_support::make_route;
@@ -1431,6 +1901,232 @@ mod tests {
             HashSet::from([(k7, 0)]),
             "a key still retained (k1 via OTHER1) must not be withdrawn"
         );
+    }
+
+    fn vpn_key(n: u8) -> VpnRouteKey {
+        VpnRouteKey {
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, n]),
+            prefix: VpnPrefix::v4(Ipv4Addr::new(10, 210, n, 0), 24).unwrap(),
+        }
+    }
+
+    fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
+        let key = vpn_key(n);
+        VpnRibRoute {
+            nlri: VpnNlri {
+                labels: vec![MplsLabelEntry::try_new(100, 0, true).unwrap()],
+                route_distinguisher: key.route_distinguisher,
+                prefix: key.prefix,
+            },
+            next_hop: src,
+            peer: src,
+            attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: std::time::Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }
+    }
+
+    fn vpn_announce_delta(n: u8, src: IpAddr, old: Option<IpAddr>) -> VpnGroupDelta {
+        VpnGroupDelta {
+            key: vpn_key(n),
+            new: Some(vpn_route(n, src)),
+            old: old.map(|peer| vpn_route(n, peer)),
+            policy_label: None,
+        }
+    }
+
+    fn vpn_withdraw_delta(n: u8, old: Option<IpAddr>) -> VpnGroupDelta {
+        VpnGroupDelta {
+            key: vpn_key(n),
+            new: None,
+            old: old.map(|peer| vpn_route(n, peer)),
+            policy_label: None,
+        }
+    }
+
+    /// Risk-2 exhaustive VPN source-flip matrix: every combination of
+    /// `{old source} × {new source | withdraw}` for a fixed member,
+    /// asserted against the per-peer-path reference semantics (design
+    /// §2.2, `pass ≡ true`): announce ⇔ GETS; withdraw ⇔ HAD ∧ ¬GETS.
+    #[test]
+    fn vpn_source_flip_matrix_exhaustive() {
+        let old_sources = [None, Some(MEMBER), Some(OTHER1), Some(OTHER2)];
+        let new_sources = [None, Some(MEMBER), Some(OTHER1), Some(OTHER2)];
+        for old in old_sources {
+            for new in new_sources {
+                if new.is_none() && old.is_none() {
+                    // A withdraw delta always has an old entry.
+                    continue;
+                }
+                let delta = match new {
+                    Some(src) => vpn_announce_delta(1, src, old),
+                    None => vpn_withdraw_delta(1, old),
+                };
+                let mut announce = Vec::new();
+                let mut withdraw = Vec::new();
+                emit_vpn_group_deltas_for_member(
+                    std::slice::from_ref(&delta),
+                    MEMBER,
+                    &mut announce,
+                    &mut withdraw,
+                );
+
+                let member_had = old.is_some_and(|s| s != MEMBER);
+                let member_gets = new.is_some_and(|s| s != MEMBER);
+                assert_eq!(
+                    announce.len(),
+                    usize::from(member_gets),
+                    "announce mismatch for old={old:?} new={new:?}"
+                );
+                assert_eq!(
+                    withdraw.len(),
+                    usize::from(member_had && !member_gets),
+                    "withdraw mismatch for old={old:?} new={new:?}"
+                );
+                if member_gets {
+                    assert_eq!(announce[0].peer, new.unwrap());
+                }
+                if member_had && !member_gets {
+                    assert_eq!(withdraw[0].nlri_key, vpn_key(1));
+                    assert_eq!(withdraw[0].path_id, 0);
+                }
+            }
+        }
+    }
+
+    /// VPN dirty-member resync: full-VPN-table announce minus
+    /// own-sourced; VPN tombstones withdraw unless the member still
+    /// retains the key via another source; own-sourced tombstones are a
+    /// safe over-withdraw. Force bypasses only the equality suppression.
+    #[test]
+    fn vpn_dirty_resync_replays_table_and_tombstones() {
+        let mut group = empty_group();
+        group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+        group.apply_vpn_delta(&vpn_announce_delta(2, MEMBER, None));
+        group.vpn_tombstones.insert(vpn_key(1)); // retained via OTHER1 — no withdraw
+        group.vpn_tombstones.insert(vpn_key(3)); // gone — withdraw
+        group.vpn_tombstones.insert(vpn_key(2)); // member-sourced — safe over-withdraw
+
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        RibManager::assemble_group_vpn_resync(
+            &group,
+            MEMBER,
+            true,
+            false,
+            None,
+            None,
+            &mut announce,
+            &mut withdraw,
+        );
+        let announced: HashSet<VpnRouteKey> = announce.iter().map(|r| r.nlri.key()).collect();
+        assert_eq!(
+            announced,
+            HashSet::from([vpn_key(1)]),
+            "own-sourced entries excluded"
+        );
+        let withdrawn: HashSet<VpnRouteKey> = withdraw.iter().map(|k| k.nlri_key).collect();
+        assert_eq!(withdrawn, HashSet::from([vpn_key(2), vpn_key(3)]));
+
+        // Regroup one-shot diff: unchanged baseline entry suppressed,
+        // baseline key no longer retained withdrawn.
+        let mut baseline: FxHashMap<VpnRouteKey, VpnRibRoute> = FxHashMap::default();
+        baseline.insert(vpn_key(1), vpn_route(1, OTHER1)); // unchanged — suppressed
+        baseline.insert(vpn_key(5), vpn_route(5, OTHER1)); // gone — withdraw
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        RibManager::assemble_group_vpn_resync(
+            &group,
+            MEMBER,
+            true,
+            false,
+            Some(&baseline),
+            None,
+            &mut announce,
+            &mut withdraw,
+        );
+        assert!(announce.is_empty(), "baseline-equal entries suppressed");
+        let withdrawn: HashSet<VpnRouteKey> = withdraw.iter().map(|k| k.nlri_key).collect();
+        assert!(withdrawn.contains(&vpn_key(5)));
+
+        // Force re-announces every retained entry.
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        RibManager::assemble_group_vpn_resync(
+            &group,
+            MEMBER,
+            false,
+            true,
+            Some(&baseline),
+            None,
+            &mut announce,
+            &mut withdraw,
+        );
+        let announced: HashSet<VpnRouteKey> = announce.iter().map(|r| r.nlri.key()).collect();
+        assert_eq!(announced, HashSet::from([vpn_key(1)]));
+    }
+
+    /// VPN count synthesis tracks `apply_vpn_delta` (announce, source
+    /// flip, withdraw), and `family_counts_for` buckets VPN by family.
+    #[test]
+    fn vpn_counts_and_family_synthesis_track_deltas() {
+        let mut group = GroupRibOut::new(
+            None,
+            false,
+            true,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+            vec![],
+            0,
+        );
+        assert!(group.stages_vpn());
+        group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
+        group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+        group.apply_vpn_delta(&vpn_announce_delta(2, MEMBER, None));
+        assert_eq!(group.vpn_advertised_count_for(MEMBER), 1);
+        assert_eq!(group.vpn_advertised_count_for(OTHER1), 1);
+        assert_eq!(group.vpn_advertised_count_for(OTHER2), 2);
+        // Unicast count synthesis is untouched by the VPN entries.
+        assert_eq!(group.advertised_count_for(MEMBER), 1);
+        assert_eq!(
+            group.family_counts_for(MEMBER),
+            vec![
+                ((Afi::Ipv4, Safi::Unicast), 1),
+                ((Afi::Ipv4, Safi::MplsVpn), 1)
+            ]
+        );
+        let view = group.member_vpn_view_snapshot(MEMBER);
+        assert_eq!(view.len(), 1);
+        assert!(view.contains_key(&vpn_key(1)));
+
+        // Source flip key 1 OTHER1 → MEMBER keeps counts exact.
+        group.apply_vpn_delta(&vpn_announce_delta(1, MEMBER, Some(OTHER1)));
+        assert_eq!(group.vpn_advertised_count_for(MEMBER), 0);
+        assert_eq!(group.vpn_advertised_count_for(OTHER1), 2);
+
+        // Withdraw drops the entry and its label residue.
+        group.apply_vpn_delta(&vpn_withdraw_delta(1, Some(MEMBER)));
+        assert_eq!(group.vpn_advertised_count_for(OTHER1), 1);
+        assert_eq!(group.table.vpn_len(), 1);
+        assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
+
+        // An RTC-negotiated sendable set never stages VPN (slice-1 gate).
+        let rtc_group = GroupRibOut::new(
+            None,
+            false,
+            true,
+            vec![
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv4, Safi::RtConstrain),
+            ],
+            vec![],
+            0,
+        );
+        assert!(!rtc_group.stages_vpn());
     }
 
     /// The join replay dimension: a joining member's view is the table
