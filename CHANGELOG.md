@@ -118,6 +118,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "\\{"`, reject-ASPA-invalid) with in-language tests runnable via
   `rbgp policy check`.
 
+- **M83 interop receipt: RFC 7947 route-server profile, multi-stack
+  (BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 + StayRTR) — the ADR-0101
+  proof-ladder closer.** rustbgpd is the route server (AS 65500) for
+  three member stacks with `route_server_client` + `role =
+  "route_server"` per member and the examples/route-server hygiene/ROV
+  import chain (`.rpol` + TOML mixed, RTR-fed). 46 assertions in a new
+  `interop` CI job: RFC 7947 §2.2 transparency on all three client
+  views AND at byte level (tshark on the RS↔BIRD link — no 65500 in
+  any AS_PATH segment, NEXT_HOP = originator, MED + standard/large
+  communities verbatim on the wire); RFC 9234 OTC toward members (wire
+  attribute 35); per-member export views (`rbgp rib advertised`
+  agreeing per member); ROV reject-at-import with `rbgp policy
+  explain` naming the deciding term; the RFC 7947 §2.3 path-hiding
+  contrast — the member whose export chain denies the Loc-RIB best
+  gets NOTHING in single-best mode, gets the runner-up after a live
+  `per_client_best` flip (SIGHUP + session bounce) with the explain
+  ladder naming "candidate 1 of 2 denied", and the Add-Path member
+  holds both candidate paths; runner-up withdraw convergence;
+  EoR-after-flood ordering; withdraw propagation; session stability
+  through a policy SIGHUP. First-AS relaxation per stack recorded in
+  the script header (FRR: per-neighbor `no enforce-first-as`; BIRD:
+  `enforce first as off`; GoBGP: no enforcement exists).
+
+- **Fixed: `per_client_best` never reached live sessions.** The knob
+  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
+  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
+  `PeerManager::build_transport_config` never copied it into the
+  transport session config, so every configured peer silently
+  registered single-best and `rbgp neighbor` reported `Distribution
+  Mode: single-best` regardless of config. Caught live by the M83 lab
+  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
+  seam); fixed with a one-line copy plus a
+  `build_transport_config_preserves_per_client_best` unit pin.
+
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,

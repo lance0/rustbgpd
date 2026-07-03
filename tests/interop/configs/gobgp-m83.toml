@@ -1,0 +1,28 @@
+# M83 — GoBGP as an IXP member (AS 65002) of the rustbgpd route
+# server, with Add-Path receive negotiated (the preferred RFC 7948
+# path-hiding mitigation): this member must see BOTH candidate paths
+# for the Add-Path pair prefix.
+#
+# First-AS: GoBGP 3.x has no first-AS enforcement — nothing to
+# disable (documented in the topology header).
+# Routes are injected at test time via `gobgp global rib add` (MED,
+# standard + large communities on the transparency probe).
+
+[global.config]
+as = 65002
+router-id = "10.83.2.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.83.2.1"
+peer-as = 65500
+description = "rustbgpd-rs"
+
+[neighbors.timers.config]
+hold-time = 90
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+[neighbors.afi-safis.add-paths.config]
+receive = true

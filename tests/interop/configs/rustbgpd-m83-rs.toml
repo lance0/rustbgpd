@@ -1,0 +1,138 @@
+# M83 — rustbgpd as an IXP route server (RFC 7947), three member stacks.
+# Mirrors the examples/route-server profile shape: transparent
+# route_server_client members, role = route_server (RFC 9234 OTC on
+# egress), ROV reject-at-import + rpol hygiene in the import chain.
+#
+# STAYRTR_ADDR is patched to the StayRTR management IP at test time;
+# the driver seds this file into /tmp/config.toml and runs the daemon
+# against the copy (the M21 pattern) so the per_client_best flip can
+# edit + SIGHUP it live.
+
+[global]
+asn = 65500
+router_id = "10.83.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[security.grpc]
+enforcement = "legacy"
+
+# RPKI cache — StayRTR on the containerlab management network.
+[rpki]
+[[rpki.cache_servers]]
+address = "STAYRTR_ADDR:3323"
+refresh_interval = 30
+retry_interval = 5
+expire_interval = 120
+
+# --- Named policy definitions (the examples/route-server shape) ---
+
+[policy.definitions.reject-rpki-invalid]
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
+[policy.definitions.reject-bogon-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "0.0.0.0/0"
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "10.0.0.0/8"
+le = 32
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "172.16.0.0/12"
+le = 32
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "192.168.0.0/16"
+le = 32
+action = "deny"
+
+[policy.definitions.reject-long-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+
+[policy.definitions.prefer-rpki-valid]
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "valid"
+action = "permit"
+set_local_pref = 200
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "not_found"
+action = "permit"
+set_local_pref = 100
+
+# Member-scoped export view for the FRR member: deny one member
+# prefix outright (the per-client policy-view assertion) and deny
+# anything BIRD tagged 65001:666 (the RFC 7947 §2.3 path-hiding
+# scenario — the Loc-RIB best for the overlap prefix).
+[policy.definitions.deny-to-frr]
+default_action = "permit"
+[[policy.definitions.deny-to-frr.statements]]
+prefix = "100.69.0.0/24"
+action = "deny"
+[[policy.definitions.deny-to-frr.statements]]
+match_community = ["65001:666"]
+action = "deny"
+
+[policy]
+# ixp-hygiene (reject AS_SET, reject ASPA-invalid) lives in
+# m83-hygiene.rpol; rpol and TOML policies share one namespace.
+rpol_files = ["m83-hygiene.rpol"]
+import_chain = [
+    "reject-rpki-invalid",
+    "ixp-hygiene",
+    "reject-bogon-prefixes",
+    "reject-long-prefixes",
+    "prefer-rpki-valid",
+]
+
+# --- IXP members ---
+
+# BIRD 2: plain transparent client, tshark capture rides this link.
+[[neighbors]]
+address = "10.83.1.2"
+remote_asn = 65001
+description = "member-bird"
+hold_time = 90
+route_server_client = true
+role = "route_server"
+
+# GoBGP: Add-Path member (the preferred RFC 7948 mitigation).
+[[neighbors]]
+address = "10.83.2.2"
+remote_asn = 65002
+description = "member-gobgp"
+hold_time = 90
+route_server_client = true
+role = "route_server"
+
+[neighbors.add_path]
+send = true
+send_max = 8
+
+# FRR: single-best member with a member-scoped export view. The
+# driver flips per_client_best to true mid-test (sed + SIGHUP +
+# session bounce — the knob is live-effective-next-session, see
+# docs/reload-matrix.md) to pin the ADR-0101 path-hiding contrast.
+[[neighbors]]
+address = "10.83.3.2"
+remote_asn = 65003
+description = "member-frr"
+hold_time = 90
+route_server_client = true
+per_client_best = false
+role = "route_server"
+export_policy_chain = ["deny-to-frr"]

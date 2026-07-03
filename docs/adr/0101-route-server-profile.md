@@ -2,7 +2,14 @@
 
 **Status:** Accepted — per-client best-path shipped in #696; explain arm,
 profile polish, and this record in the follow-up slice. The M83
-multi-stack interop receipt is the remaining slice.
+multi-stack interop receipt (BIRD 2 + GoBGP + FRR + RTR, 46 assertions,
+hosted CI) closed the proof ladder: transparency byte-pinned via tshark,
+and the §2.3 contrast observed live on real stacks — the single-best
+member gets nothing, the same member gets the runner-up after a
+`per_client_best` flip, the Add-Path member gets both. M83 also caught
+the knob dropped at the `PeerManager::build_transport_config` seam
+(every configured peer silently single-best despite #696's RIB/CLI
+layers testing green) — fixed in the M83 change with a unit pin.
 **Date:** 2026-07-03
 
 ## Context
