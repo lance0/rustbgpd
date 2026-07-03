@@ -671,3 +671,167 @@ fn reasonable_nesting_stays_clean() {
     let report = check_on_small_stack(src);
     assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
 }
+
+// ── RFC 8097 origin-validation-state well-known names (OV_*) ──────
+
+#[test]
+fn ov_names_match_add_remove_and_evaluate() {
+    use rustbgpd_wire::ExtendedCommunity;
+
+    let chain = compile_ok(
+        r"policy ov {
+             term drop-invalid { if route.ext-communities has OV_INVALID { reject } }
+             term tag {
+                 add ext-community OV_VALID;
+                 remove ext-community OV_NOT_FOUND;
+                 accept
+             }
+         }",
+    );
+    let TermAction::Permit(mods) = &chain.policies[0].terms[1].action else {
+        panic!("expected permit")
+    };
+    assert_eq!(
+        mods.extended_communities_add,
+        vec![ExtendedCommunity::ORIGIN_VALIDATION_VALID]
+    );
+    assert_eq!(
+        mods.extended_communities_remove,
+        vec![ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND]
+    );
+
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let invalid_ecs = [ExtendedCommunity::ORIGIN_VALIDATION_INVALID];
+    assert_eq!(
+        chain
+            .evaluate(&RouteContext {
+                extended_communities: &invalid_ecs,
+                ..base
+            })
+            .action,
+        PolicyAction::Deny
+    );
+    // Exact raw-value match: a different OV state does not trip it.
+    let valid_ecs = [ExtendedCommunity::ORIGIN_VALIDATION_VALID];
+    assert_eq!(
+        chain
+            .evaluate(&RouteContext {
+                extended_communities: &valid_ecs,
+                ..base
+            })
+            .action,
+        PolicyAction::Permit
+    );
+}
+
+#[test]
+fn ov_names_in_test_fixtures_and_with_assertions() {
+    // End-to-end tag-on-import + match through the in-language runner:
+    // one policy tags, a second matches what the first added.
+    let source = r"
+policy tag-ov { term tag { add ext-community OV_INVALID; accept } }
+policy drop-ov-invalid {
+    term drop { if route.ext-communities has OV_INVALID { reject } }
+    term rest { accept }
+}
+
+test tagging-asserts-the-added-ov-state {
+    route { prefix 10.0.0.0/24 }
+    expect tag-ov == accept with ext-community OV_INVALID
+}
+
+test tagged-route-is-dropped-on-rematch {
+    route { prefix 10.0.0.0/24; ext-communities [OV_INVALID] }
+    expect drop-ov-invalid == reject
+}
+
+test untagged-route-passes {
+    route { prefix 10.0.0.0/24; ext-communities [OV_VALID, RT:65001:100] }
+    expect drop-ov-invalid == accept
+}
+";
+    let report = run_rpol_tests(source).expect("compiles");
+    assert!(report.all_passed(), "{:?}", report.failures);
+}
+
+// ── strict next-hop (`route.next-hop == peer.address`) ────────────
+
+#[test]
+fn strict_next_hop_lowers_and_evaluates_both_ways() {
+    let chain = compile_ok(
+        "policy strict-nh {
+             term ok { if route.next-hop == peer.address { accept } }
+             term rest { reject }
+         }",
+    );
+    assert_eq!(chain.policies[0].terms[0].guard, MatchExpr::NextHopEqPeer);
+    assert!(
+        chain.requires_peer_context(),
+        "strict next-hop reads peer identity — must disqualify grouping"
+    );
+
+    let peer = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let matching = RouteContext {
+        next_hop: Some(peer),
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&matching).action, PolicyAction::Permit);
+    let mismatched = RouteContext {
+        next_hop: Some(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&mismatched).action, PolicyAction::Deny);
+    // Unknown next-hop never matches (both sides must be known).
+    let unknown = RouteContext {
+        next_hop: None,
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&unknown).action, PolicyAction::Deny);
+}
+
+#[test]
+fn strict_next_hop_negated_form() {
+    let chain = compile_ok(
+        "policy not-self {
+             term reroute { if route.next-hop != peer.address { reject } }
+             term rest { accept }
+         }",
+    );
+    let peer = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let matching = RouteContext {
+        next_hop: Some(peer),
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&matching).action, PolicyAction::Permit);
+    let mismatched = RouteContext {
+        next_hop: Some(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&mismatched).action, PolicyAction::Deny);
+}
+
+#[test]
+fn strict_next_hop_rejects_other_field_comparisons() {
+    // The one legal field-vs-field pair is next-hop vs peer.address.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.next-hop == peer.asn { accept } } }");
+    assert!(
+        rendered.contains("only `peer.address` is allowed here"),
+        "{rendered}"
+    );
+    // Field references are not valid operands for other fields.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.local-pref == peer.address { accept } } }");
+    assert!(rendered.contains("field reference"), "{rendered}");
+    // And peer.address still only compares against an IP literal.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if peer.address == route.next-hop { accept } } }");
+    assert!(rendered.contains("field reference"), "{rendered}");
+}

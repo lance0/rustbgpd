@@ -321,6 +321,12 @@ pub enum CommunityMatch {
         /// Second local data part.
         local_data2: u32,
     },
+    /// Match an extended community by its exact raw 8-byte value.
+    /// Used by well-known non-RT/RO extended communities such as the
+    /// RFC 8097 origin-validation states (`OV_VALID` / `OV_NOT_FOUND` /
+    /// `OV_INVALID`); unlike RT/RO matching there is no
+    /// encoding-agnostic decode — the wire value *is* the identity.
+    ExactExt(u64),
 }
 
 impl CommunityMatch {
@@ -334,6 +340,7 @@ impl CommunityMatch {
             CommunityMatch::RouteOrigin { global, local } => {
                 ec.route_origin() == Some((*global, *local))
             }
+            CommunityMatch::ExactExt(raw) => ec.as_u64() == *raw,
             CommunityMatch::Standard { .. } | CommunityMatch::LargeCommunity { .. } => false,
         }
     }
@@ -367,7 +374,9 @@ impl CommunityMatch {
     #[inline]
     pub(crate) fn matches_route_communities(&self, ctx: &RouteContext<'_>) -> bool {
         match self {
-            CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => ctx
+            CommunityMatch::RouteTarget { .. }
+            | CommunityMatch::RouteOrigin { .. }
+            | CommunityMatch::ExactExt(_) => ctx
                 .extended_communities
                 .iter()
                 .any(|ec| self.matches_ec(ec)),
@@ -389,6 +398,9 @@ impl CommunityMatch {
 /// - Well-known names: `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`,
 ///   `"BLACKHOLE"` (RFC 7999 §5, `0xFFFF_029A`), `"GRACEFUL_SHUTDOWN"`
 ///   (RFC 8326 §3, `0xFFFF_0000`)
+/// - Well-known extended-community names: `"OV_VALID"`, `"OV_NOT_FOUND"`,
+///   `"OV_INVALID"` (RFC 8097 origin-validation state, type `0x43`
+///   sub-type `0x00`)
 ///
 /// # Errors
 ///
@@ -396,6 +408,9 @@ impl CommunityMatch {
 pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
     if let Some(value) = well_known_community_value(s) {
         return Ok(CommunityMatch::Standard { value });
+    }
+    if let Some(ec) = well_known_ext_community_value(s) {
+        return Ok(CommunityMatch::ExactExt(ec.as_u64()));
     }
 
     // Check for LC: prefix first (4 parts with LC: prefix)
@@ -496,6 +511,19 @@ fn well_known_community_value(s: &str) -> Option<u32> {
         "NO_EXPORT_SUBCONFED" => Some(rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED),
         "BLACKHOLE" => Some(rustbgpd_wire::COMMUNITY_BLACKHOLE),
         "GRACEFUL_SHUTDOWN" => Some(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN),
+        _ => None,
+    }
+}
+
+/// Resolve well-known extended-community aliases (RFC 8097
+/// origin-validation states). Same alias surface as the standard
+/// well-knowns: usable in match and set positions in both the TOML and
+/// `.rpol` frontends.
+fn well_known_ext_community_value(s: &str) -> Option<ExtendedCommunity> {
+    match s {
+        "OV_VALID" => Some(ExtendedCommunity::ORIGIN_VALIDATION_VALID),
+        "OV_NOT_FOUND" => Some(ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND),
+        "OV_INVALID" => Some(ExtendedCommunity::ORIGIN_VALIDATION_INVALID),
         _ => None,
     }
 }

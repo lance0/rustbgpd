@@ -92,7 +92,11 @@ report.
   - Extended community (Route Target / Route Origin):
     `RT:65001:100`, `RO:65001:100`, `RT:192.0.2.1:5` (IPv4 admin),
     `RT:200000:100` (4-octet-AS admin). IPv4 and 4-octet-AS admins
-    take a u16 local part (RFC 4360 encodings).
+    take a u16 local part (RFC 4360 encodings). Well-known names:
+    `OV_VALID`, `OV_NOT_FOUND`, `OV_INVALID` — the RFC 8097
+    origin-validation states (non-transitive opaque, type `0x43`
+    sub-type `0x00`, state in the last octet), matched and
+    added/removed by exact wire value.
   - Strings (AS-path regexes, peer-group names): `"..."` with `\"`
     and `\\` escapes.
 - **Statement separators**: `;` between statements is conventional
@@ -213,6 +217,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.as-path matches "^65010"` | Cisco/Quagga-style regex; `_` is a boundary anchor |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
+| `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
 | `route.rpki == invalid` | RPKI origin validation state |
 | `route.aspa == unknown` | ASPA verification state |
 | `route.route-type == external` | route source class |
@@ -259,7 +264,7 @@ Two consequences worth internalizing:
 | `set next-hop <ip>` / `set next-hop self` | override `NEXT_HOP` |
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
-| `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO) |
+| `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (count: literal 1–255) |
 
 The kind keyword must match the literal's kind (`add community

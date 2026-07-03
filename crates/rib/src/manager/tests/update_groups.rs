@@ -468,3 +468,75 @@ async fn content_identical_policy_replace_is_key_stable() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Strict next-hop (`route.next-hop == peer.address`, rpol) reads peer
+/// identity, so an EXPORT chain carrying it must disqualify the peer
+/// from update-group membership (`policy_peer_context`). The other
+/// direction of the matrix — the same policy on an IMPORT chain — is
+/// grouping-irrelevant by construction: import chains are applied at
+/// session ingress and never enter the fingerprint (`PeerUp` carries
+/// only `export_policy`), so a peer whose import policy uses strict
+/// next-hop still groups normally.
+#[tokio::test]
+async fn strict_next_hop_export_chain_disqualifies_grouping() {
+    use std::sync::Arc;
+
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    fn rpol_chain(source: &str, name: &str) -> PolicyChain {
+        let mut store = SetStore::new();
+        let compiled = RpolFile::parse(source)
+            .expect("clean rpol")
+            .compile_policy(name, &[], &mut store)
+            .expect("policy exists");
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            name.to_string(),
+            Arc::new(compiled),
+        )])
+    }
+
+    let strict_nh = "policy strict-nh {
+        term nh { if route.next-hop == peer.address { reject } }
+        term rest { accept }
+    }";
+    let plain = "policy plain {
+        term nh { if route.next-hop == 192.0.2.99 { reject } }
+        term rest { accept }
+    }";
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let strict_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
+    let plain_a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+    let plain_b = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3));
+
+    let mut spec = PeerUpSpec::ibgp(strict_peer);
+    spec.export_policy = Some(rpol_chain(strict_nh, "strict-nh"));
+    let _rx1 = peer_up(&tx, spec).await;
+
+    // Content-equal non-strict chains group together.
+    for peer in [plain_a, plain_b] {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(rpol_chain(plain, "plain"));
+        let _rx = peer_up(&tx, spec).await;
+    }
+
+    assert_eq!(
+        query_update_group(&tx, strict_peer).await,
+        "policy_peer_context"
+    );
+    let group_a = query_update_group(&tx, plain_a).await;
+    assert!(
+        group_a.starts_with("group:"),
+        "plain peer must group: {group_a}"
+    );
+    assert_eq!(query_update_group(&tx, plain_b).await, group_a);
+
+    drop(tx);
+    handle.await.unwrap();
+}

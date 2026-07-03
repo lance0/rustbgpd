@@ -150,11 +150,14 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
   peer-parameterized policy matchers — rejected (superseded by the v2
   filter); default-on mitigation — deferred pending soak history;
   RFC 8097 validation-state extended-community tagging on import —
-  deferred small slice (rpol can add ext-communities on match today;
-  the well-known encoding constants deserve their own slice; on the
-  arouteserver-target critical path). ARouteServer target — deferred
+  **delivered** (the deferred small slice landed: `OV_VALID` /
+  `OV_NOT_FOUND` / `OV_INVALID` well-known extended-community names in
+  TOML and `.rpol` match/add/remove positions, exact-wire-value
+  semantics, RFC 8097 encoding pinned by wire tests; the RS example's
+  `hygiene.rpol` tags RPKI outcomes on import). ARouteServer target — deferred
   per ROADMAP until a pilot is credible; noted: arouteserver supports
   only BIRD and OpenBGPD (7.5+) today, adding a target is a Jinja2
   contribution on their side, and after this arc rustbgpd covers the
-  generated-config essentials except RFC 8097 tagging and RTT-based
-  communities (no RTT source — likely permanent-reject).
+  generated-config essentials except RTT-based
+  communities (no RTT source — likely permanent-reject); the RFC 8097
+  tagging gap has since been closed (see above).

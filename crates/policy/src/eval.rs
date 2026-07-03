@@ -336,6 +336,12 @@ impl CompiledChain {
             }
             MatchExpr::Med(cmp) => cmp_value(*cmp, ctx.med.unwrap_or(IMPLICIT_MED)),
             MatchExpr::NextHopEq(next_hop) => ctx.next_hop == Some(*next_hop),
+            // Strict next-hop: both sides must be known; two unknowns
+            // are not a match.
+            MatchExpr::NextHopEqPeer => match (ctx.next_hop, ctx.peer_address) {
+                (Some(next_hop), Some(peer)) => next_hop == peer,
+                _ => false,
+            },
             MatchExpr::NeighborIn(set) => {
                 set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group)
             }

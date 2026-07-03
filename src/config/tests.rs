@@ -2607,6 +2607,37 @@ fn set_community_ro_4byte_asn_rejected() {
 }
 
 #[test]
+fn ov_well_known_ext_community_names_in_toml_policy() {
+    // RFC 8097 origin-validation states ride the well-known-name path
+    // in match and set positions.
+    let toml = community_toml(
+        r#"action = "permit"
+            match_community = ["OV_INVALID"]
+            set_community_add = ["OV_VALID"]
+            set_community_remove = ["OV_NOT_FOUND"]"#,
+    );
+    let cfg = parse(&toml).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    let chain = import.expect("import chain configured");
+    let stmt = &chain.policies[0].entries[0];
+    assert_eq!(
+        stmt.match_community,
+        vec![rustbgpd_policy::CommunityMatch::ExactExt(
+            rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID.as_u64()
+        )]
+    );
+    assert_eq!(
+        stmt.modifications.extended_communities_add,
+        vec![rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_VALID]
+    );
+    assert_eq!(
+        stmt.modifications.extended_communities_remove,
+        vec![rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND]
+    );
+}
+
+#[test]
 fn set_community_rt_2byte_asn_accepted() {
     let toml = community_toml(
         r#"action = "permit"

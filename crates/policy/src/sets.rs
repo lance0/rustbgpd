@@ -261,6 +261,7 @@ pub struct CommunitySet {
     route_targets: FxHashSet<(u32, u32)>,
     route_origins: FxHashSet<(u32, u32)>,
     large: FxHashSet<(u32, u32, u32)>,
+    exact_ext: FxHashSet<u64>,
 }
 
 impl CommunitySet {
@@ -295,6 +296,9 @@ impl CommunitySet {
                 } => {
                     set.large.insert((global_admin, local_data1, local_data2));
                 }
+                CommunityMatch::ExactExt(raw) => {
+                    set.exact_ext.insert(raw);
+                }
             }
         }
         set
@@ -309,13 +313,16 @@ impl CommunitySet {
         if !self.standard.is_empty() && ctx.communities.iter().any(|c| self.standard.contains(c)) {
             return true;
         }
-        if (!self.route_targets.is_empty() || !self.route_origins.is_empty())
+        if (!self.route_targets.is_empty()
+            || !self.route_origins.is_empty()
+            || !self.exact_ext.is_empty())
             && ctx.extended_communities.iter().any(|ec| {
                 ec.route_target()
                     .is_some_and(|key| self.route_targets.contains(&key))
                     || ec
                         .route_origin()
                         .is_some_and(|key| self.route_origins.contains(&key))
+                    || self.exact_ext.contains(&ec.as_u64())
             })
         {
             return true;
@@ -353,6 +360,11 @@ fn community_key(cm: CommunityMatch) -> CommunityKey {
             local_data1,
             local_data2,
         } => (3, global_admin, local_data1, local_data2),
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "deliberate split of the raw u64 into two key halves"
+        )]
+        CommunityMatch::ExactExt(raw) => (4, (raw >> 32) as u32, raw as u32, 0),
     }
 }
 

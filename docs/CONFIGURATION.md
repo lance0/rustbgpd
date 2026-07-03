@@ -1591,6 +1591,7 @@ accept these formats:
 | Well-known name | `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`, `"BLACKHOLE"`, `"GRACEFUL_SHUTDOWN"` | Standard community |
 | `RT:ASN:VALUE` | `"RT:65001:100"` | Extended community (route target) |
 | `RO:ASN:VALUE` | `"RO:65001:200"` | Extended community (route origin) |
+| Well-known name | `"OV_VALID"`, `"OV_NOT_FOUND"`, `"OV_INVALID"` | Extended community (RFC 8097 origin-validation state; matched/added/removed by exact wire value) |
 | `LC:G:L1:L2` | `"LC:65001:100:200"` | Large community (RFC 8092) |
 
 ### AS_PATH regex

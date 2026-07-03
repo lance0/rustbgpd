@@ -7,7 +7,7 @@ with OTC, RPKI origin validation, and both path-hiding mitigations.
 | File | Purpose |
 |---|---|
 | `config.toml` | Daemon config: two members, RPKI, policy chain |
-| `hygiene.rpol` | Import hygiene in the rpol policy language: reject AS_SET, reject ASPA-invalid — with in-language tests |
+| `hygiene.rpol` | Import hygiene in the rpol policy language: reject AS_SET, reject ASPA-invalid, tag RPKI outcomes as RFC 8097 `OV_*` extended communities — with in-language tests |
 
 ## Path-hiding (RFC 7947 §2.3), both mitigations
 

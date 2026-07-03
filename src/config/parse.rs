@@ -541,6 +541,9 @@ fn parse_community_values(strings: &[String]) -> Result<CommunityValues, ConfigE
             } => {
                 large.push(LargeCommunity::new(global_admin, local_data1, local_data2));
             }
+            // Well-known extended communities (RFC 8097 OV_* states):
+            // the exact raw wire value is the identity.
+            CommunityMatch::ExactExt(raw) => extended.push(ExtendedCommunity::new(raw)),
         }
     }
     Ok(CommunityValues {

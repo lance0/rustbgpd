@@ -294,18 +294,22 @@ impl Parser<'_> {
                 self.ext_community_lit(&text, span)?
             }
             Tok::Ident => {
-                // Well-known standard community names share the TOML
-                // frontend's alias table via `parse_community_match`.
+                // Well-known community names (standard and extended)
+                // share the TOML frontend's alias table via
+                // `parse_community_match`.
+                let well_known_shape = text.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                 match parse_community_match(&text) {
-                    Ok(CommunityMatch::Standard { value })
-                        if text.chars().all(|c| c.is_ascii_uppercase() || c == '_') =>
-                    {
+                    Ok(CommunityMatch::Standard { value }) if well_known_shape => {
                         self.bump();
                         CommunityLit::Standard(value)
                     }
+                    Ok(CommunityMatch::ExactExt(raw)) if well_known_shape => {
+                        self.bump();
+                        CommunityLit::ExtRaw(raw)
+                    }
                     _ => {
                         return Err(self.error_expected(
-                            "a community literal (`65000:100`, `65000:1:2`, `RT:65001:100`, or a well-known name like `NO_EXPORT`)",
+                            "a community literal (`65000:100`, `65000:1:2`, `RT:65001:100`, or a well-known name like `NO_EXPORT` or `OV_INVALID`)",
                         ));
                     }
                 }
@@ -821,6 +825,10 @@ impl Parser<'_> {
             Tok::StdCommunityLit | Tok::LargeCommunityLit | Tok::ExtCommunityLit => {
                 Ok(Rhs::Community(self.community_lit()?))
             }
+            // Field-vs-field comparison (`route.next-hop ==
+            // peer.address`); the typechecker restricts which pairs
+            // are legal.
+            Tok::RouteKw | Tok::PeerKw => Ok(Rhs::Field(self.field_path()?)),
             _ => Err(self.error_expected(
                 "a comparison operand (integer, identifier, IP, prefix, or string)",
             )),

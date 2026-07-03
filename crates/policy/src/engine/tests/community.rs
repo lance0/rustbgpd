@@ -384,3 +384,30 @@ fn community_match_route_origin() {
         PolicyAction::Deny
     );
 }
+
+// -----------------------------------------------------------------------
+// RFC 8097 origin-validation-state well-known names (OV_*)
+// -----------------------------------------------------------------------
+
+#[test]
+fn parse_community_match_ov_well_known_names() {
+    for (name, ec) in [
+        ("OV_VALID", ExtendedCommunity::ORIGIN_VALIDATION_VALID),
+        (
+            "OV_NOT_FOUND",
+            ExtendedCommunity::ORIGIN_VALIDATION_NOT_FOUND,
+        ),
+        ("OV_INVALID", ExtendedCommunity::ORIGIN_VALIDATION_INVALID),
+    ] {
+        let cm = parse_community_match(name).unwrap();
+        assert_eq!(cm, CommunityMatch::ExactExt(ec.as_u64()), "{name}");
+        // Exact raw-value semantics: matches its own state only.
+        assert!(cm.matches_ec(&ec));
+    }
+    let invalid = parse_community_match("OV_INVALID").unwrap();
+    assert!(!invalid.matches_ec(&ExtendedCommunity::ORIGIN_VALIDATION_VALID));
+    // An RT does not match an exact-ext criterion and vice versa.
+    assert!(!invalid.matches_ec(&make_rt(65001, 100)));
+    let rt = parse_community_match("RT:65001:100").unwrap();
+    assert!(!rt.matches_ec(&ExtendedCommunity::ORIGIN_VALIDATION_INVALID));
+}
