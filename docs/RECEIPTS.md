@@ -20,6 +20,20 @@ Numbering note: M0–M4 and M10 onward are interop labs. M5–M9 were
 development-phase build milestones (wire/RIB/API hardening) and are documented
 in [`milestones.md`](milestones.md), not here.
 
+## Receipts → deployment recipes
+
+Several receipt clusters back a copy-paste deployment recipe in
+[`cookbook/`](cookbook/README.md) — the receipt proves the behavior,
+the recipe is the config + runbook it enables:
+
+| Receipts | Recipe |
+|----------|--------|
+| M14, M76, M77, 1000-peer scale receipt | [iBGP route reflector at scale](cookbook/route-reflector.md) |
+| M74, M75, M77, VPN scale receipt | [L3VPN route reflector](cookbook/l3vpn-route-reflector.md) |
+| M24, M81 | [Controller / monitoring feed](cookbook/monitoring-feed.md) |
+| M29, M30, M31, M32, M33, M82 | [EVPN fabric route reflector](cookbook/evpn-fabric-rr.md) |
+| M34, M80 | [Policy quickstart (`.rpol`)](cookbook/policy-quickstart.md) |
+
 ## Interop labs — PR-gated (`interop.yml`)
 
 These run on every pull request via
