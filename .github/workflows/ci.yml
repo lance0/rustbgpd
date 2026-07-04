@@ -37,6 +37,12 @@ jobs:
       # bench_support surface; it has silently broken before when a
       # manager API grew an argument.
       - run: cargo check -p rustbgpd-rib --features bench-internals --benches
+      # Same class of gap for the root crate: `bench-internals` exposes
+      # `pub mod config` (and its EVPN reload-diff dependencies) in the
+      # lib, a surface the default `--all-targets` clippy never compiles.
+      # LAN-198: `config` referenced binary-only modules, so the lib
+      # failed to build under `--all-features` while the bin stayed green.
+      - run: cargo check -p rustbgpd --all-features --lib
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:

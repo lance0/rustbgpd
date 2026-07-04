@@ -776,6 +776,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The library target now builds under `--all-features` (LAN-198).**
+  The lib exposes `pub mod config` only under `bench-internals`, and
+  `config`'s reload-diff logic (`classify_evpn_runtime_change`) reaches
+  into the EVPN runtime subsystem — modules previously declared only in
+  `main.rs`. With `bench-internals` off (the default) the lib compiled
+  empty, so the gap was invisible; `cargo check -p rustbgpd
+  --all-features --lib` failed with `E0433: cannot find
+  evpn_plan_decomposer in crate` while the binary stayed green. The lib
+  now declares the transitive EVPN module closure (plan decomposer,
+  converger, ES-drain, originator, segment, dataplane, IMET, L3
+  originator, SVI) under the same feature gate, and CI gained a
+  `cargo check -p rustbgpd --all-features --lib` step so the
+  bench-internals lib surface can no longer regress unnoticed.
+
 - **BMP monitoring can no longer diverge silently from the wire under
   saturation.** Two per-peer holes closed in the PeerSession→BmpManager
   path: (1) BMP `PeerUp`/`PeerDown` were emitted with the same lossy

@@ -13,6 +13,36 @@ mod fib_common;
 #[cfg(feature = "bench-internals")]
 mod fib;
 
+// `config`'s reload-diff logic (`classify_evpn_runtime_change` inside
+// `diff_config`) reaches into the EVPN runtime subsystem — the plan
+// decomposer, which transitively pulls in the converger, ES-drain
+// modules, originator, L3 originator, segment, SVI, dataplane, and
+// IMET. The bin declares all of these in `main.rs`; the lib needs its
+// own declarations so that when `config` is exposed under this feature
+// the paths resolve. Without them, `cargo check -p rustbgpd
+// --all-features --lib` fails with E0433 on `crate::evpn_plan_decomposer`
+// (LAN-198).
+#[cfg(feature = "bench-internals")]
+mod evpn_dataplane;
+#[cfg(feature = "bench-internals")]
+mod evpn_es_drain;
+#[cfg(feature = "bench-internals")]
+mod evpn_es_link_drain;
+#[cfg(feature = "bench-internals")]
+mod evpn_imet;
+#[cfg(feature = "bench-internals")]
+mod evpn_l3_originator;
+#[cfg(feature = "bench-internals")]
+mod evpn_originator;
+#[cfg(feature = "bench-internals")]
+mod evpn_plan_decomposer;
+#[cfg(feature = "bench-internals")]
+mod evpn_runtime_converger;
+#[cfg(feature = "bench-internals")]
+mod evpn_segment;
+#[cfg(feature = "bench-internals")]
+mod evpn_svi;
+
 // `fib`'s unit tests (the only bench-internals lib module with tests
 // that use the shared builders) reach for `crate::test_support`. The
 // bin declares it in `main.rs`; the lib needs its own declaration so
