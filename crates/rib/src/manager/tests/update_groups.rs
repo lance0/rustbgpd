@@ -540,3 +540,115 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// LAN-210: a grouped member's export-policy counters must not drift
+/// from an otherwise-identical ungrouped peer's across a dirty resync.
+/// Before the fix the dirty-resync distribution pass replayed the group
+/// table to the wire but never re-recorded the per-member counters
+/// (`apply_group_policy_counters` was `!resync`-gated, and the join
+/// replay only ran from lifecycle/route-refresh paths), while the
+/// ungrouped per-prefix path re-records every entry on resync.
+#[tokio::test]
+async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
+    tokio::time::pause();
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let grouped = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let ungrouped = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    // Unresolved ORR vantage: disqualifies grouping but leaves
+    // single-best selection and the permit-all verdict untouched, so the
+    // two peers must report identical counters at every step.
+    let vantage = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    // Capacity-1 channels so the second announce can't fit and drives the
+    // dirty-resync path.
+    let (g_tx, mut g_rx) = mpsc::channel(1);
+    let (u_tx, mut u_rx) = mpsc::channel(1);
+    for (peer, out_tx, vantage) in [(grouped, g_tx, None), (ungrouped, u_tx, Some(vantage))] {
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: vantage,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+    }
+    drain_eor(&mut g_rx).await;
+    drain_eor(&mut u_rx).await;
+    assert_eq!(query_update_group(&tx, grouped).await, "group:0");
+    assert_eq!(query_update_group(&tx, ungrouped).await, "orr_vantage");
+
+    // First route fits both channels; the second can't, marking both
+    // peers dirty. Neither is drained yet.
+    for prefix in [prefix1, prefix2] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    // Serialize past both distribution passes.
+    let _ = query_best_routes(&tx).await;
+
+    let pre_grouped = query_neighbor_policy_stats(&tx, grouped).await;
+    let pre_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;
+    assert_eq!(
+        pre_grouped.export_policy_routes_permitted, pre_ungrouped.export_policy_routes_permitted,
+        "grouped/ungrouped counters must already agree pre-resync"
+    );
+    assert!(pre_grouped.export_policy_routes_permitted > 0);
+
+    // Drain the stuck first announce so the resync has room, then fire
+    // the dirty-resync timer.
+    let _ = g_rx.recv().await.unwrap();
+    let _ = u_rx.recv().await.unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    // The resync delivers the previously-dropped prefix2 to both peers.
+    let _ = g_rx.recv().await.unwrap();
+    let _ = u_rx.recv().await.unwrap();
+
+    let post_grouped = query_neighbor_policy_stats(&tx, grouped).await;
+    let post_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;
+    assert!(
+        post_ungrouped.export_policy_routes_permitted
+            > pre_ungrouped.export_policy_routes_permitted,
+        "sanity: ungrouped peer must re-record its table on resync"
+    );
+    assert_eq!(
+        post_grouped.export_policy_routes_permitted, post_ungrouped.export_policy_routes_permitted,
+        "grouped peer must re-record export counters on dirty resync (LAN-210)"
+    );
+    assert_eq!(
+        post_grouped.export_policy_routes_denied,
+        post_ungrouped.export_policy_routes_denied,
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
