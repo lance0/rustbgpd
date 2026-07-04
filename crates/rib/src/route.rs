@@ -669,8 +669,14 @@ impl LabeledRibRouteKey {
 pub struct LabeledRibRoute {
     /// Full NLRI: prefix + MPLS label stack (preserved verbatim).
     pub nlri: LabeledNlri,
-    /// Next-hop from `MP_REACH_NLRI`.
+    /// Global next-hop from `MP_REACH_NLRI`.
     pub next_hop: IpAddr,
+    /// IPv6 link-local next-hop carried alongside the global one (RFC 8950 §4
+    /// / RFC 2545 §3 two-address form), populated when the received labeled
+    /// `MP_REACH_NLRI` had a 32-byte next-hop. Reflected verbatim so labeled
+    /// IPv6 link-local forwarding survives reflection (LAN-190); `None` for
+    /// IPv4 or single-address IPv6 next-hops.
+    pub link_local_next_hop: Option<Ipv6Addr>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes.

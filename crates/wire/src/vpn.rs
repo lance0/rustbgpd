@@ -1299,6 +1299,31 @@ mod tests {
         );
     }
 
+    /// LAN-190 §C: RFC 7911 reserves `path_id` 0 for "no Add-Path", but the
+    /// VPN Add-Path decoder deliberately *accepts* a received `path_id` of 0
+    /// rather than rejecting it (some peers emit it). Pin the permissive
+    /// acceptance so a future change can't silently tighten it into a reject.
+    #[test]
+    fn addpath_vpn_decode_accepts_path_id_zero() {
+        let entry = VpnNlriEntry {
+            path_id: 0,
+            nlri: VpnNlri {
+                labels: vec![label(200, true)],
+                route_distinguisher: rd(),
+                prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+            },
+        };
+        let mut buf = Vec::new();
+        encode_vpn_nlri_addpath(std::slice::from_ref(&entry), VpnAddressFamily::V4, &mut buf)
+            .unwrap();
+        let decoded = decode_vpn_nlri_addpath(&buf, VpnAddressFamily::V4).unwrap();
+        assert_eq!(decoded, vec![entry]);
+        assert_eq!(
+            decoded[0].path_id, 0,
+            "path_id 0 must be accepted, not rejected"
+        );
+    }
+
     #[test]
     fn addpath_vpnv6_roundtrip() {
         let entry = VpnNlriEntry {

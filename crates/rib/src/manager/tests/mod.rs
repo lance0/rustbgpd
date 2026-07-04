@@ -122,6 +122,7 @@ fn make_labeled_rib_route(
     crate::route::LabeledRibRoute {
         nlri,
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),

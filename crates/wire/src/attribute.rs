@@ -4453,6 +4453,50 @@ mod tests {
         assert!(decoded_mp.announced.is_empty());
     }
 
+    /// LAN-190: an IPv6 labeled-unicast `MP_REACH` carrying an RFC 8950 §4 /
+    /// RFC 2545 §3 two-address next-hop (global + link-local) must emit the
+    /// 32-byte form and round-trip the link-local half, so a route reflector
+    /// re-advertising the route preserves labeled IPv6 link-local forwarding.
+    #[test]
+    fn mp_reach_labeled_v6_link_local_next_hop_roundtrip() {
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let nlri = labeled_v6_nlri(100);
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::LabeledUnicast,
+            next_hop: IpAddr::V6(global),
+            link_local_next_hop: Some(link_local),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            vpn_announced: vec![],
+            labeled_announced: vec![labeled_entry(0, nlri.clone())],
+            rtc_announced: vec![],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false).unwrap();
+        // Value layout after the 3-byte attribute header: AFI(2) SAFI(1)
+        // NH-Len(1); NH-Len must be 32 (global + link-local), not 16.
+        assert_eq!(
+            buf[6], 32,
+            "labeled IPv6 two-address next-hop must be 32 bytes"
+        );
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode labeled v6 MP_REACH");
+        let PathAttribute::MpReachNlri(decoded_mp) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(decoded_mp.next_hop, IpAddr::V6(global));
+        assert_eq!(
+            decoded_mp.link_local_next_hop,
+            Some(link_local),
+            "labeled IPv6 link-local next-hop must survive encode/decode"
+        );
+        assert_eq!(decoded, vec![PathAttribute::MpReachNlri(mp)]);
+    }
+
     /// RFC 8277 §2.4: a labeled-unicast withdraw carries one ignored
     /// 3-octet compatibility field, not a label stack — the decoded entry
     /// has empty `labels` and re-encode emits 0x800000.

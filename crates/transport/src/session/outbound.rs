@@ -1217,6 +1217,7 @@ impl PeerSession {
             let mut labeled_groups: Vec<(
                 (Afi, Safi),
                 IpAddr,
+                Option<Ipv6Addr>,
                 Vec<PathAttribute>,
                 Vec<rustbgpd_wire::LabeledNlriEntry>,
             )> = Vec::new();
@@ -1227,6 +1228,10 @@ impl PeerSession {
                 }
                 let attrs = self.prepare_outbound_attributes_labeled(labeled_route, is_ebgp);
                 let nh = labeled_route.next_hop;
+                // RFC 8950 two-address IPv6 next-hop: the link-local half
+                // is grouped alongside the global next-hop so it survives
+                // reflection (LAN-190).
+                let ll = labeled_route.link_local_next_hop;
                 let entry = rustbgpd_wire::LabeledNlriEntry {
                     path_id: labeled_route.path_id,
                     nlri: labeled_route.nlri.clone(),
@@ -1234,17 +1239,17 @@ impl PeerSession {
                 if let Some(group) =
                     labeled_groups
                         .iter_mut()
-                        .find(|(g_family, g_nh, g_attrs, _)| {
-                            *g_family == family && *g_nh == nh && *g_attrs == attrs
+                        .find(|(g_family, g_nh, g_ll, g_attrs, _)| {
+                            *g_family == family && *g_nh == nh && *g_ll == ll && *g_attrs == attrs
                         })
                 {
-                    group.3.push(entry);
+                    group.4.push(entry);
                 } else {
-                    labeled_groups.push((family, nh, attrs, vec![entry]));
+                    labeled_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
             let max_len = usize::from(self.max_message_len());
-            for ((afi, _), next_hop, attrs, routes) in labeled_groups {
+            for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in labeled_groups {
                 let add_path = match afi {
                     Afi::Ipv4 => add_path_labeled_v4_send,
                     _ => add_path_labeled_v6_send,
@@ -1252,6 +1257,7 @@ impl PeerSession {
                 if !self.send_labeled_reach_chunked(
                     afi,
                     next_hop,
+                    link_local_next_hop,
                     &attrs,
                     &routes,
                     four_octet_as,
@@ -1812,6 +1818,7 @@ impl PeerSession {
         &mut self,
         afi: Afi,
         next_hop: IpAddr,
+        link_local_next_hop: Option<Ipv6Addr>,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::LabeledNlriEntry],
         four_octet_as: bool,
@@ -1827,7 +1834,7 @@ impl PeerSession {
                 afi,
                 safi: Safi::LabeledUnicast,
                 next_hop,
-                link_local_next_hop: None,
+                link_local_next_hop,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],

@@ -455,6 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn prefix_32_matches_origin_as_only() {
+        // LAN-190 §D: a /32 NLRI covers only the origin-AS field. Every RT
+        // bit below it — the RT type/sub-type byte included — is outside the
+        // prefix and ignored, so interest in AS 65001 matches that AS's RTs
+        // regardless of RT sub-type encoding or local admin.
+        let entry = nlri(65001, 0, 32);
+        // 2-octet-AS RT:65001:100 (type 0x00) — global admin 65001.
+        assert!(entry.matches(ExtendedCommunity::new(RT_65001_100)));
+        // Same global admin 65001 but a DIFFERENT RT sub-type encoding
+        // (4-octet AS, type 0x02, RT:65001:999) — still a hit; /32
+        // discriminates on origin-AS alone, not the RT sub-type.
+        assert!(entry.matches(ExtendedCommunity::new(0x0202_0000_FDE9_03E7)));
+        // A different global admin (65002) misses.
+        assert!(!entry.matches(ExtendedCommunity::new(0x0002_FDEA_0000_0064)));
+        // A non-RT community (Route Origin, sub-type 0x03) never matches,
+        // even when its global admin equals the origin AS.
+        assert!(!entry.matches(ExtendedCommunity::new(0x0003_FDE9_0000_0064)));
+    }
+
+    #[test]
     fn origin_as_mismatch_at_96_misses() {
         // The RT bytes are identical, but the candidate's high 32 bits come
         // from the RT's global administrator (65001), not the NLRI's origin
