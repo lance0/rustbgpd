@@ -19,10 +19,10 @@ telemetry      (no internal deps)
 event-history  ──► telemetry
 evpn           ──► wire
 evpn-linux     ──► evpn
-rib            ──► wire, policy, telemetry, rpki
+rib            ──► wire, policy, telemetry, rpki, bmp
 transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
 api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history
-cli            ──► wire        (dev tests also use api, evpn)
+cli            ──► wire, policy    (dev tests also use api, evpn)
 ```
 
 The daemon binary (`src/`) depends on every crate above; it wires them
@@ -45,7 +45,7 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 | `rustbgpd-event-history` | Durable local event outbox (ADR-0072): SQLite WAL store with monotonic `event_id`, `EventHistoryManager` actor + storage thread, in-process `subscribe_live()` broadcast, retention by count + bytes, payload-opaque (producer-encoded bytes are persisted and broadcast byte-identically). Producers (RIB, EVPN, PeerManager session lifecycle, policy, BFD bridge, dataplane FIB / blackhole) enqueue prost-encoded `BgpEvent` envelopes; the gRPC `SubscribeFromEvent` cursor in `api` does the replay → live handoff. |
 | `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` / `IpVrf` / `IpVrfTable` (RFC 7432 / RFC 8365 / RFC 9136). Includes the `LocalMacOriginator` / `LocalMacIpOriginator` / `LocalEsOriginator` / `LocalEadPerEs*` state machines (RFC 7432 §15.1 mobility + §8 multi-homing), the `DataplaneIntent` / `RemoteMacTable` snapshot types with `RemoteMacEntry::alias_group_key` for ADR-0059 aliasing-ECMP wire intent, the IP-VRF readiness probe (Gate 9), and the pure-logic Type 5 origination + projection helpers (RFC 9136 §4.4.2 Interface-less IRB). Aliasing module (`aliasing::group_members`) produces the canonical alias VTEP set for a multi-homed Type 2. Domain-only, kernel-free. See ADR-0052, ADR-0054, ADR-0055, ADR-0057, ADR-0058, ADR-0059. |
 | `rustbgpd-evpn-linux` | Linux kernel dataplane for EVPN VTEP mode (`cfg(target_os = "linux")`). Reconciles remote-MAC FDB programming via rtnetlink, surfaces local-MAC observations from `RTNLGRP_NEIGH` upward (plus `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` for slice 6a sub-second IP-VRF route observation), supplies Linux rtnetlink dumps for VRF / L3VXLAN inventory (Gate 9), implements the `Dataplane::probe_ip_vrfs` IRB readiness call, and programs FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` for aliasing-ECMP receive paths (ADR-0059). `linux::nexthop_raw` is the raw-netlink primitive (rtnetlink 0.21 has no nexthop API); `linux::fdb_nhg` is the apply primitive with the CVE-2025-39851 guard; `group_state` + `nh_id_alloc` carry the refcount + NHID-tagging state the reconcile coordinator uses. Consumes domain types from `rustbgpd-evpn`; never imports `rib` or `transport`. See ADR-0054, ADR-0055, ADR-0058, ADR-0059. |
-| `rustbgpd-api` | gRPC server (tonic). Eleven services, proto codegen at build time. |
+| `rustbgpd-api` | gRPC server (tonic). Twelve services (eleven native, plus the vendored OpenConfig `gnmi.gNMI` service — Capabilities/Get/Set/Subscribe), proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rbgp` | CLI tool. Client-only generated gRPC stubs; depends on `wire` for shared route/address-family parsing and formatting. Dev tests use `api` and `evpn` mock surfaces. |
 
@@ -214,7 +214,7 @@ gRPC request
 | FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
 | FSM state transitions | `crates/fsm/src/lib.rs` |
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
-| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`) |
+| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `tests.rs`) |
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
 | Policy evaluation | `crates/policy/src/engine.rs` |
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
