@@ -2087,7 +2087,9 @@ fn redefine_imet_failure(
 /// #268 plan decomposer (`crate::evpn_plan_decomposer`) to prove — up
 /// front, before any step commits — that every decomposed step is an
 /// already-supported primitive shape, and to recognize a plan that is
-/// already primitive. Keep the routing here and in `converge` in sync.
+/// already primitive. Keep the routing here and in `converge` in sync —
+/// `shape_gate_and_converge_reject_unsupported_shapes_identically` and
+/// `shape_gate_accepts_every_supported_converge_shape` enforce it.
 ///
 /// # Errors
 /// The routed validator's error when the plan is not a supported shape.
@@ -2169,7 +2171,9 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         Box::pin(async move {
             // NOTE: `validate_supported_plan_shape` above mirrors this
             // dispatch for the #268 plan decomposer — keep the routing in
-            // sync when adding or reshaping converge paths.
+            // sync when adding or reshaping converge paths. The
+            // `shape_gate_*` tests assert both routers classify shapes
+            // identically.
             // Atomic tenant teardown (delete-only multi-element / cross-resource)
             // is routed first; single-element deletes fall through to the
             // single-shape converters below.
@@ -3491,6 +3495,10 @@ where
     apply_evpn_runtime_candidate_locked(candidate, validate_only, coordinator, converger).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the plan/validate-only/converge/decompose/commit sequence reads clearest as one flow"
+)]
 async fn apply_evpn_runtime_candidate_locked<C>(
     candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
     validate_only: bool,
@@ -3516,11 +3524,61 @@ where
     };
 
     if validate_only {
+        // LAN-214 #9: a dry-run must reject exactly what a real apply would
+        // reject. Re-run the same shape acceptance the commit path uses —
+        // supported primitive shape, or a #268 decomposition into supported
+        // steps — WITHOUT committing or touching any actor. (`converge` is
+        // skipped on purpose: it has actor side effects, and its only shape
+        // decision mirrors `validate_supported_plan_shape`.)
+        let message = if plan.is_noop() {
+            "candidate EVPN runtime model validated (no-op: matches the committed generation); \
+             generation not advanced"
+                .to_string()
+        } else {
+            match validate_supported_plan_shape(&current, &candidate, &plan) {
+                Ok(()) => "candidate EVPN runtime model validated as a supported primitive shape; \
+                           generation not advanced"
+                    .to_string(),
+                Err(shape_error) => {
+                    match crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(
+                        &current, &candidate, &plan,
+                    ) {
+                        Ok(steps) => format!(
+                            "candidate EVPN runtime model validated; a real apply would decompose \
+                             it into {} supported steps ({}); generation not advanced",
+                            steps.len(),
+                            steps
+                                .iter()
+                                .map(|step| step.description.clone())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
+                        // Primitive but unsupported: surface the same shape
+                        // rejection the commit path would return.
+                        Err(crate::evpn_plan_decomposer::EvpnDecomposeError::AlreadyPrimitive) => {
+                            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                                "EVPN runtime candidate rejected: {}; generation {} remains committed",
+                                shape_error.message(),
+                                snapshot.generation.as_u64()
+                            )));
+                        }
+                        Err(crate::evpn_plan_decomposer::EvpnDecomposeError::Unsupported(
+                            reason,
+                        )) => {
+                            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                                "EVPN runtime candidate rejected: {reason}; generation {} remains committed",
+                                snapshot.generation.as_u64()
+                            )));
+                        }
+                    }
+                }
+            }
+        };
         return Ok(proto::ApplyEvpnRuntimeResponse {
             outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
             runtime: Some(runtime_snapshot_to_proto(&snapshot)),
             plan: Some(runtime_plan_to_proto(&plan)),
-            message: "candidate EVPN runtime model validated; generation not advanced".to_string(),
+            message,
         });
     }
 
@@ -5130,6 +5188,15 @@ table_id = 6000
         evpn_runtime_candidate_from_toml(toml).unwrap()
     }
 
+    fn runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
+        let candidate = runtime_candidate_from_toml(toml);
+        rustbgpd_evpn::EvpnRuntimeModel::startup(
+            candidate.instances().clone(),
+            candidate.ip_vrfs().clone(),
+            candidate.ethernet_segments().to_vec(),
+        )
+    }
+
     fn runtime_converger_rib_responder(
         mut rib_rx: mpsc::Receiver<RibUpdate>,
         injects: Arc<tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
@@ -5282,6 +5349,162 @@ table_id = 6000
         assert_eq!(plan.evpn_instances.unwrap().added, vec!["100"]);
         assert_eq!(response.runtime.unwrap().generation, 1);
         assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_validate_only_rejects_unsupported_shape() {
+        // LAN-214 #9: a dry-run must reject what a real apply rejects. An
+        // IP-VRF L3VNI (identity) redefine is restart-required by design; a
+        // real apply fails it closed, so validate_only must too — not return
+        // "validated". The converger is scripted to fail if converge is ever
+        // called, proving the dry-run stays side-effect free.
+        let current = runtime_candidate_from_toml(ip_vrf_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::failed("validate_only must not converge");
+
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: ip_vrf_redefined_l3vni_runtime_candidate_toml().to_string(),
+                validate_only: true,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap_err();
+
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = error else {
+            panic!("expected FailedPrecondition, got: {error:?}");
+        };
+        assert!(
+            message.contains("rejected"),
+            "dry-run must reject, not validate: {message}"
+        );
+        assert!(
+            message.contains("restart-required by design"),
+            "must carry the real shape rejection: {message}"
+        );
+
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(
+            guard.model().generation().as_u64(),
+            1,
+            "a rejected dry-run must not advance the generation"
+        );
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+            "a rejected dry-run must not pin/degrade the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn shape_gate_and_converge_reject_unsupported_shapes_identically() {
+        // LAN-214 #8: `validate_supported_plan_shape` re-implements the
+        // converge dispatch's if/else routing. If the two ladders drift, a
+        // shape one routes to a supported branch the other rejects. Every
+        // `converge_*` method runs its `validate_single_*` before touching
+        // any actor, so an all-None converger reaches the exact same shape
+        // rejection the gate does. Asserting the messages are byte-identical
+        // enforces that both routers classify each shape the same way.
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        // L2VNI add mixed with an IP-VRF identity redefine: undecomposable,
+        // routes to the L2VNI-add branch which rejects the IP-VRF change.
+        let mut mixed_candidate = ip_vrf_redefined_l3vni_runtime_candidate_toml().to_string();
+        mixed_candidate.push_str(
+            r#"
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        );
+
+        let cases: Vec<(
+            &str,
+            rustbgpd_evpn::EvpnRuntimeModel,
+            rustbgpd_evpn::EvpnRuntimeCandidate,
+        )> = vec![
+            (
+                "ip_vrf identity (L3VNI) redefine",
+                runtime_model_from_toml(ip_vrf_runtime_candidate_toml()),
+                runtime_candidate_from_toml(ip_vrf_redefined_l3vni_runtime_candidate_toml()),
+            ),
+            (
+                "l2vni add mixed with ip_vrf identity redefine",
+                runtime_model_from_toml(ip_vrf_runtime_candidate_toml()),
+                runtime_candidate_from_toml(&mixed_candidate),
+            ),
+        ];
+
+        for (name, current, candidate) in &cases {
+            let plan = current.plan_candidate(candidate);
+            let gate_error = validate_supported_plan_shape(current, candidate, &plan)
+                .expect_err(&format!("{name}: shape gate must reject"));
+            let converge_error = converger
+                .converge(current, candidate, &plan)
+                .await
+                .expect_err(&format!("{name}: converge dispatch must reject"));
+            assert_eq!(
+                gate_error.message(),
+                converge_error.message(),
+                "{name}: shape gate and converge dispatch must route to the identical rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_gate_accepts_every_supported_converge_shape() {
+        // LAN-214 #8 (accept side): the shape gate must accept exactly the
+        // shapes the converge dispatch commits. Each shape below has a
+        // dedicated committing test through the real converger (e.g.
+        // `apply_evpn_runtime_ethernet_segment_add_commits_after_convergence`);
+        // this asserts the gate agrees they are supported.
+        let cases: [(&str, rustbgpd_evpn::EvpnRuntimeModel, &str); 3] = [
+            (
+                "single L2VNI add",
+                runtime_model_from_toml(minimal_runtime_candidate_toml()),
+                l2vni_runtime_candidate_toml(),
+            ),
+            (
+                "single IP-VRF add",
+                runtime_model_from_toml(minimal_runtime_candidate_toml()),
+                ip_vrf_runtime_candidate_toml(),
+            ),
+            (
+                "Ethernet Segment add",
+                runtime_model_from_toml(two_l2vni_one_es_runtime_candidate_toml()),
+                two_l2vni_two_es_runtime_candidate_toml(),
+            ),
+        ];
+        for (name, current, candidate_toml) in &cases {
+            let candidate = runtime_candidate_from_toml(candidate_toml);
+            let plan = current.plan_candidate(&candidate);
+            assert!(
+                validate_supported_plan_shape(current, &candidate, &plan).is_ok(),
+                "{name}: shape gate must accept a shape the converge dispatch commits"
+            );
+        }
     }
 
     #[tokio::test]
