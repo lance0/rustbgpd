@@ -245,4 +245,24 @@ mod tests {
             format!("token file is empty: {}", path.display())
         );
     }
+
+    // Connecting to a socket nothing is listening on must surface the
+    // friendly "daemon is not running or unreachable" message rather than
+    // leak a raw transport/io error. A nonexistent UDS path fails
+    // immediately (ENOENT) so this stays fast and deterministic — no
+    // dependence on the 5s connect timeout.
+    #[tokio::test]
+    async fn connect_to_absent_socket_reports_daemon_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("not-listening.sock");
+        let addr = format!("unix://{}", absent.display());
+
+        // `Connection` is not `Debug`, so match instead of `expect_err`.
+        let err = match connect(&addr, None).await {
+            Ok(_) => panic!("connecting to an unbound socket must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.to_string(), "daemon is not running or unreachable");
+    }
 }
