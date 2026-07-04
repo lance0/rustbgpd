@@ -173,4 +173,48 @@ mod tests {
         .unwrap();
         print_orr_status(&ListOrrStatusResponse::default(), false).unwrap();
     }
+
+    // The ORR JSON output is produced by hand-rolled `Serialize` impls
+    // (JsonOrrStatus / JsonVantages / JsonVantageRef), which is exactly
+    // where a field can be silently dropped, renamed, or reordered
+    // without any compiler help. Pin the whole shape so that regression
+    // class is caught. `node_key` is emitted verbatim in JSON (unlike the
+    // shortened table label), which operator tooling depends on.
+    #[test]
+    fn orr_status_json_shape_is_stable() {
+        let resp = ListOrrStatusResponse {
+            vantages: vec![OrrVantageStatusEntry {
+                vantage: "10.0.8.1".to_string(),
+                resolved: true,
+                node_key: "0200000000000000000000fc00020000".to_string(),
+                asn: 64512,
+                bgp_ls_id: 7,
+                router_id: "000000000001".to_string(),
+                reachable_nodes: 4,
+                peers: vec!["192.0.2.1".to_string(), "192.0.2.2".to_string()],
+            }],
+            topology_nodes: 4,
+            topology_links: 6,
+        };
+
+        let value = serde_json::to_value(JsonOrrStatus(&resp)).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "vantages": [{
+                    "vantage": "10.0.8.1",
+                    "resolved": true,
+                    "node_key": "0200000000000000000000fc00020000",
+                    "asn": 64512,
+                    "bgp_ls_id": 7,
+                    "router_id": "000000000001",
+                    "reachable_nodes": 4,
+                    "peers": ["192.0.2.1", "192.0.2.2"],
+                }],
+                "topology_nodes": 4,
+                "topology_links": 6,
+            })
+        );
+    }
 }

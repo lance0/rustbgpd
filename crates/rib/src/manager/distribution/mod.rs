@@ -1540,9 +1540,15 @@ impl RibManager {
                     current_policy_filtered_routes
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
                 }
-                // Per-member export-policy counters from the group
-                // verdict — integer adds, no per-(prefix × peer) work.
-                if !resync && let Some(stage) = group_stage.get(&gid) {
+                // Per-member export-policy counters — integer adds, no
+                // per-(prefix × peer) work. A clean pass takes the group
+                // verdict delta; a resync (dirty or force) replays
+                // join-style full-table counters, matching the ungrouped
+                // per-prefix staging path which re-records every Loc-RIB
+                // entry on resync (LAN-210).
+                if resync {
+                    self.apply_group_join_counters(peer, gid, None);
+                } else if let Some(stage) = group_stage.get(&gid) {
                     self.apply_group_policy_counters(peer, &stage.evals);
                 }
             }

@@ -115,17 +115,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the script header (FRR: per-neighbor `no enforce-first-as`; BIRD:
   `enforce first as off`; GoBGP: no enforcement exists).
 
-- **Fixed: `per_client_best` never reached live sessions.** The knob
-  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
-  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
-  `PeerManager::build_transport_config` never copied it into the
-  transport session config, so every configured peer silently
-  registered single-best and `rbgp neighbor` reported `Distribution
-  Mode: single-best` regardless of config. Caught live by the M83 lab
-  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
-  seam); fixed with a one-line copy plus a
-  `build_transport_config_preserves_per_client_best` unit pin.
-
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,
@@ -804,6 +793,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon on the export path. Predicate and extractor are merged into one
   `Fn(&PathAttribute) -> Option<Vec<_>>` closure that matches and
   extracts together, so disagreement — and the `expect` — are gone.
+
+- **Grouped peers no longer lose export-policy counters on a dirty
+  resync (LAN-210).** After a full-outbound-channel dirty (or forced)
+  resync, `distribute_changes` replayed a grouped member's table to the
+  wire but never re-recorded its per-member export-policy counters:
+  `apply_group_policy_counters` was `!resync`-gated and the join-style
+  replay only ran from the route-refresh / peer-lifecycle paths, while
+  ungrouped peers re-record every prefix through the per-prefix staging
+  path on every resync. Grouped and ungrouped peers therefore drifted
+  on `bgp_policy_routes_total`. The resync branch now replays
+  `apply_group_join_counters` (full-table permit/deny counts), matching
+  the ungrouped path exactly.
+
+- **ORR next-hop resolution is now deterministic on equal-metric ties
+  (LAN-189).** `OrrTopology::resolve_node` broke equal prefix-metric LPM
+  ties by advertiser `Vec` order, which derives from hasher-dependent
+  Adj-RIB-In iteration, so an ambiguous vantage could resolve to a
+  different node across restarts. Ties now break on the lowest canonical
+  BGP-LS node key. Additionally, an empty BGP-LS batch (a withdraw of a
+  key not held, or an empty announce) no longer triggers a wasted ORR
+  topology rebuild + per-vantage SPF recompute, and the covering-default
+  (`0.0.0.0/0` / `::/0`) Prefix-NLRI LPM semantics are now documented and
+  regression-pinned (a default route yields a finite `distance + metric`
+  cost; least-preferred `None` means no covering Prefix NLRI at all).
+
+- **`per_client_best` never reached live sessions.** The knob
+  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
+  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
+  `PeerManager::build_transport_config` never copied it into the
+  transport session config, so every configured peer silently
+  registered single-best and `rbgp neighbor` reported `Distribution
+  Mode: single-best` regardless of config. Caught live by the M83 lab
+  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
+  seam); fixed with a one-line copy plus a
+  `build_transport_config_preserves_per_client_best` unit pin.
+
 - **`ApplyEvpnRuntime` with `validate_only` now rejects what a real apply
   would reject (LAN-214 #9).** The dry-run path returned
   `EvpnRuntimeApplyValidated` immediately after the (pure, rejection-free)

@@ -57,3 +57,57 @@ impl From<serde_json::Error> for CliError {
         CliError::Json(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::Status;
+
+    // Every gRPC command routes its `Status` errors through
+    // `From<Status>` via `?`, so this mapping is the CLI's single
+    // operator-facing error contract. These pin the three distinct arms
+    // so a regression (reordering the match, dropping a special case, or
+    // changing a prefix) is caught centrally rather than per command.
+
+    #[test]
+    fn unavailable_is_reported_as_generic_unreachable() {
+        // The raw transport detail is intentionally suppressed: an
+        // operator seeing UNAVAILABLE almost always just means the daemon
+        // is down, so we never leak the noisy inner message.
+        let err = CliError::from(Status::unavailable("connection reset by peer"));
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(err.to_string(), "daemon is not running or unreachable");
+    }
+
+    #[test]
+    fn not_found_gets_friendly_prefix_and_keeps_message() {
+        let err = CliError::from(Status::not_found("no IP-VRF named \"blue\""));
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(err.to_string(), "not found: no IP-VRF named \"blue\"");
+    }
+
+    #[test]
+    fn invalid_argument_falls_through_with_code_and_message() {
+        // INVALID_ARGUMENT is not special-cased: it must surface via the
+        // generic "{code}: {message}" arm so operators see both.
+        let err = CliError::from(Status::invalid_argument("prefix length 33 exceeds 32"));
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(
+            err.to_string(),
+            "Client specified an invalid argument: prefix length 33 exceeds 32"
+        );
+    }
+
+    #[test]
+    fn already_exists_falls_through_with_code_and_message() {
+        let err = CliError::from(Status::already_exists(
+            "neighbor 10.0.0.2 already configured",
+        ));
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(
+            err.to_string(),
+            "Some entity that we attempted to create already exists: \
+             neighbor 10.0.0.2 already configured"
+        );
+    }
+}
