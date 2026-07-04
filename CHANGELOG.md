@@ -770,6 +770,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Update-groups: a second policy-driven regroup while a member's prior
+  regroup resync is still un-drained no longer leaks stale routes.** A
+  grouped member keeps no per-family Adj-RIB-Out record of its unicast/VPN
+  wire state, so its `pending_regroup_baseline` is the *only* record of
+  what is on its wire. When a regroup resync send failed (outbound channel
+  full) the member stayed dirty with that baseline retained; a second
+  regroup before it drained *overwrote* the baseline with a fresh
+  group-view snapshot of a table the member was never advertised. Keys on
+  the wire but absent from both the new snapshot and the new group's table
+  then fell out of the withdraw candidate set and were never withdrawn,
+  stranding stale routes on the peer. The second regroup now *unions* the
+  new snapshot onto the retained baseline (existing/wire values win on
+  conflict) for both unicast and VPN, so every wire key stays a withdraw
+  candidate; `member_retains` still suppresses withdrawing keys present in
+  the new group's table. Regression-tested against the per-peer oracle
+  (`oracle_second_regroup_while_dirty_unions_baseline_no_leak`).
 - **Labeled IPv6 reflection no longer drops the link-local next-hop
   (LAN-190).** `LabeledRibRoute` stored only a single global next-hop, so
   a labeled-unicast (SAFI 4) IPv6 route received with an RFC 8950 §4 /

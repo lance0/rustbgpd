@@ -1783,7 +1783,25 @@ impl RibManager {
                 self.join_group(gid, peer);
             }
             match (baseline, new_gid) {
-                (Some(base), Some(_)) => {
+                (Some(mut base), Some(_)) => {
+                    // A grouped member keeps no per-family record of its
+                    // unicast/VPN wire state in `adj_ribs_out` (join clears
+                    // it), so its `pending_regroup_baseline` entry is the
+                    // ONLY record of what is on its wire. If the member's
+                    // prior resync never committed (still dirty), that entry
+                    // is the true wire state, while `base` is a snapshot of a
+                    // group view the member was never advertised — UNION them
+                    // (existing/wire values win on conflict) rather than blind
+                    // overwrite. A blind overwrite drops wire keys absent from
+                    // BOTH the new snapshot and the new group's table: they
+                    // would never be withdrawn and leak as stale routes. One
+                    // baseline covers unicast AND VPN, so this covers both.
+                    if self.dirty_peers.contains(&peer)
+                        && let Some(prev) = self.pending_regroup_baseline.remove(&peer)
+                    {
+                        base.unicast.extend(prev.unicast);
+                        base.vpn.extend(prev.vpn);
+                    }
                     self.pending_regroup_baseline.insert(peer, base);
                 }
                 (Some(base), None) => {

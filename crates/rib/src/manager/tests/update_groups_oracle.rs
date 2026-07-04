@@ -199,6 +199,39 @@ fn deny_prefix_chain(prefix: Ipv4Prefix) -> PolicyChain {
     }])
 }
 
+/// Deny several prefixes, permit the rest — a multi-statement variant of
+/// [`deny_prefix_chain`] so a second regroup lands on a *different* chain
+/// (a content-equal reinstall is key-stable and would not regroup).
+fn deny_prefixes_chain(prefixes: &[Ipv4Prefix]) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: prefixes
+            .iter()
+            .map(|prefix| PolicyStatement {
+                prefix: Some(Prefix::V4(*prefix)),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications::default(),
+            })
+            .collect(),
+        default_action: PolicyAction::Permit,
+    }])
+}
+
 /// One outbound message, normalized: announces carry everything the
 /// wire path consumes (route identity, next hop, source, attributes,
 /// aligned next-hop-override flag), sorted so intra-message iteration
@@ -906,6 +939,86 @@ async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the source-flip withdraw lost to the full channel must be recovered by the resync"
+    );
+}
+
+/// Regression (stale-route leak): a grouped member whose regroup resync
+/// SEND FAILS is dirty with `pending_regroup_baseline` holding the ONLY
+/// record of its true wire state (a grouped member keeps no per-family
+/// Adj-RIB-Out). A SECOND regroup before it drains must UNION the fresh
+/// group-view snapshot onto that baseline, not overwrite it — a blind
+/// overwrite drops wire keys absent from BOTH the new snapshot and the
+/// new group's table, so they are never withdrawn and leak.
+///
+/// Sequence: C in sync on wire {p1,p2} → jam its cap-1 channel with p3 →
+/// regroup A→B (policy denies p1; resync send fails → C dirty, baseline
+/// = {p1,p2,p3}) → regroup B→C (policy denies p1,p3) before C drains →
+/// drain + fire the resync timer. p1 is in the first baseline, absent
+/// from the second group view (denied by B) AND from group C's table
+/// (denied by C) — it MUST be withdrawn, not stranded on C's wire.
+#[tokio::test]
+async fn oracle_second_regroup_while_dirty_unions_baseline_no_leak() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await; // route source
+        o.peer_up(C, false, true, None, 1).await; // observed, cap-1 channel
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Sync C to wire {p1,p2}: each lands and is drained, so the
+        // channel empties between sends and C never goes dirty here.
+        for n in 1..=2u8 {
+            o.routes(A, vec![ibgp_route(pfx(n, 0), A, 100, vec![])], vec![])
+                .await;
+            o.drain_one(C).await;
+        }
+
+        // Jam: p3 (a distinct prefix) lands in the cap-1 channel and is
+        // NOT drained, so the next resync send fails against a full queue.
+        o.routes(A, vec![ibgp_route(pfx(3, 0), A, 100, vec![])], vec![])
+            .await;
+
+        // Regroup A→B (deny p1): baseline captures wire {p1,p2,p3}; the
+        // resync send fails against the full channel → C stays dirty.
+        o.replace_policy(C, Some(deny_prefixes_chain(&[pfx(1, 0)])))
+            .await;
+        // Regroup B→C (deny p1,p3) BEFORE C drains: must UNION onto the
+        // retained {p1,p2,p3} baseline, not overwrite with {p2,p3}.
+        o.replace_policy(C, Some(deny_prefixes_chain(&[pfx(1, 0), pfx(3, 0)])))
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    // The leak: p1 was on C's wire, is absent from group C's table, and
+    // is absent from the second group-view snapshot. A baseline overwrite
+    // never withdraws it (it never reaches the withdraw candidate set);
+    // the union does.
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "stale-route leak: p1 was never withdrawn — the second regroup \
+         overwrote the wire baseline instead of unioning it"
+    );
+    // member_retains must keep a route still in group C's table advertised.
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "p2 (still in group C's table) must stay advertised"
+    );
+    // And the whole grouped end state must converge with the per-peer
+    // oracle, which tracks wire state in Adj-RIB-Out and cannot leak.
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "grouped final advertised state must converge with the per-peer oracle"
     );
 }
 
