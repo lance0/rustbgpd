@@ -1265,7 +1265,24 @@ async fn run<T>(
             "!! Booted from the pre-transaction config; the unconfirmed candidate was saved to {}.",
             notice.backup_path.display()
         );
-        metrics.record_config_transaction_lifecycle("boot_revert", "success");
+        if notice.journal_retained {
+            // Config was restored, but the revert journal could not be removed.
+            // Booting anyway (rather than looping and clobbering the saved-aside
+            // candidate — LAN-208); the operator must delete the journal, and a
+            // durable failure metric makes the residual state diagnosable.
+            error!(
+                journal = %confirm_journal::journal_path(&config.runtime_state_dir()).display(),
+                "commit-confirm boot revert could not remove the journal after restoring the config; \
+                 delete it manually or the next boot re-runs the revert and overwrites the saved-aside candidate"
+            );
+            eprintln!(
+                "!! WARNING: the revert journal could not be removed. Delete {} before the next restart.",
+                confirm_journal::journal_path(&config.runtime_state_dir()).display()
+            );
+            metrics.record_config_transaction_lifecycle("boot_revert", "failure");
+        } else {
+            metrics.record_config_transaction_lifecycle("boot_revert", "success");
+        }
     }
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
         error!(
