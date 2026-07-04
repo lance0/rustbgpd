@@ -49,6 +49,12 @@ pub struct BmpManager {
     /// Loc-RIB table-dump request channel toward the RIB manager, used
     /// on collector (re)connect to synthesize the initial table sync.
     dump_tx: Option<mpsc::Sender<BmpDumpRequest>>,
+    /// Collector indices whose most recent connect-time Loc-RIB `PeerUp`
+    /// was dropped on a full channel (LAN-200). Live Loc-RIB Route
+    /// Monitoring is suppressed for these collectors so none ever sees an
+    /// RFC 9069 RM without a preceding Loc-RIB `PeerUp`. Cleared when a
+    /// later reconnect's [`Self::start_loc_rib_sync`] lands the `PeerUp`.
+    loc_rib_suppressed: std::collections::HashSet<usize>,
     metrics: BgpMetrics,
 }
 
@@ -73,6 +79,7 @@ impl BmpManager {
             peer_up_cache: std::collections::HashMap::new(),
             loc_rib: None,
             dump_tx: None,
+            loc_rib_suppressed: std::collections::HashSet::new(),
             metrics,
         }
     }
@@ -202,7 +209,10 @@ impl BmpManager {
         }
         let now = std::time::SystemTime::now();
         self.fan_out_filtered(
-            |f| f.loc_rib,
+            // Suppress live RM for any collector whose connect-time
+            // Loc-RIB PeerUp was dropped (LAN-200) — RFC 9069 RM must
+            // never precede the Loc-RIB PeerUp on the wire.
+            |idx, f| f.loc_rib && !self.loc_rib_suppressed.contains(&idx),
             |version| match event {
                 BmpEvent::LocRibRouteMonitoring {
                     update_pdu,
@@ -267,7 +277,7 @@ impl BmpManager {
             BmpEvent::RouteMonitoring { peer_info, .. } => {
                 let rib_out = peer_info.is_rib_out;
                 self.fan_out_filtered(
-                    |f| {
+                    |_, f| {
                         if rib_out {
                             f.rib_out_post
                         } else {
@@ -318,7 +328,7 @@ impl BmpManager {
                 if let Some(ref cfg) = self.loc_rib {
                     let now = std::time::SystemTime::now();
                     self.fan_out_filtered(
-                        |f| f.loc_rib,
+                        |_, f| f.loc_rib,
                         |version| codec::encode_loc_rib_peer_down(cfg, now, version),
                     );
                 }
@@ -375,7 +385,7 @@ impl BmpManager {
     /// blocks on a slow collector; live Loc-RIB events keep fanning out
     /// concurrently and may overlap the dump (the standard BMP
     /// dump-vs-live race — collectors reconcile by prefix).
-    fn start_loc_rib_sync(&self, collector_id: usize) {
+    fn start_loc_rib_sync(&mut self, collector_id: usize) {
         let Some(ref cfg) = self.loc_rib else {
             return;
         };
@@ -388,24 +398,34 @@ impl BmpManager {
 
         let addr_label = addr.to_string();
         let version = *version;
-        let peer_up = codec::encode_loc_rib_peer_up(cfg, std::time::SystemTime::now(), version);
+        // Clone out of `self` up front so the mutable `loc_rib_suppressed`
+        // bookkeeping below doesn't collide with the collector/config
+        // borrows.
+        let cfg = cfg.clone();
+        let collector_tx = collector_tx.clone();
+        let peer_up = codec::encode_loc_rib_peer_up(&cfg, std::time::SystemTime::now(), version);
         if let Err(e) = collector_tx.try_send(peer_up) {
             let reason = trysend_reason(&e);
             self.metrics
                 .record_bmp_collector_drop(&addr_label, "loc_rib_dump", reason, 1);
             warn!(
-                collector = %addr,
+                collector = %addr_label,
                 error = %e,
-                "BMP collector channel full or closed for Loc-RIB PeerUp; skipping dump"
+                "BMP collector channel full or closed for Loc-RIB PeerUp; skipping dump \
+                 and suppressing live Loc-RIB RM until reconnect"
             );
+            // A dropped PeerUp must not be followed by live RM (LAN-200):
+            // gate live Loc-RIB fan-out for this collector until a later
+            // reconnect lands the PeerUp.
+            self.loc_rib_suppressed.insert(collector_id);
             return;
         }
+        // PeerUp is on the wire ahead of any RM — live fan-out may resume.
+        self.loc_rib_suppressed.remove(&collector_id);
 
         let Some(ref dump_tx) = self.dump_tx else {
             return;
         };
-        let cfg = cfg.clone();
-        let collector_tx = collector_tx.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(forward_loc_rib_dump(
             dump_tx.clone(),
@@ -418,19 +438,20 @@ impl BmpManager {
     }
 
     fn fan_out(&self, encode: impl Fn(BmpVersion) -> Bytes) {
-        self.fan_out_filtered(|_| true, encode);
+        self.fan_out_filtered(|_, _| true, encode);
     }
 
-    /// Fan out one event, framing per collector version. `encode` is
-    /// called at most once per BMP version in use (two-slot memo).
+    /// Fan out one event, framing per collector version. `want` receives
+    /// the collector index and filter; `encode` is called at most once
+    /// per BMP version in use (two-slot memo).
     fn fan_out_filtered(
         &self,
-        want: impl Fn(&BmpMonitorFilter) -> bool,
+        want: impl Fn(usize, &BmpMonitorFilter) -> bool,
         encode: impl Fn(BmpVersion) -> Bytes,
     ) {
         let mut memo: [Option<Bytes>; 2] = [None, None];
-        for (addr, tx, filter, version) in &self.collectors {
-            if !want(filter) {
+        for (idx, (addr, tx, filter, version)) in self.collectors.iter().enumerate() {
+            if !want(idx, filter) {
                 continue;
             }
             let msg = memo[version.idx()]
@@ -1629,6 +1650,71 @@ mod tests {
         drop(event_tx);
         drop(control_tx);
         handle.await.unwrap();
+    }
+
+    /// LAN-200: a Loc-RIB `PeerUp` dropped on a full channel at connect
+    /// suppresses subsequent live Loc-RIB Route Monitoring for that
+    /// collector, so it never sees an RFC 9069 RM without a preceding
+    /// Loc-RIB `PeerUp`. A later reconnect (channel drained) heals it.
+    #[tokio::test]
+    async fn dropped_loc_rib_peer_up_suppresses_live_route_monitoring() {
+        let (_event_tx, event_rx) = mpsc::channel(16);
+        let (_control_tx, control_rx) = mpsc::channel(16);
+        // Capacity-1 collector channel so a single backlog message fills
+        // it and the connect-time Loc-RIB PeerUp cannot enqueue.
+        let (c_tx, mut c_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(4);
+
+        let mut mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(
+                collector_addr(0),
+                c_tx.clone(),
+                loc_rib_filter(),
+                BmpVersion::V3,
+            )],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+
+        let live_rm = BmpEvent::LocRibRouteMonitoring {
+            update_pdu: Bytes::from_static(&[0xCC; 23]),
+            timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            path_status: None,
+        };
+
+        // Saturate the channel, then connect: the PeerUp try_send hits
+        // Full and is dropped → this collector is suppressed.
+        c_tx.try_send(Bytes::from_static(b"backlog")).unwrap();
+        mgr.handle_control(BmpControlEvent::CollectorConnected {
+            collector_id: 0,
+            collector_addr: collector_addr(0),
+        });
+        mgr.handle_event(&live_rm);
+
+        // Only the pre-existing backlog is queued — no PeerUp, no RM.
+        assert_eq!(c_rx.try_recv().unwrap(), Bytes::from_static(b"backlog"));
+        assert!(
+            c_rx.try_recv().is_err(),
+            "suppressed: no live Loc-RIB RM without a preceding PeerUp"
+        );
+
+        // Reconnect with the channel drained heals it: PeerUp lands, then
+        // live RM flows again.
+        mgr.handle_control(BmpControlEvent::CollectorConnected {
+            collector_id: 0,
+            collector_addr: collector_addr(0),
+        });
+        let peer_up = c_rx.try_recv().unwrap();
+        assert_eq!(
+            peer_up[6], 3,
+            "Loc-RIB PeerUp (peer type 3) delivered on reconnect"
+        );
+        mgr.handle_event(&live_rm);
+        let rm = c_rx.try_recv().unwrap();
+        assert_eq!(rm[5], 0, "route monitoring type");
+        assert_eq!(rm[6], 3, "live Loc-RIB RM resumes after the PeerUp");
     }
 
     /// Shutdown sends the Loc-RIB Peer Down (reason 6 + table-name TLV)

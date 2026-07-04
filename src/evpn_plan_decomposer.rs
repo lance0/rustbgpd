@@ -532,6 +532,72 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[test]
+    fn redefined_l2vni_non_identity_change_collapses_to_redefine_not_delete_plus_add() {
+        // LAN-203: the plan diff (`diff_keyed_maps`) partitions every VNI
+        // into exactly one of {deleted, redefined, added} — a VNI can never
+        // land in both `deleted` and `added`. A same-VNI "delete + re-add"
+        // is therefore structurally a *redefine*, so no "reject if in both
+        // lists" guard is reachable. An L2VNI has no restart-required
+        // identity field (unlike an IP-VRF's L3VNI/device/table), so even a
+        // change to its most device-like attribute (`local_vtep_ip`) is a
+        // live redefine — it must decompose to a supported redefine step,
+        // not fail closed.
+        let current = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        );
+        // Redefine VNI 100's local_vtep_ip AND delete its Ethernet Segment
+        // (cross-domain mix, so the candidate is not a supported primitive
+        // and must decompose).
+        let candidate = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.2"
+"#,
+        );
+
+        let current_model = model_from_toml(&current);
+        let candidate_model = candidate_from_toml(&candidate);
+        let plan = current_model.plan_candidate(&candidate_model);
+        // The crux of LAN-203: VNI 100 is redefined, never simultaneously
+        // deleted and added.
+        assert_eq!(plan.evpn_instances.redefined, vec![100]);
+        assert!(!plan.evpn_instances.deleted.contains(&100));
+        assert!(!plan.evpn_instances.added.contains(&100));
+
+        let steps = decompose_evpn_runtime_candidate(&current_model, &candidate_model, &plan)
+            .expect("non-identity L2VNI redefine must decompose, not fail closed");
+        let redefine = steps
+            .iter()
+            .find(|step| step.description.starts_with("L2VNI redefine"))
+            .expect("a supported L2VNI redefine step is expected");
+        assert_eq!(
+            redefine
+                .candidate
+                .instances()
+                .get(vni(100))
+                .unwrap()
+                .local_vtep_ip
+                .to_string(),
+            "10.0.0.2",
+            "the redefine step must carry the changed non-identity attribute"
+        );
+    }
+
+    #[test]
     fn supported_single_shape_is_already_primitive() {
         let current = with_header("");
         let candidate = with_header(

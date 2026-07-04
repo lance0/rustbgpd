@@ -925,6 +925,112 @@ async fn bmp_peer_down_survives_full_channel() {
         "PeerDown must be delivered even when the channel was full"
     );
 }
+/// LAN-200: a TCP disconnect abandons any pending BMP divergence repair.
+/// Otherwise the run loop's `bmp_repair_timer` arm could fire after the
+/// socket died and emit a synthetic `PeerDown`/`PeerUp` for a dead session
+/// — which the reconnect would then stack a real `PeerUp` on top of.
+#[tokio::test]
+async fn tcp_disconnect_clears_bmp_repair_latch() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    // Latch divergence + arm the repair timer via a dropped RM on a full
+    // channel.
+    let tx = session.bmp_tx.clone().unwrap();
+    for _ in 0..16 {
+        tx.try_send(BmpEvent::StatsReport {
+            peer_info: session.build_bmp_peer_info(),
+            adj_rib_in_routes: 0,
+            adj_rib_out_post: None,
+        })
+        .unwrap();
+    }
+    session.emit_bmp_event(BmpEvent::RouteMonitoring {
+        peer_info: session.build_bmp_peer_info(),
+        update_pdu: Bytes::from_static(&[0xde, 0xad]),
+    });
+    assert!(session.bmp_stream_diverged);
+    assert!(session.bmp_repair_timer.is_some());
+    // Drain so a stray repair *could* succeed if it fired.
+    for _ in 0..16 {
+        bmp_rx.try_recv().unwrap();
+    }
+    // TCP disconnect must abandon the repair outright.
+    session.handle_tcp_disconnect();
+    assert!(
+        !session.bmp_stream_diverged,
+        "disconnect clears the divergence latch"
+    );
+    assert!(
+        session.bmp_repair_timer.is_none(),
+        "disconnect disarms the repair timer"
+    );
+    // A late repair-timer fire on the dead session must emit nothing.
+    session.retry_bmp_stream_repair();
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "no synthetic PeerDown/PeerUp for a dead session"
+    );
+}
+/// LAN-201: a partial repair attempt — `PeerDown` enqueued, `PeerUp` hits
+/// a full channel — leaves the latch set and retries. The collector-visible
+/// sequence carries a duplicate `PeerDown`, which is acceptable: RFC 7854
+/// `PeerDown` is idempotent (the collector has already discarded peer state
+/// from the first one), and the pair still ends in exactly one `PeerUp`.
+#[tokio::test]
+async fn repair_partial_enqueue_duplicate_peer_down_is_acceptable() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    let tx = session.bmp_tx.clone().unwrap();
+    // Leave exactly one free slot in the 16-deep channel: PeerDown will
+    // enqueue, the following PeerUp hits Full.
+    for _ in 0..15 {
+        tx.try_send(BmpEvent::StatsReport {
+            peer_info: session.build_bmp_peer_info(),
+            adj_rib_in_routes: 0,
+            adj_rib_out_post: None,
+        })
+        .unwrap();
+    }
+    session.bmp_stream_diverged = true;
+    // Partial attempt: PeerDown enqueues, PeerUp returns Full → incomplete.
+    assert!(
+        !session.repair_bmp_stream(&tx),
+        "PeerUp Full leaves the repair incomplete"
+    );
+    assert!(
+        session.bmp_stream_diverged,
+        "latch stays set after a partial attempt"
+    );
+    // Drain the 15 fillers; the 16th queued item is the partial PeerDown.
+    for _ in 0..15 {
+        assert!(matches!(
+            bmp_rx.try_recv().unwrap(),
+            BmpEvent::StatsReport { .. }
+        ));
+    }
+    assert!(
+        matches!(bmp_rx.try_recv().unwrap(), BmpEvent::PeerDown { .. }),
+        "partial attempt enqueued a PeerDown"
+    );
+    // Channel now empty → the retry completes the reset: PeerDown, PeerUp.
+    assert!(
+        session.repair_bmp_stream(&tx),
+        "retry completes once the channel drains"
+    );
+    assert!(!session.bmp_stream_diverged);
+    assert!(matches!(
+        bmp_rx.try_recv().unwrap(),
+        BmpEvent::PeerDown { .. }
+    ));
+    assert!(matches!(
+        bmp_rx.try_recv().unwrap(),
+        BmpEvent::PeerUp { .. }
+    ));
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "the completed reset ends in exactly one PeerUp"
+    );
+}
 #[test]
 fn ebgp_prepends_asn() {
     let session = make_test_session(65001, 65002);

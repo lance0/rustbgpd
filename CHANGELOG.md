@@ -115,17 +115,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the script header (FRR: per-neighbor `no enforce-first-as`; BIRD:
   `enforce first as off`; GoBGP: no enforcement exists).
 
-- **Fixed: `per_client_best` never reached live sessions.** The knob
-  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
-  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
-  `PeerManager::build_transport_config` never copied it into the
-  transport session config, so every configured peer silently
-  registered single-best and `rbgp neighbor` reported `Distribution
-  Mode: single-best` regardless of config. Caught live by the M83 lab
-  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
-  seam); fixed with a one-line copy plus a
-  `build_transport_config_preserves_per_client_best` unit pin.
-
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,
@@ -799,6 +788,52 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`0.0.0.0/0` / `::/0`) Prefix-NLRI LPM semantics are now documented and
   regression-pinned (a default route yields a finite `distance + metric`
   cost; least-preferred `None` means no covering Prefix NLRI at all).
+
+- **`per_client_best` never reached live sessions.** The knob
+  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
+  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
+  `PeerManager::build_transport_config` never copied it into the
+  transport session config, so every configured peer silently
+  registered single-best and `rbgp neighbor` reported `Distribution
+  Mode: single-best` regardless of config. Caught live by the M83 lab
+  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
+  seam); fixed with a one-line copy plus a
+  `build_transport_config_preserves_per_client_best` unit pin.
+
+- **`ApplyEvpnRuntime` with `validate_only` now rejects what a real apply
+  would reject (LAN-214 #9).** The dry-run path returned
+  `EvpnRuntimeApplyValidated` immediately after the (pure, rejection-free)
+  `plan_candidate`, so an operator could "validate" a candidate that a
+  real apply then fails closed (e.g. an IP-VRF L3VNI identity redefine, or
+  an undecomposable mixed candidate). Validate-only now runs the same
+  shape acceptance the commit path uses — `validate_supported_plan_shape`
+  plus, for unsupported-but-mixed candidates, the #268 decomposition —
+  without committing or touching any actor, returning the planned step
+  descriptions on success and the real shape rejection on failure.
+- **The EVPN runtime shape gate and converge dispatch are now proven to
+  classify plan shapes identically (LAN-214 #8).**
+  `validate_supported_plan_shape` mirrors `EvpnRuntimeActorConverger::converge`'s
+  if/else routing by hand, previously guarded only by a "keep in sync"
+  comment. Regression tests now drive a representative set of shapes
+  through both routers and assert identical classification — byte-identical
+  rejection messages for unsupported shapes (every `converge_*` runs its
+  `validate_single_*` before any actor, so the comparison is side-effect
+  free) and gate-acceptance of every shape the dispatch commits.
+
+- **BMP peer-state lifecycle no longer emits spurious or mis-ordered
+  events across a TCP flap (LAN-200).** Two gaps closed. (1) A pending
+  BMP divergence repair (the synthetic RFC 7854 PeerDown/PeerUp forced
+  after a RouteMonitoring drop) is now abandoned when the TCP session
+  tears down: `close_tcp` / `handle_tcp_disconnect` clear the divergence
+  latch and disarm the `bmp_repair_timer`, so the run loop's repair arm
+  can no longer fire a synthetic PeerDown/PeerUp for a dead session that
+  a reconnect would then stack a real PeerUp on top of. (2) A live
+  Loc-RIB PeerUp (RFC 9069) dropped on a full collector channel at
+  connect now suppresses that collector's subsequent live Loc-RIB Route
+  Monitoring until a later reconnect lands the PeerUp — a collector can
+  no longer see Loc-RIB RM with no preceding Loc-RIB PeerUp. The
+  connect-time Loc-RIB dump path was already safe (it skips the dump on
+  a dropped PeerUp).
 
 - **Config persistence now fsyncs before rename (LAN-206).**
   `ConfigPersister::persist()` wrote the temp config with `fs::write` +
