@@ -887,30 +887,43 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write-tmp+fsync+rename+fsync-dir primitive the commit-confirm journal
   uses (`confirm_journal::write_atomic`).
 
-- **Boot revert can no longer leave the config file missing (LAN-207).**
+- **Boot revert can no longer leave the config file missing, and its
+  refusal messages are state-aware (LAN-207, LAN-220).**
   `boot_revert_check` renames the on-disk candidate to
   `<config>.unconfirmed` before writing the restored pre-transaction
   config; if that write failed, the config file was gone and boot
   refused with nothing left to load. The candidate is now put back on a
-  restore-write failure, and the refusal message names the
-  `<config>.unconfirmed` backup slot and an explicit `rm <journal>`
-  recovery command.
+  restore-write failure. The refusal message now detects whether the
+  config file exists: when it is missing it no longer tells the operator
+  to `rm <journal>` and boot the on-disk config (there is none) — it
+  points them at the pre-transaction config embedded in the journal and
+  the `<config>.unconfirmed` candidate to restore instead. The revert is
+  idempotent across a crash mid-revert (config missing + live journal
+  resumes cleanly).
 
-- **A journal-removal failure at boot no longer loops and clobbers the
-  saved-aside candidate (LAN-208).** After a successful restore, if the
-  journal could not be removed, `boot_revert_check` returned `Err`;
-  under systemd `Restart=` that looped boot, and each iteration renamed
-  the already-reverted config over the real `<config>.unconfirmed`
-  candidate, destroying it. Boot now proceeds from the restored config,
-  surfaces the retained journal
-  (`config_transaction_lifecycle{operation="boot_revert",outcome="failure"}`
-  metric + loud ERROR/banner telling the operator to delete it) instead
-  of looping.
+- **A journal-removal failure at boot now FAILS STARTUP instead of
+  booting anyway, and never clobbers the saved-aside candidate
+  (LAN-219; supersedes the earlier LAN-208 boot-anyway behavior).**
+  After the revert is written, if the journal cannot be removed
+  `boot_revert_check` returns `Err` and the daemon refuses to start: a
+  daemon that cannot prove the revert intent was consumed would
+  otherwise silently re-revert every config the operator applies on each
+  restart. The reverted config is still written to disk and the
+  unconfirmed candidate is preserved at `<config>.unconfirmed`; the
+  refusal message states exactly this and tells the operator to preserve
+  the candidate, then fix the journal's permissions or `rm` it and
+  restart. The `.unconfirmed` recovery copy is written once and is never
+  overwritten with different bytes on a subsequent boot, so a restart
+  loop can no longer destroy the real saved candidate.
 
-- **Oversized commit-confirm journals are rejected before parse
-  (LAN-204).** A corrupt journal with a huge `rollback_toml` could OOM
-  during boot deserialization; boot now refuses (fail closed) any
-  journal larger than 10 MB before reading it.
+- **Oversized and non-regular-file commit-confirm journals are rejected
+  before read (LAN-204, LAN-221).** A corrupt journal with a huge
+  `rollback_toml` could OOM during boot deserialization; boot refuses
+  (fail closed) any journal larger than 10 MB. The size guard trusted
+  `metadata().len()`, which a FIFO/socket/device reports as 0 (bypassing
+  it) before a read blocks or runs unbounded — boot now also refuses any
+  journal path that is not a regular file, and reads the journal through
+  a hard byte cap as defense-in-depth.
 
 - **The library target now builds under `--all-features` (LAN-198).**
   The lib exposes `pub mod config` only under `bench-internals`, and
