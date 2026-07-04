@@ -54,12 +54,14 @@ pub enum Cmp {
 /// matcher exactly (pinned by the golden corpus in
 /// `engine/tests/ir_parity.rs`):
 ///
-/// - Prefix nodes never match a prefixless route (e.g. BGP-LS NLRIs).
+/// - Prefix nodes (`PrefixEq` / `PrefixNe` / `PrefixInSet`) never match
+///   a prefixless route (e.g. BGP-LS / RTC NLRIs) — `!=` mirrors `==`.
 /// - [`Cmp`] on `LocalPref` / `Med` sees the RFC 4271 implicit defaults
 ///   (`LOCAL_PREF` 100, `MED` 0) when the attribute is absent.
-/// - `RouteTypeIs` / `EvpnRouteTypeIs` / `NextHopEq` / `NextHopNe`
-///   never match when the corresponding context field is `None` (`!=`
-///   mirrors `==`: an absent attribute satisfies neither).
+/// - `RouteTypeIs` / `EvpnRouteTypeIs` / `NextHopEq` and their `Ne`
+///   siblings (`RouteTypeNe` / `EvpnRouteTypeNe` / `NextHopNe`) never
+///   match when the corresponding context field is `None` (`!=` mirrors
+///   `==`: an absent attribute satisfies neither).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchExpr {
     /// Always matches (an unconditional term).
@@ -70,6 +72,18 @@ pub enum MatchExpr {
     /// (see [`crate::sets::prefix_entry_matches`]). Single-prefix
     /// matches stay inline rather than paying a set indirection.
     PrefixEq {
+        /// The covering prefix; candidates are masked at its length.
+        prefix: Prefix,
+        /// Minimum candidate prefix length (inclusive).
+        ge: Option<u8>,
+        /// Maximum candidate prefix length (inclusive).
+        le: Option<u8>,
+    },
+    /// The route's prefix does **not** match this `(prefix, ge, le)`
+    /// triple. Unlike `Not(PrefixEq{…})`, this never matches a
+    /// prefixless route (BGP-LS / RTC NLRIs): `!=` mirrors `==`, so an
+    /// absent prefix satisfies neither.
+    PrefixNe {
         /// The covering prefix; candidates are masked at its length.
         prefix: Prefix,
         /// Minimum candidate prefix length (inclusive).
@@ -117,8 +131,16 @@ pub enum MatchExpr {
     NeighborIn(Box<NeighborSetMatch>),
     /// The route's source class equals this type.
     RouteTypeIs(RouteType),
+    /// The route's source class differs from this type. Unlike
+    /// `Not(RouteTypeIs(_))`, this never matches when the route-type is
+    /// absent — `!=` mirrors `==`.
+    RouteTypeNe(RouteType),
     /// The route is an EVPN NLRI of this route type (RFC 7432 §7).
     EvpnRouteTypeIs(u8),
+    /// The route is an EVPN NLRI whose route type differs from this one.
+    /// Unlike `Not(EvpnRouteTypeIs(_))`, this never matches a non-EVPN
+    /// (absent evpn-route-type) route — `!=` mirrors `==`.
+    EvpnRouteTypeNe(u8),
     /// RPKI origin validation state equals this state (RFC 6811).
     RpkiIs(RpkiValidation),
     /// ASPA path verification state equals this state.
@@ -149,10 +171,14 @@ impl MatchExpr {
             | MatchExpr::NextHopNe(_)
             | MatchExpr::NextHopNePeer
             | MatchExpr::RouteTypeIs(_)
+            | MatchExpr::RouteTypeNe(_)
             | MatchExpr::EvpnRouteTypeIs(_)
+            | MatchExpr::EvpnRouteTypeNe(_)
             | MatchExpr::RpkiIs(_)
             | MatchExpr::AspaIs(_) => 0,
-            MatchExpr::PrefixInSet(_) | MatchExpr::PrefixEq { .. } => 1,
+            MatchExpr::PrefixInSet(_) | MatchExpr::PrefixEq { .. } | MatchExpr::PrefixNe { .. } => {
+                1
+            }
             MatchExpr::NeighborIn(_) => 2,
             MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
             MatchExpr::AsPathMatches(_) => 4,

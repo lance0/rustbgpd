@@ -920,3 +920,161 @@ fn evpn_route_type_enforces_rfc7432_range() {
         );
     }
 }
+
+/// A route context with every optional attribute absent — the shape a
+/// BGP-LS / RTC / non-EVPN NLRI presents to a policy.
+fn absent_ctx() -> RouteContext<'static> {
+    RouteContext {
+        prefix: None,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    }
+}
+
+/// Compile `if route.<expr> { reject }` guarded by `everything-else:
+/// accept`, so a matching guard yields `Deny` and a non-matching one
+/// falls through to `Permit`.
+fn reject_if(guard: &str) -> crate::ir::CompiledChain {
+    compile_ok(&format!(
+        "policy guard {{ term t {{ if {guard} {{ reject }} }} term rest {{ accept }} }}"
+    ))
+}
+
+/// LAN-209 class guard: for EVERY structurally-absent route attribute
+/// that supports `==`/`!=`, an absent attribute must match **neither**
+/// operator (mirroring the next-hop fix). This fails loudly if any
+/// field's `!=` ever lowers back to `Not(<X>Eq)` (which matches on
+/// absent) — a future comparable field cannot silently reintroduce the
+/// bug without tripping this table.
+///
+/// `local-pref`/`med` are deliberately excluded: they carry RFC 4271
+/// implicit defaults (100/0), so their "absent" is a real value that
+/// legitimately compares — they are not part of the absent-`!=` class.
+#[test]
+fn absent_route_attribute_matches_neither_eq_nor_ne() {
+    // (field expression, a literal it compares against)
+    let fields = [
+        ("route.next-hop", "192.0.2.1"),
+        ("route.prefix", "10.0.0.0/24"),
+        ("route.route-type", "external"),
+        ("route.evpn-route-type", "3"),
+    ];
+    let absent = absent_ctx();
+    for (field, literal) in fields {
+        for op in ["==", "!="] {
+            let chain = reject_if(&format!("{field} {op} {literal}"));
+            assert_eq!(
+                chain.evaluate(&absent).action,
+                PolicyAction::Permit,
+                "absent `{field}` must not match `{field} {op} {literal}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn evpn_route_type_ne_absent_does_not_match() {
+    // A non-EVPN route (absent evpn-route-type) must match neither `==`
+    // nor `!=` — `Not(EvpnRouteTypeIs)` used to match every such route.
+    let chain = reject_if("route.evpn-route-type != 3");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::EvpnRouteTypeNe(3)
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        evpn_route_type: Some(2),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        evpn_route_type: Some(3),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent evpn-route-type must not match `!= 3`"
+    );
+}
+
+#[test]
+fn prefix_ne_absent_does_not_match() {
+    // A prefixless route (BGP-LS / RTC NLRIs) must match neither `==`
+    // nor `!=` — `Not(PrefixEq)` used to match every prefixless route.
+    let chain = reject_if("route.prefix != 10.0.0.0/24");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::PrefixNe {
+            prefix: v4(10, 0, 0, 0, 24),
+            ge: None,
+            le: None,
+        }
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        prefix: Some(v4(198, 51, 100, 0, 24)),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        prefix: Some(v4(10, 0, 0, 0, 24)),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent prefix must not match `!= 10.0.0.0/24`"
+    );
+}
+
+#[test]
+fn route_type_ne_absent_does_not_match() {
+    // A route with no source class must match neither `==` nor `!=` —
+    // `Not(RouteTypeIs)` used to match when the route-type was absent.
+    let chain = reject_if("route.route-type != external");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::RouteTypeNe(crate::engine::RouteType::External)
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        route_type: Some(crate::engine::RouteType::Local),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        route_type: Some(crate::engine::RouteType::External),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent route-type must not match `!= external`"
+    );
+}

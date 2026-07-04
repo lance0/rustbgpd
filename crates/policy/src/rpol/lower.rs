@@ -362,6 +362,7 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one arm per comparable policy field")]
 fn lower_cmp(
     field: &super::ast::FieldPath,
     op: CmpOp,
@@ -373,12 +374,20 @@ fn lower_cmp(
         Field::LocalPref => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::LocalPref),
         Field::Med => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::Med),
         Field::AsPathLen => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::AsPathLen),
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: a
+        // non-EVPN route (absent evpn-route-type) must match neither `==`
+        // nor `!=` (LAN-209 class), and `Not(EvpnRouteTypeIs)` would
+        // wrongly match every non-EVPN route.
         Field::EvpnRouteType => {
             let Rhs::Int(value, _) = rhs else {
                 unreachable!("typechecked: evpn-route-type takes an integer literal")
             };
-            let node = MatchExpr::EvpnRouteTypeIs(u8::try_from(*value).expect("typechecked range"));
-            negate_if(op == CmpOp::Ne, node)
+            let evpn_type = u8::try_from(*value).expect("typechecked range");
+            if op == CmpOp::Ne {
+                MatchExpr::EvpnRouteTypeNe(evpn_type)
+            } else {
+                MatchExpr::EvpnRouteTypeIs(evpn_type)
+            }
         }
         Field::Rpki => {
             let node = MatchExpr::RpkiIs(match rhs_ident(rhs) {
@@ -396,13 +405,20 @@ fn lower_cmp(
             });
             negate_if(op == CmpOp::Ne, node)
         }
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
+        // route-type must match neither `==` nor `!=` (LAN-209 class),
+        // and `Not(RouteTypeIs)` would wrongly match when it is absent.
         Field::RouteType => {
-            let node = MatchExpr::RouteTypeIs(match rhs_ident(rhs) {
+            let route_type = match rhs_ident(rhs) {
                 "local" => crate::engine::RouteType::Local,
                 "internal" => crate::engine::RouteType::Internal,
                 _ => crate::engine::RouteType::External,
-            });
-            negate_if(op == CmpOp::Ne, node)
+            };
+            if op == CmpOp::Ne {
+                MatchExpr::RouteTypeNe(route_type)
+            } else {
+                MatchExpr::RouteTypeIs(route_type)
+            }
         }
         // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
         // next-hop must match neither `==` nor `!=` (LAN-209), and
@@ -454,16 +470,27 @@ fn lower_cmp(
             }));
             negate_if(op == CmpOp::Ne, node)
         }
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: a
+        // prefixless route (BGP-LS / RTC NLRIs) must match neither `==`
+        // nor `!=` (LAN-209 class), and `Not(PrefixEq)` would wrongly
+        // match when the prefix is absent.
         Field::Prefix => {
             let Rhs::Prefix(prefix, _) = rhs else {
                 unreachable!("typechecked: prefix compares a prefix")
             };
-            let node = MatchExpr::PrefixEq {
-                prefix: *prefix,
-                ge: None,
-                le: None,
-            };
-            negate_if(op == CmpOp::Ne, node)
+            if op == CmpOp::Ne {
+                MatchExpr::PrefixNe {
+                    prefix: *prefix,
+                    ge: None,
+                    le: None,
+                }
+            } else {
+                MatchExpr::PrefixEq {
+                    prefix: *prefix,
+                    ge: None,
+                    le: None,
+                }
+            }
         }
         Field::Communities | Field::LargeCommunities | Field::ExtCommunities | Field::AsPath => {
             unreachable!("typechecked: no direct comparison on lists")

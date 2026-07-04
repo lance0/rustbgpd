@@ -793,6 +793,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   guards that, like `==`, require the attribute present, so an absent
   next-hop matches neither. `!= peer.address` still reads peer identity
   (disqualifies update-group sharing).
+- **`.rpol` `route.prefix != …`, `route.route-type != …`, and
+  `route.evpn-route-type != …` no longer match a route missing that
+  attribute — closes the absent-`!=` class LAN-209 opened for
+  next-hop.** The same `!= → Not(<X>Eq)` lowering that flipped next-hop
+  affected every field whose `==` is false-on-absent: `route.prefix`
+  matched every prefixless route (BGP-LS / RTC NLRIs), `route.route-type`
+  matched when the source class was absent, and — the highest-impact
+  case — `route.evpn-route-type != N` matched **every non-EVPN route**
+  (they all carry no EVPN route type), silently rejecting normal unicast
+  traffic. Each now lowers to a dedicated `PrefixNe` / `RouteTypeNe` /
+  `EvpnRouteTypeNe` guard that, like `==`, requires the attribute
+  present, so an absent attribute matches neither operator. A class-guard
+  test asserts every absent-able comparable field matches neither `==`
+  nor `!=` when its attribute is absent, so a future field cannot
+  reintroduce the flip. (Fields with RFC 4271 implicit defaults —
+  `local-pref` / `med` — and the total-enum `rpki` / `aspa` states were
+  audited and are correctly unaffected.)
 - **Policy hit-counter attribution no longer risks a panic on a stale
   counter set (LAN-192).** `evaluate_with_attribution_counting` indexed
   the per-policy and per-term counter arrays directly; a counter set
