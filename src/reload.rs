@@ -428,6 +428,24 @@ pub(crate) async fn apply_reload_outcome(
     {
         return Err("config_bridge");
     }
+
+    // Per-peer `log_level` is a LIVE field (reload matrix): re-apply the
+    // tracing filter so level edits take effect without a restart. This is
+    // the single choke point every successful reload flows through, so it
+    // catches a log_level change regardless of which diff bucket carried it.
+    // Directives come from the operator's on-disk `desired` config (the
+    // live intent for this live field); the telemetry layer rebuilds the
+    // full filter (RUST_LOG base + all per-peer directives), so the global
+    // base level always survives. Reapplying identical directives is a
+    // no-op; a malformed directive leaves the live filter untouched. A
+    // failure here is non-fatal — the config is already committed — so warn
+    // rather than unwind the reload.
+    if let Err(error) =
+        rustbgpd_telemetry::reload_per_peer_directives(&reloaded.desired.per_peer_log_directives())
+    {
+        warn!(error = %error, "failed to re-apply per-peer log_level filter on config reload");
+    }
+
     Ok(reloaded.runtime)
 }
 

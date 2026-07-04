@@ -594,8 +594,10 @@ short version for first deployment:
 For deeper investigation, raise the daemon log level globally via
 `[global.telemetry] log_format = "json"` and per-peer via
 `[[neighbors]] log_level = "debug"`. Restart required for the global
-setting; per-peer log_level is **live** (see the
-[reload matrix](reload-matrix.md)).
+setting; per-peer log_level is **live** — re-applied on SIGHUP via a
+tracing reload handle that rebuilds the filter (base level plus every
+per-peer directive), so a level edit takes effect without a restart (see
+the [reload matrix](reload-matrix.md)).
 
 ## Related
 

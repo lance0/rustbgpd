@@ -1420,8 +1420,12 @@ impl Config {
     }
     /// Build `tracing` filter directives for per-peer log level overrides.
     ///
-    /// Returns directives like `peer{peer_addr=10.0.0.1}=debug` that can be
-    /// appended to an `EnvFilter`.
+    /// Returns directives like `[peer{peer_addr=10.0.0.1}]=debug` that can
+    /// be appended to an `EnvFilter`. The span directive MUST be wrapped in
+    /// square brackets — `peer{...}=level` (no brackets) is rejected by the
+    /// `EnvFilter` directive parser (`error parsing level filter`), which
+    /// would make `init_logging` fail and abort daemon boot the moment any
+    /// neighbor set a `log_level`.
     pub fn per_peer_log_directives(&self) -> Vec<String> {
         let mut directives = Vec::new();
         for neighbor in &self.neighbors {
@@ -1434,7 +1438,7 @@ impl Config {
             });
             if let Some(level) = level {
                 directives.push(format!(
-                    "peer{{peer_addr={addr}}}={level}",
+                    "[peer{{peer_addr={addr}}}]={level}",
                     addr = neighbor.address
                 ));
             }

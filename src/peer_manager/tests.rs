@@ -3528,6 +3528,197 @@ fn build_transport_config_preserves_local_role_for_otc() {
     );
 }
 
+/// Class guard for the "config knob parsed/validated/displayed but never
+/// reaches its runtime consumer" bug (#702, `per_client_best` dropped in
+/// `build_transport_config`; caught only by the M83 real-stack lab because
+/// the RIB/CLI unit layers are wired above this seam). This pins the
+/// `PeerManagerNeighborConfig` → `TransportConfig` seam as a whole so a
+/// future dropped copy fails a unit test, not a lab.
+///
+/// Two guards, deliberately layered:
+///
+/// 1. **Compile-time (new field):** the destructure below names EVERY
+///    field with NO `..`. Add a field to `PeerManagerNeighborConfig` and
+///    THIS test stops compiling — forcing an explicit decision: transport
+///    field (assert it) or one of the three non-transport fields
+///    (`description`, `import_policy`, `export_policy` — RIB/label side,
+///    not a session property; add it to the `_`-bound exclusions).
+///
+/// 2. **Run-time (dropped copy of an existing field):** every transport
+///    field is set to a non-default sentinel and asserted against the
+///    resulting `TransportConfig`. A field left at `TransportConfig::new`'s
+///    default would pass a weaker test even with the copy missing, so the
+///    sentinels are chosen to differ from those defaults.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn build_transport_config_reflects_every_transport_field() {
+    let (_, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let config = PeerManagerNeighborConfig {
+        address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        interface: Some("test-if".to_string()),
+        scope_id: Some(7),
+        remote_asn: 65002,
+        description: "sentinel-description".to_string(),
+        peer_group: Some("rr-clients".to_string()),
+        hold_time: Some(240),
+        send_hold_time: Some(600),
+        max_prefixes: Some(1000),
+        md5_password: Some("hunter2".to_string()),
+        tcp_ao: Some(rustbgpd_transport::TcpAoConfig {
+            key: "ao-secret".to_string(),
+            send_id: 11,
+            recv_id: 22,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        }),
+        ttl_security: true,
+        families: vec![(Afi::Ipv6, Safi::Unicast)],
+        graceful_restart: true,
+        gr_restart_time: 300,
+        gr_stale_routes_time: 720,
+        llgr_stale_time: 3600,
+        gr_restart_eligible: false,
+        local_ipv6_nexthop: Some("2001:db8::1".parse().unwrap()),
+        route_reflector_client: true,
+        orr_vantage: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
+        route_server_client: true,
+        per_client_best: true,
+        remove_private_as: rustbgpd_transport::RemovePrivateAs::All,
+        add_path_receive: true,
+        add_path_send: true,
+        add_path_send_max: 4,
+        local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
+        strict_role: true,
+        prefix_orf_receive: true,
+        disable_ipv4_unicast: true,
+        import_policy: None,
+        export_policy: None,
+    };
+
+    // Destructure with NO `..`: a new field breaks compilation here.
+    let PeerManagerNeighborConfig {
+        address,
+        interface,
+        scope_id,
+        remote_asn,
+        description: _description, // NON-TRANSPORT: operator label only.
+        peer_group,
+        hold_time,
+        send_hold_time,
+        max_prefixes,
+        md5_password,
+        tcp_ao,
+        ttl_security,
+        families,
+        graceful_restart,
+        gr_restart_time,
+        gr_stale_routes_time,
+        llgr_stale_time,
+        gr_restart_eligible,
+        local_ipv6_nexthop,
+        route_reflector_client,
+        orr_vantage,
+        route_server_client,
+        per_client_best,
+        remove_private_as,
+        add_path_receive,
+        add_path_send,
+        add_path_send_max,
+        local_role,
+        strict_role,
+        prefix_orf_receive,
+        disable_ipv4_unicast,
+        import_policy: _import_policy, // NON-TRANSPORT: RIB-side policy chain.
+        export_policy: _export_policy, // NON-TRANSPORT: RIB-side policy chain.
+    } = &config;
+
+    let t = mgr.build_transport_config(&config);
+
+    assert_eq!(t.remote_addr.ip(), *address, "address");
+    assert_eq!(t.peer_interface, *interface, "interface");
+    assert_eq!(t.peer_scope_id, *scope_id, "scope_id");
+    assert_eq!(t.peer.remote_asn, *remote_asn, "remote_asn");
+    assert_eq!(t.peer_group, *peer_group, "peer_group");
+    assert_eq!(t.peer.hold_time, hold_time.unwrap(), "hold_time");
+    assert_eq!(
+        t.peer.send_hold_time,
+        send_hold_time.unwrap(),
+        "send_hold_time"
+    );
+    assert_eq!(t.max_prefixes, *max_prefixes, "max_prefixes");
+    assert_eq!(t.md5_password, *md5_password, "md5_password");
+    assert_eq!(t.tcp_ao, *tcp_ao, "tcp_ao");
+    assert_eq!(t.ttl_security, *ttl_security, "ttl_security");
+    assert_eq!(t.peer.families, *families, "families");
+    assert_eq!(
+        t.peer.graceful_restart, *graceful_restart,
+        "graceful_restart"
+    );
+    assert_eq!(t.peer.gr_restart_time, *gr_restart_time, "gr_restart_time");
+    assert_eq!(
+        t.gr_stale_routes_time, *gr_stale_routes_time,
+        "gr_stale_routes_time"
+    );
+    assert_eq!(t.llgr_stale_time, *llgr_stale_time, "llgr_stale_time");
+    // `gr_restart_eligible` only opens the restart window when the manager
+    // holds a live `local_gr_restart_until` deadline (none here), so it
+    // resolves to `None`. The window→Some path has its own dedicated test
+    // (`build_transport_config_sets_restart_window_for_eligible_static_peer`);
+    // here we just keep the field named/consumed and pin the disabled outcome.
+    assert!(!*gr_restart_eligible);
+    assert!(t.gr_restart_until.is_none(), "gr_restart_until");
+    assert_eq!(
+        t.local_ipv6_nexthop, *local_ipv6_nexthop,
+        "local_ipv6_nexthop"
+    );
+    assert_eq!(
+        t.route_reflector_client, *route_reflector_client,
+        "route_reflector_client"
+    );
+    assert_eq!(t.orr_vantage, *orr_vantage, "orr_vantage");
+    assert_eq!(
+        t.route_server_client, *route_server_client,
+        "route_server_client"
+    );
+    // The #702 field: this is the exact assertion the class of tests exists
+    // to make impossible to lose again.
+    assert_eq!(t.per_client_best, *per_client_best, "per_client_best");
+    assert_eq!(t.remove_private_as, *remove_private_as, "remove_private_as");
+    assert_eq!(
+        t.peer.add_path_receive, *add_path_receive,
+        "add_path_receive"
+    );
+    assert_eq!(t.peer.add_path_send, *add_path_send, "add_path_send");
+    assert_eq!(
+        t.peer.add_path_send_max, *add_path_send_max,
+        "add_path_send_max"
+    );
+    assert_eq!(t.peer.local_role, *local_role, "local_role");
+    assert_eq!(t.peer.strict_role, *strict_role, "strict_role");
+    assert_eq!(
+        t.peer.prefix_orf_receive, *prefix_orf_receive,
+        "prefix_orf_receive"
+    );
+    assert_eq!(
+        t.peer.disable_ipv4_unicast, *disable_ipv4_unicast,
+        "disable_ipv4_unicast"
+    );
+}
+
 #[tokio::test]
 async fn policy_events_publish_successful_policy_mutations() {
     use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
