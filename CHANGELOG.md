@@ -790,6 +790,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer see Loc-RIB RM with no preceding Loc-RIB PeerUp. The
   connect-time Loc-RIB dump path was already safe (it skips the dump on
   a dropped PeerUp).
+
+- **Config persistence now fsyncs before rename (LAN-206).**
+  `ConfigPersister::persist()` wrote the temp config with `fs::write` +
+  `fs::rename` and never called `sync_all()` on the temp file or fsynced
+  the parent directory, so a crash in the settle window could leave a
+  torn/zero-length config that fails to parse on the next boot — on
+  *every* gRPC config mutation. It now routes through the same
+  write-tmp+fsync+rename+fsync-dir primitive the commit-confirm journal
+  uses (`confirm_journal::write_atomic`).
+
+- **Boot revert can no longer leave the config file missing (LAN-207).**
+  `boot_revert_check` renames the on-disk candidate to
+  `<config>.unconfirmed` before writing the restored pre-transaction
+  config; if that write failed, the config file was gone and boot
+  refused with nothing left to load. The candidate is now put back on a
+  restore-write failure, and the refusal message names the
+  `<config>.unconfirmed` backup slot and an explicit `rm <journal>`
+  recovery command.
+
+- **A journal-removal failure at boot no longer loops and clobbers the
+  saved-aside candidate (LAN-208).** After a successful restore, if the
+  journal could not be removed, `boot_revert_check` returned `Err`;
+  under systemd `Restart=` that looped boot, and each iteration renamed
+  the already-reverted config over the real `<config>.unconfirmed`
+  candidate, destroying it. Boot now proceeds from the restored config,
+  surfaces the retained journal
+  (`config_transaction_lifecycle{operation="boot_revert",outcome="failure"}`
+  metric + loud ERROR/banner telling the operator to delete it) instead
+  of looping.
+
+- **Oversized commit-confirm journals are rejected before parse
+  (LAN-204).** A corrupt journal with a huge `rollback_toml` could OOM
+  during boot deserialization; boot now refuses (fail closed) any
+  journal larger than 10 MB before reading it.
+
 - **The library target now builds under `--all-features` (LAN-198).**
   The lib exposes `pub mod config` only under `bench-internals`, and
   `config`'s reload-diff logic (`classify_evpn_runtime_change`) reaches
