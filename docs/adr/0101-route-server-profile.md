@@ -15,8 +15,8 @@ layers testing green) — fixed in the M83 change with a unit pin.
 ## Context
 
 The ROADMAP's route-server item named one load-bearing gap versus
-BIRD/OpenBGPd at an IXP: **RFC 7948 path-hiding mitigation for members
-that cannot do Add-Path**. A design pass over main verified that the
+BIRD/OpenBGPd at an IXP: **RFC 7947 §2.3.2 path-hiding mitigation for
+members that cannot do Add-Path**. A design pass over main verified that the
 transparency core of RFC 7947 §2.2 had already shipped in ADR-0039
 (`route_server_client`, FRR interop receipt M19) — at the transport seam
 (`crates/transport/src/session/outbound.rs`, `prepare_outbound_attributes`):

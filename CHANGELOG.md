@@ -115,17 +115,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the script header (FRR: per-neighbor `no enforce-first-as`; BIRD:
   `enforce first as off`; GoBGP: no enforcement exists).
 
-- **Fixed: `per_client_best` never reached live sessions.** The knob
-  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
-  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
-  `PeerManager::build_transport_config` never copied it into the
-  transport session config, so every configured peer silently
-  registered single-best and `rbgp neighbor` reported `Distribution
-  Mode: single-best` regardless of config. Caught live by the M83 lab
-  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
-  seam); fixed with a one-line copy plus a
-  `build_transport_config_preserves_per_client_best` unit pin.
-
 - **M82 interop receipt: EVPN VLAN-Aware Bundle (non-zero Ethernet
   Tag) route reflection — including rustbgpd's FIRST vendor-NOS interop
   leg (Nokia SR Linux 25.10).** The ADR-0092 Decision 6 proof ladder,
@@ -775,6 +764,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "Crash-restart adoption across upgrades (ADR-0082)".
 
 ### Fixed
+
+- **`per_client_best` never reached live sessions.** The knob
+  (RFC 7947 §2.3.2 per-client best-path, #696) parsed, validated,
+  survived SIGHUP diffs, and displayed in the docs/reload matrix — but
+  `PeerManager::build_transport_config` never copied it into the
+  transport session config, so every configured peer silently
+  registered single-best and `rbgp neighbor` reported `Distribution
+  Mode: single-best` regardless of config. Caught live by the M83 lab
+  (the RIB- and CLI-layer tests from #696/#698 sit above the dropped
+  seam); fixed with a one-line copy plus a
+  `build_transport_config_preserves_per_client_best` unit pin.
 
 - **`ApplyEvpnRuntime` with `validate_only` now rejects what a real apply
   would reject (LAN-214 #9).** The dry-run path returned
