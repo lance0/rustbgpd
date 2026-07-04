@@ -335,6 +335,12 @@ impl CompiledChain {
             MatchExpr::PrefixEq { prefix, ge, le } => ctx
                 .prefix
                 .is_some_and(|candidate| prefix_entry_matches(*prefix, *ge, *le, candidate)),
+            // `!=` mirrors `==`: a prefixless route (BGP-LS / RTC NLRIs)
+            // matches neither, so require the prefix present before
+            // testing non-containment.
+            MatchExpr::PrefixNe { prefix, ge, le } => ctx
+                .prefix
+                .is_some_and(|candidate| !prefix_entry_matches(*prefix, *ge, *le, candidate)),
             MatchExpr::PrefixInSet(id) => ctx
                 .prefix
                 .is_some_and(|candidate| self.prefix_sets[id.0 as usize].matches(candidate)),
@@ -368,7 +374,14 @@ impl CompiledChain {
                 set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group)
             }
             MatchExpr::RouteTypeIs(route_type) => ctx.route_type == Some(*route_type),
+            // `!=` mirrors `==`: an absent route-type matches neither.
+            MatchExpr::RouteTypeNe(route_type) => ctx.route_type.is_some_and(|t| t != *route_type),
             MatchExpr::EvpnRouteTypeIs(evpn_type) => ctx.evpn_route_type == Some(*evpn_type),
+            // `!=` mirrors `==`: a non-EVPN route (absent
+            // evpn-route-type) matches neither.
+            MatchExpr::EvpnRouteTypeNe(evpn_type) => {
+                ctx.evpn_route_type.is_some_and(|t| t != *evpn_type)
+            }
             MatchExpr::RpkiIs(state) => ctx.validation_state == *state,
             MatchExpr::AspaIs(state) => ctx.aspa_state == *state,
         }

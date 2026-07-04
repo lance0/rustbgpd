@@ -570,6 +570,16 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
             }
             out
         }
+        MatchExpr::PrefixNe { prefix, ge, le } => {
+            let mut out = format!("route.prefix != {prefix}");
+            if let Some(ge) = ge {
+                let _ = write!(out, " ge {ge}");
+            }
+            if let Some(le) = le {
+                let _ = write!(out, " le {le}");
+            }
+            out
+        }
         MatchExpr::CommunityContains(cm) => {
             format!(
                 "{} has {}",
@@ -622,8 +632,14 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::RouteTypeIs(route_type) => {
             format!("route.route-type == {}", route_type_label(*route_type))
         }
+        MatchExpr::RouteTypeNe(route_type) => {
+            format!("route.route-type != {}", route_type_label(*route_type))
+        }
         MatchExpr::EvpnRouteTypeIs(evpn_type) => {
             format!("route.evpn-route-type == {evpn_type}")
+        }
+        MatchExpr::EvpnRouteTypeNe(evpn_type) => {
+            format!("route.evpn-route-type != {evpn_type}")
         }
         MatchExpr::RpkiIs(state) => format!(
             "route.rpki == {}",
