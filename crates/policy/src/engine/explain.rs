@@ -598,7 +598,9 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::LocalPref(cmp) => render_cmp("route.local-pref", *cmp),
         MatchExpr::Med(cmp) => render_cmp("route.med", *cmp),
         MatchExpr::NextHopEq(addr) => format!("route.next-hop == {addr}"),
+        MatchExpr::NextHopNe(addr) => format!("route.next-hop != {addr}"),
         MatchExpr::NextHopEqPeer => "route.next-hop == peer.address".to_string(),
+        MatchExpr::NextHopNePeer => "route.next-hop != peer.address".to_string(),
         MatchExpr::NeighborIn(set) => {
             let mut parts: Vec<String> = Vec::new();
             for addr in &set.addresses {

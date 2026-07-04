@@ -57,8 +57,9 @@ pub enum Cmp {
 /// - Prefix nodes never match a prefixless route (e.g. BGP-LS NLRIs).
 /// - [`Cmp`] on `LocalPref` / `Med` sees the RFC 4271 implicit defaults
 ///   (`LOCAL_PREF` 100, `MED` 0) when the attribute is absent.
-/// - `RouteTypeIs` / `EvpnRouteTypeIs` / `NextHopEq` never match when
-///   the corresponding context field is `None`.
+/// - `RouteTypeIs` / `EvpnRouteTypeIs` / `NextHopEq` / `NextHopNe`
+///   never match when the corresponding context field is `None` (`!=`
+///   mirrors `==`: an absent attribute satisfies neither).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchExpr {
     /// Always matches (an unconditional term).
@@ -97,6 +98,17 @@ pub enum MatchExpr {
     /// on an export chain the verdict is per-target-peer and the peer
     /// must not join an update group.
     NextHopEqPeer,
+    /// The route's next-hop differs from this address. Unlike
+    /// `Not(NextHopEq(_))`, this never matches when the next-hop is
+    /// absent — `!=` mirrors `==`, so an absent attribute satisfies
+    /// neither.
+    NextHopNe(IpAddr),
+    /// The route's next-hop differs from the evaluation peer's address
+    /// (strict next-hop `!=`, `.rpol` `route.next-hop != peer.address`).
+    /// Never matches when either side is unknown. Like
+    /// [`NextHopEqPeer`](Self::NextHopEqPeer) it reads peer identity, so
+    /// it counts toward [`CompiledChain::requires_peer_context`].
+    NextHopNePeer,
     /// The evaluation peer matches a neighbor set (address, ASN, or
     /// peer-group membership — OR within the set). Boxed: the set is
     /// three `Vec`s (72 bytes) and would otherwise dominate every
@@ -134,6 +146,8 @@ impl MatchExpr {
             | MatchExpr::Med(_)
             | MatchExpr::NextHopEq(_)
             | MatchExpr::NextHopEqPeer
+            | MatchExpr::NextHopNe(_)
+            | MatchExpr::NextHopNePeer
             | MatchExpr::RouteTypeIs(_)
             | MatchExpr::EvpnRouteTypeIs(_)
             | MatchExpr::RpkiIs(_)
@@ -309,7 +323,8 @@ impl CompiledChain {
     /// Whether evaluating this chain depends on the evaluation peer's
     /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
     /// ASN, or peer-group matching — or a strict-next-hop
-    /// [`MatchExpr::NextHopEqPeer`] node). Content-equal chains with
+    /// [`MatchExpr::NextHopEqPeer`] / [`MatchExpr::NextHopNePeer`]
+    /// node). Content-equal chains with
     /// such a guard can still yield peer-different verdicts, so
     /// update-group fingerprinting must not group peers that share one.
     /// Import chains are evaluated per-session and are unaffected by
@@ -317,7 +332,10 @@ impl CompiledChain {
     #[must_use]
     pub fn requires_peer_context(&self) -> bool {
         self.any_guard_node(&|expr| {
-            matches!(expr, MatchExpr::NeighborIn(_) | MatchExpr::NextHopEqPeer)
+            matches!(
+                expr,
+                MatchExpr::NeighborIn(_) | MatchExpr::NextHopEqPeer | MatchExpr::NextHopNePeer
+            )
         })
     }
 

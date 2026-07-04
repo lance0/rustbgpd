@@ -1256,10 +1256,9 @@ pub fn apply_modifications(
         &mods.communities_add,
         &mods.communities_remove,
         |a| match a {
-            PathAttribute::Communities(c) => Some(c),
+            PathAttribute::Communities(c) => Some(c.clone()),
             _ => None,
         },
-        |a| matches!(a, PathAttribute::Communities(_)),
         PathAttribute::Communities,
     );
 
@@ -1276,10 +1275,9 @@ pub fn apply_modifications(
         &mods.large_communities_add,
         &mods.large_communities_remove,
         |a| match a {
-            PathAttribute::LargeCommunities(c) => Some(c),
+            PathAttribute::LargeCommunities(c) => Some(c.clone()),
             _ => None,
         },
-        |a| matches!(a, PathAttribute::LargeCommunities(_)),
         PathAttribute::LargeCommunities,
     );
 
@@ -1314,12 +1312,17 @@ fn upsert_attr(
 }
 
 /// Add/remove community-style attributes (standard, extended, large).
+///
+/// `extract` both matches and extracts in one shot — `Some(items)` for
+/// the community kind this call operates on, `None` otherwise — so a
+/// matching predicate can never be paired with a non-yielding extractor
+/// (the disagreement a separate predicate/extractor pair could panic
+/// on).
 fn apply_community_mods<T: Clone + Eq + Hash>(
     attrs: &mut Vec<PathAttribute>,
     add: &[T],
     remove: &[T],
-    extract: impl Fn(PathAttribute) -> Option<Vec<T>>,
-    predicate: impl Fn(&PathAttribute) -> bool,
+    extract: impl Fn(&PathAttribute) -> Option<Vec<T>>,
     wrap: impl Fn(Vec<T>) -> PathAttribute,
 ) {
     if add.is_empty() && remove.is_empty() {
@@ -1330,10 +1333,10 @@ fn apply_community_mods<T: Clone + Eq + Hash>(
     let mut found = false;
     let mut index = 0;
     while index < attrs.len() {
-        if predicate(&attrs[index]) {
-            let attr = attrs.remove(index);
+        if let Some(extracted) = extract(&attrs[index]) {
+            attrs.remove(index);
             if !found {
-                items = extract(attr).expect("community attribute predicate and extractor agree");
+                items = extracted;
                 found = true;
             }
         } else {

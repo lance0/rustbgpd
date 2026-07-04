@@ -111,9 +111,10 @@ impl CompiledChain {
     /// plus live hit counting: every matched guard bumps its term's
     /// counter (relaxed; `Continue` terms included, terms after the
     /// decider are never evaluated and never count) and the chain-level
-    /// evaluation count increments once. `hits` must have been built
-    /// from this chain ([`PolicyHitCounters::for_chain`]); a mismatched
-    /// shape is a caller bug (the increment indexes directly).
+    /// evaluation count increments once. `hits` is expected to have
+    /// been built from this chain ([`PolicyHitCounters::for_chain`]); a
+    /// set shorter than the chain (e.g. a stale hot-reload leftover)
+    /// degrades to skipped increments rather than a panic.
     #[must_use]
     pub fn evaluate_with_attribution_counting(
         &self,
@@ -136,7 +137,13 @@ impl CompiledChain {
         let mut accumulated = RouteModifications::default();
         for (policy_index, policy) in self.policies.iter().enumerate() {
             let policy_hits = if COUNT {
-                hits.map(|h| h.policies[policy_index].as_slice())
+                // Counters are shaped for — and live on — the chain they
+                // were built from (they are replaced together), so a set
+                // shorter than the chain is a construction impossibility.
+                // `get` rather than `[]` keeps that invariant a
+                // stat-undercount rather than a daemon panic if a future
+                // refactor ever breaks it on this production path.
+                hits.and_then(|h| h.policies.get(policy_index).map(Vec::as_slice))
             } else {
                 None
             };
@@ -273,7 +280,13 @@ impl CompiledChain {
         for (term_index, term) in policy.terms.iter().enumerate() {
             if self.eval_expr(&term.guard, ctx) {
                 if COUNT && let Some(hits) = hits {
-                    hits[term_index].fetch_add(1, Ordering::Relaxed);
+                    // Same shape invariant as the per-policy slice: a
+                    // term row shorter than the policy is impossible by
+                    // construction, but `get` degrades to a skipped
+                    // increment instead of a panic if it ever isn't.
+                    if let Some(counter) = hits.get(term_index) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 match &term.action {
                     TermAction::Permit(mods) => {
@@ -336,10 +349,19 @@ impl CompiledChain {
             }
             MatchExpr::Med(cmp) => cmp_value(*cmp, ctx.med.unwrap_or(IMPLICIT_MED)),
             MatchExpr::NextHopEq(next_hop) => ctx.next_hop == Some(*next_hop),
+            // `!=` mirrors `==`: an absent next-hop matches neither, so
+            // require the attribute to be present before comparing.
+            MatchExpr::NextHopNe(next_hop) => ctx.next_hop.is_some_and(|nh| nh != *next_hop),
             // Strict next-hop: both sides must be known; two unknowns
             // are not a match.
             MatchExpr::NextHopEqPeer => match (ctx.next_hop, ctx.peer_address) {
                 (Some(next_hop), Some(peer)) => next_hop == peer,
+                _ => false,
+            },
+            // Strict next-hop `!=`: like `==`, both sides must be known;
+            // an absent next-hop or peer never matches.
+            MatchExpr::NextHopNePeer => match (ctx.next_hop, ctx.peer_address) {
+                (Some(next_hop), Some(peer)) => next_hop != peer,
                 _ => false,
             },
             MatchExpr::NeighborIn(set) => {
@@ -556,5 +578,59 @@ mod tests {
         // A prefixless route (e.g. BGP-LS) never matches prefix nodes.
         let (result, _) = chain.evaluate_with_attribution(&ctx(None));
         assert_eq!(result.action, PolicyAction::Deny);
+    }
+
+    /// LAN-192: a counter set shorter than the chain (a stale hot-reload
+    /// leftover) must degrade to skipped increments, not an index panic
+    /// on the production evaluation path.
+    #[test]
+    fn stale_short_counter_set_does_not_panic() {
+        use super::PolicyHitCounters;
+
+        // Counters shaped for a 1-policy / 1-term chain…
+        let small = single_term_chain(MatchExpr::True, Vec::new());
+        let counters = PolicyHitCounters::for_chain(&small);
+
+        // …applied to a larger chain: policy 0 visits two terms (the
+        // second is out of the 1-term counter row) and policy 1 is out
+        // of the 1-policy counter set entirely.
+        let big = CompiledChain {
+            policies: vec![
+                CompiledPolicy {
+                    name: Some("p0".to_string()),
+                    terms: vec![
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: TermAction::Continue(RouteModifications::default()),
+                        },
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: TermAction::Permit(RouteModifications::default()),
+                        },
+                    ],
+                    default_action: PolicyAction::Deny,
+                    source: PolicySource::Toml,
+                },
+                CompiledPolicy {
+                    name: Some("p1".to_string()),
+                    terms: vec![Term {
+                        name: None,
+                        guard: MatchExpr::True,
+                        action: TermAction::Permit(RouteModifications::default()),
+                    }],
+                    default_action: PolicyAction::Deny,
+                    source: PolicySource::Toml,
+                },
+            ],
+            ..CompiledChain::empty()
+        };
+
+        let (result, _) = big.evaluate_with_attribution_counting(&ctx(None), &counters);
+        assert_eq!(result.action, PolicyAction::Permit);
+        // In-range term still counted; out-of-range slots skipped.
+        assert_eq!(counters.snapshot(), vec![vec![1]]);
+        assert_eq!(counters.evals(), 1);
     }
 }

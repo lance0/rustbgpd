@@ -156,6 +156,39 @@ fn apply_community_add_remove_preserves_order_and_legacy_attr_position() {
 }
 
 #[test]
+fn apply_community_mods_collapses_duplicate_attributes() {
+    // A route carrying two Communities attributes (malformed but
+    // wire-reachable): the merged match+extract closure removes every
+    // matching attribute and keeps the first's values, with no panic
+    // from a predicate/extractor disagreement (LAN-175).
+    let c1 = (65001u32 << 16) | 0x0064;
+    let c2 = (65001u32 << 16) | 0x00C8;
+    let c3 = (65001u32 << 16) | 0x012C;
+    let mut attrs = vec![
+        PathAttribute::Communities(vec![c1]),
+        PathAttribute::Communities(vec![c2]),
+    ];
+    let mods = RouteModifications {
+        communities_add: vec![c3],
+        ..Default::default()
+    };
+
+    apply_modifications(&mut attrs, &mods);
+
+    let comms: Vec<&Vec<u32>> = attrs
+        .iter()
+        .filter_map(|a| match a {
+            PathAttribute::Communities(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(comms.len(), 1, "duplicate community attributes collapsed");
+    // First attribute's value survives (first-attr-wins), plus the add;
+    // the second attribute's value is dropped.
+    assert_eq!(comms[0], &vec![c1, c3]);
+}
+
+#[test]
 fn merge_exact_community_lists_preserves_later_wins_order() {
     let c1 = (65001u32 << 16) | 0x0064;
     let c2 = (65001u32 << 16) | 0x00C8;
