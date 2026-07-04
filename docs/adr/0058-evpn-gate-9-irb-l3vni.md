@@ -277,7 +277,7 @@ The supervisor consumes the broadcast as it already does for
 
 ### 8. CLI visibility (Step 5 preview)
 
-A new `rustbgpctl evpn vrfs` subcommand prints:
+A new `rbgp evpn vrfs` subcommand prints:
 
 ```
 NAME         VNI    STATUS       VRF        L3VXLAN     ROUTER_MAC          ORIGINATED  RECEIVED
@@ -374,7 +374,7 @@ shape as actually merged:
    edge-triggered output, not a 5 s spam loop.
 7. **CLI / report visibility slice.** Adds `IpVrfStatus` rows to
    `DataplaneReport`, a `ListIpVrfs` / `GetIpVrf` gRPC RPC, and the
-   `rustbgpctl evpn vrfs [NAME]` command. Surfaces IP-VRF
+   `rbgp evpn vrfs [NAME]` command. Surfaces IP-VRF
    readiness so the operator can see it before any FIB programming
    ships.
 8. **End-to-end wiring + M39 interop smoke.** Supervisor consumes

@@ -123,7 +123,7 @@ gracefully resetting the affected live dynamic sessions after persist.**
    live dynamic sessions keep their running config until reconnect. Bouncing
    customers as a side effect of a reload or a single-object RPC — with no
    plan preview — is an operator surprise; the transaction path is the one
-   with `PlanConfigTransaction`/`rustbgpctl config plan` showing the blast
+   with `PlanConfigTransaction`/`rbgp config plan` showing the blast
    radius first, and gNMI Set inherits it by bridging onto the same
    controller. Upgrading the targeted path to the same reset is a follow-up
    decision, not blocked by anything here (the primitive is path-agnostic).
@@ -142,13 +142,13 @@ dropped with the reaped peer; the remote retries and is accepted fresh).
 
 ## Consequences
 
-- `rustbgpctl config apply` / gNMI Set can now commit a peer-group field
+- `rbgp config apply` / gNMI Set can now commit a peer-group field
   edit (e.g. `hold_time`) for a group serving `[[dynamic_neighbors]]`
   ranges — alone or mixed with static members — instead of `REJECTED`. The
   response reports reconfigured static sessions and signaled dynamic
   sessions separately, plus any signaling failures.
 - An operator editing a peer group behind a busy IX range takes a
-  full-range flap on commit. `rustbgpctl config plan` shows the impacted
+  full-range flap on commit. `rbgp config plan` shows the impacted
   ranges (with reasons) before apply; this is the deliberate trade against
   silently running sessions whose config disagrees with the committed one.
 - A known pre-existing wrinkle is unchanged: an admin-disabled dynamic peer

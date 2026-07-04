@@ -120,7 +120,7 @@ service InjectionService {
 }
 
 // Policy CRUD, chain assignment, and import-policy explain
-service PolicyService { /* 19 RPCs: policies, neighbor sets, chains, ExplainImportPolicy */ }
+service PolicyService { /* 21 RPCs: policies, neighbor sets, chains, ExplainImportPolicy, TestPolicy (dry-run), GetPolicyStats */ }
 
 // Peer group CRUD
 service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neighbor membership */ }
@@ -483,9 +483,10 @@ controller-driven injection for Type 2 / Type 3. What remains:
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
   members. The MAC-churn variant of the BUM-state soak passed
   2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
-  which unblocks flipping the `apply_bum_enforcement` and
-  `apply_aliasing_ecmp` defaults to `true`; the flip itself is a
-  separate release decision.
+  which motivated flipping the `apply_bum_enforcement` and
+  `apply_aliasing_ecmp` defaults to `true`, shipped in v0.23.0;
+  operators who need observe-only behavior set them = `false`
+  explicitly.
 - **Symmetric Interface-less IRB:** EVPN symmetric IRB (Type-5 / L3VNI) ships end-to-end in
   v0.18.0 — RFC 9136 §4.4.2 / ADR-0058. The `[[evpn_ip_vrfs]]`
   config object, `IpVrfStatus` readiness probe, Linux VRF +

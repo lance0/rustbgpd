@@ -178,12 +178,15 @@ that are stood up once at startup. Two flags are hot-pluggable.
 | `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. |
 | `install_blackhole_discard` | restart-required | The RFC 7999 kernel-discard reconciler spawns once at startup. |
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
-| `apply_bum_enforcement` | restart-required | EVPN BUM-port enforcement is pinned per ADR-0058. |
 | `multipath_relax` | restart-required | RIB best-path tie-break behavior; reconciling mid-flight would require an Adj-RIB-Out rebuild. |
 | `link_bandwidth_weighted` | restart-required | Weighted-multipath behavior (ADR-0068). |
 | `dynamic_neighbor_limit` | restart-required | Pre-allocated cap on dynamic-neighbor slots. |
 | `worker_threads` | restart-required | Tokio runtime worker-thread count; the runtime is built once at startup. Unset caps to `min(CPU parallelism, 8)`; `RUSTBGPD_WORKER_THREADS` overrides. |
 | `runtime_state_dir` | restart-required | File-system paths (`gr-restart.toml`, `fib-owned.json`, `grpc.sock`) are bound at startup. |
+
+`apply_bum_enforcement` is **restart-required** but is a top-level
+(document-root) key, **not** a `[global]` key — EVPN BUM-port enforcement is
+pinned per ADR-0057.
 
 ### `[global.telemetry]`
 

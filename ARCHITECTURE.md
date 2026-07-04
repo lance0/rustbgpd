@@ -325,9 +325,14 @@ gRPC request
    through the same transaction executor. While a transaction is applying or
    pending confirmation, other persisted runtime config mutators return
    `FAILED_PRECONDITION`.
-5. Transaction state is process-local. A daemon restart during the confirm
-   window leaves the already-persisted candidate live and clears the in-memory
-   auto-revert timer; operators must re-plan after restart.
+5. Commit-confirm survives a restart durably (ADR-0076 Decision 6 amendment).
+   The pre-commit snapshot is journaled to
+   `<runtime_state_dir>/commit-confirm-journal.json` before the candidate
+   commits. A daemon restart inside the confirm window triggers a boot-time
+   revert (`boot_revert_check()`, per RFC 6241 §8.4): the pre-transaction
+   config is restored and the unconfirmed candidate is saved aside as
+   `<config>.unconfirmed`. A torn or unusable journal refuses boot rather than
+   guessing. See `tests/commit_confirm_binary.rs`.
 
 ### Graceful Shutdown
 

@@ -17,9 +17,11 @@ see [`../rr-evpn-fabric/`](../rr-evpn-fabric/).
   local EVI state on the RR; the leaf owns its own.
 - **Three `[[evpn_instances]]` blocks** showing the full operator
   surface:
-  - **VNI 10100** — the minimal shape: `vni`, `rd`, `route_targets`,
-    `local_vtep_ip`. Optional `bridge` set to `br100` for the Linux
-    dataplane reconciler.
+  - **VNI 10100** — the core shape: `vni`, `rd`, `route_targets`,
+    `local_vtep_ip`, with `bridge` set to `br100` for the Linux
+    dataplane reconciler. Also demonstrates `sticky_macs` (two pinned
+    anycast-gateway MACs) and `duplicate_mac_detection` (detect-only,
+    RFC 7432 defaults).
   - **VNI 10200** — adds `advertise_svi_mac = true` (RFC 9135 §6.1).
     The Linux dataplane captures the bridge link-layer address,
     surfaces it on `InstanceDataplaneStatus.bridge_mac`, and the
@@ -101,9 +103,9 @@ rbgp evpn instances --json
 Expected output (human format):
 
 ```
-vni=10100 rd=10.0.0.10:10100 vtep=10.0.0.10 rts=[65000:10100] bridge=br100
-vni=10200 rd=10.0.0.10:10200 vtep=10.0.0.10 rts=[65000:10200] bridge=br200 advertise-svi-mac
-vni=10300 rd=4200000000:300 vtep=10.0.0.10 rts=[65000:10300,65000:55000]
+vni=10100 rd=10.0.0.10:10100 vtep=10.0.0.10 rts=[65000:10100] readiness=ready bridge=br100 originated-local-macs=0
+vni=10200 rd=10.0.0.10:10200 vtep=10.0.0.10 rts=[65000:10200] readiness=ready bridge=br200 advertise-svi-mac originated-local-macs=0
+vni=10300 rd=4200000000:300 vtep=10.0.0.10 rts=[65000:10300,65000:55000] readiness=ready originated-local-macs=0
 ```
 
 The same state plus route/metric presence can be summarized with:

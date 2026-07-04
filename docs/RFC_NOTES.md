@@ -957,8 +957,9 @@ implemented per ADR-0040.
   aliasing projection, and a receive-side EAD-per-ES mass-withdraw
   filter. The 24 h MAC-churn soak passed 2026-05-16
   ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
-  which unblocks the production-default flip; the defaults still ship
-  as `false` so operators opt in deliberately before flipping.
+  which unblocks the production-default flip, and the flip landed:
+  `apply_bum_enforcement` / `apply_aliasing_ecmp` default to `true`
+  since v0.23.0, with explicit `= false` as the documented opt-out.
 - **M38 smoke** (`tests/interop/m38-evpn-df-election.clab.yml`):
   2-PE rustbgpd segment, asserts (1) PE1 elected DF, (2) PE2
   elected NonDF, (3) PE2 promotes to DF after PE1 shutdown,

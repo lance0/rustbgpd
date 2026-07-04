@@ -31,7 +31,7 @@ reset to empty on daemon restart.
 Only the route ring carries an `event_id` (`u64`, process-local
 monotonic, assigned at
 `crates/rib/src/manager/mod.rs:1033-1038`). The CLI's
-`rustbgpctl watch --backfill` flag (`crates/cli/src/commands/watch.rs:829-868`)
+`rbgp watch --backfill` flag (`crates/cli/src/commands/watch.rs:829-868`)
 uses that ID to deduplicate when it fetches history via
 `ListRouteEvents` and then subscribes to live events. **The dedup
 silently breaks across a daemon restart**: the new process resets
@@ -162,7 +162,7 @@ prior IDs. Behavior split by `[event_history].required`:
   `bgp_event_outbox_degraded` flag flips, and the durable surface
   reports "outbox disabled" on cursor RPCs. An operator who
   wants to resume durable mode runs an explicit
-  `rustbgpctl event-history reset-allocator --starting-id N`
+  `rbgp event-history reset-allocator --starting-id N`
   (P1 follow-up) that records the operator's chosen safe-jump
   value and the rationale in the new DB's metadata. The reset
   command's contract is "I have communicated the cursor break
@@ -387,7 +387,7 @@ Producers `try_send`. On full queue:
 - On the first non-zero drop in a process lifetime, flip the
   Prometheus gauge `bgp_event_outbox_degraded = 1`. **In v1 it never
   auto-clears** — operator restarts to
-  clear. A future `rustbgpctl event-history reset-health` command
+  clear. A future `rbgp event-history reset-health` command
   is a P1 nice-to-have.
 
 **Uniform drop across categories, deliberately.** We do not
@@ -680,7 +680,7 @@ reference bridge at `examples/event-bridge/`:
   restart-required.
 - **No auto-clear for `bgp_event_outbox_degraded`.** The flag stays
   set until restart in v1. A future
-  `rustbgpctl event-history reset-health` command is a P1 nice-to-
+  `rbgp event-history reset-health` command is a P1 nice-to-
   have.
 - **Dataplane events deferred from the v1 PR5 producer set.**
   *Historical rationale.* PR5 wired five categories through EHM:
@@ -855,7 +855,7 @@ reference bridge at `examples/event-bridge/`:
 - The existing per-category `ListRouteEvents`, `ListEvpnEvents`,
   `ListSessionEvents`, `ListPolicyEvents` RPCs keep working; their
   server impls re-route through EHM's cursor API.
-- `rustbgpctl watch --backfill` is deprecated in favor of
+- `rbgp watch --backfill` is deprecated in favor of
   `--from-event-id`. The `--backfill` flag remains for one
   release as an alias with a deprecation warning, then is
   removed.

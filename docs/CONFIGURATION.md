@@ -41,7 +41,6 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
-| `apply_bum_enforcement` | bool | no   | `true` (since v0.23.0) | Apply Gate 8b BUM-suppression filters to the kernel per-port `IFLA_BRPORT_*_FLOOD` triplet. Restart-required. Default flipped to `true` after the Gate 8b 24 h MAC-churn soak (2026-05-16) and the M37 local-origination 24 h MAC-churn soak (2026-05-19) both passed. Operators who need the prior observe-only posture must set `apply_bum_enforcement = false` explicitly |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by their Link Bandwidth Extended Community (draft-ietf-idr-link-bandwidth, FRR's `bgp bestpath bandwidth`) when the whole equal-cost group carries one; otherwise equal-cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 
@@ -64,6 +63,27 @@ example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
 peers at a time.
+
+### `apply_bum_enforcement` — top-level (document-root) key
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `apply_bum_enforcement` | bool | no | `true` (since v0.23.0) | Apply Gate 8b BUM-suppression filters to the kernel per-port `IFLA_BRPORT_*_FLOOD` triplet. **Restart-required.** Default flipped to `true` after the Gate 8b 24 h MAC-churn soak (2026-05-16) and the M37 local-origination 24 h MAC-churn soak (2026-05-19) both passed. Operators who need the prior observe-only posture must set `apply_bum_enforcement = false` explicitly. |
+
+This is a **document-root** key — a bare key written outside any `[section]`
+header (typically at the very top of the file, before `[global]`), **not** a
+`[global]` key. `[global]` is a `deny_unknown_fields` section, so placing
+`apply_bum_enforcement` inside it makes the daemon refuse to start with a TOML
+parse error.
+
+```toml
+# top of file, outside any section header
+apply_bum_enforcement = false
+
+[global]
+asn = 65001
+# ...
+```
 
 ### `honor_graceful_shutdown` — RFC 8326 receiver behavior
 
@@ -1919,7 +1939,7 @@ Note: the rib-out stream is live-only. A collector that connects (or
 reconnects) mid-session receives Peer Up state replay but no synthesized
 table dump of already-advertised routes — the same limitation the rib-in
 stream has today. The `loc_rib` view below does not share this gap. See
-`KNOWN_ISSUES.md`.
+[KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### RFC 9069 Loc-RIB monitoring
 
@@ -2408,7 +2428,7 @@ is running, each segment originates:
 The DF election runs on the union of locally configured ES and
 remote Type 4 routes for the same ESI; the elected DF role drives
 Type 2 origination ESI tagging and the optional BUM-suppression
-filter (see `apply_bum_enforcement` in `[global]`).
+filter (see the top-level `apply_bum_enforcement` key).
 
 SIGHUP reload and `EvpnService.ApplyEvpnRuntime` can live-commit a single
 Ethernet Segment add, delete, or redefine when the segment actor exists,

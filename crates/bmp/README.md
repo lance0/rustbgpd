@@ -1,6 +1,8 @@
 # rustbgpd-bmp
 
-BMP exporter implementing RFC 7854 (BGP Monitoring Protocol).
+BMP exporter implementing RFC 7854, with RFC 8671 (post-policy
+Adj-RIB-Out) and RFC 9069 (Loc-RIB) route monitoring and BMPv4
+per-collector TLV framing.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
@@ -12,6 +14,12 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - Fan-out manager distributes events to all connected collectors
 - Peer Up replay on collector reconnect
 - Periodic Stats Report (Adj-RIB-In route count)
+- RFC 8671 post-policy Adj-RIB-Out route monitoring (O=1/L=1)
+- RFC 9069 Loc-RIB route monitoring + Loc-RIB Stats Report (peer type 3),
+  with a resumable cursor-based Loc-RIB dump
+- BMPv4 per-collector TLV framing (draft-ietf-grow-bmp-tlv), including the
+  Path Marking TLV
+- Per-collector monitoring-scope selection (Adj-RIB-In / Adj-RIB-Out / Loc-RIB)
 - Coordinated Termination on daemon shutdown
 
 ## Architecture

@@ -200,7 +200,7 @@ One reshape engine, two front doors.
 - A reshape is a session bounce even when atomic; operators editing a
   peer group with many Established members take a full-group flap on the
   targeted path, with no equivalent of the transaction planner's diff
-  preview. `rustbgpctl config plan` remains the "show me the blast
+  preview. `rbgp config plan` remains the "show me the blast
   radius first" tool.
 - The persist-rollback double-bounce (decision 3) stays until
   persistence moves into the peer-manager command.

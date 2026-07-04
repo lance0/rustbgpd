@@ -84,7 +84,7 @@ RIB state.
 - **gRPC:** `TriggerMrtDump` RPC on `ControlService`. Returns the file
   path of the produced dump. `FAILED_PRECONDITION` when MRT is not
   configured.
-- **CLI:** `rustbgpctl mrt-dump` subcommand.
+- **CLI:** `rbgp mrt-dump` subcommand.
 - **Config:** `[mrt]` TOML section with `output_dir`, `dump_interval`
   (default 7200), `compress` (default false), `file_prefix` (default
   "rib").

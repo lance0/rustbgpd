@@ -53,7 +53,7 @@ sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
 ```
 
 To pin to a specific tag for reproducibility, swap `latest` for the
-version, e.g. `releases/download/v0.30.0/${TARBALL}`. SHA-256
+version, e.g. `releases/download/v0.45.0/${TARBALL}`. SHA-256
 checksums are published alongside each tarball as
 `checksums-${SUFFIX}.txt`.
 
@@ -61,7 +61,6 @@ Verify:
 
 ```sh
 rustbgpd --version
-rbgp --version
 rbgp --version
 ```
 
@@ -89,15 +88,15 @@ GHCR. Three tag flavors are available per the
 
 | Tag | Resolves to | Updates on |
 |-----|-------------|------------|
-| `:0.30.0` | exact version | nothing (immutable) |
-| `:0.30` | latest patch in the 0.30 minor | each 0.30.x release |
+| `:0.45.0` | exact version | nothing (immutable) |
+| `:0.45` | latest patch in the 0.45 minor | each 0.45.x release |
 | `:latest` | latest non-prerelease release | each minor or patch release |
 
 Major-minor is the usual operator default — auto-receives bug-fix
 releases but pins against minor-version churn:
 
 ```sh
-docker pull ghcr.io/lance0/rustbgpd:0.30
+docker pull ghcr.io/lance0/rustbgpd:0.45
 ```
 
 The published image is the Dockerfile's default `runtime` target:
@@ -225,8 +224,8 @@ For your own deployment:
     -p 179:179 \
     -p 9179:9179 \
     --cap-add=NET_BIND_SERVICE \
-    --cap-add=NET_RAW \
-    ghcr.io/lance0/rustbgpd:0.30
+    --cap-add=NET_ADMIN \
+    ghcr.io/lance0/rustbgpd:0.45
   ```
 
 - **Logs**: structured JSON when `[global.telemetry] log_format =

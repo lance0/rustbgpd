@@ -23,9 +23,10 @@ analyzers, test harnesses, MRT readers, etc.
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
 | 4360 | Extended communities (route target, route origin, 4-byte AS) |
 | 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
-| 4364 / 4659 / 8277 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
+| 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
 | 4486 | NOTIFICATION subcodes |
+| 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
 | 4761 §3.2.5 | Default Gateway extended community (decode) |
@@ -44,6 +45,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 8092 | Large communities (3× u32) |
 | 8203 | Admin shutdown communication |
+| 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
 | 8538 | Notification GR (N-bit) |
@@ -56,7 +58,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
-| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche; outbound reflection and local topology production remain outside the wire crate |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche. Typed topology read accessors now live in the crate (the `bgpls_topo` module); outbound reflection and topology production remain outside the wire crate |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
 
@@ -133,6 +135,15 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV codec, preserving
   unknown object types and TLVs for the daemon's receive/API surface and
   future reflection support
+- **`bgpls_topo` module** — typed read accessors over the opaque BGP-LS codec
+  (`bgp_ls_attribute_tlvs`, `igp_metric`, `prefix_metric`, `te_default_metric`,
+  `BgpLsNodeKey`, and the `BGP_LS_TLV_*` type constants)
+- **`labeled` module** — IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4, RFC 8277):
+  `LabeledNlri` / `LabeledNlriEntry` / `LABELED_UNICAST_SAFI`, label-stack +
+  prefix encode/decode with Add-Path and withdraw forms
+- **`rtc` module** — Route Target Constrain NLRI codec (SAFI 132, RFC 4684):
+  `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
+  `encode_rtc_nlri` with default-route and prefix-bit bounds
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
@@ -158,14 +169,18 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 
 ## Fuzz tested
 
-Eight fuzz targets exercise the codec continuously in CI:
+Twelve fuzz targets exercise the codec continuously in CI:
 
 - `decode_message` — full BGP message framing
 - `decode_update` — UPDATE parsing with Add-Path and MP-BGP variants
+- `decode_open` — OPEN + capability decode
+- `decode_route_refresh` — ROUTE-REFRESH / ORF decode
 - `decode_flowspec` — FlowSpec NLRI component decoding
 - `decode_evpn` — EVPN NLRI (Types 1–5) decoding
 - `encode_evpn` — EVPN NLRI encode round-trip
 - `decode_vpn` — VPNv4/VPNv6 labeled NLRI decode + successful decode round-trip
+- `decode_labeled` — labeled-unicast NLRI decode (SAFI 4)
+- `decode_rtc` — RT-Constrain NLRI decode (SAFI 132)
 - `decode_bgpls` — BGP-LS/BGP-LS-VPN NLRI and TLV decode + successful decode round-trip
 - `parse_rd` — `RouteDistinguisher` `FromStr` parsing
 

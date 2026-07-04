@@ -24,7 +24,7 @@ operator's preferred sink. The patterns to preserve are:
 4. **Use `timestamp`, not `event_id`, for causal joins across
    event categories.** The `event_id` is order-of-arrival at EHM,
    not order-of-occurrence at the producer. See ADR-0072 "Global
-   ordering semantic."
+   ordering."
 
 ## Build + run
 
@@ -70,7 +70,7 @@ Each line of stdout is one JSON object:
   + BFD through EHM. Dataplane events stay live-only. Empty
   categories on `SubscribeFromEvent` selects all **retained**
   categories — dataplane is silently absent. See ADR-0072
-  "Producer set in v1".
+  "What v1 does not cover".
 
 ## Plugging in a real sink
 

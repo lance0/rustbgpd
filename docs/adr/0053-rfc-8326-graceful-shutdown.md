@@ -116,7 +116,7 @@ The runtime side is a per-peer **bool**, not a policy edit:
 
 - gRPC: `NeighborService.SetGracefulShutdown { address, enabled }`
   (empty `address` = all peers, for whole-router maintenance).
-- CLI: `rustbgpctl gshut [--peer X] [--clear]` (top-level — the
+- CLI: `rbgp gshut [--peer X] [--clear]` (top-level — the
   `shutdown` verb is already taken by the daemon-shutdown RPC).
 - Persistence: the toggle is **runtime-only** by design. RFC 8326 is
   a maintenance-window action; operators clear it when the work is
@@ -147,7 +147,7 @@ per-`PeerSession` bool. Three reasons this matters:
   captures the toggle before `peers.remove`; the inbound handler
   for the same address replays it via `restore_dead_lettered_pending`
   before the new session is wired up. Operators no longer need to
-  re-issue `rustbgpctl gshut` after a dynamic-peer flap during a
+  re-issue `rbgp gshut` after a dynamic-peer flap during a
   maintenance window. The replay is covered by
   `dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establish`.
 
@@ -234,7 +234,7 @@ dispatch failure or aggregated broadcast partial — maps to gRPC
 - `crates/rib/src/update.rs` + `crates/rib/src/manager/distribution.rs`
   — `RibUpdate::RefreshPeerOutbound`.
 - `crates/cli/src/main.rs` + `crates/cli/src/commands/neighbor.rs` —
-  `rustbgpctl gshut` command.
+  `rbgp gshut` command.
 - `tests/interop/m35-graceful-shutdown-frr.clab.yml` +
   `tests/interop/scripts/test-m35-graceful-shutdown-frr.sh` — both
   legs against FRR 10.3.1.

@@ -223,13 +223,13 @@ label, and assembles an `EvpnRibRoute` with `RouteOrigin::Local` that
 flows through the same reflection pipeline as iBGP-learned routes.
 Phase 1 originally covered Type 2 MAC/IP and Type 3 IMET; Type 5
 IP-Prefix injection later shipped via `AddEvpnRoute` /
-`DeleteEvpnRoute` and `rustbgpctl evpn add-ip-prefix`. Native Type 1/4
+`DeleteEvpnRoute` and `rbgp evpn add-ip-prefix`. Native Type 1/4
 multi-homing origination later shipped through `[[ethernet_segments]]`,
 but controller injection for Type 1/4 remains deferred.
 
 ### CLI
 
-`rustbgpctl evpn [--route-type N] [--peer IP] [--rd STR]` — JSON output
+`rbgp evpn [--route-type N] [--peer IP] [--rd STR]` — JSON output
 via `--json`. Human output groups fields conditionally per route type
 (MAC/IP routes show MAC + IP but not prefix; Type 5 shows prefix +
 gateway but not MAC). VXLAN encap is surfaced as `encap=vxlan` for

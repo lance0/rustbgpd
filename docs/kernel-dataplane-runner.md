@@ -79,6 +79,16 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
+- M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
+- M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.
+- M62: ADR-0079 blackhole adoption sweep kill-and-restart against FRR.
+- M65: ADR-0083 single-active failover blackout measurement against GoBGP.
+- M66: ADR-0084 ES drain service handover (rustbgpd ×3).
+- M67: ADR-0085 link-driven ES drain failover (rustbgpd ×3).
+- M69: EVPN preference-DF election against FRR.
+- M70: ADR-0089 VLAN-aware bridge FDB attribution against FRR.
+- M71: RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive against GoBGP.
+- M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against GoBGP.
 - Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`,
   `dataplane_vlan_fdb`, `macip_vlan_attribution`, `svd_fdb_vni`,
   `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`, `managed_vlan_upper`, `managed_ready`,

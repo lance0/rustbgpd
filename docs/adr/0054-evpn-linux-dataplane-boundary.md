@@ -8,7 +8,7 @@
 ADR-0052 landed the Gate 7a EVPN VTEP foundation: `crates/evpn`
 contains the declarative local EVI/VNI model, daemon config accepts
 `[[evpn_instances]]`, and `EvpnService.ListEvpnInstances` /
-`rustbgpctl evpn instances` expose that resolved table. It deliberately
+`rbgp evpn instances` expose that resolved table. It deliberately
 did **not** touch Linux netlink, bridge FDB state, VXLAN devices, or
 Type 2/3 local origination.
 
@@ -495,7 +495,7 @@ entries only.
 ### Neutral
 
 - `bridge = None` remains valid. Such instances are visible via
-  `rustbgpctl evpn instances` but are not eligible for Linux
+  `rbgp evpn instances` but are not eligible for Linux
   reconciliation until bound to a bridge.
 - L3VNI / IRB / Type 5 origination stay out of this ADR except where
   current fields such as `advertise_svi_mac` need to remain compatible.
@@ -506,7 +506,7 @@ entries only.
 
 - Keep the Gate 7b runway binary-spawn integration test: start the real
   `rustbgpd` binary with `[[evpn_instances]]`, then query it through a
-  real `rustbgpctl evpn instances` subprocess.
+  real `rbgp evpn instances` subprocess.
 - `crates/evpn-linux` must carry diff-loop unit tests over fake
   desired/kernel snapshots: create, no-op, update, delete, foreign-entry
   preservation, and retry-after-failure.

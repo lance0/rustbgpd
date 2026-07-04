@@ -42,7 +42,7 @@ rbgp config abort deploy-123
 ```bash
 rbgp neighbor
 rbgp neighbor <addr>
-rbgp neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]
+rbgp neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role] [--route-server-client] [--per-client-best]
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> softreset
@@ -51,6 +51,13 @@ rbgp neighbor <addr> delete
 rbgp dynamic-neighbor list
 rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
 rbgp dynamic-neighbor delete 10.0.0.0/24
+
+rbgp peer-group list                       # manage [[peer_groups]] entries
+rbgp peer-group set <name> --from-file group.json
+rbgp peer-group attach <addr> --group <name>   # bind a neighbor to a group
+rbgp peer-group detach <addr>                  # unbind
+rbgp neighbor-set list                     # manage [[neighbor_sets]] used by policy
+rbgp neighbor-set set <name> --from-file set.json
 
 rbgp bfd
 rbgp bfd show <addr>
@@ -66,6 +73,9 @@ rbgp rib --prefix <prefix> --explain
 rbgp rib blackholes
 rbgp rib fib
 rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
+rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
+rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
+rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 
 rbgp policy list
 rbgp policy get <name>
@@ -77,6 +87,9 @@ rbgp policy chain set-export [--neighbor <addr>] <names...>
 rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
+rbgp policy check <file.rpol>                          # parse + typecheck an .rpol file in-process (no daemon)
+rbgp policy test <file.rpol> --policy <name> --direction import|export [--peer <addr>]   # dry-run over the live RIB
+rbgp policy stats [--peer <addr>]                     # live per-term hit counters
 
 rbgp flowspec
 rbgp fib-table list
@@ -111,6 +124,9 @@ rbgp events policy
 rbgp events evpn
 rbgp watch              # legacy route-update stream
 
+rbgp topology           # RFC 9107 ORR topology graph from BGP-LS
+rbgp orr                # RFC 9107 ORR per-vantage status
+rbgp gshut [--peer <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
 rbgp shutdown
 rbgp completions bash

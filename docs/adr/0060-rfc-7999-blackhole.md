@@ -97,7 +97,7 @@ The first FIB slice is deliberately conservative:
   require `allow_blackhole_broad_prefixes = true` for broader drops.
 - **Failure discipline:** a failed discard install must not make the
   control plane claim enforcement succeeded. Failures are surfaced in
-  `rustbgpctl rib blackholes` and Prometheus counters.
+  `rbgp rib blackholes` and Prometheus counters.
 - **Blast-radius controls:** rate limits, maximum active blackholes,
   and a richer operator-visible audit trail remain follow-ups.
 - **Idempotent cleanup:** route withdrawal, policy rejection, peer flap,
