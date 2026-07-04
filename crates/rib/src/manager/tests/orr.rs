@@ -226,6 +226,53 @@ async fn no_vantage_configured_skips_topology_rebuild() {
     handle.await.unwrap();
 }
 
+/// LAN-189 sub-item 2: a BGP-LS batch that changes nothing (a withdraw of
+/// a key not held) must not rebuild the topology or re-run SPF — the
+/// `bgp_orr_spf_runs_total` counter stays put even with a resolved vantage
+/// configured.
+#[tokio::test]
+async fn empty_bgpls_batch_skips_orr_recompute() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // Resolve a vantage against the square topology (initial SPF run).
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    feed_square_topology(&tx, feed).await;
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    let status = query_orr_status(&tx).await;
+    assert!(status.vantages[0].resolved, "vantage must resolve");
+    let runs_before = counter_metric_value(&metrics, "bgp_orr_spf_runs_total");
+    assert!(runs_before >= 1.0, "initial SPF ran");
+
+    // No-op batch: withdraw a real key from a peer that holds nothing, so
+    // the affected set stays empty.
+    let unheld_key = crate::orr::fixtures::square_topology(feed)
+        .first()
+        .expect("fixture has routes")
+        .key();
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 8, 8, 8)),
+        announced: vec![],
+        withdrawn: vec![unheld_key],
+    })
+    .await
+    .unwrap();
+    // Sync point so the no-op batch is fully processed.
+    let _ = query_orr_status(&tx).await;
+    assert!(
+        (counter_metric_value(&metrics, "bgp_orr_spf_runs_total") - runs_before).abs()
+            < f64::EPSILON,
+        "an empty BGP-LS batch must not re-run ORR SPF"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Collect the unicast staging stream (announce prefixes + withdraws per
 /// update) an RR client sees for a fixed scenario, with or without an
 /// ORR vantage configured on it.

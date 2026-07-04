@@ -342,7 +342,14 @@ impl OrrTopology {
     /// Resolve an IP address to a topology node: (a) exact link
     /// interface/neighbor address hit; (b) longest-prefix match over
     /// Prefix NLRIs, picking the advertising node with the lowest prefix
-    /// metric. `None` when the address is outside the topology.
+    /// metric. `None` when the address matches no exact link address and
+    /// no covering Prefix NLRI (a `0.0.0.0/0` / `::/0` Prefix NLRI, if
+    /// advertised, IS a covering LPM match).
+    ///
+    /// Equal-metric ties break on the lowest canonical node key
+    /// ([`BgpLsNodeKey`] bytes), so an ambiguous vantage resolves the
+    /// same way across restarts regardless of the advertiser insertion
+    /// order (which derives from hasher-dependent Adj-RIB-In iteration).
     #[must_use]
     pub fn resolve_node(&self, ip: IpAddr) -> Option<NodeIx> {
         if let Some(&ix) = self.addr_index.get(&ip) {
@@ -350,7 +357,13 @@ impl OrrTopology {
         }
         self.prefix_lpm(ip)?
             .iter()
-            .min_by_key(|(_, metric)| *metric)
+            .min_by(|(a_ix, a_metric), (b_ix, b_metric)| {
+                a_metric.cmp(b_metric).then_with(|| {
+                    self.node_keys[a_ix.index()]
+                        .as_bytes()
+                        .cmp(self.node_keys[b_ix.index()].as_bytes())
+                })
+            })
             .map(|&(ix, _)| ix)
     }
 
@@ -522,6 +535,13 @@ impl SpfResult {
     /// address hit yields the node distance; (b) longest-prefix match
     /// yields the min over advertisers of distance + prefix metric;
     /// (c) `None` — the caller must rank unknown-cost as least preferred.
+    ///
+    /// A `0.0.0.0/0` / `::/0` Prefix NLRI (an IGP default route carried in
+    /// BGP-LS) is a legitimate covering match under (b): a next-hop with
+    /// no more-specific match resolves to the default's advertiser at
+    /// `distance + default-prefix metric`, exactly as ordinary LPM
+    /// dictates. `None` (least-preferred) therefore means "no covering
+    /// Prefix NLRI at all", not merely "no host/subnet route".
     ///
     /// `topo` must be the topology this SPF was computed over.
     #[must_use]
@@ -1082,6 +1102,62 @@ mod tests {
             spf.cost_to(&topo, IpAddr::V4(Ipv4Addr::new(10, 0, B, X))),
             None
         );
+    }
+
+    #[test]
+    fn resolve_node_breaks_equal_metric_ties_by_lowest_node_key() {
+        // X and Y both advertise 192.0.2.0/24 with the SAME prefix
+        // metric — an ambiguous vantage. The tie must break on the lower
+        // canonical node key, independent of advertiser insertion order
+        // (which derives from hasher-dependent Adj-RIB-In iteration).
+        // LAN-189 sub-item 1.
+        let prefix = Ipv4Addr::new(192, 0, 2, 0);
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+        assert!(
+            node_key(X).as_bytes() < node_key(Y).as_bytes(),
+            "fixture precondition: X's key sorts below Y's"
+        );
+        let x_first = [
+            prefix_route(PEER1, X, prefix, 24, Some(50)),
+            prefix_route(PEER2, Y, prefix, 24, Some(50)),
+        ];
+        let y_first = [
+            prefix_route(PEER1, Y, prefix, 24, Some(50)),
+            prefix_route(PEER2, X, prefix, 24, Some(50)),
+        ];
+        let topo_x = OrrTopology::build(x_first.iter());
+        let topo_y = OrrTopology::build(y_first.iter());
+        assert_eq!(topo_x.resolve_node(ip), Some(ix(&topo_x, X)));
+        assert_eq!(
+            topo_y.resolve_node(ip),
+            Some(ix(&topo_y, X)),
+            "equal-metric tie must resolve to the lowest node key regardless of insertion order"
+        );
+    }
+
+    #[test]
+    fn default_prefix_nlri_is_a_covering_lpm_match() {
+        // Chosen semantics (LAN-189 sub-item 3): a 0.0.0.0/0 Prefix NLRI
+        // (an IGP default carried in BGP-LS) is a legitimate covering LPM
+        // match. An otherwise out-of-topology next-hop resolves to the
+        // default's advertiser at dist+metric; `None` (least-preferred)
+        // means "no covering Prefix NLRI at all", not "no host route".
+        let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200));
+
+        // Baseline: no default route → the NH is genuinely unknown-cost.
+        let no_default = square();
+        let spf = no_default.spf(ix(&no_default, A));
+        assert_eq!(no_default.resolve_node(outside), None);
+        assert_eq!(spf.cost_to(&no_default, outside), None);
+
+        // Default originated by X (metric 7): the same NH now resolves to
+        // X at dist(A->X)=1 + 7 = 8.
+        let mut routes = square_topology(PEER1);
+        routes.push(prefix_route(PEER1, X, Ipv4Addr::UNSPECIFIED, 0, Some(7)));
+        let topo = OrrTopology::build(routes.iter());
+        let spf = topo.spf(ix(&topo, A));
+        assert_eq!(topo.resolve_node(outside), Some(ix(&topo, X)));
+        assert_eq!(spf.cost_to(&topo, outside), Some(8));
     }
 
     #[test]

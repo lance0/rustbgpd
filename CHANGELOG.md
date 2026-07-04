@@ -776,6 +776,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Grouped peers no longer lose export-policy counters on a dirty
+  resync (LAN-210).** After a full-outbound-channel dirty (or forced)
+  resync, `distribute_changes` replayed a grouped member's table to the
+  wire but never re-recorded its per-member export-policy counters:
+  `apply_group_policy_counters` was `!resync`-gated and the join-style
+  replay only ran from the route-refresh / peer-lifecycle paths, while
+  ungrouped peers re-record every prefix through the per-prefix staging
+  path on every resync. Grouped and ungrouped peers therefore drifted
+  on `bgp_policy_routes_total`. The resync branch now replays
+  `apply_group_join_counters` (full-table permit/deny counts), matching
+  the ungrouped path exactly.
+
+- **ORR next-hop resolution is now deterministic on equal-metric ties
+  (LAN-189).** `OrrTopology::resolve_node` broke equal prefix-metric LPM
+  ties by advertiser `Vec` order, which derives from hasher-dependent
+  Adj-RIB-In iteration, so an ambiguous vantage could resolve to a
+  different node across restarts. Ties now break on the lowest canonical
+  BGP-LS node key. Additionally, an empty BGP-LS batch (a withdraw of a
+  key not held, or an empty announce) no longer triggers a wasted ORR
+  topology rebuild + per-vantage SPF recompute, and the covering-default
+  (`0.0.0.0/0` / `::/0`) Prefix-NLRI LPM semantics are now documented and
+  regression-pinned (a default route yields a finite `distance + metric`
+  cost; least-preferred `None` means no covering Prefix NLRI at all).
+
 - **Config persistence now fsyncs before rename (LAN-206).**
   `ConfigPersister::persist()` wrote the temp config with `fs::write` +
   `fs::rename` and never called `sync_all()` on the temp file or fsynced
