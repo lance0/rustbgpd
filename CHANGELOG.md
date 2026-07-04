@@ -776,6 +776,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`ApplyEvpnRuntime` with `validate_only` now rejects what a real apply
+  would reject (LAN-214 #9).** The dry-run path returned
+  `EvpnRuntimeApplyValidated` immediately after the (pure, rejection-free)
+  `plan_candidate`, so an operator could "validate" a candidate that a
+  real apply then fails closed (e.g. an IP-VRF L3VNI identity redefine, or
+  an undecomposable mixed candidate). Validate-only now runs the same
+  shape acceptance the commit path uses — `validate_supported_plan_shape`
+  plus, for unsupported-but-mixed candidates, the #268 decomposition —
+  without committing or touching any actor, returning the planned step
+  descriptions on success and the real shape rejection on failure.
+- **The EVPN runtime shape gate and converge dispatch are now proven to
+  classify plan shapes identically (LAN-214 #8).**
+  `validate_supported_plan_shape` mirrors `EvpnRuntimeActorConverger::converge`'s
+  if/else routing by hand, previously guarded only by a "keep in sync"
+  comment. Regression tests now drive a representative set of shapes
+  through both routers and assert identical classification — byte-identical
+  rejection messages for unsupported shapes (every `converge_*` runs its
+  `validate_single_*` before any actor, so the comparison is side-effect
+  free) and gate-acceptance of every shape the dispatch commits.
 - **The library target now builds under `--all-features` (LAN-198).**
   The lib exposes `pub mod config` only under `bench-internals`, and
   `config`'s reload-diff logic (`classify_evpn_runtime_change`) reaches
