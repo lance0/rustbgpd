@@ -506,15 +506,20 @@ impl Checker<'_> {
         }
     }
 
-    /// `route.evpn-route-type` compares against a 0-255 integer
-    /// literal (RFC 7432 route types are 1-5).
+    /// `route.evpn-route-type` compares against a 1-5 integer literal
+    /// (the RFC 7432 §7 route types rustbgpd emits); 0 and 6-255 are
+    /// rejected as dead policies.
     fn check_evpn_route_type_rhs(&mut self, field: &FieldPath, rhs: &Rhs) {
         match rhs {
-            Rhs::Int(value, span) if *value > 255 => {
+            // rustbgpd emits EVPN NLRIs of route types 1-5 only
+            // (RFC 7432 §7). A comparison against 0 or 6-255 can never
+            // match a real route, so reject it as a dead policy rather
+            // than let it silently never fire.
+            Rhs::Int(value, span) if !(1..=5).contains(value) => {
                 self.diags.push(Diagnostic::new(
                     *span,
                     format!("EVPN route type {value} out of range"),
-                    "must be 0-255 (RFC 7432 route types are 1-5)",
+                    "must be 1-5 (RFC 7432 §7 route types)",
                 ));
             }
             Rhs::Int(..) => {}

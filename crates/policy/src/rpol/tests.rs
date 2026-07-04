@@ -643,7 +643,11 @@ fn deep_bang_and_operator_chains_are_diagnostics_too() {
         "!".repeat(100_000),
     );
     let report = check_on_small_stack(src);
-    assert!(!report.diagnostics.is_empty());
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("nesting exceeds"),
+        "want a depth diagnostic, got: {rendered:.300}"
+    );
 
     // Chained binary ops build a left-leaning AST whose depth the
     // downstream recursive passes (typeck, lower, Drop) consume.
@@ -801,6 +805,13 @@ fn strict_next_hop_negated_form() {
              term rest { accept }
          }",
     );
+    // `!=` lowers to a dedicated Ne node (not `Not(NextHopEqPeer)`) so
+    // that an absent next-hop matches neither `==` nor `!=` (LAN-209).
+    assert_eq!(chain.policies[0].terms[0].guard, MatchExpr::NextHopNePeer);
+    assert!(
+        chain.requires_peer_context(),
+        "strict next-hop `!=` still reads peer identity"
+    );
     let peer = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
     let matching = RouteContext {
@@ -815,6 +826,58 @@ fn strict_next_hop_negated_form() {
         ..base
     };
     assert_eq!(chain.evaluate(&mismatched).action, PolicyAction::Deny);
+    // LAN-209: an absent next-hop must NOT match `!=` — the `reroute`
+    // term must not fire, so the route falls through to `accept`.
+    let absent = RouteContext {
+        next_hop: None,
+        peer_address: Some(peer),
+        ..base
+    };
+    assert_eq!(
+        chain.evaluate(&absent).action,
+        PolicyAction::Permit,
+        "absent next-hop must not match `route.next-hop != peer.address`"
+    );
+}
+
+#[test]
+fn next_hop_ne_literal_absent_does_not_match() {
+    // LAN-209: `route.next-hop != <ip>` must never match when the
+    // next-hop attribute is absent (mirroring `==`), rather than
+    // matching via `Not(NextHopEq)`.
+    let chain = compile_ok(
+        "policy drop-non-blackhole {
+             term reject-others { if route.next-hop != 192.0.2.1 { reject } }
+             term rest { accept }
+         }",
+    );
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::NextHopNe(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+    );
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        next_hop: Some(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        next_hop: Some(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    let absent = RouteContext {
+        next_hop: None,
+        ..base
+    };
+    assert_eq!(
+        chain.evaluate(&absent).action,
+        PolicyAction::Permit,
+        "absent next-hop must not match `route.next-hop != <ip>`"
+    );
 }
 
 #[test]
@@ -834,4 +897,26 @@ fn strict_next_hop_rejects_other_field_comparisons() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { if peer.address == route.next-hop { accept } } }");
     assert!(rendered.contains("field reference"), "{rendered}");
+}
+
+#[test]
+fn evpn_route_type_enforces_rfc7432_range() {
+    // LAN-192: rustbgpd only emits EVPN route types 1-5 (RFC 7432 §7),
+    // so those compile…
+    for t in 1..=5 {
+        compile_ok(&format!(
+            "policy p {{ term t {{ if route.evpn-route-type == {t} {{ accept }} }} }}"
+        ));
+    }
+    // …while 0 and 6-255 can never match a real route and are rejected
+    // as dead policies rather than silently never firing.
+    for t in [0u32, 6, 255, 256] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p {{ term t {{ if route.evpn-route-type == {t} {{ accept }} }} }}"
+        ));
+        assert!(
+            rendered.contains("out of range"),
+            "evpn-route-type {t} must be rejected, got: {rendered}"
+        );
+    }
 }

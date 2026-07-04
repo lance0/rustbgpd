@@ -404,11 +404,27 @@ fn lower_cmp(
             });
             negate_if(op == CmpOp::Ne, node)
         }
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
+        // next-hop must match neither `==` nor `!=` (LAN-209), and
+        // `Not(NextHopEq)` would wrongly match when the attribute is
+        // absent.
         Field::NextHop => match rhs {
-            Rhs::Ip(addr, _) => negate_if(op == CmpOp::Ne, MatchExpr::NextHopEq(*addr)),
+            Rhs::Ip(addr, _) => {
+                if op == CmpOp::Ne {
+                    MatchExpr::NextHopNe(*addr)
+                } else {
+                    MatchExpr::NextHopEq(*addr)
+                }
+            }
             // Strict next-hop (`route.next-hop == peer.address`); the
             // typechecker only lets `peer.address` through here.
-            Rhs::Field(_) => negate_if(op == CmpOp::Ne, MatchExpr::NextHopEqPeer),
+            Rhs::Field(_) => {
+                if op == CmpOp::Ne {
+                    MatchExpr::NextHopNePeer
+                } else {
+                    MatchExpr::NextHopEqPeer
+                }
+            }
             _ => unreachable!("typechecked: next-hop compares an IP or peer.address"),
         },
         Field::PeerAddress => {
