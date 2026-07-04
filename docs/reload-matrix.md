@@ -97,7 +97,7 @@ the old neighbor is torn down, the new one starts fresh.
 | `disable_ipv4_unicast` | live (effective next session) | IPv6-only peering: drops IPv4 unicast from the advertised MultiProtocol capability and suppresses the RFC 4760 §8 implicit-IPv4 fallback — both OPEN-time properties, so a toggle takes effect on the next session. Rejected at load when the effective `families` resolve to `ipv4_unicast` only. |
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes are negotiated in OPEN. Mid-session changes are no-ops until renegotiation. |
-| `log_level` | live | Per-peer tracing filter; takes effect on next log emission. |
+| `log_level` | live | Per-peer tracing filter, re-applied on SIGHUP via the tracing [`reload`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/reload/index.html) handle: the reload rebuilds the full `EnvFilter` (the `RUST_LOG` base level plus every per-peer directive) and swaps it into the running subscriber, so a level edit takes effect without a restart. The global base level stays restart-required (read once from `RUST_LOG`). |
 | `import_policy` | live | Inline import statements; re-evaluated against all received routes on reconcile. |
 | `export_policy` | live | Inline export statements; re-evaluated against the Adj-RIB-Out on next distribution. |
 | `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
@@ -135,7 +135,7 @@ dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 | `disable_ipv4_unicast` | live (effective next session) | Group-level IPv6-only toggle; same OPEN-time semantics as the neighbor field, effective on the inheriting peer's next session. |
 | `remove_private_as` | live | |
 | `add_path` | live (effective next session) | |
-| `log_level` | live | |
+| `log_level` | live | Same as neighbor — inherited per-peer tracing filter, re-applied on SIGHUP via the tracing reload handle. |
 | `import_policy` | live | Inline import statements inherited by peers that do not set their own import policy / chain. |
 | `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
 | `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain. |

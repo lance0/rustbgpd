@@ -789,6 +789,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   originator, SVI) under the same feature gate, and CI gained a
   `cargo check -p rustbgpd --all-features --lib` step so the
   bench-internals lib surface can no longer regress unnoticed.
+- **Per-peer `log_level` is now genuinely live on SIGHUP — and no longer
+  aborts boot.** Two bugs closed. (1) The generated filter directive used
+  the unbracketed span form `peer{peer_addr=X}=level`, which the
+  `EnvFilter` parser rejects (`error parsing level filter`); `init_logging`
+  surfaced that as an error and the daemon `exit(1)`-ed, so any config that
+  set a per-peer `log_level` failed to boot. The directive is now the
+  correct bracketed `[peer{peer_addr=X}]=level`, guarded by a test that
+  parses every emitted directive. (2) The reload matrix and deployment docs
+  already classed `[[neighbors]] log_level` (and the peer-group
+  equivalent) as live, but the tracing subscriber was installed once at
+  startup with no reload handle, so an edited per-peer level never took
+  effect without a restart. The subscriber's `EnvFilter`
+  now sits behind a `tracing_subscriber::reload` handle (stored in a
+  process-global `OnceLock` in the telemetry crate, matching the
+  subscriber's own global scope); after a validated config reload the
+  SIGHUP path recomputes `per_peer_log_directives` and swaps in a freshly
+  rebuilt filter (`RUST_LOG` base level plus every current per-peer
+  directive — the base always survives). Reapplying identical directives
+  is a no-op and a malformed directive leaves the live filter untouched.
+  The global base level stays restart-required (read once from
+  `RUST_LOG`). Formatting/output are unchanged. Also adds a class-guard
+  unit test (`build_transport_config_reflects_every_transport_field`) that
+  fails at compile time when a new `PeerManagerNeighborConfig` transport
+  field is added without a copy into `TransportConfig`, and at run time
+  when an existing copy is dropped — the same seam that silently lost
+  `per_client_best` (#702); plus a reload-matrix test that pins the
+  live/restart-required class column so a docs-vs-reality drift fails CI.
 
 - **BMP monitoring can no longer diverge silently from the wire under
   saturation.** Two per-peer holes closed in the PeerSession→BmpManager

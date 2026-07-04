@@ -10800,6 +10800,84 @@ fn reload_matrix_documents_every_peer_group_field() {
     }
 }
 
+/// All table rows in the reload matrix whose first cell is exactly the
+/// backtick-wrapped field name. Returns every match — some knobs (e.g.
+/// `log_level`) appear in both the `[[neighbors]]` and `[peer_groups]`
+/// sections and must be classed consistently. Matching the exact
+/// leading table-cell prefix avoids matching prose or compound cells
+/// (such as the `tcp_ao mandatory fields` validation row).
+fn reload_matrix_rows_for<'a>(matrix: &'a str, field: &str) -> Vec<&'a str> {
+    let cell = format!("| `{field}` |");
+    matrix
+        .lines()
+        .filter(|line| line.starts_with(&cell))
+        .collect()
+}
+
+/// The name-coverage tests above only prove a field *appears* in the
+/// matrix. This one pins the CLASS column (live vs restart-required) for
+/// the knobs where the class is load-bearing — a docs-vs-reality drift on
+/// these actively misleads an operator about whether a SIGHUP suffices.
+///
+/// `log_level` is now genuinely live (re-applied on SIGHUP via the
+/// telemetry tracing reload handle), so the doc claim is finally true; if
+/// someone regresses it back to inert and re-marks the row restart-required
+/// (or vice versa) this fails. `tcp_ao` and `bfd` pin the restart-required
+/// side so a blanket "mark everything live" edit also fails.
+#[test]
+fn reload_matrix_pins_load_bearing_field_classes() {
+    let matrix = load_reload_matrix();
+    for (field, class_cell) in [
+        ("log_level", "| live |"),
+        ("tcp_ao", "| restart-required |"),
+        ("bfd", "| restart-required |"),
+    ] {
+        let rows = reload_matrix_rows_for(&matrix, field);
+        assert!(
+            !rows.is_empty(),
+            "no reload-matrix table row found for `{field}`"
+        );
+        for row in rows {
+            assert!(
+                row.contains(class_cell),
+                "reload-matrix class drift: the row for `{field}` must be \
+                 classed `{class_cell}` (load-bearing: it tells operators \
+                 whether SIGHUP is enough). Row reads: {row}"
+            );
+        }
+    }
+}
+
+/// Regression guard for the directive format itself: every string
+/// `per_peer_log_directives` emits must actually parse as an `EnvFilter`
+/// directive. The original `peer{peer_addr=X}=level` form (no brackets)
+/// did NOT parse — `init_logging` rejected it and aborted daemon boot the
+/// moment any neighbor set a `log_level`, so the per-peer knob was inert
+/// *and* boot-fatal. The bracketed `[peer{peer_addr=X}]=level` form parses;
+/// this pins it so the format can't silently regress into a boot-abort.
+#[test]
+fn per_peer_log_directives_parse_as_env_filter() {
+    use tracing_subscriber::filter::Directive;
+
+    // Appends `log_level` onto the fixture's single 10.0.0.2 neighbor.
+    let config = parse(&format!("{}log_level = \"debug\"\n", valid_toml())).unwrap();
+    let directives = config.per_peer_log_directives();
+    assert_eq!(directives.len(), 1, "one neighbor carries a log_level");
+    assert!(
+        directives[0].starts_with("[peer{"),
+        "span directive must be bracketed, got {:?}",
+        directives[0]
+    );
+    for directive in &directives {
+        directive.parse::<Directive>().unwrap_or_else(|e| {
+            panic!(
+                "per_peer_log_directives emitted {directive:?} which EnvFilter \
+                 rejects ({e}) — init_logging would abort daemon boot"
+            )
+        });
+    }
+}
+
 #[test]
 fn managed_netdevs_default_empty_and_resolve_stamps() {
     let config = parse(&format!(

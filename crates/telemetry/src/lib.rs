@@ -17,6 +17,6 @@ pub mod logging;
 pub mod metrics;
 pub mod reason_labels;
 
-pub use logging::{LoggingError, init_logging};
+pub use logging::{LoggingError, init_logging, reload_per_peer_directives};
 pub use metrics::BgpMetrics;
 pub use reason_labels::{OtcBlockReason, RrLoopReason};
