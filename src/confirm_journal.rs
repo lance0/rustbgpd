@@ -29,6 +29,12 @@ use crate::config::Config;
 /// Journal file name under `runtime_state_dir`.
 pub const JOURNAL_FILE_NAME: &str = "commit-confirm-journal.json";
 
+/// Sanity cap on the on-disk journal size. A well-formed journal is a small
+/// config snapshot; a journal larger than this is corrupt, and loading it would
+/// only risk an OOM during boot deserialization, so it is refused before parse
+/// (LAN-204).
+const MAX_JOURNAL_BYTES: u64 = 10 * 1024 * 1024;
+
 /// On-disk revert state for one pending commit-confirmed transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmJournal {
@@ -55,6 +61,12 @@ pub struct BootRevertNotice {
     pub confirm_id: String,
     /// Where the unconfirmed candidate was saved aside.
     pub backup_path: PathBuf,
+    /// The config was restored, but the journal could not be removed. The boot
+    /// still proceeds from the restored config (rather than looping under
+    /// systemd `Restart=` and clobbering the saved-aside candidate — LAN-208);
+    /// `main` records a durable failure metric and tells the operator to delete
+    /// the stale journal.
+    pub journal_retained: bool,
 }
 
 #[must_use]
@@ -99,6 +111,29 @@ pub fn boot_revert_check(
     journal_path: &Path,
     config_path: &Path,
 ) -> Result<Option<BootRevert>, String> {
+    // Size guard BEFORE read (LAN-204): a corrupt journal with a giant
+    // `rollback_toml` must not OOM `read_to_string`/deserialize at boot.
+    match fs::metadata(journal_path) {
+        Ok(meta) if meta.len() > MAX_JOURNAL_BYTES => {
+            return Err(refuse_message(
+                journal_path,
+                config_path,
+                &format!(
+                    "the journal is {} bytes, exceeding the {MAX_JOURNAL_BYTES}-byte sanity limit — refusing to load a journal this large",
+                    meta.len()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(refuse_message(
+                journal_path,
+                config_path,
+                &format!("the journal cannot be read: {error}"),
+            ));
+        }
+    }
     let raw = match fs::read_to_string(journal_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -131,11 +166,11 @@ pub fn boot_revert_check(
     // previous config atomically. Order matters: the rename preserves the
     // candidate bytes before anything overwrites them.
     let backup_path = unconfirmed_backup_path(config_path);
-    match fs::rename(config_path, &backup_path) {
-        Ok(()) => {}
+    let candidate_saved = match fs::rename(config_path, &backup_path) {
+        Ok(()) => true,
         // A missing config file is unexpected mid-revert but not a reason to
         // refuse restoring a known-good config.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(refuse_message(
                 journal_path,
@@ -146,29 +181,35 @@ pub fn boot_revert_check(
                 ),
             ));
         }
-    }
-    write_atomic(config_path, journal.rollback_toml.as_bytes()).map_err(|error| {
-        refuse_message(
+    };
+    if let Err(error) = write_atomic(config_path, journal.rollback_toml.as_bytes()) {
+        // The candidate was already renamed aside; if we bail now the config
+        // file is GONE and the next boot has nothing to load (LAN-207). Put the
+        // candidate back so the on-disk state is exactly what it was before this
+        // attempt — the journal is still present, so a retry runs the same
+        // (idempotent) revert.
+        if candidate_saved {
+            let _ = fs::rename(&backup_path, config_path);
+        }
+        return Err(refuse_message(
             journal_path,
             config_path,
             &format!("failed to restore the pre-transaction config: {error}"),
-        )
-    })?;
-    remove(journal_path).map_err(|error| {
-        refuse_message(
-            journal_path,
-            config_path,
-            &format!(
-                "the config file was reverted, but the journal could not be removed: {error}; \
-                 delete the journal manually before restarting"
-            ),
-        )
-    })?;
+        ));
+    }
+    // The config is now restored on disk. If the journal cannot be removed we
+    // must NOT return Err: under systemd `Restart=` that loops boot, and the
+    // next iteration renames the (already-reverted) config over the real
+    // `.unconfirmed` candidate, destroying it (LAN-208). Boot from the restored
+    // config and surface the retained journal so `main` records a durable
+    // metric and tells the operator to delete it.
+    let journal_retained = remove(journal_path).is_err();
     Ok(Some(BootRevert {
         config: Box::new(config),
         notice: BootRevertNotice {
             confirm_id: journal.confirm_id,
             backup_path,
+            journal_retained,
         },
     }))
 }
@@ -185,15 +226,18 @@ fn refuse_message(journal_path: &Path, config_path: &Path, detail: &str) -> Stri
     format!(
         "refusing to boot: a commit-confirmed config transaction revert journal exists at {journal} \
          (meaning the last run stopped inside a confirm window, so the on-disk config {config} may be \
-         an unconfirmed candidate), but {detail}. Inspect {journal} and {config}; to boot the current \
-         on-disk config anyway, delete the journal.",
+         an unconfirmed candidate), but {detail}. If a candidate was saved aside during the revert it \
+         is at {backup}. Inspect {journal} and {config}; to boot the current on-disk config anyway, \
+         run `rm {journal}` and restart.",
         journal = journal_path.display(),
         config = config_path.display(),
+        backup = unconfirmed_backup_path(config_path).display(),
     )
 }
 
-/// Write temp file + fsync + rename + fsync dir.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Write temp file + fsync + rename + fsync dir. Shared with the config
+/// persister so every durable config write goes through the same primitive.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = parent_dir(path)?;
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
@@ -379,5 +423,103 @@ log_format = "json"
         let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
         assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
         assert!(!revert.notice.backup_path.exists());
+        assert!(!revert.notice.journal_retained);
+    }
+
+    #[test]
+    fn boot_check_refuses_oversized_journal_before_parse() {
+        // LAN-204: a corrupt journal larger than the sanity cap must be refused
+        // up front, never read/deserialized (which would risk an OOM).
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("rustbgpd.toml");
+        fs::write(&config_path, "candidate").unwrap();
+        let path = journal_path(dir.path());
+        let oversized = usize::try_from(MAX_JOURNAL_BYTES + 1).unwrap();
+        fs::write(&path, vec![b'a'; oversized]).unwrap();
+
+        let message = boot_revert_check(&path, &config_path).unwrap_err();
+        assert!(message.contains("refusing to boot"), "{message}");
+        assert!(message.contains("sanity limit"), "{message}");
+        // Fail closed: config untouched, journal preserved.
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), "candidate");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn boot_check_restores_candidate_when_config_restore_write_fails() {
+        // LAN-207: if write_atomic fails after the candidate was renamed aside,
+        // the config must be put back rather than left missing. Inject the
+        // failure by pre-creating a DIRECTORY at the temp path write_atomic
+        // needs (`<config>.tmp`), so File::create there fails while the
+        // candidate→backup rename still succeeds.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("rustbgpd.toml");
+        fs::write(&config_path, "unconfirmed candidate bytes").unwrap();
+        let mut blocker = config_path.clone().into_os_string();
+        blocker.push(".tmp");
+        fs::create_dir(&blocker).unwrap();
+        let path = journal_path(dir.path());
+        write(&path, &journal()).unwrap();
+
+        let message = boot_revert_check(&path, &config_path).unwrap_err();
+        assert!(message.contains("refusing to boot"), "{message}");
+        // The candidate was restored — the config file is NOT missing.
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            "unconfirmed candidate bytes",
+            "candidate must be restored after a failed revert write"
+        );
+        // Refusal names the backup slot and an explicit recovery command.
+        let backup = unconfirmed_backup_path(&config_path);
+        assert!(message.contains(&*backup.to_string_lossy()), "{message}");
+        assert!(message.contains("rm "), "{message}");
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_check_retains_journal_instead_of_looping_when_removal_fails() {
+        // LAN-208: a journal-removal failure after a successful restore must NOT
+        // be fatal (returning Err loops boot under systemd Restart= and, on the
+        // next iteration, renames the reverted config over the real .unconfirmed
+        // candidate). Boot from the restored config with journal_retained set.
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = tempfile::tempdir().unwrap();
+        let journal_dir = base.path().join("journal");
+        let config_dir = base.path().join("config");
+        fs::create_dir_all(&journal_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("rustbgpd.toml");
+        fs::write(&config_path, "unconfirmed candidate bytes").unwrap();
+        let path = journal_path(&journal_dir);
+        write(&path, &journal()).unwrap();
+
+        // Read-only journal dir → remove_file fails (needs dir write), but the
+        // journal is still readable and the config dir stays writable.
+        fs::set_permissions(&journal_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory-write permission; skip the strict assertion.
+        if fs::File::create(journal_dir.join(".root-probe")).is_ok() {
+            fs::set_permissions(&journal_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
+        assert!(
+            revert.notice.journal_retained,
+            "a removal failure must surface as journal_retained, not a fatal Err"
+        );
+        // Config restored despite the removal failure.
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        // The real candidate is preserved in the backup slot.
+        assert_eq!(
+            fs::read_to_string(&revert.notice.backup_path).unwrap(),
+            "unconfirmed candidate bytes"
+        );
+        // Journal still present (couldn't be removed) but boot succeeded.
+        assert!(path.exists());
+
+        // Restore perms so tempdir cleanup works.
+        fs::set_permissions(&journal_dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
