@@ -695,8 +695,15 @@ impl RibManager {
 
     /// Insert the local default RT-Constrain NLRI into the `LOCAL_PEER`
     /// Adj-RIB-In (lazy + idempotent) and run the RTC recompute so it flows
-    /// to any already-established RTC peers. Never withdrawn — harmless if
-    /// no RTC peer remains. No config knob by design.
+    /// to any already-established RTC peers. No config knob by design.
+    ///
+    /// Intentionally never withdrawn (LAN-190 §B). The default lives in the
+    /// synthetic `LOCAL_PEER` Adj-RIB-In, which no session teardown touches
+    /// (`clear_peer_adj_rib_in` only removes the departed *peer's* RIB), so
+    /// it survives the last RTC peer going down as a local, inert entry and
+    /// is re-advertised for free when an RTC peer returns. This is correct,
+    /// not a leak: adding a withdraw would only churn the RIB with nothing
+    /// downstream to receive it.
     fn ensure_default_rtc_originated(&mut self) {
         use rustbgpd_wire::{AsPath, Origin, PathAttribute, RtcNlri};
 

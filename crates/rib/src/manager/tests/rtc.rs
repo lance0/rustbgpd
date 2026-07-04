@@ -374,6 +374,49 @@ async fn default_rtc_origination_idempotent_across_peer_ups() {
     handle.await.unwrap();
 }
 
+/// LAN-190 §B: the locally-originated default RTC NLRI is intentionally
+/// retained when the LAST RTC peer drops — it lives in the synthetic
+/// `LOCAL_PEER` RIB, which peer teardown never touches — and is
+/// re-advertised for free when an RTC peer returns. No withdraw is emitted.
+#[tokio::test]
+async fn default_rtc_retained_after_last_rtc_peer_drops_and_readvertised_on_return() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // The only RTC peer comes up: default is originated and advertised.
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    // The last (and only) RTC peer drops.
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+
+    // The default RTC NLRI is retained, not withdrawn: still originated with
+    // no RTC peer remaining.
+    let stored = query_rtc_routes(&tx).await;
+    assert_eq!(stored.len(), 1, "default RTC NLRI must be retained");
+    assert!(stored[0].nlri.is_default());
+    assert_eq!(stored[0].origin_type, crate::route::RouteOrigin::Local);
+
+    // An RTC peer returns: the retained default is re-advertised in its
+    // initial dump — no re-origination churn, the entry was never dropped.
+    let mut return_rx = rtc_peer_up(&tx, peer, true, false).await;
+    let dump = return_rx.recv().await.unwrap();
+    assert!(
+        dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
+        "returning RTC peer must receive the retained default NLRI"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Peer teardown removes the departed peer's RTC routes and withdraws them
 /// from remaining peers.
 #[tokio::test]
@@ -821,6 +864,45 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// LAN-190 §E: `rtc_vpn_filter` resolves the RFC 4684 VPN outbound filter
+/// directly. Two contracts pinned: (1) an RTC-negotiated peer with no
+/// membership recorded resolves to the STRICT EMPTY filter (advertise
+/// nothing), never fail-open; (2) the filter keys off the `sendable`
+/// ARGUMENT, so a stale `peer_sendable_families` entry is harmless — a
+/// sendable set lacking RTC resolves to `None` (unfiltered) even when a
+/// membership is still recorded for the peer.
+#[test]
+fn rtc_vpn_filter_strict_empty_and_argument_driven() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let sendable_rtc = vec![crate::route::RtcRibRouteKey::afi_safi()];
+    let sendable_no_rtc = vec![(Afi::Ipv4, Safi::Unicast)];
+
+    // (1) RTC negotiated, no membership recorded → strict empty, not fail-open.
+    assert_eq!(
+        manager.rtc_vpn_filter(peer, Some(&sendable_rtc)),
+        Some(RtcMembership::default()),
+        "no membership must resolve to strict empty, not fail-open"
+    );
+
+    // A recorded membership is returned verbatim.
+    let membership = RtcMembership {
+        has_default: true,
+        entries: vec![],
+    };
+    manager.peer_rt_membership.insert(peer, membership.clone());
+    assert_eq!(
+        manager.rtc_vpn_filter(peer, Some(&sendable_rtc)),
+        Some(membership)
+    );
+
+    // (2) Argument-driven: a sendable set lacking RTC (or absent) resolves
+    // to None even though a membership is still recorded for the peer.
+    assert_eq!(manager.rtc_vpn_filter(peer, Some(&sendable_no_rtc)), None);
+    assert_eq!(manager.rtc_vpn_filter(peer, None), None);
 }
 
 /// When a matching RTC NLRI arrives, the withheld VPN route is announced as a
