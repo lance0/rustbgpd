@@ -776,6 +776,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BMP peer-state lifecycle no longer emits spurious or mis-ordered
+  events across a TCP flap (LAN-200).** Two gaps closed. (1) A pending
+  BMP divergence repair (the synthetic RFC 7854 PeerDown/PeerUp forced
+  after a RouteMonitoring drop) is now abandoned when the TCP session
+  tears down: `close_tcp` / `handle_tcp_disconnect` clear the divergence
+  latch and disarm the `bmp_repair_timer`, so the run loop's repair arm
+  can no longer fire a synthetic PeerDown/PeerUp for a dead session that
+  a reconnect would then stack a real PeerUp on top of. (2) A live
+  Loc-RIB PeerUp (RFC 9069) dropped on a full collector channel at
+  connect now suppresses that collector's subsequent live Loc-RIB Route
+  Monitoring until a later reconnect lands the PeerUp — a collector can
+  no longer see Loc-RIB RM with no preceding Loc-RIB PeerUp. The
+  connect-time Loc-RIB dump path was already safe (it skips the dump on
+  a dropped PeerUp).
+
 - **Config persistence now fsyncs before rename (LAN-206).**
   `ConfigPersister::persist()` wrote the temp config with `fs::write` +
   `fs::rename` and never called `sync_all()` on the temp file or fsynced
