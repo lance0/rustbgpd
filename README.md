@@ -238,8 +238,8 @@ rbgp completions bash > /etc/bash_completion.d/rbgp
 recipes — receipt-proven config, verification commands, metrics, and
 failure-mode debugging — for the common deployment shapes: iBGP route
 reflector at scale, L3VPN (VPNv4/VPNv6 + RT-Constrain) reflection,
-a BMP/event/MRT monitoring feed, an EVPN fabric RR, and the `.rpol`
-policy workflow.
+an IXP route server, a BMP/event/MRT monitoring feed, an EVPN fabric RR,
+and the `.rpol` policy workflow.
 
 gRPC defaults to a local Unix domain socket. For remote access, configure
 native mTLS on the TCP listener (`tls_cert_file` / `tls_key_file` /
@@ -444,7 +444,7 @@ evolving API.**
 
 | Document | Content |
 |----------|---------|
-| [docs/cookbook/](docs/cookbook/README.md) | Scenario recipes with receipt-proven configs: RR at scale, L3VPN RR, monitoring feed, EVPN fabric RR, policy quickstart |
+| [docs/cookbook/](docs/cookbook/README.md) | Scenario recipes with receipt-proven configs: RR at scale, L3VPN RR, IXP route server, monitoring feed, EVPN fabric RR, policy quickstart |
 | [docs/USE_CASES.md](docs/USE_CASES.md) | Deployment scenarios: DDoS, hosting, IX, SDN, collector |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Crate graph, runtime model, ownership, data flow |
 | [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |

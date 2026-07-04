@@ -226,7 +226,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   hit counters). M80 proves route-for-route parity against FRR
   route-maps expressing the same intent, plus refresh-scoping on an
   `.rpol` edit under traffic. Follow-up: an import-side read surface for
-  the (already-accumulating) import hit counters. — per-client best paths
+  the (already-accumulating) import hit counters.
+- **Optimal Route Reflection (RFC 9107)** — per-client best paths
   via SPF over the BGP-LS-sourced topology; typed topology accessors, graph +
   hand-rolled Dijkstra + NH-cost resolution, `orr_vantage` config, the
   interior-cost tiebreak at RFC 4271's step-(e) slot, `rbgp topology`/`rbgp
