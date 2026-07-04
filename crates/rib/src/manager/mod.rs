@@ -2656,6 +2656,16 @@ impl RibManager {
     /// unicast/FlowSpec/EVPN recompute + distribution pattern.
     fn recompute_bgpls_keys(&mut self, affected: &HashSet<crate::route::BgpLsRouteKey>) {
         self.recompute_and_distribute_bgpls(affected);
+        // An empty affected set means no BGP-LS route actually changed
+        // (e.g. a withdraw of a key not held, or an empty batch), so the
+        // Adj-RIB-In topology union is byte-identical and the SPF surface
+        // cannot have moved — skip the topology rebuild + per-vantage SPF
+        // (LAN-189). Vantage-config changes take the direct
+        // `recompute_orr()` path in peer_lifecycle, not this seam, so
+        // they are unaffected by this guard.
+        if affected.is_empty() {
+            return;
+        }
         // Every BGP-LS mutation seam routes through here — receive
         // (`handle_bgpls_routes_received`), the enhanced-refresh EoRR
         // sweep (`finish_route_refresh`), the GR entry sweep
