@@ -715,6 +715,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`.rpol` `route.evpn-route-type` now accepts only 1-5 (LAN-192).**
+  rustbgpd emits EVPN NLRIs of route types 1-5 (RFC 7432 §7), so a
+  comparison against `0` or `6`-`255` could never match a real route.
+  The typechecker previously accepted `0`-`255` and silently compiled a
+  dead policy; out-of-range literals are now a compile-time diagnostic.
 - **The default container image is now a lean production runtime.**
   `docker build .` (and the GHCR release image) ships only the daemon
   and the `rbgp` CLI, runs as a nonroot `rustbgpd` user, and carries no
@@ -776,6 +781,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`.rpol` `route.next-hop != …` no longer matches a route with no
+  next-hop (LAN-209).** `!=` (both `route.next-hop != <ip>` and
+  `route.next-hop != peer.address`) lowered to `Not(NextHopEq…)`, which
+  matched whenever the attribute was absent — the opposite of the
+  documented rule that next-hop predicates never match a route without a
+  next-hop. `!=` now lowers to dedicated `NextHopNe` / `NextHopNePeer`
+  guards that, like `==`, require the attribute present, so an absent
+  next-hop matches neither. `!= peer.address` still reads peer identity
+  (disqualifies update-group sharing).
+- **Policy hit-counter attribution no longer risks a panic on a stale
+  counter set (LAN-192).** `evaluate_with_attribution_counting` indexed
+  the per-policy and per-term counter arrays directly; a counter set
+  shorter than the chain (a hot-reload leftover) would panic on the
+  production evaluation path. It now degrades to skipped increments via
+  bounds-checked access. (The counters live on the owning chain and are
+  replaced with it, so a short set is a construction impossibility today
+  — this is defense-in-depth.)
+- **`apply_community_mods` can no longer panic (LAN-175).** The private
+  helper paired a match predicate with a separate value extractor joined
+  by `.expect("… agree")`; a caller mismatch would have panicked the
+  daemon on the export path. Predicate and extractor are merged into one
+  `Fn(&PathAttribute) -> Option<Vec<_>>` closure that matches and
+  extracts together, so disagreement — and the `expect` — are gone.
 - **`ApplyEvpnRuntime` with `validate_only` now rejects what a real apply
   would reject (LAN-214 #9).** The dry-run path returned
   `EvpnRuntimeApplyValidated` immediately after the (pure, rejection-free)

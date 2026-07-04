@@ -80,6 +80,20 @@ impl Config {
     /// file's directory when known, the process working directory
     /// otherwise). Name collisions — with `[policy.definitions]` or
     /// across `.rpol` files — are load errors naming both sources.
+    ///
+    /// Path resolution is deliberately **not** confined to `base_dir`.
+    /// `rpol_files` is an operator-authored include directive — the same
+    /// trust model as an nginx `include` or a systemd drop-in: whoever
+    /// writes the on-disk config is the trusted host operator, and
+    /// absolute paths (`/etc/rbgp/policies/common.rpol`) and
+    /// parent-relative references into a shared policy library are
+    /// legitimate and expected. There is therefore no `..`/symlink
+    /// confinement or canonicalization step; a `base.join(entry)` that
+    /// escapes `base_dir` is intended behavior, not a traversal to
+    /// reject. (Untrusted candidate configs arrive via
+    /// `load_toml_with_diagnostics` with `base_dir = None`, so relative
+    /// entries resolve against the process CWD and never against a
+    /// caller-influenced base.)
     fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
         use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry};
 

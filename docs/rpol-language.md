@@ -221,7 +221,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.rpki == invalid` | RPKI origin validation state |
 | `route.aspa == unknown` | ASPA verification state |
 | `route.route-type == external` | route source class |
-| `route.evpn-route-type == 2` | EVPN route type (integer literal 0–255; `==`/`!=` only) |
+| `route.evpn-route-type == 2` | EVPN route type (integer literal 1–5, RFC 7432 §7; `==`/`!=` only) |
 | `peer.address == 192.0.2.1` | evaluation-peer address |
 | `peer.asn == 65010` | evaluation-peer ASN (`==`/`!=` only) |
 | `peer.group == "leaf"` | evaluation-peer group name |
