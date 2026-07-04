@@ -593,6 +593,7 @@ mod tests {
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(addr), len)),
             },
             next_hop: peer,
+            link_local_next_hop: None,
             peer,
             attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),

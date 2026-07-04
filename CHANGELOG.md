@@ -770,6 +770,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Labeled IPv6 reflection no longer drops the link-local next-hop
+  (LAN-190).** `LabeledRibRoute` stored only a single global next-hop, so
+  a labeled-unicast (SAFI 4) IPv6 route received with an RFC 8950 §4 /
+  RFC 2545 §3 two-address next-hop (32-byte: global + link-local) was
+  reflected with a 16-byte single-address next-hop — the link-local half
+  was silently discarded. The route data model now carries
+  `link_local_next_hop` alongside the global next-hop; the receive path
+  populates it and the reflected `MP_REACH_NLRI` re-emits the 32-byte
+  form verbatim, so labeled IPv6 link-local forwarding survives
+  reflection. A change confined to the link-local half now correctly
+  re-advertises. (The VPNv6 reflection path shares the same
+  single-next-hop limitation on `VpnRibRoute`; that mirror is deferred as
+  a follow-up — the wire codec already round-trips the RFC 4659 48-byte
+  two-address VPN next-hop.)
 - **`.rpol` `route.next-hop != …` no longer matches a route with no
   next-hop (LAN-209).** `!=` (both `route.next-hop != <ip>` and
   `route.next-hop != peer.address`) lowered to `Not(NextHopEq…)`, which

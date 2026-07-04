@@ -100,6 +100,9 @@ pub(super) fn labeled_routes_equal(
 ) -> bool {
     a.nlri == b.nlri
         && a.next_hop == b.next_hop
+        // A change confined to the IPv6 link-local half of the next-hop
+        // (RFC 8950 two-address form) must still re-advertise (LAN-190).
+        && a.link_local_next_hop == b.link_local_next_hop
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)

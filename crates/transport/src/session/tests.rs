@@ -1560,6 +1560,7 @@ fn make_labeled_rib_route(label: u32) -> rustbgpd_rib::LabeledRibRoute {
             )),
         },
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1686,6 +1687,91 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
             }
         }],
         "withdraw-mode NLRI carries no label stack (RFC 8277 §2.4 compatibility field)"
+    );
+}
+/// LAN-190: a labeled IPv6 route carrying an RFC 8950 two-address next-hop
+/// (global + link-local) reflects the link-local half — the emitted
+/// `MP_REACH` uses the 32-byte next-hop form, not the 16-byte single-address
+/// form.
+/// Without this, labeled IPv6 link-local forwarding breaks on reflection.
+#[tokio::test]
+async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::LabeledUnicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+    let route = rustbgpd_rib::LabeledRibRoute {
+        nlri: rustbgpd_wire::LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48)),
+        },
+        next_hop: IpAddr::V6(global),
+        link_local_next_hop: Some(link_local),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![].into(),
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![].into(),
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![],
+        labeled_announce: vec![route.clone()],
+        rtc_announce: vec![],
+        vpn_withdraw: vec![],
+        labeled_withdraw: vec![],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected labeled MP_REACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("labeled announcement must use MP_REACH");
+    assert_eq!(mp.afi, Afi::Ipv6);
+    assert_eq!(mp.safi, Safi::LabeledUnicast);
+    assert_eq!(
+        mp.next_hop,
+        IpAddr::V6(global),
+        "labeled global next-hop must pass through reflection unchanged"
+    );
+    assert_eq!(
+        mp.link_local_next_hop,
+        Some(link_local),
+        "labeled IPv6 link-local next-hop must survive reflection (LAN-190)"
     );
 }
 /// RFC 7911 labeled outbound: with Add-Path send negotiated for (IPv4, SAFI

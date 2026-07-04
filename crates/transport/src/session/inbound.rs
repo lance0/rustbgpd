@@ -1630,6 +1630,10 @@ impl PeerSession {
                                 labeled_announced.push(LabeledRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
+                                    // Carry the RFC 8950 two-address IPv6
+                                    // link-local half so labeled IPv6
+                                    // reflection re-emits it (LAN-190).
+                                    link_local_next_hop: mp.link_local_next_hop,
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,
