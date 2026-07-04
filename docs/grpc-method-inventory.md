@@ -125,7 +125,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (21 RPCs)
+### RibService (22 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -146,6 +146,7 @@ shape itself does not raise the tier.
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
 | `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
+| `ListLabeledRoutes` | `sensitive_read` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability. |
 | `ListRtcRoutes` | `sensitive_read` | RFC 4684 RT-Constrain membership NLRI — reveals which Route Targets each peer imports (VPN topology metadata). |
 | `ListTopologyNodes` | `sensitive_read` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union — discloses IGP node identity (AS, router-IDs). |
 | `ListTopologyLinks` | `sensitive_read` | RFC 9107 ORR topology links — discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
@@ -234,11 +235,13 @@ specific method if the model warrants it.
 1. **Tier vs. service granularity.** Every service has at least one
    `sensitive_read` method, and there are currently no true `read`
    methods because even `GetHealth` returns peer and route counts.
-   `RibService` and `EventService` are
-   pure observability (no mutations at all). The minimum-viable
+   `EventService` is pure observability (no mutations at all);
+   `RibService` is read-only apart from the mutating `SetFibTable` /
+   `DeleteFibTable` FIB-table CRUD pair (ADR-0074). The minimum-viable
    enforcement could be a per-service listener split: read-only
-   listener for those two plus lightweight health checks elsewhere,
-   mutating listener for everything else. The 4-tier scheme allows
+   listener for `EventService` plus the `RibService` read subset and
+   lightweight health checks, mutating listener for everything else
+   (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
 2. **`operator_only` is small enough to gate by principal role.** 23
@@ -300,7 +303,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 90-method classification
+`crates/api/src/authz.rs` contains the same 98-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

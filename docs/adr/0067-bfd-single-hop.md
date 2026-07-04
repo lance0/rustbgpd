@@ -53,7 +53,7 @@ timing before arming the teardown. The staged delivery is:
 2. **Actor + config + status** — sessions run on real sockets and report Up/Down
    via a status `watch` channel + Prometheus metrics, but do **not** affect BGP.
    **[shipped]**
-3a. **Operator inspection surface** — gRPC `GetBfdSessions`, `rustbgpctl bfd`,
+3a. **Operator inspection surface** — gRPC `GetBfdSessions`, `rbgp bfd`,
    read from the actor's status snapshot. **[shipped]** Lands the **event proto
    contract** (`EVENT_CATEGORY_BFD`, `BfdSessionEvent`, the `BgpEvent.bfd`
    oneof) at the same time so it is stable, but **does not yet stream live BFD

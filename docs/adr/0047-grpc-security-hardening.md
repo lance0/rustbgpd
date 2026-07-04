@@ -45,7 +45,7 @@ all listeners; if any exits unexpectedly, all are shut down.
 
 ### CLI alignment
 
-`rustbgpctl` defaults to `unix:///var/lib/rustbgpd/grpc.sock` and supports
+`rbgp` defaults to `unix:///var/lib/rustbgpd/grpc.sock` and supports
 `--token-file` / `RUSTBGPD_TOKEN_FILE` for bearer auth injection.
 
 ## Alternatives considered

@@ -134,7 +134,7 @@ candidate EVPN runtime model, the daemon reuses config validation, computes a
 plan, converges the affected actors, and commits a new generation only after the
 live shape succeeds.
 
-### CLI: `rustbgpctl evpn instances`
+### CLI: `rbgp evpn instances`
 
 Pure proto-wrapping of the gRPC surface. Mirrors the existing
 `evpn list` route-listing command's output style.
@@ -241,7 +241,7 @@ helpers between this domain enum and
   to additive fields.
 - **Validation surface today, behavior tomorrow.** Operators can
   write the leaf config and run `rustbgpd --check` /
-  `rustbgpctl evpn instances` against it before any kernel
+  `rbgp evpn instances` against it before any kernel
   integration ships. That's the same workflow they get with FRR's
   `vtysh` validation pass.
 - **No regression for RR-only deployments.** Empty

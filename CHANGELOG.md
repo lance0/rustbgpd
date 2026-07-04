@@ -9,51 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Deprecated
-
-- **The in-daemon birdwatcher looking glass
-  (`[global.telemetry.looking_glass]`) is deprecated and will be
-  removed in a future release.** Partial compatibility with an external
-  REST contract does not belong in daemon core; the daemon's durable
-  API is gRPC + `rbgp`. The same birdwatcher-compatible REST surface
-  (identical endpoints and response shapes, consumed by Alice-LG and
-  similar frontends) is now served by a maintained external adapter,
-  `examples/birdwatcher-adapter`, which sources everything from the
-  daemon's gRPC API — point it at a gRPC TCP listener and keep the same
-  frontend config. The daemon logs a deprecation warning at startup
-  while the section is present; behavior is otherwise unchanged. An
-  end-to-end smoke test pins adapter-vs-in-daemon response equality.
-- **Global inline policy (`[[policy.import]]` / `[[policy.export]]`)
-  is deprecated and will be removed in a future release.** It is the
-  legacy pre-chain fallback: restart-required on change (no SIGHUP
-  hot-apply) and invisible to config transactions and the impact
-  planner. The daemon now logs a loud deprecation warning at startup,
-  in the startup banner, and on every reload while it is present.
-  Migrate to named policy chains (`[policy.definitions]` +
-  `import_chain` / `export_chain`) or `.rpol` files
-  (`policy.rpol_files`); see docs/CONFIGURATION.md "Inline policy
-  (deprecated)". Per-neighbor inline policy is unaffected.
-
-### Changed
-
-- **The default container image is now a lean production runtime.**
-  `docker build .` (and the GHCR release image) ships only the daemon
-  and the `rbgp` CLI, runs as a nonroot `rustbgpd` user, and carries no
-  dev/test/bench helpers. The previous all-in image (adds
-  `evpn-tester` / `evpn-monitor`, `iproute2`, the interop start
-  script; runs as root) is now the `dev` build target:
-  `docker build --target dev -t rustbgpd:dev .` — CI interop/soak
-  workflows are pinned to it.
-- **systemd packaging split into an unprivileged base unit + opt-in
-  dataplane drop-in.** `examples/systemd/rustbgpd.service` now runs as
-  a dedicated `rustbgpd` user with `CAP_NET_BIND_SERVICE` only
-  (`CAP_NET_RAW` dropped from the bounding set — nothing in the daemon
-  needs it; kernel programming was never possible under the old unit
-  either, which lacked `CAP_NET_ADMIN`). Kernel-dataplane deployments
-  ([[fib_tables]], blackhole install, EVPN VTEP/IRB) opt in via the
-  new `examples/systemd/rustbgpd-dataplane.conf` drop-in, which adds
-  `CAP_NET_ADMIN`. See docs/deployment.md "systemd".
-
 ### Added
 
 - **Durable commit-confirm: a restart inside the confirm window now
@@ -757,6 +712,51 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale). Add-Path, labeled-unicast (SAFI 4), and RT-Constrain remain
   deferred. M74 proves reflection, field preservation, withdrawal, and
   no-dataplane-install against a GoBGP source and sink.
+
+### Changed
+
+- **The default container image is now a lean production runtime.**
+  `docker build .` (and the GHCR release image) ships only the daemon
+  and the `rbgp` CLI, runs as a nonroot `rustbgpd` user, and carries no
+  dev/test/bench helpers. The previous all-in image (adds
+  `evpn-tester` / `evpn-monitor`, `iproute2`, the interop start
+  script; runs as root) is now the `dev` build target:
+  `docker build --target dev -t rustbgpd:dev .` — CI interop/soak
+  workflows are pinned to it.
+- **systemd packaging split into an unprivileged base unit + opt-in
+  dataplane drop-in.** `examples/systemd/rustbgpd.service` now runs as
+  a dedicated `rustbgpd` user with `CAP_NET_BIND_SERVICE` only
+  (`CAP_NET_RAW` dropped from the bounding set — nothing in the daemon
+  needs it; kernel programming was never possible under the old unit
+  either, which lacked `CAP_NET_ADMIN`). Kernel-dataplane deployments
+  ([[fib_tables]], blackhole install, EVPN VTEP/IRB) opt in via the
+  new `examples/systemd/rustbgpd-dataplane.conf` drop-in, which adds
+  `CAP_NET_ADMIN`. See docs/deployment.md "systemd".
+
+### Deprecated
+
+- **The in-daemon birdwatcher looking glass
+  (`[global.telemetry.looking_glass]`) is deprecated and will be
+  removed in a future release.** Partial compatibility with an external
+  REST contract does not belong in daemon core; the daemon's durable
+  API is gRPC + `rbgp`. The same birdwatcher-compatible REST surface
+  (identical endpoints and response shapes, consumed by Alice-LG and
+  similar frontends) is now served by a maintained external adapter,
+  `examples/birdwatcher-adapter`, which sources everything from the
+  daemon's gRPC API — point it at a gRPC TCP listener and keep the same
+  frontend config. The daemon logs a deprecation warning at startup
+  while the section is present; behavior is otherwise unchanged. An
+  end-to-end smoke test pins adapter-vs-in-daemon response equality.
+- **Global inline policy (`[[policy.import]]` / `[[policy.export]]`)
+  is deprecated and will be removed in a future release.** It is the
+  legacy pre-chain fallback: restart-required on change (no SIGHUP
+  hot-apply) and invisible to config transactions and the impact
+  planner. The daemon now logs a loud deprecation warning at startup,
+  in the startup banner, and on every reload while it is present.
+  Migrate to named policy chains (`[policy.definitions]` +
+  `import_chain` / `export_chain`) or `.rpol` files
+  (`policy.rpol_files`); see docs/CONFIGURATION.md "Inline policy
+  (deprecated)". Per-neighbor inline policy is unaffected.
 
 ### Removed
 

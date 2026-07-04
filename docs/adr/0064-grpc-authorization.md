@@ -210,9 +210,10 @@ Later runtime-enforcement slices add `[security.grpc]` with an
 enforcement = "tier"  # default since v0.24.0 (slice 4b default flip)
 ```
 
-- `legacy` — preserves role authorization behavior. Listener
-  `max_tier` caps still deny methods above the listener ceiling, but
-  principal roles are not used to authorize or deny calls.
+- `legacy` — preserves the pre-tier listener-only authorization
+  behavior. Listener `max_tier` caps still deny methods above the
+  listener ceiling, but principal roles are not used to authorize or
+  deny calls.
 - `tier` — opt-in per-principal enforcement. The authenticated
   principal must be present in `[security.grpc.roles]`, and the role's
   ceiling must be at least the requested method tier.

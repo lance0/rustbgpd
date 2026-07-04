@@ -7,7 +7,7 @@
 
 Runtime `[[fib_tables]]` CRUD shipped post-v0.32.0: `SetFibTable`
 (create-or-replace by name), `DeleteFibTable`, and `ListFibTables` on
-`RibService`, with `rustbgpctl fib-table {list,set,delete}`. `SetFibTable`
+`RibService`, with `rbgp fib-table {list,set,delete}`. `SetFibTable`
 and `DeleteFibTable` change which kernel FIB tables exist and which
 configured neighbors / peer-groups feed them; the ADR-0061 reconciler then
 programs the kernel — added tables back-fill from current best routes,

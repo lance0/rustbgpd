@@ -6,7 +6,7 @@
 ## Context
 
 tonic/hyper drop a request's future when the client disconnects — a
-killed `rustbgpctl`, an RPC deadline, a network blip. A dropped future
+killed `rbgp`, an RPC deadline, a network blip. A dropped future
 stops executing at its current await point and never resumes. For
 read paths this is free cancellation; for **multi-step runtime mutation
 applies** it is a correctness hazard: the mutation stops half-applied,

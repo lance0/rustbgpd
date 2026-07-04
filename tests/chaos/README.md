@@ -10,7 +10,8 @@ Each script:
   states which one in its header)
 - writes a per-run dir under `tests/chaos/runs/<UTC-timestamp>/` with
   the chaos driver log, script-specific sample/probe CSV or log output,
-  and a final `report.json`
+  and a final `report.json` (`tests/chaos/runs/` is gitignored and stays
+  local, parity with `tests/soak/runs/`)
 - exits 0 on clean pass, non-zero on a gate failure or harness setup error
 
 ## Available harnesses

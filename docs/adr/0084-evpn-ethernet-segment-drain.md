@@ -64,7 +64,7 @@ suppressed locally.
 **Add a runtime-only, in-memory ES drain primitive, owned by the
 daemon coordinator and pushed to both origination actors, exposed via
 `EvpnService.SetEthernetSegmentDrain` (gRPC) and
-`rustbgpctl evpn es drain|undrain <esi>` (CLI).**
+`rbgp evpn es drain|undrain <esi>` (CLI).**
 
 ### Numbered decisions
 

@@ -318,9 +318,10 @@ full-scans that dominated earlier versions.
 
 ### Best-Path Comparison
 
-1000 pairwise `best_path_cmp()` calls per iteration. The 10-step tiebreak
-(stale, RPKI, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref, CLUSTER_LIST,
-ORIGINATOR_ID, peer addr) is the inner loop of best-path selection.
+1000 pairwise `best_path_cmp()` calls per iteration. The 11-step tiebreak
+(stale, RPKI, ASPA, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref,
+CLUSTER_LIST, ORIGINATOR_ID, peer addr) is the inner loop of best-path
+selection.
 
 | Scenario | Time (1000 calls) | Per-call | vs v0.31.0 |
 |----------|-------------------|----------|------------|

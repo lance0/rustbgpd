@@ -162,7 +162,7 @@ Delivered:
 | EVPN `clear_stale` on EoR (GR + LLGR paths) | `crates/rib/src/manager/route_refresh.rs` |
 | `refresh_stale_evpn` tracking for enhanced route refresh; EVPN BoRR/EoRR emission | `crates/rib/src/manager/route_refresh.rs` + `mod.rs` |
 | `LocRib::recompute_evpn` fix: detect `is_stale` / `is_llgr_stale` flips so single-peer stale transitions propagate into Loc-RIB | `crates/rib/src/loc_rib.rs` |
-| 6 AdjRibIn stale unit tests + 7 RibManager GR/LLGR regression tests | `crates/rib/src/adj_rib_in.rs`, `crates/rib/src/manager/tests.rs` |
+| 6 AdjRibIn stale unit tests + 7 RibManager GR/LLGR regression tests | `crates/rib/src/adj_rib_in.rs`, `crates/rib/src/manager/tests/gr_llgr.rs` |
 
 Evidence: +13 tests, 1214 workspace total; clippy clean on Rust 1.95.
 
@@ -339,7 +339,7 @@ Delivered:
 | Proto: `AddEvpnRoute` / `DeleteEvpnRoute` RPCs | `proto/rustbgpd.proto` |
 | `InjectionService` methods + RD / MAC / IP validation | `crates/api/src/injection_service.rs` |
 | `rbgp evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
-| Unit + integration tests | `crates/rib/src/manager/tests.rs`, `crates/api/src/injection_service.rs` |
+| Unit + integration tests | `crates/rib/src/manager/tests/evpn.rs`, `crates/api/src/injection_service.rs` |
 
 End-to-end flow:
 

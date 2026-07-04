@@ -32,8 +32,7 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 - [ ] **Interop tier** — the PR-gated foundation interop jobs in
       `.github/workflows/interop.yml` (against FRR 10.3.1 via
       containerlab) are green; that workflow is the authoritative job
-      set, so check it rather than re-listing M-numbers here. New this
-      cycle: BGP-LS receive + reflection (M73).
+      set, so check it rather than re-listing M-numbers here.
 
 ## Documentation hygiene
 
@@ -521,7 +520,7 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
    - `ghcr.io/lance0/rustbgpd:latest` (auto-published for non-prerelease
      tags via the action's default `latest=auto` flavor)
    These **container-image** tags are emitted **without** the `v` prefix —
-   `0.30.0`, not `v0.30.0` (`docker/metadata-action` strips it). The **git tag
+   `0.45.0`, not `v0.45.0` (`docker/metadata-action` strips it). The **git tag
    stays `vX.Y.Z`** (step 6); only the image tag drops the `v`.
 10. **Verify release tarballs** under
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each

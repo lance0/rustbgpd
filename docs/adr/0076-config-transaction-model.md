@@ -157,7 +157,7 @@ section executors behind that public contract.
   RPCs redact the TOML body; apply summaries also avoid logging free-form
   comments verbatim. Confirm/abort/status summaries include only bounded
   correlation/status fields.
-- `rustbgpctl config plan` and `rustbgpctl config apply` are thin clients over
+- `rbgp config plan` and `rbgp config apply` are thin clients over
   the same RPCs. They print redacted daemon summaries by default and stable JSON
   when `--json` is set.
 - The transaction planner is stricter than SIGHUP. Some sections that SIGHUP can

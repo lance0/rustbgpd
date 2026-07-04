@@ -633,8 +633,12 @@ reflection through controller injection; see
   `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn vrfs` CLI +
   `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.3.1.
   ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
-  nexthop groups (M40 FRR-validated). Still ahead:
-  RFC 9135 overlay-index IRB.
+  nexthop groups (M40 FRR-validated). Shipped since: receive-side
+  RFC 9135 overlay-index Type 5 recursion, native GW-IP + ESI
+  overlay-index Type 5 origination, single-active (M71) / all-active
+  (M72) ESI overlay-index Type 5 receive; remaining EVPN work is the
+  ADR-0063 runtime mixed-edit tail, Linux softswitch local-bias, and
+  service-provider route families.
 
 **Why the API-first shape matters for DC fabric:**
 
@@ -699,8 +703,12 @@ measurement path.
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
   `rbgp evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
   (v0.19.0) adds receive-path aliasing-ECMP via FDB nexthop
-  groups (M40 FRR-validated). Still ahead: full
-  RFC 9135 overlay-index IRB. See
+  groups (M40 FRR-validated). Shipped since: receive-side RFC 9135
+  overlay-index Type 5 recursion, native GW-IP + ESI overlay-index
+  Type 5 origination, single-active (M71) / all-active (M72) ESI
+  overlay-index Type 5 receive; remaining EVPN work is the ADR-0063
+  runtime mixed-edit tail, Linux softswitch local-bias, and
+  service-provider route families. See
   [docs/evpn-enablement.md](evpn-enablement.md)
   for the full enablement ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual

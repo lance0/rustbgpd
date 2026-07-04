@@ -725,8 +725,9 @@ for the architectural record.
   `[[evpn_ip_vrfs]].router_mac`, `label2` carries the L3VNI on
   origination, and remote Type 5 import maps `(L3VXLAN ifindex,
   router_mac)` to the next-hop's L3 neighbor + L3VXLAN FDB rows
-  with conflict detection. Full RFC 9135 overlay-index IRB
-  remains deferred.
+  with conflict detection. Overlay-index IRB (RFC 9135 §4.4) was
+  deferred at this milestone; it shipped later (receive-side
+  recursion + single/all-active ESI, M71/M72).
 - **ADR-0059 EVPN aliasing dataplane via FDB nexthop groups** —
   shipped on `main` v0.19.0 across slices 1-4 + M40 hosted smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
   program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the

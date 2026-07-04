@@ -3,7 +3,7 @@
 **Status:** Proposed (research blueprint — not scheduled; execute via the staged slices below)
 **Date:** 2026-07-03
 
-**Repo:** `/home/lance/projects/rustbgpd`, main ≥ `21a5ffaa`. Design only; nothing implemented.
+**Repo:** rustbgpd, main ≥ `21a5ffaa`. Design only; nothing implemented.
 **Inputs:** `docs/perf/scale-receipt-2026-07.md` (measured), scratchpad `cpu-flamegraph-2026-07-03.md` (measured), ADR-0098/0099 (invariants), code read at HEAD.
 
 ## 0. The measured starting point (facts, not estimates)
@@ -131,8 +131,8 @@ Verified against RFC 4271/4724/7313 semantics and the code's own assumptions:
 - **Do NOT touch the family twins (VPN/EVPN/labeled/LS) in slice 2** — unicast first, where the receipts are; twins follow the proven pattern in slice 4.
 
 ### Critical Files for Implementation
-- /home/lance/projects/rustbgpd/crates/rib/src/manager/update_groups.rs — `stage_group_prefixes`/`stage_group_vpn_keys`, the compute/commit split target
-- /home/lance/projects/rustbgpd/crates/rib/src/manager/distribution/mod.rs — `recompute_best*`, `distribute_changes`, the pass structure
-- /home/lance/projects/rustbgpd/crates/rib/src/manager/distribution/unicast.rs — `distribute_single_best_prefix`, the shared export body that must stay `&`-parallel-safe
-- /home/lance/projects/rustbgpd/crates/rib/src/manager/distribution/export_memo.rs — per-thread memo semantics
-- /home/lance/projects/rustbgpd/crates/rib/src/manager/tests/update_groups_oracle.rs — the oracle pattern the seq-vs-par differential clones
+- crates/rib/src/manager/update_groups.rs — `stage_group_prefixes`/`stage_group_vpn_keys`, the compute/commit split target
+- crates/rib/src/manager/distribution/mod.rs — `recompute_best*`, `distribute_changes`, the pass structure
+- crates/rib/src/manager/distribution/unicast.rs — `distribute_single_best_prefix`, the shared export body that must stay `&`-parallel-safe
+- crates/rib/src/manager/distribution/export_memo.rs — per-thread memo semantics
+- crates/rib/src/manager/tests/update_groups_oracle.rs — the oracle pattern the seq-vs-par differential clones

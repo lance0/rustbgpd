@@ -212,7 +212,8 @@ landing, tracked here for visibility)
   `synthesize_esi_label` previously vulnerable to bytes-[4..7]
   collisions across operator-chosen ESIs.
 - [x] **DF-role-aware (ESI-aware) MAC origination landed**
-  (`src/evpn_originator.rs`). Type 2 NLRIs for MACs learned on a
+  (`src/evpn_originator/` — the ESI-aware origination code is in
+  `src/evpn_originator/rib_write.rs`). Type 2 NLRIs for MACs learned on a
   VNI in a configured `[[ethernet_segments]]` block now carry the
   segment's ESI; peers can resolve aliasing alternatives via
   RFC 7432 §14. SVI MACs stay ESI=0 (L3 next-hop, not CE-side).

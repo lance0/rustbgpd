@@ -6,10 +6,12 @@
 ## Context
 
 `rustbgpctl` already explains *export* decisions cleanly: RIB owns
-both the candidate route and the export-policy chain
-(`crates/rib/src/manager/distribution.rs:94`), and the RPC surface
-hangs off the route-explain group at `proto/rustbgpd.proto:937`
-(`RibService.ExplainAdvertisedRoute`).
+both the candidate route and the export-policy chain (export-chain
+evaluation is `evaluate_export_chain` in
+`crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
+assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
+the RPC surface hangs off the route-explain group at
+`proto/rustbgpd.proto:1113` (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -17,7 +19,7 @@ There is no equivalent for **import**. The operator question
 - Import policy is evaluated in the transport layer at
   the `evaluate_chain_with_attribution` call sites in
   `crates/transport/src/session/inbound.rs` (for example the IPv4
-  unicast body path around line 979). A denied route drops at that
+  unicast body path around line 1202). A denied route drops at that
   point and never reaches RIB. Existing tests pin this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
@@ -25,7 +27,7 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_import_routes_{permitted,denied}_total{peer}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs:870`) carries
+- `PolicyEvaluation` (`crates/policy/src/engine.rs:896`) carries
   the terminal-decision policy + action, which is what an explain
   surface should report — but it is consumed and discarded at the
   eval site.
@@ -152,7 +154,7 @@ rpc ExplainImportPolicy(ExplainImportPolicyRequest)
 Authorization tier: **`SensitiveRead`**, matching the existing
 route-explain surfaces (`crates/api/src/authz.rs`).
 
-Response carries one of five outcomes:
+Response carries one of six outcomes:
 
 | Outcome | Meaning |
 |---|---|
@@ -195,8 +197,8 @@ peer to re-advertise.
 ### CLI
 
 ```
-rustbgpctl policy explain --neighbor X --prefix Y [--path-id N]
-                          [--json]
+rbgp policy explain --neighbor X --prefix Y [--path-id N]
+                    [--json]
 ```
 
 Text render: outcome line, peer + prefix, terminal policy, pre-eval
@@ -286,7 +288,7 @@ review added the enable flag (7). They are pinned here, not deferred:
 ## Implementation sequencing
 
 **Shipped as a single reviewable PR** (the transport cache, proto
-surface, RPC, config, authz, the `rustbgpctl policy explain` CLI, and
+surface, RPC, config, authz, the `rbgp policy explain` CLI, and
 the IPv4 + IPv6 unicast write paths landed together). The work was
 built in stages but is not split across PRs:
 
@@ -294,7 +296,7 @@ built in stages but is not split across PRs:
    sites, `ExplainImportPolicy` reading from the cache, session-local
    `policy_generation`, `[policy.explain].enabled` write-gating, lighter
    `WITHDRAWN` tombstones.
-2. CLI + Add-Path semantics: `rustbgpctl policy explain`, text + JSON
+2. CLI + Add-Path semantics: `rbgp policy explain`, text + JSON
    renderers, AFI inferred from the prefix, all-paths vs `--path-id`.
 3. (shipped in a later PR) Statement-level trace: `repeated
    ImportExplainStatementStep statements = 13` on the explain response,
@@ -306,9 +308,11 @@ built in stages but is not split across PRs:
 - Eval call sites: `evaluate_chain_with_attribution` in
   `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
   and MP-unicast paths)
-- `PolicyEvaluation`: `crates/policy/src/engine.rs:870`
-- Export-explain reference: `crates/rib/src/manager/distribution.rs:94`,
-  RPC at `proto/rustbgpd.proto:937`
+- `PolicyEvaluation`: `crates/policy/src/engine.rs:896`
+- Export-explain reference: `evaluate_export_chain` in
+  `crates/rib/src/manager/distribution/mod.rs` (assembly in
+  `crates/rib/src/manager/distribution/unicast.rs`),
+  RPC at `proto/rustbgpd.proto:1113`
 - Existing import counters: `record_import_policy_eval` at
   `crates/transport/src/session/inbound.rs:21`
 - Authz tier reference: `crates/api/src/authz.rs`
