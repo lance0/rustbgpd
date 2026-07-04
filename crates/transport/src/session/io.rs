@@ -300,6 +300,7 @@ impl PeerSession {
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
         self.read_buf.clear();
+        self.clear_bmp_stream_repair();
     }
 
     /// Clear TCP state after disconnect or error. Same writer-channel
@@ -314,6 +315,19 @@ impl PeerSession {
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
         self.read_buf.clear();
+        self.clear_bmp_stream_repair();
+    }
+
+    /// Abandon any pending BMP divergence repair (LAN-200). Once the TCP
+    /// session is gone the repair is meaningless: the reconnect re-floods
+    /// both views and the FSM's `SessionDown` emits the collector-visible
+    /// `PeerDown`. Clearing the latch and disarming its retry timer here
+    /// keeps the run loop's `bmp_repair_timer` arm from firing a spurious
+    /// synthetic `PeerDown`/`PeerUp` for a dead session (which a reconnect
+    /// would then stack a real `PeerUp` on top of).
+    fn clear_bmp_stream_repair(&mut self) {
+        self.bmp_stream_diverged = false;
+        self.bmp_repair_timer = None;
     }
 
     /// Drain complete messages from the read buffer and feed to FSM.

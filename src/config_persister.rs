@@ -129,12 +129,10 @@ impl ConfigPersister {
     fn persist(&self) -> std::io::Result<()> {
         let toml_str = toml::to_string_pretty(&self.current).map_err(std::io::Error::other)?;
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = self.config_path.with_extension("toml.tmp");
-        std::fs::write(&temp_path, &toml_str)?;
-        std::fs::rename(&temp_path, &self.config_path)?;
-
-        Ok(())
+        // Durable atomic write: temp file → fsync → rename → fsync parent dir.
+        // Reuses the commit-confirm journal's proven primitive so a crash in the
+        // settle window can never leave a torn/zero-length config (LAN-206).
+        crate::confirm_journal::write_atomic(&self.config_path, toml_str.as_bytes())
     }
 }
 
@@ -267,6 +265,38 @@ log_format = "json"
 
         let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(reloaded.neighbors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persist_is_durable_atomic_write_no_temp_left() {
+        // LAN-206: persist() must go through the fsync'd atomic-write primitive
+        // and never leave a temp file lingering.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.2", 65002,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        // write_atomic renames `<config>.tmp` into place — it must not survive.
+        let mut temp = path.clone().into_os_string();
+        temp.push(".tmp");
+        assert!(
+            !std::path::Path::new(&temp).exists(),
+            "atomic write must not leave a temp file behind"
+        );
+        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded.neighbors.len(), 1);
+        assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
     }
 
     #[tokio::test]
