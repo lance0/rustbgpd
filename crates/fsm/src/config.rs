@@ -28,6 +28,12 @@ pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> boo
     )
 }
 
+/// Default proposed hold time in seconds (RFC 4271 §4.2 suggested value).
+/// Single source of truth for the daemon default — other crates (e.g. the
+/// gRPC neighbor service's send-hold-time validation) reuse this rather
+/// than re-hardcoding 90.
+pub const DEFAULT_HOLD_TIME: u16 = 90;
+
 /// Minimum default `SendHoldTime` in seconds: 8 minutes (RFC 9687 §6).
 pub const MIN_DEFAULT_SEND_HOLD_TIME: u32 = 480;
 
@@ -113,8 +119,8 @@ impl Default for PeerConfig {
             local_asn: 0,
             remote_asn: 0,
             local_router_id: Ipv4Addr::UNSPECIFIED,
-            hold_time: 90,
-            send_hold_time: default_send_hold_time(90),
+            hold_time: DEFAULT_HOLD_TIME,
+            send_hold_time: default_send_hold_time(DEFAULT_HOLD_TIME),
             connect_retry_secs: 120,
             families: Vec::new(),
             graceful_restart: false,

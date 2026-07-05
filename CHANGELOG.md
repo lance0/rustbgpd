@@ -770,6 +770,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CLI/API consistency cleanup (LAN-211).** The default hold time (90s)
+  is now a single `rustbgpd_fsm::DEFAULT_HOLD_TIME` constant reused by the
+  gRPC neighbor service's send-hold-time validation instead of a duplicated
+  literal, added a `per_client_best` proto round-trip test for peer groups,
+  and documented the deliberate export-gate-verdict label duplication across
+  the client/server type boundary.
 - **Export-explain no longer reports staged modifications for a denied
   route (LAN-212).** `distribute_single_best_prefix` recorded the export
   policy's `modifications` into the explain trace before the deny gate,

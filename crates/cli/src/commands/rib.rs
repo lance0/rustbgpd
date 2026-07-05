@@ -1022,6 +1022,11 @@ fn explain_to_json(
 }
 
 /// Render an export gate verdict for text/JSON output.
+///
+/// This maps the *proto* `ExportGateVerdict` (which has an extra
+/// `Unspecified` variant crossing the client/server boundary), so it can't
+/// reuse `rustbgpd_rib::ExportGateVerdict::label()` directly. These labels
+/// must stay in sync with that server-side `label()`.
 fn gate_verdict_label(verdict: i32) -> &'static str {
     match ExportGateVerdict::try_from(verdict).unwrap_or(ExportGateVerdict::Unspecified) {
         ExportGateVerdict::Pass => "pass",

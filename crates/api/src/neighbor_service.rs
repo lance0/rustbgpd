@@ -22,11 +22,6 @@ use rustbgpd_rib::RibUpdate;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Default hold time applied by the peer manager when `hold_time` is
-/// unset — mirrored here (same value as the daemon config default) for
-/// send-hold-time validation parity with the config path.
-const DEFAULT_HOLD_TIME: u16 = 90;
-
 fn is_ipv6_link_local(address: IpAddr) -> bool {
     match address {
         IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
@@ -499,10 +494,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         if let Some(value) = config.send_hold_time
             && value != 0
         {
+            // Unset hold_time falls back to the daemon default the peer
+            // manager applies (single source of truth in the fsm crate).
             let effective_hold_time = if config.hold_time > 0 {
                 config.hold_time
             } else {
-                u32::from(DEFAULT_HOLD_TIME)
+                u32::from(rustbgpd_fsm::DEFAULT_HOLD_TIME)
             };
             if value <= effective_hold_time {
                 return Err(Status::invalid_argument(format!(
