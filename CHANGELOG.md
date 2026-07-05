@@ -778,6 +778,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   either case with a diagnostic naming the field and offending address,
   alongside the existing iBGP / `route_reflector_client` checks, rather
   than silently accepting it.
+- **`rpol_files` policy entries are canonicalized before they are read
+  (LAN-218).** Each `[policy] rpol_files` path is now `canonicalize()`d
+  immediately before `read_to_string`, so the file that is opened is the
+  file that was resolved — closing a symlink TOCTOU window between path
+  resolution and open. A path that cannot be canonicalized (missing or
+  unreadable) surfaces the same `failed to read` config error as before.
+  Robustness hardening; path resolution stays deliberately unconfined to
+  the config directory. Regression-tested via
+  `rpol_symlinked_file_canonicalizes_and_loads`.
+- **Boot-revert save-aside is now an atomic no-clobber move (LAN-224).**
+  `save_candidate_aside` in the commit-confirm revert journal previously did a
+  check-then-act `try_exists` + `rename` on the `<config>.unconfirmed` backup.
+  Because `rename(2)` overwrites its destination unconditionally, an
+  `.unconfirmed` created between the check and the rename — by an external writer
+  to the state dir, or a second daemon booting against the same config dir —
+  could be clobbered, violating the "never overwrite an existing `.unconfirmed`
+  with different bytes" invariant. It now uses a `hard_link` + `remove_file`
+  move whose no-clobber guard is atomic: an existing backup yields the same
+  `Ok(false)` (did-not-move) result and its bytes are left untouched.
 - **Update-groups: a second policy-driven regroup while a member's prior
   regroup resync is still un-drained no longer leaks stale routes.** A
   grouped member keeps no per-family Adj-RIB-Out record of its unicast/VPN
