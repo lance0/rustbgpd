@@ -690,6 +690,17 @@ mod tests {
         assert_eq!(back.send_hold_time, Some(500));
     }
 
+    /// `per_client_best` round-trips proto -> input -> proto.
+    #[test]
+    fn per_client_best_round_trips() {
+        let mut definition = sample_definition();
+        definition.per_client_best = Some(true);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.per_client_best, Some(true));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.per_client_best, Some(true));
+    }
+
     #[tokio::test]
     async fn read_peer_group_responses_redact_md5_password() {
         let definition = proto_definition_to_input(sample_definition()).unwrap();

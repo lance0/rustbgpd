@@ -206,6 +206,10 @@ pub enum ExportGateVerdict {
 
 impl ExportGateVerdict {
     /// Stable lowercase label used by the API/CLI surfaces.
+    ///
+    /// The CLI's `gate_verdict_label` maps the proto enum (which adds an
+    /// `Unspecified` variant) rather than reusing this across the
+    /// client/server boundary — keep the two label sets in sync.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {

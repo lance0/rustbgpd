@@ -68,6 +68,13 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
     // (negotiated Add-Path send outranks the per-client-best fallback).
     // An ORR vantage is not on the runtime NeighborConfig surface, so
     // it is recognized via the update-group ungrouped reason.
+    //
+    // LAN-211 #6: this reads the *configured* add_path_send/per_client_best
+    // bits echoed on NeighborConfig, so a peer that configured Add-Path but
+    // never negotiated it still prints "add-path". A negotiated/effective
+    // mode is not surfaced on NeighborState (update_group is a shadow-mode
+    // grouping string, "group:N" when grouped), so fixing this needs new
+    // plumbing; deferred.
     let distribution_mode = if cfg.map(|c| c.add_path_send).unwrap_or(false) {
         "add-path"
     } else if cfg.map(|c| c.per_client_best).unwrap_or(false) {
