@@ -88,9 +88,12 @@ impl Config {
     /// absolute paths (`/etc/rbgp/policies/common.rpol`) and
     /// parent-relative references into a shared policy library are
     /// legitimate and expected. There is therefore no `..`/symlink
-    /// confinement or canonicalization step; a `base.join(entry)` that
-    /// escapes `base_dir` is intended behavior, not a traversal to
-    /// reject. (Untrusted candidate configs arrive via
+    /// *confinement*: a `base.join(entry)` that escapes `base_dir` is
+    /// intended behavior, not a traversal to reject. Each entry is,
+    /// however, `canonicalize()`d immediately before it is read
+    /// (LAN-218), closing the symlink TOCTOU window between path
+    /// resolution and open — canonicalization resolves the target, it
+    /// does not confine it. (Untrusted candidate configs arrive via
     /// `load_toml_with_diagnostics` with `base_dir = None`, so relative
     /// entries resolve against the process CWD and never against a
     /// caller-influenced base.)
@@ -106,6 +109,17 @@ impl Config {
                 path = base.join(path);
             }
             let display = path.display().to_string();
+            // Canonicalize before reading (LAN-218): resolve symlinks and
+            // `..` once, then read that resolved path so the file we open is
+            // the file we resolved (closes a symlink TOCTOU window).
+            // canonicalize() also errors on a missing/unreadable path — we
+            // surface that identically to a read failure.
+            let path = path
+                .canonicalize()
+                .map_err(|e| ConfigError::InvalidRpolFile {
+                    path: display.clone(),
+                    reason: format!("failed to read: {e}"),
+                })?;
             let source =
                 std::fs::read_to_string(&path).map_err(|e| ConfigError::InvalidRpolFile {
                     path: display.clone(),
