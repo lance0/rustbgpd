@@ -185,6 +185,7 @@ fn make_vpn_rib_route(
     VpnRibRoute {
         nlri,
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -653,6 +654,7 @@ fn make_vpn6_rib_route_with_rts(
     VpnRibRoute {
         nlri,
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),

@@ -495,8 +495,14 @@ impl VpnRibRouteKey {
 pub struct VpnRibRoute {
     /// Full NLRI: RD + prefix + MPLS label stack (preserved verbatim).
     pub nlri: VpnNlri,
-    /// VPN next-hop from `MP_REACH_NLRI` (Route-Distinguisher-stripped).
+    /// Global VPN next-hop from `MP_REACH_NLRI` (Route-Distinguisher-stripped).
     pub next_hop: IpAddr,
+    /// IPv6 link-local next-hop carried alongside the global one (RFC 4659
+    /// §3.2.1.1 48-byte two-address form), populated when the received
+    /// `VPNv6` `MP_REACH_NLRI` had a 48-byte next-hop. Reflected verbatim so
+    /// `VPNv6` link-local forwarding survives reflection (LAN-217); `None`
+    /// for `VPNv4` or single-address `VPNv6` next-hops.
+    pub link_local_next_hop: Option<Ipv6Addr>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes. Route Targets ride here as extended communities.
@@ -1314,6 +1320,7 @@ mod tests {
         VpnRibRoute {
             nlri,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),

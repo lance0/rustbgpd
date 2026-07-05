@@ -1164,6 +1164,7 @@ impl PeerSession {
             let mut vpn_groups: Vec<(
                 (Afi, Safi),
                 IpAddr,
+                Option<Ipv6Addr>,
                 Vec<PathAttribute>,
                 Vec<rustbgpd_wire::VpnNlriEntry>,
             )> = Vec::new();
@@ -1174,20 +1175,28 @@ impl PeerSession {
                 }
                 let attrs = self.prepare_outbound_attributes_vpn(vpn_route, is_ebgp);
                 let nh = vpn_route.next_hop;
+                // RFC 4659 two-address IPv6 next-hop: the link-local half
+                // is grouped alongside the global next-hop so it survives
+                // reflection (LAN-217).
+                let ll = vpn_route.link_local_next_hop;
                 let entry = rustbgpd_wire::VpnNlriEntry {
                     path_id: vpn_route.path_id,
                     nlri: vpn_route.nlri.clone(),
                 };
-                if let Some(group) = vpn_groups.iter_mut().find(|(g_family, g_nh, g_attrs, _)| {
-                    *g_family == family && *g_nh == nh && *g_attrs == attrs
-                }) {
-                    group.3.push(entry);
+                if let Some(group) =
+                    vpn_groups
+                        .iter_mut()
+                        .find(|(g_family, g_nh, g_ll, g_attrs, _)| {
+                            *g_family == family && *g_nh == nh && *g_ll == ll && *g_attrs == attrs
+                        })
+                {
+                    group.4.push(entry);
                 } else {
-                    vpn_groups.push((family, nh, attrs, vec![entry]));
+                    vpn_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
             let max_len = usize::from(self.max_message_len());
-            for ((afi, _), next_hop, attrs, routes) in vpn_groups {
+            for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in vpn_groups {
                 let add_path = match afi {
                     Afi::Ipv4 => add_path_vpnv4_send,
                     _ => add_path_vpnv6_send,
@@ -1195,6 +1204,7 @@ impl PeerSession {
                 if !self.send_vpn_reach_chunked(
                     afi,
                     next_hop,
+                    link_local_next_hop,
                     &attrs,
                     &routes,
                     four_octet_as,
@@ -1690,6 +1700,7 @@ impl PeerSession {
         &mut self,
         afi: Afi,
         next_hop: IpAddr,
+        link_local_next_hop: Option<Ipv6Addr>,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::VpnNlriEntry],
         four_octet_as: bool,
@@ -1705,7 +1716,7 @@ impl PeerSession {
                 afi,
                 safi: Safi::MplsVpn,
                 next_hop,
-                link_local_next_hop: None,
+                link_local_next_hop,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],

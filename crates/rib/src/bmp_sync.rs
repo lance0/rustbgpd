@@ -434,6 +434,7 @@ mod tests {
         VpnRibRoute {
             nlri: vpn_nlri(),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+            link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: Arc::new(base_attrs()),
             received_at: Instant::now(),

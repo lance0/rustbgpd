@@ -2701,6 +2701,46 @@ mod tests {
         );
         assert!(decoded_mp.announced.is_empty());
     }
+    /// LAN-217: a `VPNv6` `MP_REACH` carrying an RFC 4659 §3.2.1.1 48-byte
+    /// two-address next-hop (RD + global, RD + link-local) must emit the
+    /// 48-byte form and round-trip the link-local half, so a route reflector
+    /// re-advertising the route preserves `VPNv6` link-local forwarding.
+    #[test]
+    fn mp_reach_vpnv6_link_local_next_hop_roundtrip() {
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let route = vpnv6_nlri(100);
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::MplsVpn,
+            next_hop: IpAddr::V6(global),
+            link_local_next_hop: Some(link_local),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![vpn_entry(0, route.clone())],
+            rtc_announced: vec![],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false).unwrap();
+        // Value layout after the 3-byte attribute header: AFI(2) SAFI(1)
+        // NH-Len(1); NH-Len must be 48 (RD + global, RD + link-local), not 24.
+        assert_eq!(buf[6], 48, "VPNv6 two-address next-hop must be 48 bytes");
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode VPNv6 MP_REACH");
+        let PathAttribute::MpReachNlri(decoded_mp) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(decoded_mp.next_hop, IpAddr::V6(global));
+        assert_eq!(
+            decoded_mp.link_local_next_hop,
+            Some(link_local),
+            "VPNv6 link-local next-hop must survive encode/decode"
+        );
+        assert_eq!(decoded, vec![PathAttribute::MpReachNlri(mp)]);
+    }
     #[test]
     fn mp_unreach_vpnv6_attribute_roundtrip() {
         // RFC 8277 §2.4: a withdrawn VPN NLRI carries a 3-octet compatibility
