@@ -19,6 +19,7 @@ use rustbgpd_api::evpn_service::{
 };
 use rustbgpd_api::proto;
 use rustbgpd_rib::RibUpdate;
+use rustbgpd_telemetry::BgpMetrics;
 
 use crate::config::Config;
 use crate::{
@@ -117,6 +118,10 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// link-drain coordinator consumes the receiver.
     es_link_bindings_tx:
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
+    /// Daemon metrics handle, so a #268 decomposed-apply fail-stop can
+    /// bump `evpn_runtime_decomposed_fail_stops_total`. Defaults to a
+    /// throwaway registry (`with_metrics` wires the real one in `main`).
+    metrics: BgpMetrics,
 }
 
 impl EvpnRuntimeReloadApply {
@@ -135,7 +140,15 @@ impl EvpnRuntimeReloadApply {
             converger,
             committed_config: Arc::new(Mutex::new(committed_config)),
             es_link_bindings_tx: None,
+            metrics: BgpMetrics::new(),
         }
+    }
+
+    /// Wire the daemon metrics handle so a #268 decomposed-apply
+    /// fail-stop increments `evpn_runtime_decomposed_fail_stops_total`.
+    pub(crate) fn with_metrics(mut self, metrics: BgpMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Attach the ADR-0085 binding publisher. Every committed config
@@ -311,6 +324,7 @@ impl EvpnRuntimeReloadApply {
             validate_only,
             &self.coordinator,
             self.converger.as_ref(),
+            &self.metrics,
         )
         .await
     }
@@ -3469,30 +3483,39 @@ pub(crate) async fn apply_evpn_runtime_request<C>(
 where
     C: DaemonEvpnRuntimeConverger + ?Sized,
 {
-    let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
-    apply_evpn_runtime_candidate(
-        candidate,
-        request.validate_only,
+    apply_evpn_runtime_request_with_metrics(
+        request,
         coordinator,
         apply_lock,
         converger,
+        &BgpMetrics::new(),
     )
     .await
 }
 
+/// Same as [`apply_evpn_runtime_request`] but with a caller-owned metrics
+/// handle, so a test can assert the fail-stop counter moved.
 #[cfg(test)]
-async fn apply_evpn_runtime_candidate<C>(
-    candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
-    validate_only: bool,
+pub(crate) async fn apply_evpn_runtime_request_with_metrics<C>(
+    request: &proto::ApplyEvpnRuntimeRequest,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     apply_lock: &tokio::sync::Mutex<()>,
     converger: &C,
+    metrics: &BgpMetrics,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
 where
     C: DaemonEvpnRuntimeConverger + ?Sized,
 {
+    let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
     let _apply_guard = apply_lock.lock().await;
-    apply_evpn_runtime_candidate_locked(candidate, validate_only, coordinator, converger).await
+    apply_evpn_runtime_candidate_locked(
+        candidate,
+        request.validate_only,
+        coordinator,
+        converger,
+        metrics,
+    )
+    .await
 }
 
 #[expect(
@@ -3504,6 +3527,7 @@ async fn apply_evpn_runtime_candidate_locked<C>(
     validate_only: bool,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     converger: &C,
+    metrics: &BgpMetrics,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
 where
     C: DaemonEvpnRuntimeConverger + ?Sized,
@@ -3609,6 +3633,7 @@ where
                         &plan,
                         coordinator,
                         converger,
+                        metrics,
                     )
                     .await;
                 }
@@ -3626,6 +3651,14 @@ where
             }
         }
         if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
+            // #268 decomposition is only attempted for `Unsupported` mixes;
+            // a `Failed` converge had side effects and pins here instead.
+            tracing::error!(
+                error = %error.message(),
+                generation = snapshot.generation.as_u64(),
+                "decomposition skipped: prior converge failed; pinning the coordinator \
+                 and leaving generation committed"
+            );
             let mut coordinator = coordinator.lock().map_err(|_| {
                 GrpcEvpnRuntimeApplyError::Internal(
                     "EVPN runtime coordinator lock poisoned".to_string(),
@@ -3673,6 +3706,7 @@ async fn apply_decomposed_evpn_runtime_steps<C>(
     overall_plan: &rustbgpd_evpn::EvpnRuntimePlan,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     converger: &C,
+    metrics: &BgpMetrics,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
 where
     C: DaemonEvpnRuntimeConverger + ?Sized,
@@ -3711,6 +3745,9 @@ where
                 let mut coordinator = lock_coordinator()?;
                 let mut failed = FailedRuntimeConverger { source };
                 let _ = coordinator.apply_candidate(step.candidate.clone(), &mut failed);
+                // Fail-stop pinned the coordinator (mutation_state=Failed);
+                // the ERROR log below carries the human detail.
+                metrics.add_evpn_runtime_decomposed_fail_stops(1);
             }
             let committed_summary = if committed_generations.is_empty() {
                 "no earlier step committed".to_string()
@@ -3754,6 +3791,9 @@ where
         committed_generations.push(report.committed_generation.as_u64());
     }
     let snapshot = lock_coordinator()?.snapshot();
+    // Report what actually committed, not `total` (`steps.len()`): no-op
+    // steps `continue` without a generation, so `committed` can be < total.
+    let committed = committed_generations.len();
     let generations_summary = match (committed_generations.first(), committed_generations.last()) {
         (Some(first), Some(last)) => format!(" as generations {first}..={last}"),
         _ => String::new(),
@@ -3761,9 +3801,12 @@ where
     Ok(proto::ApplyEvpnRuntimeResponse {
         outcome: runtime_apply_outcome_to_proto(rustbgpd_evpn::EvpnRuntimeApplyOutcome::Committed),
         runtime: Some(runtime_snapshot_to_proto(&snapshot)),
+        // #23: the response echoes the operator's REQUESTED mixed plan, not
+        // the primitive committed steps. Per-step committed detail lives in
+        // the INFO logs above and in `generations_summary`.
         plan: Some(runtime_plan_to_proto(overall_plan)),
         message: format!(
-            "candidate EVPN runtime model committed via {total} decomposed steps{generations_summary}"
+            "candidate EVPN runtime model committed via {committed} decomposed steps{generations_summary}"
         ),
     })
 }
@@ -3773,7 +3816,6 @@ mod tests {
     use std::time::{Duration, Instant as StdInstant};
 
     use rustbgpd_rib::RibCommandError;
-    use rustbgpd_telemetry::BgpMetrics;
     use tokio::sync::{broadcast, watch};
 
     use super::*;
@@ -11649,6 +11691,46 @@ local_vtep_ip = "10.0.0.1"
                 .instances()
                 .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
                 .is_some()
+        );
+    }
+
+    // LAN-215 #10: a mid-sequence decomposed fail-stop must bump the
+    // observability counter exactly once (it pins mutation_state=Failed).
+    #[tokio::test]
+    async fn apply_evpn_runtime_decomposed_fail_stop_increments_metric() {
+        use prometheus::Encoder;
+
+        let coordinator = one_es_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = ShapeCheckingConverger::failing_on(2);
+        let metrics = BgpMetrics::new();
+
+        let error = apply_evpn_runtime_request_with_metrics(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: decomposer_mixed_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+            &metrics,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
+        ));
+
+        let encoder = prometheus::TextEncoder::new();
+        let mut buf = Vec::new();
+        encoder
+            .encode(&metrics.registry().gather(), &mut buf)
+            .unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("evpn_runtime_decomposed_fail_stops_total 1"),
+            "fail-stop must bump the counter exactly once: {text}"
         );
     }
 

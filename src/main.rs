@@ -2157,6 +2157,7 @@ async fn run<T>(
         evpn_runtime_converger.clone(),
         config.clone(),
     )
+    .with_metrics(metrics.clone())
     .with_es_link_bindings_publisher(es_link_bindings_tx.clone());
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB

@@ -1028,4 +1028,220 @@ table_id = 101
                 .is_some_and(|vnis| vnis.contains(&vni(100)))
         );
     }
+
+    // LAN-215 #24 (characterization): the precondition simulation loop
+    // rebuilds each step's model with `EvpnRuntimeModel::startup(..)`
+    // (see the loop near the end of `decompose_evpn_runtime_candidate`),
+    // which resets generation to STARTUP and mutation_state/lifecycle to
+    // their startup defaults. No shape validator inspects generation or
+    // lifecycle today, so decomposition is invariant to the current
+    // model's runtime status. This test PINS that behavior: if a future
+    // change makes the decision depend on generation/lifecycle/mutation
+    // state, one of the assertions below fails and flags the new coupling.
+    #[test]
+    fn precondition_simulation_ignores_current_model_runtime_status() {
+        let (current_toml, candidate_toml) = maintainer_example();
+        let candidate = candidate_from_toml(&candidate_toml);
+        let tables = candidate_from_toml(&current_toml);
+
+        // Two "current" models over identical tables but different runtime
+        // status: `startup` is Disabled, `coordinator_startup` is Idle.
+        let startup_model = EvpnRuntimeModel::startup(
+            tables.instances().clone(),
+            tables.ip_vrfs().clone(),
+            tables.ethernet_segments().to_vec(),
+        );
+        let coordinator_model = EvpnRuntimeModel::coordinator_startup(
+            tables.instances().clone(),
+            tables.ip_vrfs().clone(),
+            tables.ethernet_segments().to_vec(),
+        );
+        assert_ne!(
+            startup_model.mutation_state(),
+            coordinator_model.mutation_state(),
+            "the two current models must differ in runtime status"
+        );
+
+        let from_startup = decompose_evpn_runtime_candidate(
+            &startup_model,
+            &candidate,
+            &startup_model.plan_candidate(&candidate),
+        );
+        let from_coordinator = decompose_evpn_runtime_candidate(
+            &coordinator_model,
+            &candidate,
+            &coordinator_model.plan_candidate(&candidate),
+        );
+        assert!(from_startup.is_ok(), "sanity: the shape must decompose");
+        assert_eq!(
+            from_startup, from_coordinator,
+            "decomposition must not depend on the current model's runtime status"
+        );
+
+        // The loop rebuilds via `startup`, so every simulated per-step model
+        // is at the STARTUP generation — the real per-step committed
+        // generations (2, 3, 4, ...) are never reflected in the simulation.
+        let rebuilt = EvpnRuntimeModel::startup(
+            candidate.instances().clone(),
+            candidate.ip_vrfs().clone(),
+            candidate.ethernet_segments().to_vec(),
+        );
+        assert_eq!(
+            rebuilt.generation().as_u64(),
+            1,
+            "startup rebuild always resets generation to STARTUP"
+        );
+    }
+
+    // LAN-215 #27: a VLAN-aware bridge bundle (two L2VNIs sharing a Linux
+    // bridge, each with its own `bridge_vlan`). Mutating one member's
+    // `bridge_vlan` mixed with an Ethernet Segment delete (cross-domain, so
+    // it is not a supported primitive) must decompose to a live L2VNI
+    // redefine carrying the changed selector — `bridge_vlan` is not a
+    // restart-required identity field for an L2VNI (LAN-203), so it must
+    // not fail closed or collapse to delete+add.
+    #[test]
+    fn vlan_aware_bundle_bridge_vlan_change_decomposes_as_live_redefine() {
+        let current = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+bridge_vlan = 10
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+bridge_vlan = 20
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        );
+        // Change VNI 100's bridge_vlan (10 -> 30) AND delete its Ethernet
+        // Segment — a cross-domain mix, so the candidate is not a supported
+        // primitive and must decompose. Bundle member VNI 200 is untouched.
+        let candidate = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+bridge_vlan = 30
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+bridge_vlan = 20
+"#,
+        );
+
+        let steps = decompose(&current, &candidate)
+            .expect("a VLAN-aware-bundle bridge_vlan change must decompose, not fail closed");
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.description.starts_with("deletes")),
+            "the deleted Ethernet Segment must be its own step: {steps:#?}"
+        );
+        let redefine = steps
+            .iter()
+            .find(|step| step.description.starts_with("L2VNI redefine"))
+            .expect("a supported L2VNI redefine step is expected");
+        assert_eq!(
+            redefine
+                .candidate
+                .instances()
+                .get(vni(100))
+                .unwrap()
+                .bridge_vlan
+                .as_ref()
+                .map(ToString::to_string),
+            Some("30".to_string()),
+            "the redefine step must carry the changed bridge_vlan"
+        );
+    }
+
+    // LAN-215 #27: an IRB L3VNI mutation. `tenant-blue` is a true IRB VRF
+    // (an L2VNI is bound to it via `ip_vrf`); changing its L3VNI is a kernel
+    // VRF identity change, restart-required by design. Mixed with an L2VNI
+    // add it must fail the whole candidate closed, naming the offending
+    // step, before anything commits — the IRB binding must not change that.
+    #[test]
+    fn irb_l3vni_identity_mutation_fails_closed_naming_the_step() {
+        let current = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:50:00"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vxlan5000"
+table_id = 100
+"#,
+        );
+        // Redefine the IRB VRF's L3VNI (5000 -> 5001) AND add L2VNI 200.
+        let candidate = with_header(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5001
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:50:00"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vxlan5000"
+table_id = 100
+"#,
+        );
+
+        let Err(EvpnDecomposeError::Unsupported(message)) = decompose(&current, &candidate) else {
+            panic!("IRB L3VNI identity redefine must fail closed");
+        };
+        assert!(
+            message.contains("restart-required by design"),
+            "must carry the identity-redefine error: {message}"
+        );
+        assert!(
+            message.contains("step 1/2"),
+            "must name the offending step: {message}"
+        );
+    }
 }
