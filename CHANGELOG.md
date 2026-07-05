@@ -770,6 +770,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **ORR vantage config validation now rejects a degenerate vantage IP
+  (LAN-216).** An `orr_vantage` (RFC 9107) equal to the neighbor's own
+  peering address or the reflector's `router_id` degenerates to the
+  reflector's own viewpoint (plain non-ORR reflection) and is a
+  copy-paste misconfiguration. Config load/validate now fails closed on
+  either case with a diagnostic naming the field and offending address,
+  alongside the existing iBGP / `route_reflector_client` checks, rather
+  than silently accepting it.
 - **`rpol_files` policy entries are canonicalized before they are read
   (LAN-218).** Each `[policy] rpol_files` path is now `canonicalize()`d
   immediately before `read_to_string`, so the file that is opened is the

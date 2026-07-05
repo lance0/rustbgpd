@@ -408,7 +408,7 @@ impl Config {
             let orr_vantage = neighbor
                 .orr_vantage
                 .or_else(|| group.and_then(|g| g.orr_vantage));
-            if orr_vantage.is_some() {
+            if let Some(vantage) = orr_vantage {
                 if neighbor.remote_asn != self.global.asn {
                     return Err(ConfigError::InvalidRrConfig {
                         reason: format!(
@@ -422,6 +422,33 @@ impl Config {
                         reason: format!(
                             "orr_vantage on neighbor {} requires route_reflector_client = true",
                             neighbor.address
+                        ),
+                    });
+                }
+                // RFC 9107: the vantage must identify a *distinct* BGP-LS
+                // topology node. Equal to the client's own peering address
+                // or the reflector's router_id it degenerates to the
+                // reflector's own viewpoint (plain non-ORR reflection) — a
+                // copy-paste misconfiguration. Fail closed at config load.
+                if let Ok(peer_addr) = neighbor.address.parse::<IpAddr>()
+                    && vantage == peer_addr
+                {
+                    return Err(ConfigError::InvalidRrConfig {
+                        reason: format!(
+                            "orr_vantage {vantage} on neighbor {} must not equal the \
+                             neighbor's own address",
+                            neighbor.address
+                        ),
+                    });
+                }
+                if let Ok(local_addr) = self.global.router_id.parse::<IpAddr>()
+                    && vantage == local_addr
+                {
+                    return Err(ConfigError::InvalidRrConfig {
+                        reason: format!(
+                            "orr_vantage {vantage} on neighbor {} must not equal the \
+                             reflector's local router_id {}",
+                            neighbor.address, self.global.router_id
                         ),
                     });
                 }

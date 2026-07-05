@@ -2201,6 +2201,41 @@ orr_vantage = "192.0.2.7"
 }
 
 #[test]
+fn orr_vantage_rejected_when_equal_to_neighbor_or_local_address() {
+    // Vantage == the neighbor's own peering address (10.0.0.2).
+    let toml = orr_toml(
+        "route_reflector_client = true\norr_vantage = \"10.0.0.2\"",
+        "",
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    assert!(
+        err.to_string().contains("orr_vantage")
+            && err.to_string().contains("neighbor's own address"),
+        "diagnostic names the field and offending address: {err}"
+    );
+
+    // Vantage == the reflector's own router_id (10.0.0.1).
+    let toml = orr_toml(
+        "route_reflector_client = true\norr_vantage = \"10.0.0.1\"",
+        "",
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    assert!(
+        err.to_string().contains("orr_vantage") && err.to_string().contains("router_id"),
+        "diagnostic names the field and offending address: {err}"
+    );
+
+    // A distinct vantage is still accepted.
+    let toml = orr_toml(
+        "route_reflector_client = true\norr_vantage = \"192.0.2.7\"",
+        "",
+    );
+    assert!(parse(&toml).is_ok(), "distinct vantage passes validation");
+}
+
+#[test]
 fn orr_vantage_warns_without_linkstate_family() {
     // The warning condition (pure helper backing the load-time warn):
     // vantage set, no linkstate family anywhere → true.
