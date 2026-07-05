@@ -799,6 +799,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Restored the consolidated "supported standards at a glance" table.** The
+  README slim replaced the old protocol-coverage row with a pointer to
+  `docs/RFC_NOTES.md`/`INTEROP.md`/`RECEIPTS.md`, but none of those carried a
+  single at-a-glance list of the supported RFCs/SAFIs. `docs/RFC_NOTES.md` now
+  opens with that table and the README "Protocol coverage" row links to it.
 - **EVPN decomposed-apply response disambiguates committed vs planned
   steps.** When no-op steps are skipped mid-sequence the `ApplyEvpnRuntime`
   message now appends `(N of M planned steps committed)` so an API consumer
