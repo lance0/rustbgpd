@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN #268 decomposed-apply fail-stop observability
+  (`evpn_runtime_decomposed_fail_stops_total`).** When a decomposed
+  `ApplyEvpnRuntime` fails mid-sequence — an earlier primitive step
+  committed its generation and a later one pinned the coordinator with
+  `mutation_state=Failed` — the daemon now increments a counter next to
+  the existing ERROR log. The commit message reports the number of
+  steps that actually committed (no-op steps no longer inflate the
+  count), and a `Failed` single-shot converge logs that decomposition
+  was skipped (only `Unsupported` mixes decompose). (LAN-215)
 - **Observability for discarded malformed BGP-LS NLRIs (RFC 9552 fault
   management).** Known BGP-LS NLRIs with out-of-order descriptor TLVs are
   isolated and dropped while the session survives (PR #616); that discard was

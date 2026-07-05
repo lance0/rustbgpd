@@ -204,6 +204,9 @@ pub struct BgpMetrics {
     evpn_single_active_teardowns: IntCounter,
     evpn_single_active_backup_active: IntGauge,
 
+    // ── EVPN runtime apply (ADR-0063, #268 decomposition) ──────────
+    evpn_runtime_decomposed_fail_stops: IntCounter,
+
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
     bmp_collector_drops: IntCounterVec,
@@ -1118,6 +1121,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_runtime_decomposed_fail_stops = IntCounter::new(
+            "evpn_runtime_decomposed_fail_stops_total",
+            "Mid-sequence failures of a #268-decomposed EVPN runtime apply that pinned \
+             the coordinator (mutation_state=Failed). Fail-stop: earlier decomposed \
+             generations stay committed; the operator must fix the candidate and \
+             re-SIGHUP / re-apply to converge the remainder.",
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -1516,6 +1528,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_single_active_backup_active.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_runtime_decomposed_fail_stops.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -1656,6 +1671,7 @@ impl BgpMetrics {
             evpn_single_active_backup_swaps,
             evpn_single_active_teardowns,
             evpn_single_active_backup_active,
+            evpn_runtime_decomposed_fail_stops,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -2741,6 +2757,16 @@ impl BgpMetrics {
         self.evpn_single_active_teardowns.inc_by(delta);
     }
 
+    /// Increment the #268 decomposed-apply fail-stop counter: a
+    /// mid-sequence decomposed step pinned the coordinator
+    /// (`mutation_state=Failed`), leaving earlier generations committed.
+    pub fn add_evpn_runtime_decomposed_fail_stops(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_runtime_decomposed_fail_stops.inc_by(delta);
+    }
+
     /// Set the ADR-0083 backup-window gauge: how many
     /// `(ESI, EthernetTag)` single-active groups are currently
     /// retargeted at their backup PE.
@@ -3689,6 +3715,15 @@ mod tests {
         m.set_evpn_single_active_backup_active(0);
         let text = gather_text(&m);
         assert!(text.contains("evpn_single_active_backup_active 0"));
+    }
+
+    #[test]
+    fn evpn_runtime_decomposed_fail_stops_is_exported() {
+        let m = BgpMetrics::new();
+        m.add_evpn_runtime_decomposed_fail_stops(1);
+        assert_eq!(m.evpn_runtime_decomposed_fail_stops.get(), 1);
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_runtime_decomposed_fail_stops_total 1"));
     }
 
     #[test]
