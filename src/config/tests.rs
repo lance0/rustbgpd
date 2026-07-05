@@ -11791,6 +11791,32 @@ fn rpol_missing_file_fails_config_load() {
     assert!(error.contains("failed to read"), "{error}");
 }
 
+/// LAN-218: entries are `canonicalize()`d before reading, so an
+/// `rpol_files` path that points through a symlink still resolves to and
+/// loads the real file's content.
+#[cfg(unix)]
+#[test]
+fn rpol_symlinked_file_canonicalizes_and_loads() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""bogon-filter""#);
+    std::os::unix::fs::symlink(
+        dir.path().join("policies/core.rpol"),
+        dir.path().join("policies/link.rpol"),
+    )
+    .unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let toml = fs::read_to_string(&toml_path).unwrap().replace(
+        r#"rpol_files = ["policies/core.rpol"]"#,
+        r#"rpol_files = ["policies/link.rpol"]"#,
+    );
+    fs::write(&toml_path, toml).unwrap();
+
+    let config = load_dir(&dir).expect("symlinked rpol file loads");
+    // Content read through the symlink: both policies registered.
+    assert_eq!(config.policy.rpol.policies.len(), 2);
+    assert!(config.policy.rpol.policies.contains_key("bogon-filter"));
+    assert!(config.policy.rpol.policies.contains_key("customer-in"));
+}
+
 #[test]
 fn rpol_name_collision_with_toml_definition_fails() {
     let dir = rpol_config_dir("policy toml-pass { term t { reject } }", r#""toml-pass""#);

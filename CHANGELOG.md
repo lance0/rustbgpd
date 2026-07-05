@@ -770,6 +770,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rpol_files` policy entries are canonicalized before they are read
+  (LAN-218).** Each `[policy] rpol_files` path is now `canonicalize()`d
+  immediately before `read_to_string`, so the file that is opened is the
+  file that was resolved — closing a symlink TOCTOU window between path
+  resolution and open. A path that cannot be canonicalized (missing or
+  unreadable) surfaces the same `failed to read` config error as before.
+  Robustness hardening; path resolution stays deliberately unconfined to
+  the config directory. Regression-tested via
+  `rpol_symlinked_file_canonicalizes_and_loads`.
 - **Boot-revert save-aside is now an atomic no-clobber move (LAN-224).**
   `save_candidate_aside` in the commit-confirm revert journal previously did a
   check-then-act `try_exists` + `rename` on the `<config>.unconfirmed` backup.
