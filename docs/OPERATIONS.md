@@ -147,6 +147,17 @@ or one whose embedded config no longer parses, refuses boot with a message
 naming both the journal and the config file — delete the journal manually only
 if you are sure the on-disk config is the one you want.
 
+The boot-revert save-aside moves the unconfirmed candidate to
+`<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
+an existing `.unconfirmed`. That needs the config file and its directory to be
+on a filesystem that supports hard links — every local filesystem does. On a
+filesystem without hard-link support (some FUSE mounts, certain NFS setups),
+the save-aside fails and the daemon **refuses to boot** with the journal left
+intact, rather than risk an unsafe revert. Keep the config and
+`runtime_state_dir` on a local filesystem (the default); this mainly matters
+for containerized deployments that bind-mount the config from an exotic
+backend.
+
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
 `config plan`, then apply with the returned token. The transaction reconfigures
