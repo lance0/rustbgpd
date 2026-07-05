@@ -217,6 +217,19 @@ pub struct BgpLsNlriKey {
 /// Returns `DecodeError` if an NLRI header, known-NLRI payload, or known-NLRI
 /// descriptor TLV is structurally truncated.
 pub fn decode_bgpls_nlri(input: &[u8]) -> Result<Vec<BgpLsNlri>, DecodeError> {
+    Ok(decode_bgpls_nlri_inner(input, false)?.0)
+}
+
+/// Like [`decode_bgpls_nlri`] but also returns the number of NLRIs discarded
+/// for out-of-order descriptor TLVs, so the session layer can observe the
+/// otherwise-silent RFC 9552 drop with peer context.
+///
+/// # Errors
+///
+/// Same fatal boundary as [`decode_bgpls_nlri`].
+pub(crate) fn decode_bgpls_nlri_counted(
+    input: &[u8],
+) -> Result<(Vec<BgpLsNlri>, u32), DecodeError> {
     decode_bgpls_nlri_inner(input, false)
 }
 
@@ -227,6 +240,18 @@ pub fn decode_bgpls_nlri(input: &[u8]) -> Result<Vec<BgpLsNlri>, DecodeError> {
 /// Returns `DecodeError` if an NLRI header, route distinguisher,
 /// known-NLRI payload, or known-NLRI descriptor TLV is structurally truncated.
 pub fn decode_bgpls_vpn_nlri(input: &[u8]) -> Result<Vec<BgpLsNlri>, DecodeError> {
+    Ok(decode_bgpls_nlri_inner(input, true)?.0)
+}
+
+/// Like [`decode_bgpls_vpn_nlri`] but also returns the number of NLRIs
+/// discarded for out-of-order descriptor TLVs (see [`decode_bgpls_nlri_counted`]).
+///
+/// # Errors
+///
+/// Same fatal boundary as [`decode_bgpls_vpn_nlri`].
+pub(crate) fn decode_bgpls_vpn_nlri_counted(
+    input: &[u8],
+) -> Result<(Vec<BgpLsNlri>, u32), DecodeError> {
     decode_bgpls_nlri_inner(input, true)
 }
 
@@ -315,8 +340,15 @@ pub fn encode_bgpls_tlvs(tlvs: &[BgpLsTlv], out: &mut Vec<u8>) -> Result<(), Enc
     Ok(())
 }
 
-fn decode_bgpls_nlri_inner(input: &[u8], vpn: bool) -> Result<Vec<BgpLsNlri>, DecodeError> {
+/// Decode BGP-LS NLRIs, also returning the number of *recoverable* discards.
+///
+/// The `u32` is the count of known NLRIs dropped for out-of-order descriptor
+/// TLVs (RFC 9552 fault management): the NLRI is isolated, the session survives.
+/// Structurally fatal input still returns `Err`, so a discarded NLRI never
+/// hides a framing/length error — the two paths stay distinct.
+fn decode_bgpls_nlri_inner(input: &[u8], vpn: bool) -> Result<(Vec<BgpLsNlri>, u32), DecodeError> {
     let mut routes = Vec::new();
+    let mut discarded = 0_u32;
     let mut offset = 0;
     while offset < input.len() {
         let remaining = input.len() - offset;
@@ -346,10 +378,14 @@ fn decode_bgpls_nlri_inner(input: &[u8], vpn: bool) -> Result<Vec<BgpLsNlri>, De
                 route_distinguisher,
                 payload: Bytes::copy_from_slice(payload),
             });
+        } else {
+            // Recoverable RFC 9552 fault: out-of-order descriptor TLVs.
+            // Drop just this NLRI, keep the session, and surface the count.
+            discarded = discarded.saturating_add(1);
         }
         offset += total_len;
     }
-    Ok(routes)
+    Ok((routes, discarded))
 }
 
 fn split_bgpls_value(
@@ -660,6 +696,32 @@ mod tests {
 
         let decoded = decode_bgpls_nlri(&bytes).expect("batch decode survives one bad NLRI");
         assert_eq!(decoded, vec![good]);
+    }
+
+    #[test]
+    fn counted_decode_reports_recoverable_discards() {
+        let bad = BgpLsNlri::try_new(BgpLsNlriType::Node, None, unordered_node_payload())
+            .expect("bad fixture fits");
+        let good = BgpLsNlri::try_new(BgpLsNlriType::Node, None, node_payload())
+            .expect("good fixture fits");
+        let mut bytes = Vec::new();
+        encode_bgpls_nlri(&[bad, good.clone()], &mut bytes).expect("encodes");
+
+        let (decoded, discarded) =
+            decode_bgpls_nlri_counted(&bytes).expect("batch decode survives one bad NLRI");
+        assert_eq!(decoded, vec![good], "only the well-ordered NLRI survives");
+        assert_eq!(
+            discarded, 1,
+            "the out-of-order NLRI is counted as discarded"
+        );
+    }
+
+    #[test]
+    fn counted_decode_does_not_count_fatal_errors() {
+        // A structurally truncated known payload is fatal (session-resetting):
+        // it must surface as Err, never as a recoverable discard count.
+        let bytes = [0, 1, 0, 3, 1, 2, 3];
+        decode_bgpls_nlri_counted(&bytes).expect_err("truncation stays fatal");
     }
 
     #[test]
