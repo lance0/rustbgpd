@@ -4,10 +4,10 @@ rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
 Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
 `gnmi.gNMI` OpenConfig service over one or more configured listeners. The
 gNMI surface is read-only telemetry (`Capabilities` / `Get` / `Subscribe`) plus an
-operator-tier `Set` subset — transaction-backed create/update/delete of static
-numbered neighbors and the commit-confirmed extension, committed through
-ADR-0076; unsupported `Set` paths return `UNIMPLEMENTED`. The default listener is a local Unix
-domain socket at
+operator-tier `Set` subset — transaction-backed create/update/delete for static
+numbered BGP neighbors, peer-group catalog entries, dynamic-neighbor prefixes,
+and the commit-confirmed extension through ADR-0076. Unsupported `Set` paths
+return `UNIMPLEMENTED`. The default listener is a local Unix domain socket at
 `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
@@ -161,7 +161,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -192,12 +192,12 @@ session-state leaf, requires `[event_history]` enabled, and returns
 `FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
 default network instance. `Set` is operator-only and supports the first durable
 config subset: static, numbered BGP neighbor create/update/delete for
-`neighbor-address`, `peer-as`, `description`, and `peer-group`. Supported Set
-edits are translated into full candidate TOML and fed through
-`PlanConfigTransaction` / `ApplyConfigTransaction`; the standard gNMI
-commit-confirmed extension maps to the same confirm / abort lifecycle as native
-config transactions. Unsupported paths return `UNIMPLEMENTED` instead of
-bypassing the transaction model. See
+`neighbor-address`, `peer-as`, `description`, and `peer-group`, peer-group
+catalog entries, and dynamic-neighbor prefixes. Supported Set edits are
+translated into full candidate TOML and fed through `PlanConfigTransaction` /
+`ApplyConfigTransaction`; the standard gNMI commit-confirmed extension maps to
+the same confirm / abort lifecycle as native config transactions. Unsupported
+paths return `UNIMPLEMENTED` instead of bypassing the transaction model. See
 [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1 scope (initial sync,
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
@@ -334,10 +334,14 @@ confirmation, other persisted runtime config mutators fail with
 `confirm_id` to make the change permanent, or `AbortConfigTransaction` to roll
 back immediately. If the timer expires first, the daemon re-applies the
 pre-commit runtime snapshot through the same transaction executor and persists
-the rollback. Pending confirmed-transaction state is process-local; after daemon
-restart, re-plan and re-apply. `GetConfigTransactionStatus` reports the current
-pending transaction or the last terminal lifecycle result, including failed
-abort/auto-revert attempts when rollback itself could not complete.
+the rollback. The confirm window is durable. Before commit, the daemon journals the
+pre-commit config to `<runtime_state_dir>/commit-confirm-journal.json`; a
+restart that finds an unconfirmed journal reverts at boot before adopting the
+on-disk config, saves the unconfirmed candidate as `<config>.unconfirmed`, and
+fails closed on torn, unusable, or unremovable journal state. `GetConfigTransactionStatus`
+reports the current pending transaction or the last terminal lifecycle result,
+including failed abort/auto-revert attempts when rollback itself could not
+complete.
 
 `GetConfigTransactionStatus` (and the apply response) carries a
 `ConfigTransactionConfirmation`:
@@ -1032,9 +1036,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 preserves BGP-LS routes as opaque RFC 9552 objects: raw Route Distinguisher
 bytes for BGP-LS VPN, raw NLRI descriptor/payload bytes, and raw BGP-LS
 Attribute (type 29) bytes when present. Negotiated BGP-LS routes can also be
-reflected to eligible peers through the normal route-reflector pipeline. The
-daemon does not synthesize BGP-LS from a local LSDB, compute paths from BGP-LS
-data, or negotiate BGP-LS Add-Path / GR / LLGR stale preservation yet.
+reflected to eligible peers through the normal route-reflector pipeline and feed
+the RFC 9107 ORR topology used for per-vantage best-path selection. The daemon
+does not synthesize BGP-LS from a local LSDB or negotiate BGP-LS Add-Path. GR /
+LLGR stale preservation for BGP-LS and BGP-LS VPN is implemented as part of the
+RR-family stale pipeline.
 
 ### List BLACKHOLE discard status
 
@@ -1658,7 +1664,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | `ListManagedNetdevs` | List configured ADR-0091 managed EVPN bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN rows joined with the latest Linux link snapshot, plus rustbgpd-stamped orphan/unsafe rows for the configured owner. Reports class, name, desired flag, ownership stamp, state (`desired-absent`, `owned-safe`, `foreign-present`, `owned-unsafe`, `orphaned`, or `unknown`), observed ifindex, bridge `vlan_filtering`, VXLAN/SVD/L3VXLAN `vni` / `local` / `dstport` / `learning` / `collect-metadata` / `vnifilter` / master attributes, VLAN upper `vlan`, VRF `table_id`, L3VXLAN `router_mac`, observed rustbgpd ownership stamps, and reason text. Bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle execution is active in the dataplane actor; this RPC remains read-only status. |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single L2VNI redefine with unchanged `ip_vrf` link metadata, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, single IP-VRF redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, additive build-up, or an atomic tenant teardown (a delete-only plan dropping an ES-member L2VNI together with its Ethernet Segment and/or a linked IP-VRF in one pass) converges live and commits a new generation. When a segment actor already exists, L2VNI add/delete also republishes the current instance table so later ES add/redefine can bind a VNI added at runtime; ES-member L2VNI redefine also rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. An `ip_vrf` relink (an L2VNI re-homed to a different IP-VRF) also converges live as a dataplane-only republish. L3VNI/device/table IP-VRF identity changes are restart-required by design, and generic mixed add/delete/redefine edits still fail closed. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed. Supported live changes include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as deletes -> redefines -> `ip_vrf` relinks -> adds. When a segment actor already exists, L2VNI add/delete republishes the current instance table so later ES add/redefine can bind a VNI added at runtime; ES-member L2VNI redefine rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. L3VNI/device/table IP-VRF identity changes remain restart-required by design. Unsupported dependency cycles fail closed before commit; residual mid-sequence convergence failures fail-stop after already committed generations and are surfaced by `evpn_runtime_decomposed_fail_stops_total`. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -1673,45 +1679,29 @@ MAC-only/MAC+IP/SVI Type 2 originators, the Type 5/IP-VRF originator, and
 the Linux dataplane supervisor through ordered convergence commands with
 rollback on partial failure.
 
-These non-noop shapes converge live and commit the next generation: a
-**single L2VNI add** (exactly one new `[[evpn_instances]]` entry and no
-other changes), a **single L2VNI delete** when the deleted VNI is not an
-Ethernet Segment member (including IP-VRF deployments where only derived
-link metadata changes), a **single L2VNI redefine** with unchanged `ip_vrf`
-link metadata, a
-**single IP-VRF add** (exactly one new `[[evpn_ip_vrfs]]` entry and no
-other changes), a **single standalone IP-VRF delete** when no committed L2VNI
-references that IP-VRF, a **single IP-VRF redefine** with unchanged
-L3VNI/device/table identity, and a **single Ethernet Segment add, delete, or
-redefine** (exactly one added, removed, or redefined `[[ethernet_segments]]`
-entry and no other changes).
-A supported add/delete/redefine
-originates or withdraws IMET as needed, republishes the relevant effective
-tables, current segment-actor instance view, or desired-ES snapshot to live
-actors, and then publishes the new committed generation. ES add/redefine can
-reference a member VNI that was added by an earlier live L2VNI add when the
-segment actor was already running; ES-member L2VNI redefine rebuilds Type 4 /
+Supported non-noop shapes converge live and commit the next generation:
+single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up,
+atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits. The
+mixed-edit decomposer applies primitive commits in a fixed order — deletes,
+redefines, `ip_vrf` relinks, then adds — so operators may observe multiple
+runtime generations for one SIGHUP or `ApplyEvpnRuntime` request. ES
+add/redefine can reference a member VNI added by an earlier live L2VNI add when
+the segment actor is already running; ES-member L2VNI redefine rebuilds Type 4 /
 EAD-per-ES / EAD-per-EVI routes from the candidate instance snapshot while
-retaining the stable ESI label. Atomic tenant teardown (a delete-only plan
-dropping an ES-member L2VNI with its Ethernet Segment and/or a linked IP-VRF)
-and `ip_vrf` relink also converge live. Every other non-noop shape —
-L3VNI/device/table IP-VRF identity changes (restart-required by design),
-generic mixed add/delete/redefine edits, or an apply on an RR-only /
-no-actor daemon — returns
-`FAILED_PRECONDITION` without advancing the generation and without
-degrading the committed model, because an
-unsupported shape is a capability gap, not an operational failure, so
-`GetEvpnRuntime` continues to report the healthy committed generation. If
-a supported shape starts converging but an actor command fails midway,
-the apply rolls back the partial work, returns `FAILED_PRECONDITION`,
-and marks the runtime degraded. Remaining shapes are tracked in
-[issue #268](https://github.com/lance0/rustbgpd/issues/268).
+retaining the stable ESI label. L3VNI/device/table IP-VRF identity changes
+remain restart-required by design. Unsupported dependency cycles fail closed
+before commit. If a later primitive step or actor command fails after earlier
+steps committed, the sequence fail-stops there: the committed generations stay
+visible, the coordinator pins `mutation_state=Failed`, an ERROR log names the
+step, and `evpn_runtime_decomposed_fail_stops_total` increments for the
+mid-sequence stop.
 
 Operators configure instances via the `[[evpn_instances]]` TOML block.
 SIGHUP reload submits EVPN table edits through the same coordinator for
-supported ADR-0063 shapes. Unsupported mixed edits, L3VNI/device/table IP-VRF
-identity changes, missing EVPN actors, or actor convergence failure are pinned
-back to the committed runtime model and logged instead of silently advancing
+supported ADR-0063 shapes. Unsupported dependency cycles, L3VNI/device/table
+IP-VRF identity changes, or missing EVPN actors fail closed before commit.
+Actor convergence failures inside a decomposed sequence fail-stop on the last
+committed generation and keep the drift visible instead of silently advancing
 the config snapshot.
 
 ### Get EVPN runtime status
@@ -1930,11 +1920,11 @@ IP-VRF delete with no L2VNI links, a single IP-VRF redefine with unchanged
 L3VNI/device/table identity, a single Ethernet Segment add/delete/redefine,
 additive build-up, an atomic tenant teardown, or an `ip_vrf` relink
 against the committed model; the response
-carries the committed generation and outcome. Every other non-noop shape
-(L3VNI/device/table IP-VRF identity changes — restart-required by design,
-generic mixed add/delete/redefine edits, an ES referencing an unknown member
-VNI, or an ES apply with no running segment actor) is
-rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
+carries the committed generation and outcome. L3VNI/device/table IP-VRF identity changes remain restart-required by design.
+Unsupported dependency cycles, an ES referencing an unknown member VNI, or an ES
+apply with no running segment actor are rejected with `FAILED_PRECONDITION`
+before commit; decomposable mixed edits may commit multiple generations and
+fail-stop on a later primitive convergence failure as described above.
 
 ---
 

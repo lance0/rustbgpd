@@ -258,20 +258,20 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **EVPN runtime mutation is alpha-complete with two by-design
-  exceptions.** SIGHUP and the gRPC `EvpnService.ApplyEvpnRuntime` path
+- **EVPN runtime mutation is alpha-complete with one by-design
+  exception.** SIGHUP and the gRPC `EvpnService.ApplyEvpnRuntime` path
   both use the ADR-0063 coordinator for supported live shapes:
   L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, additive
   build-up, additive ES `member_vnis` expansion (adding L2VNIs that join
   an existing Ethernet Segment's member set in the same request, ADR-0063),
   atomic tenant teardown, `ip_vrf` relink, standalone and
-  IP-VRF-linked L2VNI swaps, and L2VNI-only add/delete/redefine
-  compositions. Unsupported candidates fail closed without advancing the
-  committed generation. Two shape classes remain outside the hot-apply
-  boundary by design: L3VNI/device/table IP-VRF identity changes
-  (restart-required — kernel VRF lifecycle) and ES/IP-VRF row mixed edits
-  outside the L2VNI-only composer. Tracked in
-  <https://github.com/lance0/rustbgpd/issues/268>.
+  IP-VRF-linked L2VNI swaps, and decomposable mixed edits ordered as
+  deletes -> redefines -> `ip_vrf` relinks -> adds. Unsupported dependency
+  cycles fail closed without advancing the committed generation; a later
+  primitive convergence failure fail-stops after any earlier generations that
+  already committed and increments `evpn_runtime_decomposed_fail_stops_total`.
+  L3VNI/device/table IP-VRF identity changes remain outside the hot-apply
+  boundary by design (restart-required — kernel VRF lifecycle).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), L2VPN/EVPN (AFI 25, SAFI

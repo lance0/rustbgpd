@@ -101,13 +101,12 @@ jobs:
             in_section && /^## \[/ { exit }
             in_section { print }
           ' CHANGELOG.md | tail -n +2 > release-notes.raw.md
-          if [ -s release-notes.raw.md ]; then
-            python3 scripts/reflow-release-notes.py \
-              < release-notes.raw.md > release-notes.md
-          else
-            echo "no \`## [$version]\` section found in CHANGELOG.md" \
-              > release-notes.md
+          if [ ! -s release-notes.raw.md ]; then
+            echo "::error file=CHANGELOG.md::no \`## [$version]\` section found in CHANGELOG.md"
+            exit 1
           fi
+          python3 scripts/reflow-release-notes.py \
+            < release-notes.raw.md > release-notes.md
           echo "--- release-notes.md ---"
           cat release-notes.md
 

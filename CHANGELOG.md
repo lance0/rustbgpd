@@ -422,7 +422,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dataplane writes. Implementation record appended to ADR-0096; docs
   finalized (`docs/rpol-language.md` positioning vs BIRD/route-maps,
   comparison tables, README, ROADMAP true-up).
-  language is now fully explainable through the existing surfaces.**
+
+- **The `.rpol` language is now fully explainable through the existing
+  surfaces.**
   `ExplainImportPolicy` statement traces cover `.rpol` chain members at
   term granularity: the step names the deciding term and carries one
   rendered line per evaluated term — `term NAME: GUARD => ACTION

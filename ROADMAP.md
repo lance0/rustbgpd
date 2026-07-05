@@ -139,17 +139,17 @@ Details in the "Recently shipped" section below and ADR-0097.
 
 **Next, in rough order** (each research-backed, sized about one slice):
 
-- **Secure-by-default route-server profile** — OTC/RFC 9234 + ASPA + ROV
-  + reject-AS_SET as one documented preset (the pieces are shipped; gaps
-  are OTC-on-dynamic-neighbors + a curated example). Deployed precedent:
-  YYCIX and FranceIX reject OTC-marked leaks at their route servers today.
-- **Trust/adoption hygiene sweep** (all small): cargo-fuzz targets on the
-  wire codecs + OSS-Fuzz enrollment (BGP parser CVEs are a live attack
-  class; FRR's fuzzing issue has been open since 2017 — "memory-safe and
-  continuously fuzzed" is the defensible trust artifact), RFC 9687 Send
-  Hold Timer (a conformance-table hole; BIRD/FRR/OpenBGPd all ship it), a
-  published Grafana dashboard, and a per-RFC receipts/conformance page
-  distilled from the M-series + soak history.
+- **Trust/adoption hygiene sweep** (all small): keep the cargo-fuzz / OSS-Fuzz
+  onboarding and per-RFC receipts/conformance page current, and keep the
+  published Grafana dashboard aligned with the shipped metrics. The secure
+  route-server profile and RFC 9687 Send Hold Timer pieces are now shipped.
+- **Route-server adoption polish** — the ADR-0101/M83 profile shipped the
+  secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
+  path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /
+  gRPC-added peers), ASPA/ROV/reject-AS_SET hygiene, RFC 8097 OV_* tagging,
+  and a curated `examples/route-server` profile. Remaining demand-shaped work:
+  Alice-LG adapter, a 1000+-peer route-server scale receipt, shadow/canary
+  RIB-diff tooling, and an ARouteServer target.
 - **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
   RFC, no open-source implementation found, drops onto the existing
   BGP-LS substrate; deepens the controller feed (TE controllers reading
@@ -160,17 +160,13 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **Paths-Limit capability** (draft-abraitis-idr-addpath-paths-limit) —
   small, RR-relevant (bounds Add-Path fanout), FRR 10.1 interop available.
 
-**The route-server (IXP) track** — larger, staged behind the above:
-RFC 7948 path-hiding mitigation (per-client best-path fallback; the
-load-bearing gap vs BIRD's multi-table/`secondary` and OpenBGPd), an
-Alice-LG gRPC source adapter (the looking glass every flagship IXP runs;
-its GoBGP-gRPC backend is the template), a 1000+-peer route-server scale
-receipt (BIRD 3 claims 5,000 peers but its 3.0.0 announcement concedes a
-memory regression — a direct opening for the dhat-hardened RIB), and
-shadow/canary RIB-diff tooling (`rbgp diff` against an incumbent's
-MRT/BMP feed — the documented lockstep-migration adoption path). An
-ARouteServer target is the final adoption gate but is deliberately
-deferred until the above make a pilot credible.
+**The route-server (IXP) track** — the core is shipped; remaining work is
+adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
+`per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
+multi-stack BIRD/GoBGP/FRR/StayRTR proof. Next useful slices are an Alice-LG
+gRPC source adapter, a 1000+-peer route-server scale receipt, shadow/canary
+RIB-diff tooling (`rbgp diff` against an incumbent's MRT/BMP feed), and an
+ARouteServer target once the pilot surface is stable.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
@@ -312,7 +308,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   reflection and withdrawal path with a GoBGP 4.6.0 route source and sink. GR
   entry now conservatively withdraws BGP-LS routes and Enhanced Route Refresh
   sweeps omitted BGP-LS objects instead of reporting stale controller-feed data
-  as live; true BGP-LS GR/LLGR stale preservation, BGP-LS Add-Path, BGP-LS VPN
+  as live; BGP-LS Add-Path and BGP-LS VPN
   interop, and local topology production remain deferred.
   **Done:** the VPNv4/VPNv6 (AFI 1/2, SAFI 128) route-reflector slice shipped
   end-to-end as four stacked tranches: typed RIB substrate (RD + prefix route
@@ -548,7 +544,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   **Done:** shape-aware
   EVPN `--diff` classification now
   distinguishes coordinator-supported SIGHUP shapes from restart-required
-  identity/generic mixed changes; actor availability and convergence failure
+  identity changes; actor availability and convergence failure
   remain runtime SIGHUP outcomes. Demand-shaped; keep the remaining items as
   follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support and

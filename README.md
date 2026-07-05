@@ -41,11 +41,11 @@ diversity scripts remain local / manual gates. See
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
 - **Typed, compiled policy language** (`.rpol`, ADR-0096) -- named prefix/community sets compiled to indexed matchers, parameterized policies, policy composition, and in-language unit tests (`rbgp policy check`); candidate policies dry-run read-only against the live RIB (`rbgp policy test`), decisions explain themselves per term (`rbgp policy explain`), and installed chains expose live per-term hit counters (`rbgp policy stats`). Mixes freely with the existing TOML policy chains; FRR route-map parity proven route-for-route in interop (M80). See [docs/rpol-language.md](docs/rpol-language.md).
-- **Full BMP monitoring trio** (RFC 7854/8671/9069, ADR-0097) -- per-collector selectable Adj-RIB-In (pre-policy), Adj-RIB-Out (post-policy, byte-exact wire PDUs), and Loc-RIB views on one exporter, with a chunked table dump + End-of-RIB when a collector connects. Optional per-collector BMPv4 TLV framing plus the Path Marking TLV (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv, pre-IANA -- code points may renumber; default stays BMP v3). Validated against pmacct, gobmp, and tshark at once (M81).
+- **Full BMP monitoring trio** (RFC 7854/8671/9069, ADR-0097) -- per-collector selectable Adj-RIB-In (pre-policy), Adj-RIB-Out (post-policy, byte-exact wire PDUs), and Loc-RIB views on one exporter. Loc-RIB collectors get a chunked table dump + End-of-RIB when they connect; Adj-RIB-In/Out are live streams by design. Optional per-collector BMPv4 TLV framing plus the Path Marking TLV (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv, pre-IANA -- code points may renumber; default stays BMP v3). Validated against pmacct, gobmp, and tshark at once (M81).
 - **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, and the explain trilogy: import explain (per-session decision cache), best-path explain (decisive-comparison attribution), and export explain (the full per-peer gate ladder — split horizon, RFC 4456 reflection, family, LLGR, ORF, RT membership, policy per-term verdict, advertised-state diff — produced by a dry run of the live export body, update groups included).
 - **Update-group fanout** (ADR-0098, ADR-0099) -- peers whose staged output is provably identical automatically share one outbound staging pass and one Arc-shared announce payload; measured ~28x faster 100k-route convergence at 256 uniform RR clients (15.1 s to 0.54 s), and 1.8 s wire-measured convergence / 419 MiB process RSS at 1,000 uniform RR clients x 100k routes ([scale receipt](docs/perf/scale-receipt-2026-07.md)), with a structural per-peer fallback (no knob) and a differential oracle pinning identical wire behavior. v2 extends the sharing to VPNv4/VPNv6 with the RFC 4684 RT filter applied per member at emit: 1,000 clients x 100k VPNv4 converge in 12.6 s / 625 MiB uniform and 3.9 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB and ~12.5 s / ~5.7 GiB extrapolated per-peer), and a member's RT-membership flip at 100k staged routes hits the wire in ~15 ms with zero policy evaluations.
 - **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop primarily against FRR plus GoBGP / StayRTR and documented BIRD coverage, extensive workspace tests, architecture decision records for every protocol and design choice.
-- **Reusable wire codec** -- `rustbgpd-wire` has zero internal dependencies and is independently publishable. Anyone building BGP tooling in Rust can use it without the daemon.
+- **Reusable wire codec and FSM** -- `rustbgpd-wire` has zero internal dependencies and `rustbgpd-fsm` depends only on `wire`; both are published as daemon-independent crates for Rust BGP tooling that does not need the full router.
 
 ## Good fit
 
@@ -372,11 +372,13 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   ADR-0052 / 0054–0059 / 0063 and
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the full gate
   ladder. Known gaps: runtime `[[evpn_instances]]` mutation is
-  alpha-complete with two by-design exceptions — `ApplyEvpnRuntime`
+  alpha-complete with one by-design exception — `ApplyEvpnRuntime`
   commits L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, atomic
-  tenant teardown, `ip_vrf` relink, and L2VNI-only mixed compositions live,
-  while L3VNI/device/table IP-VRF identity changes (restart-required) and
-  ES/IP-VRF row mixed edits fail closed ([#268](https://github.com/lance0/rustbgpd/issues/268));
+  tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as
+  deletes -> redefines -> `ip_vrf` relinks -> adds. L3VNI/device/table
+  IP-VRF identity changes remain restart-required by design; unsupported
+  dependency cycles fail closed before commit, and residual mid-sequence
+  convergence failures fail-stop after already committed generations;
   ESI overlay-index origination plus single-active and all-active
   ESI overlay-index receive now ship, with M71/M72 proving the receive
   paths against GoBGP route sources.
@@ -437,7 +439,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and ES/IP-VRF row mixed edits outside the L2VNI-only composer, true RFC VLAN-aware bundle VTEP origination + dataplane (non-zero Ethernet Tag RR receive/reflect shipped, M82), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, BGP-LS local topology production, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design), true RFC VLAN-aware bundle VTEP origination + dataplane (non-zero Ethernet Tag RR receive/reflect shipped, M82), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, BGP-LS local topology production, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation

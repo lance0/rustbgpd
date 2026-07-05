@@ -1,9 +1,10 @@
 # Embedding rustbgpd — the Rust BGP library map
 
-rustbgpd is not one crate; it is a layered workspace. The bottom layer is a
-pure, zero-dependency BGP message codec (`rustbgpd-wire`) that is independently
-publishable and consumable by *any* Rust project — monitor, analyzer, test
-harness, MRT reader, k8s sidecar, SDN controller — without linking the daemon.
+rustbgpd is not one crate; it is a layered workspace. The bottom layers are
+published as daemon-independent crates: a pure BGP message codec
+(`rustbgpd-wire`) and a pure RFC 4271 state machine (`rustbgpd-fsm`). They are
+consumable by Rust projects — monitors, analyzers, test harnesses, MRT readers,
+k8s sidecars, SDN controllers — without linking the daemon.
 
 This document is the contract for embedders: which crate to depend on, what the
 `pub use` boundary is, and what a minimal consumer looks like. It is the

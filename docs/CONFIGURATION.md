@@ -631,9 +631,10 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
 - `"linkstate"` — BGP-LS (AFI 16388, SAFI 71, RFC 9552). Learned BGP-LS
   routes are stored in the RIB, exposed through `RibService.ListBgpLsRoutes` /
-  `rbgp rib bgpls`, and reflected to eligible negotiated peers. rustbgpd does
-  not originate local BGP-LS objects, compute paths from BGP-LS data, or
-  negotiate BGP-LS Add-Path / GR / LLGR stale preservation yet.
+  `rbgp rib bgpls`, reflected to eligible negotiated peers, and can feed RFC
+  9107 ORR topology. rustbgpd does not originate local BGP-LS objects or
+  negotiate BGP-LS Add-Path. GR / LLGR stale preservation for BGP-LS and
+  BGP-LS VPN is implemented through the RR-family stale pipeline.
 - `"linkstate_vpn"` — BGP-LS VPN (AFI 16388, SAFI 72, RFC 9552), with
   the same controller-feed / reflection scope as `linkstate`.
 - `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Two
@@ -2366,11 +2367,12 @@ live-commits supported `[[evpn_instances]]` changes through both
 field flips such as `bridge_vlan` or `apply_aliasing_ecmp`, re-derives per-VNI dataplane
 state via the `FdbNhg → SingleDst` transition. Supported shapes include
 single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive
-build-up, atomic tenant teardown, `ip_vrf` relink, and L2VNI-only
-add/delete/redefine compositions. L3VNI/device/table IP-VRF identity
-changes are restart-required by design, and ES/IP-VRF row mixed edits
-outside the L2VNI-only composer fail closed — split those changes into
-supported requests (<https://github.com/lance0/rustbgpd/issues/268>).
+build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits
+ordered as deletes -> redefines -> `ip_vrf` relinks -> adds. L3VNI/device/table
+IP-VRF identity changes remain restart-required by design. Unsupported
+dependency cycles fail closed before commit; residual mid-sequence convergence
+failures fail-stop after any earlier primitive generations that already
+committed.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -2433,8 +2435,9 @@ filter (see the top-level `apply_bum_enforcement` key).
 SIGHUP reload and `EvpnService.ApplyEvpnRuntime` can live-commit a single
 Ethernet Segment add, delete, or redefine when the segment actor exists,
 additive build-up, and dropping an Ethernet Segment (delete or member-shrink)
-as part of an atomic tenant teardown alongside its member L2VNI. Generic mixed
-add/delete/redefine edits still fail closed.
+as part of an atomic tenant teardown alongside its member L2VNI. Mixed edits
+that can be decomposed into the supported primitive order also commit live;
+unsupported dependency cycles fail closed before commit.
 
 ---
 
@@ -2567,10 +2570,9 @@ the transition once per state change rather than every pass.
   IP-VRF add, standalone delete, or redefine with unchanged
   L3VNI/device/table identity, and an atomic tenant teardown that drops a
   linked IP-VRF together with its L2VNI (and any Ethernet Segment) in one
-  pass. `ip_vrf` relink and L2VNI-only add/delete/redefine compositions
-  commit live; L3VNI/device/table IP-VRF identity changes and ES/IP-VRF
-  row mixed edits remain fail-closed
-  [#268](https://github.com/lance0/rustbgpd/issues/268) shapes.
+  pass. `ip_vrf` relink and decomposable mixed edits ordered as deletes ->
+  redefines -> `ip_vrf` relinks -> adds commit live. L3VNI/device/table IP-VRF
+  identity changes remain restart-required shapes.
 
 ### GW-IP overlay-index origination (`overlay_index_mode = "gateway_ip"`)
 
@@ -2954,13 +2956,12 @@ applicable. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
 and `[[evpn_ip_vrfs]]`) are coordinator-gated instead: SIGHUP and the
 whole-model `EvpnService.ApplyEvpnRuntime` RPC validate a full candidate,
 converge the daemon actors in order, and advance the committed runtime
-snapshot only after the actors accept the change. Supported live shapes
-include single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine,
-additive build-up, atomic tenant teardown, `ip_vrf` relink, and
-L2VNI-only add/delete/redefine compositions. Unsupported mixed edits,
-missing actors, actor convergence failure, or restart-only IP-VRF
-identity changes pin back to the committed runtime model and keep the
-drift visible. The ADR-0061 `[[fib_tables]]` table is another
+snapshot only after the actors accept the change. Supported live shapes include single L2VNI/IP-VRF/Ethernet-Segment
+add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf`
+relink, and decomposable mixed edits ordered as deletes -> redefines ->
+`ip_vrf` relinks -> adds. Unsupported dependency cycles, missing actors,
+actor convergence failure, or restart-only IP-VRF identity changes pin back to
+or fail-stop on the committed runtime model and keep the drift visible. The ADR-0061 `[[fib_tables]]` table is another
 reload-applied surface: when the FIB reconciler is running it
 **hot-applies** table edits on SIGHUP (see the `[[fib_tables]]` section),
 advancing the snapshot only after the actor acks the new set; only *starting*

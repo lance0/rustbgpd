@@ -43,7 +43,7 @@ What the incumbents do about path hiding: BIRD offers `secondary`
 defaults it on); OpenBGPd offers `rde evaluate all` (arouteserver does
 NOT default it on, citing documented stability bugs — spurious 2nd-best
 withdrawals/re-announcements, openbgpd-portable#21); Add-Path per
-RFC 7948 is the alternative both support. rustbgpd already shipped
+RFC 7947 §2.3 is the alternative both support. rustbgpd already shipped
 Add-Path send, so mitigation (b) existed; the gap was (a).
 
 ## Decisions

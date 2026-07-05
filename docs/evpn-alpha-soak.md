@@ -426,7 +426,7 @@ landing, tracked here for visibility)
   rollback). SIGHUP file-driven reloads reuse the same coordinator for those
   shapes. Only two shapes remain non-live, by design: L3VNI/device/table
   IP-VRF identity changes (restart-required — kernel VRF lifecycle) and
-  generic mixed add/delete/redefine edits (fail closed with a "split the
+  unsupported dependency cycles (fail closed with a "split the
   request" error).
 
 ## Field-readiness gates

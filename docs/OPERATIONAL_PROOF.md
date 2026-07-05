@@ -27,7 +27,7 @@ operator-facing index that answers "what has actually been proved?"
 | BIRD / GoBGP / StayRTR diversity | Mixed CI/manual | BIRD TCP-AO and GoBGP coverage are documented; RTR-dependent RPKI/ASPA cases and broader platform-diversity runs remain local/manual where extra fixtures are required. |
 | Long-wall-clock gates | Manual/local | GR/LLGR soak-style gates and M33 scale churn are intentionally not PR-CI jobs because they consume substantial wall-clock. |
 
-Compact M36-M80 index (details and assertions stay in
+Compact M36-M83 index (details and assertions stay in
 [`INTEROP.md`](INTEROP.md#ci-coverage)):
 
 | Receipts | Coverage |
@@ -37,7 +37,7 @@ Compact M36-M80 index (details and assertions stay in
 | M39, M39b, M47, M48, M60, M61, M68, M70, M71, M72 | EVPN L3VNI / Type 5 / runtime convergence / adoption / VLAN-aware / overlay-index dataplane receipts. |
 | M42, M50, M51, M52, M53, M58, M62 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, BFD, BGP unnumbered, and BLACKHOLE adoption. |
 | M43 | Conditional TCP-AO smoke; probed and skipped only when the selected runner kernel lacks support. |
-| Other M41-M80 rows in this span | Foundation interop receipts such as BLACKHOLE FIB discard, gRPC/gNMI, EVPN Type 5 injection, BGP Roles/ORF/ASPA, inbound backpressure, IPv6-only peering, BGP-LS reflection, VPNv4 route-reflection, RT-Constrain VPNv4 filtering, RFC 9107 ORR divergent-best, RR-family GR/LLGR stale preservation, multi-cluster ORR with inter-RR Add-Path, RFC 8277 labeled-unicast reflection + GR, and the ADR-0096 `.rpol` policy parity receipt vs FRR route-maps (M80: route-for-route import/export outcome equality, policy check/test/stats, `.rpol` SIGHUP hot-apply with refresh scoped to the changed peer) remain catalogued in `INTEROP.md`. |
+| Other M41-M83 rows in this span | Foundation interop receipts such as BLACKHOLE FIB discard, gRPC/gNMI, EVPN Type 5 injection, BGP Roles/ORF/ASPA, inbound backpressure, IPv6-only peering, BGP-LS reflection, VPNv4 route-reflection, RT-Constrain VPNv4 filtering, RFC 9107 ORR divergent-best, RR-family GR/LLGR stale preservation, multi-cluster ORR with inter-RR Add-Path, RFC 8277 labeled-unicast reflection + GR, ADR-0096 `.rpol` policy parity vs FRR route-maps (M80), BMP trio + BMPv4/path-marking against pmacct/gobmp/tshark (M81), EVPN VLAN-aware-bundle non-zero Ethernet Tag reflection (M82), and RFC 7947 route-server profile transparency/path-hiding/ROV proof (M83) remain catalogued in `INTEROP.md`. |
 
 ## Scale and benchmark receipts
 

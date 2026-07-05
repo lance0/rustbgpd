@@ -33,8 +33,8 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 
 | Crate | Description |
 |-------|-------------|
-| `rustbgpd-wire` | BGP message codec. Zero internal deps. Independently publishable and fuzzed. |
-| `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. |
+| `rustbgpd-wire` | BGP message codec. Zero internal deps. Independently published and fuzzed. |
+| `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. Independently published for embedders. |
 | `rustbgpd-bfd` | RFC 5880/5881 single-hop BFD: control-packet codec + sans-IO session state machine. Pure -- no tokio, no sockets (ADR-0067). The UDP/timer actor that drives it lives in the daemon binary (`src/bfd_runtime.rs`). |
 | `rustbgpd-transport` | Tokio TCP glue. Owns BGP peer session I/O and drives the FSM. |
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |

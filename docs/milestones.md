@@ -1018,7 +1018,7 @@ to the plain capability they delivered.
   member VNI added by an earlier live L2VNI add), additive build-up, atomic
   tenant teardown (M47/M48), and `ip_vrf` relink. Restart-required/fail-closed
   edits: L3VNI/device/table IP-VRF identity changes (a kernel VRF lifecycle
-  operation, restart-required by design) and generic mixed add/delete/redefine
+  operation, restart-required by design) and unsupported dependency-cycle
   edits (fail closed with a "split the request" error, pending a generalized
   converge-to-candidate follow-up).
 - **EVPN multi-homing — ESI, Type-1/Type-4** (v0.17.0, ADR-0057, M38/M46/M49) —

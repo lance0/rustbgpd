@@ -499,8 +499,10 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
    `(post-vX.Y.Z)` annotations in ROADMAP.md and the Maturity row in README.md.
 3. Bump versions:
    - Root `Cargo.toml`: `[workspace.package] version` plus every internal
-     `rustbgpd-*` pin in `[workspace.dependencies]` (the `rustbgpd-wire`
-     entry is path-only and has no version pin — leave it alone).
+     `rustbgpd-*` pin in `[workspace.dependencies]`. Library crates that
+     publish independently, such as `rustbgpd-wire`, may carry both `path`
+     and `version` so downstream publish dry-runs resolve from crates.io;
+     do not remove those version pins during the workspace bump.
    - `crates/wire/Cargo.toml`: bump **only** if `crates/wire/src/` changed
      since the last wire publish (see semver rules in the next section).
      Land the wire bump in its **own commit** before the workspace bump so
@@ -531,9 +533,10 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
     filenames drift, deployment.md silently breaks for new operators.
 11. **Verify GitHub release notes**: check that the release created by CI has
     accurate notes. The `release` workflow extracts the matching
-    `## [X.Y.Z]` block out of `CHANGELOG.md` via awk; if the body shows
-    "no `[X.Y.Z]` section found" or the auto-generated commit list,
-    fix the CHANGELOG heading and either re-tag or edit the release body.
+    `## [X.Y.Z]` block out of `CHANGELOG.md` via awk and fails the tag build
+    if the section is missing; if GitHub shows the auto-generated commit list
+    anyway, fix the CHANGELOG heading and either re-tag or edit the release
+    body.
 
 ### rustbgpd-wire crate release
 
@@ -554,3 +557,24 @@ changed.
 - **Patch**: bug fixes, stricter validation, docs/test improvements
 - **Minor**: new message types, attributes, helper methods, additive API changes
 - **Major**: breaking API changes, changed method signatures, enum shape changes
+
+### rustbgpd-fsm crate release
+
+The FSM crate has its own version in `crates/fsm/Cargo.toml`, decoupled from
+the daemon workspace version. Only publish when the pure FSM API or docs change;
+do not force an FSM release for every daemon tag.
+
+1. **Did `crates/fsm/` or its public examples/docs change since the last
+   `rustbgpd-fsm` publish?**
+   - If no: skip. Do not publish a no-op release.
+   - If yes: continue.
+2. Decide semver bump:
+   - **Patch**: bug fixes, docs/test improvements, no public API expansion.
+   - **Minor**: additive events/actions/helpers or new non-breaking
+     negotiation surfaces.
+   - **Major**: changed method signatures, removed variants, or enum/struct
+     shape changes not protected by `#[non_exhaustive]`.
+3. Update `version` in `crates/fsm/Cargo.toml`
+4. Add a `rustbgpd-fsm` entry in `CHANGELOG.md`
+5. `cargo publish -p rustbgpd-fsm --dry-run`
+6. `cargo publish -p rustbgpd-fsm`
