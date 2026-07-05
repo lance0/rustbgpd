@@ -102,6 +102,7 @@ fn vpn_route(
     VpnRibRoute {
         nlri,
         next_hop: IpAddr::V4(src),
+        link_local_next_hop: None,
         peer: IpAddr::V4(src),
         attributes: Arc::new(attributes),
         received_at: Instant::now(),

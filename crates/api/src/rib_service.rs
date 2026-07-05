@@ -2537,6 +2537,7 @@ mod tests {
                 prefix: VpnPrefix::v4(Ipv4Addr::new(10, 1, 0, 0), 24).unwrap(),
             },
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
+            link_local_next_hop: None,
             peer: Ipv4Addr::new(192, 0, 2, 2).into(),
             attributes: Arc::new(vec![
                 PathAttribute::AsPath(AsPath {

@@ -1535,6 +1535,7 @@ fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
             prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
         },
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1772,6 +1773,92 @@ async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
         mp.link_local_next_hop,
         Some(link_local),
         "labeled IPv6 link-local next-hop must survive reflection (LAN-190)"
+    );
+}
+/// LAN-217: a `VPNv6` route carrying an RFC 4659 §3.2.1.1 48-byte two-address
+/// next-hop (global + link-local) reflects the link-local half — the emitted
+/// `MP_REACH` uses the 48-byte next-hop form, not the 24-byte single-address
+/// form.
+/// Without this, `VPNv6` link-local forwarding breaks on reflection.
+#[tokio::test]
+async fn send_route_update_reflects_vpnv6_link_local_next_hop() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::MplsVpn)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+    let route = rustbgpd_rib::VpnRibRoute {
+        nlri: VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+            prefix: VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap(),
+        },
+        next_hop: IpAddr::V6(global),
+        link_local_next_hop: Some(link_local),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![].into(),
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![].into(),
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        bgpls_announce: vec![],
+        bgpls_withdraw: vec![],
+        vpn_announce: vec![route.clone()],
+        labeled_announce: vec![],
+        rtc_announce: vec![],
+        vpn_withdraw: vec![],
+        labeled_withdraw: vec![],
+        rtc_withdraw: vec![],
+        request_refresh_all_negotiated: false,
+    });
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected VPN MP_REACH UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("VPN announcement must use MP_REACH");
+    assert_eq!(mp.afi, Afi::Ipv6);
+    assert_eq!(mp.safi, Safi::MplsVpn);
+    assert_eq!(
+        mp.next_hop,
+        IpAddr::V6(global),
+        "VPN global next-hop must pass through reflection unchanged"
+    );
+    assert_eq!(
+        mp.link_local_next_hop,
+        Some(link_local),
+        "VPNv6 link-local next-hop must survive reflection (LAN-217)"
     );
 }
 /// RFC 7911 labeled outbound: with Add-Path send negotiated for (IPv4, SAFI

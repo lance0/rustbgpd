@@ -546,6 +546,7 @@ mod tests {
         VpnRibRoute {
             nlri,
             next_hop: peer,
+            link_local_next_hop: None,
             peer,
             attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
