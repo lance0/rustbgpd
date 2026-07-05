@@ -15,6 +15,7 @@ use rustbgpd_api::proto as server_proto;
 use rustbgpd_api::proto::bfd_service_server::BfdServiceServer;
 use rustbgpd_api::proto::config_service_server::ConfigServiceServer;
 use rustbgpd_api::proto::control_service_server::ControlServiceServer;
+use rustbgpd_api::proto::event_service_server::EventServiceServer;
 use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
 use rustbgpd_api::proto::neighbor_service_server::NeighborServiceServer;
@@ -28,6 +29,9 @@ pub(crate) struct MockState {
     pub(crate) health_calls: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
+    pub(crate) list_neighbors_calls: AtomicUsize,
+    pub(crate) list_session_events_calls: AtomicUsize,
+    pub(crate) list_policy_events_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
     pub(crate) config_plan_calls: AtomicUsize,
     pub(crate) config_apply_calls: AtomicUsize,
@@ -163,6 +167,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
         state: Arc::clone(&state),
     };
     let evpn = MockEvpnService;
+    let event = MockEventService {
+        state: Arc::clone(&state),
+    };
     let policy = MockPolicyService {
         state: Arc::clone(&state),
     };
@@ -192,6 +199,10 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
+                interceptor.clone(),
+            ))
+            .add_service(EventServiceServer::with_interceptor(
+                event,
                 interceptor.clone(),
             ))
             .add_service(PolicyServiceServer::with_interceptor(
@@ -249,6 +260,9 @@ pub(crate) async fn spawn_mock_uds_server(
         state: Arc::clone(&state),
     };
     let evpn = MockEvpnService;
+    let event = MockEventService {
+        state: Arc::clone(&state),
+    };
     let policy = MockPolicyService {
         state: Arc::clone(&state),
     };
@@ -278,6 +292,10 @@ pub(crate) async fn spawn_mock_uds_server(
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
+                interceptor.clone(),
+            ))
+            .add_service(EventServiceServer::with_interceptor(
+                event,
                 interceptor.clone(),
             ))
             .add_service(PolicyServiceServer::with_interceptor(
@@ -583,6 +601,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         &self,
         _request: Request<server_proto::ListNeighborsRequest>,
     ) -> Result<Response<server_proto::ListNeighborsResponse>, Status> {
+        self.state
+            .list_neighbors_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(server_proto::ListNeighborsResponse {
             neighbors: vec![],
         }))
@@ -894,6 +915,65 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         _request: Request<server_proto::ApplyEvpnRuntimeRequest>,
     ) -> Result<Response<server_proto::ApplyEvpnRuntimeResponse>, Status> {
         Err(Status::unimplemented("not in mock"))
+    }
+}
+
+struct MockEventService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::event_service_server::EventService for MockEventService {
+    type WatchEventsStream =
+        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::BgpEvent, Status>> + Send>>;
+    type SubscribeFromEventStream =
+        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::BgpEvent, Status>> + Send>>;
+
+    async fn watch_events(
+        &self,
+        _request: Request<server_proto::WatchEventsRequest>,
+    ) -> Result<Response<Self::WatchEventsStream>, Status> {
+        Err(Status::unimplemented("not used in CLI tests"))
+    }
+
+    async fn subscribe_from_event(
+        &self,
+        _request: Request<server_proto::SubscribeFromEventRequest>,
+    ) -> Result<Response<Self::SubscribeFromEventStream>, Status> {
+        Err(Status::unimplemented("not used in CLI tests"))
+    }
+
+    async fn list_evpn_events(
+        &self,
+        _request: Request<server_proto::ListEvpnEventsRequest>,
+    ) -> Result<Response<server_proto::ListEvpnEventsResponse>, Status> {
+        Ok(Response::new(server_proto::ListEvpnEventsResponse {
+            events: vec![],
+        }))
+    }
+
+    async fn list_session_events(
+        &self,
+        _request: Request<server_proto::ListSessionEventsRequest>,
+    ) -> Result<Response<server_proto::ListSessionEventsResponse>, Status> {
+        self.state
+            .list_session_events_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::ListSessionEventsResponse {
+            events: vec![],
+        }))
+    }
+
+    async fn list_policy_events(
+        &self,
+        _request: Request<server_proto::ListPolicyEventsRequest>,
+    ) -> Result<Response<server_proto::ListPolicyEventsResponse>, Status> {
+        self.state
+            .list_policy_events_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::ListPolicyEventsResponse {
+            events: vec![],
+        }))
     }
 }
 

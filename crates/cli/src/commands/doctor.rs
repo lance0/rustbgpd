@@ -4,12 +4,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::commands::watch::bgp_event_json_value;
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, JsonNeighbor};
 use crate::proto::control_service_client::ControlServiceClient;
+use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
-use crate::proto::{GetGlobalRequest, HealthRequest, MetricsRequest};
+use crate::proto::neighbor_service_client::NeighborServiceClient;
+use crate::proto::{
+    GetGlobalRequest, HealthRequest, ListNeighborsRequest, ListPolicyEventsRequest,
+    ListSessionEventsRequest, MetricsRequest,
+};
+
+/// Bounded recent slice pulled from each event history for triage. The
+/// daemon clamps to its own 4096-event ceiling; this keeps the bundle small.
+const EVENT_HISTORY_LIMIT: u32 = 256;
+
+/// Keys in the shipped `BgpEvent` JSON whose values are free text that
+/// could echo operator/peer-supplied strings (e.g. RFC 8203 shutdown
+/// reasons). Redacted the same way `tcp_ao_detail`/metrics are.
+const EVENT_FREE_TEXT_KEYS: &[&str] = &["summary", "reason", "shutdown_reason", "target"];
 
 #[derive(Serialize)]
 struct BundleManifest<'a> {
@@ -45,6 +60,12 @@ struct EnvironmentSnapshot<'a> {
     current_dir: String,
     daemon_address: &'a str,
     token_file_configured: bool,
+}
+
+#[derive(Serialize)]
+struct EventsSnapshot {
+    session: Vec<serde_json::Value>,
+    policy: Vec<serde_json::Value>,
 }
 
 fn now_unix_seconds() -> u64 {
@@ -86,6 +107,20 @@ fn redact_text(input: &str) -> String {
         .join("\n")
 }
 
+/// Redact the free-text leaf fields of one serialized `BgpEvent` in place,
+/// mirroring how `tcp_ao_detail`/metrics are scrubbed. State names, ASNs,
+/// timestamps, and other structured fields are left untouched.
+fn redact_event(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        for key in EVENT_FREE_TEXT_KEYS {
+            if let Some(serde_json::Value::String(text)) = object.get_mut(*key) {
+                *text = redact_text(text);
+            }
+        }
+    }
+    value
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CliError> {
     let bytes = serde_json::to_vec_pretty(value)?;
     fs::write(path, bytes)?;
@@ -108,10 +143,34 @@ pub async fn run(
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut global =
         GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut neighbor =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut events =
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
 
     let health = control.get_health(HealthRequest {}).await?.into_inner();
     let global_state = global.get_global(GetGlobalRequest {}).await?.into_inner();
     let metrics = control.get_metrics(MetricsRequest {}).await?.into_inner();
+    let neighbors = neighbor
+        .list_neighbors(ListNeighborsRequest {})
+        .await?
+        .into_inner();
+    let session_events = events
+        .list_session_events(ListSessionEventsRequest {
+            neighbor_address: String::new(),
+            event_types: Vec::new(),
+            limit: EVENT_HISTORY_LIMIT,
+        })
+        .await?
+        .into_inner();
+    let policy_events = events
+        .list_policy_events(ListPolicyEventsRequest {
+            neighbor_address: String::new(),
+            event_types: Vec::new(),
+            limit: EVENT_HISTORY_LIMIT,
+        })
+        .await?
+        .into_inner();
 
     write_json(
         &bundle_dir.join("health.json"),
@@ -146,6 +205,40 @@ pub async fn run(
             token_file_configured,
         },
     )?;
+    let neighbor_snapshots: Vec<JsonNeighbor> = neighbors
+        .neighbors
+        .iter()
+        .map(|n| {
+            let cfg = n.config.as_ref();
+            JsonNeighbor {
+                address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+                interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
+                remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
+                state: output::format_state_with_stale(n.state, n.stale).to_string(),
+                stale: n.stale,
+                uptime_seconds: n.uptime_seconds,
+                prefixes_received: n.prefixes_received,
+                prefixes_sent: n.prefixes_sent,
+                description: redact_text(&cfg.map(|c| c.description.clone()).unwrap_or_default()),
+            }
+        })
+        .collect();
+    write_json(&bundle_dir.join("neighbors.json"), &neighbor_snapshots)?;
+    write_json(
+        &bundle_dir.join("events.json"),
+        &EventsSnapshot {
+            session: session_events
+                .events
+                .iter()
+                .map(|e| bgp_event_json_value(e).map(redact_event))
+                .collect::<Result<Vec<_>, _>>()?,
+            policy: policy_events
+                .events
+                .iter()
+                .map(|e| bgp_event_json_value(e).map(redact_event))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+    )?;
     write_json(
         &bundle_dir.join("manifest.json"),
         &BundleManifest {
@@ -159,6 +252,8 @@ pub async fn run(
                 "global.json",
                 "metrics.prom",
                 "environment.json",
+                "neighbors.json",
+                "events.json",
             ],
             note: "No daemon config file or bearer token material is copied.",
         },
@@ -188,6 +283,21 @@ mod tests {
         assert_eq!(redacted, "ok 1\n[REDACTED]\n[REDACTED]\nok 2");
     }
 
+    #[test]
+    fn redact_event_scrubs_free_text_but_keeps_structured_fields() {
+        let event = serde_json::json!({
+            "event_type": "session_lost",
+            "new_state": "Idle",
+            "reason": "shutdown bearer token leaked here",
+            "summary": "peer down",
+        });
+        let redacted = redact_event(event);
+        assert_eq!(redacted["reason"], "[REDACTED]");
+        assert_eq!(redacted["summary"], "peer down");
+        assert_eq!(redacted["event_type"], "session_lost");
+        assert_eq!(redacted["new_state"], "Idle");
+    }
+
     #[tokio::test]
     async fn doctor_writes_bundle_and_calls_core_rpcs() {
         let server = spawn_mock_server(None).await;
@@ -204,11 +314,27 @@ mod tests {
         assert!(bundle.join("global.json").exists());
         assert!(bundle.join("metrics.prom").exists());
         assert!(bundle.join("environment.json").exists());
+        assert!(bundle.join("neighbors.json").exists());
+        assert!(bundle.join("events.json").exists());
         assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
         assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.state.list_neighbors_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server
+                .state
+                .list_session_events_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server.state.list_policy_events_calls.load(Ordering::SeqCst),
+            1
+        );
 
         let manifest = fs::read_to_string(bundle.join("manifest.json")).unwrap();
         assert!(manifest.contains("No daemon config file or bearer token material is copied."));
+        assert!(manifest.contains("neighbors.json"));
+        assert!(manifest.contains("events.json"));
     }
 }
