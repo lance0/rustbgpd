@@ -324,10 +324,12 @@ resolved.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
-- **TCP-AO not supported for RTR connections.** RPKI cache server
-  connections use plain TCP. TCP-AO (RFC 5925) is not supported for
-  either BGP or RTR sessions. Use network-level access controls or
-  SSH tunnels for RTR transport security.
+- **TCP-AO not supported for RTR connections.** RPKI cache (RTR) server
+  connections use plain TCP; TCP-AO (RFC 5925) is not available for the
+  RTR transport. Use network-level access controls or SSH tunnels for RTR
+  transport security. (TCP-AO *is* supported for BGP static-neighbor
+  startup keys on Linux — see the dynamic-neighbor / runtime-rotation
+  follow-ups in the limitations list.)
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID
