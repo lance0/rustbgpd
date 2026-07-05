@@ -770,6 +770,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **ORR vantage config validation now rejects a degenerate vantage IP
+  (LAN-216).** An `orr_vantage` (RFC 9107) equal to the neighbor's own
+  peering address or the reflector's `router_id` degenerates to the
+  reflector's own viewpoint (plain non-ORR reflection) and is a
+  copy-paste misconfiguration. Config load/validate now fails closed on
+  either case with a diagnostic naming the field and offending address,
+  alongside the existing iBGP / `route_reflector_client` checks, rather
+  than silently accepting it.
 - **Update-groups: a second policy-driven regroup while a member's prior
   regroup resync is still un-drained no longer leaks stale routes.** A
   grouped member keeps no per-family Adj-RIB-Out record of its unicast/VPN
