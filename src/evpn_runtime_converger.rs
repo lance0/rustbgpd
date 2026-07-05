@@ -3794,6 +3794,12 @@ where
     // Report what actually committed, not `total` (`steps.len()`): no-op
     // steps `continue` without a generation, so `committed` can be < total.
     let committed = committed_generations.len();
+    // #25: no-op steps `continue` without a generation, so committed may be < total.
+    let planned_note = if committed == total {
+        String::new()
+    } else {
+        format!(" ({committed} of {total} planned steps committed)")
+    };
     let generations_summary = match (committed_generations.first(), committed_generations.last()) {
         (Some(first), Some(last)) => format!(" as generations {first}..={last}"),
         _ => String::new(),
@@ -3806,7 +3812,7 @@ where
         // the INFO logs above and in `generations_summary`.
         plan: Some(runtime_plan_to_proto(overall_plan)),
         message: format!(
-            "candidate EVPN runtime model committed via {committed} decomposed steps{generations_summary}"
+            "candidate EVPN runtime model committed via {committed} decomposed steps{planned_note}{generations_summary}"
         ),
     })
 }

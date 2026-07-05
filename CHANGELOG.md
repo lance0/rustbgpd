@@ -790,6 +790,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **EVPN decomposed-apply response disambiguates committed vs planned
+  steps.** When no-op steps are skipped mid-sequence the `ApplyEvpnRuntime`
+  message now appends `(N of M planned steps committed)` so an API consumer
+  does not read the committed count as the planned count. The boot-revert
+  save-aside's hard-link filesystem requirement is now documented in
+  `docs/OPERATIONS.md`.
 - **BMP VPNv6 Adj-RIB-Out mirror preserves the link-local next-hop
   (LAN-217 follow-up).** `synthesize_vpn_announce` now copies the route's
   link-local half into the synthesized `MP_REACH`, mirroring the unicast
