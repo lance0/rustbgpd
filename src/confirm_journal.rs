@@ -249,33 +249,39 @@ fn save_candidate_aside(
     backup_path: &Path,
     journal_path: &Path,
 ) -> Result<bool, String> {
-    let backup_exists = backup_path.try_exists().map_err(|error| {
+    // Atomic no-clobber move (LAN-224). A bare `try_exists` + `rename` is a
+    // check-then-act race: `rename(2)` overwrites the destination unconditionally,
+    // so a `.unconfirmed` created between the check and the rename gets clobbered.
+    // `hard_link` fails atomically with `AlreadyExists` if the backup exists (so we
+    // never overwrite it); otherwise the backup now shares config's inode and
+    // `remove_file` completes the move — same "config moved to backup" semantics as
+    // the old rename, but with a truly atomic no-clobber guard.
+    let save_error = |error: &io::Error| {
         refuse_message(
-            journal_path,
-            config_path,
-            &format!(
-                "failed to check the recovery copy at {}: {error}",
-                backup_path.display()
-            ),
-        )
-    })?;
-    if backup_exists {
-        return Ok(false);
-    }
-    match fs::rename(config_path, backup_path) {
-        Ok(()) => Ok(true),
-        // Config missing mid-revert (crash resume): nothing to save aside — the
-        // recovery copy, if one was ever made, is already at backup.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(refuse_message(
             journal_path,
             config_path,
             &format!(
                 "failed to save the unconfirmed candidate aside to {}: {error}",
                 backup_path.display()
             ),
-        )),
+        )
+    };
+    match fs::hard_link(config_path, backup_path) {
+        Ok(()) => {}
+        // Backup already holds the REAL saved candidate — never clobber it.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        // Config missing mid-revert (crash resume): nothing to save aside — the
+        // recovery copy, if one was ever made, is already at backup.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(save_error(&error)),
     }
+    // Backup is in place; drop the original to finish the move. If this fails we
+    // fail closed (Err) — the backup already holds the candidate bytes, config is
+    // untouched, and the next boot sees the backup and no-clobbers idempotently.
+    // ponytail: two syscalls vs one; switch to renameat2(RENAME_NOREPLACE) only if
+    // the config dir ever lives on a filesystem without hard-link support.
+    fs::remove_file(config_path).map_err(|error| save_error(&error))?;
+    Ok(true)
 }
 
 /// `<config_path>.unconfirmed` — one well-known slot, written once and preserved
@@ -665,6 +671,33 @@ log_format = "json"
             "the real preserved candidate"
         );
         assert!(!path.exists(), "journal consumed on success");
+    }
+
+    #[test]
+    fn save_candidate_aside_no_clobbers_existing_backup() {
+        // LAN-224: the atomic no-clobber move must return Ok(false) and leave a
+        // pre-existing `.unconfirmed` byte-for-byte unchanged, even with a config
+        // candidate present to move aside (the old try_exists+rename could clobber
+        // a backup created between the check and the rename).
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("rustbgpd.toml");
+        fs::write(&config_path, "current candidate").unwrap();
+        let backup_path = unconfirmed_backup_path(&config_path);
+        fs::write(&backup_path, "the real preserved candidate").unwrap();
+        let jpath = journal_path(dir.path());
+
+        let moved = save_candidate_aside(&config_path, &backup_path, &jpath).unwrap();
+        assert!(!moved, "must not move when the backup already exists");
+        // No clobber: the preserved candidate is untouched.
+        assert_eq!(
+            fs::read_to_string(&backup_path).unwrap(),
+            "the real preserved candidate"
+        );
+        // Config left in place (not moved aside).
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            "current candidate"
+        );
     }
 
     #[test]

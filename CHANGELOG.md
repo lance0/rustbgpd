@@ -770,6 +770,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Boot-revert save-aside is now an atomic no-clobber move (LAN-224).**
+  `save_candidate_aside` in the commit-confirm revert journal previously did a
+  check-then-act `try_exists` + `rename` on the `<config>.unconfirmed` backup.
+  Because `rename(2)` overwrites its destination unconditionally, an
+  `.unconfirmed` created between the check and the rename — by an external writer
+  to the state dir, or a second daemon booting against the same config dir —
+  could be clobbered, violating the "never overwrite an existing `.unconfirmed`
+  with different bytes" invariant. It now uses a `hard_link` + `remove_file`
+  move whose no-clobber guard is atomic: an existing backup yields the same
+  `Ok(false)` (did-not-move) result and its bytes are left untouched.
 - **Update-groups: a second policy-driven regroup while a member's prior
   regroup resync is still un-drained no longer leaks stale routes.** A
   grouped member keeps no per-family Adj-RIB-Out record of its unicast/VPN
