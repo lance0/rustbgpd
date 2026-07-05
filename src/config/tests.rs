@@ -2236,6 +2236,24 @@ fn orr_vantage_rejected_when_equal_to_neighbor_or_local_address() {
 }
 
 #[test]
+fn orr_vantage_rejected_when_unspecified_or_loopback() {
+    // Wildcard (0.0.0.0 / ::) and loopback vantages name no real BGP-LS
+    // topology node — reject at load rather than run inert ORR.
+    for degenerate in ["0.0.0.0", "::", "127.0.0.1", "::1"] {
+        let toml = orr_toml(
+            &format!("route_reflector_client = true\norr_vantage = \"{degenerate}\""),
+            "",
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidRrConfig { .. })
+                && err.to_string().contains("unspecified or loopback"),
+            "degenerate vantage {degenerate} must be rejected: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn orr_vantage_warns_without_linkstate_family() {
     // The warning condition (pure helper backing the load-time warn):
     // vantage set, no linkstate family anywhere → true.

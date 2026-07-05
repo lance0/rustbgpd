@@ -295,6 +295,11 @@ fn vpn_afi(nlri: &VpnNlri) -> Afi {
 pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
     let attrs = route.attributes.as_slice();
     let mut mp_reach = empty_mp_reach(vpn_afi(&route.nlri), Safi::MplsVpn, route.next_hop);
+    // Carry the RFC 4659 IPv6 link-local next-hop half through the BMP
+    // mirror, mirroring synthesize_unicast_announce — otherwise a VPNv6
+    // Adj-RIB-Out RouteMonitoring PDU reconstructs a 24-byte single
+    // next-hop and the link-local half is silently lost (LAN-217 follow-up).
+    mp_reach.link_local_next_hop = route.link_local_next_hop;
     mp_reach.vpn_announced = vec![VpnNlriEntry {
         path_id: 0,
         nlri: route.nlri.clone(),
@@ -669,6 +674,45 @@ mod tests {
         let mut route = vpn_route();
         route.attributes = Arc::new(rich_attrs());
         let mut mp_reach = empty_mp_reach(Afi::Ipv4, Safi::MplsVpn, route.next_hop);
+        mp_reach.vpn_announced = vec![VpnNlriEntry {
+            path_id: 0,
+            nlri: route.nlri.clone(),
+        }];
+        let expected = clone_based_oracle(
+            &[],
+            &rich_attrs(),
+            rich_attrs().len(),
+            PathAttribute::MpReachNlri(mp_reach),
+        );
+        assert_eq!(synthesize_vpn_announce(&route).unwrap(), expected);
+    }
+
+    #[test]
+    fn borrowed_encode_vpnv6_link_local_matches_clone_based_oracle() {
+        // LAN-217 BMP follow-up: a VPNv6 Loc-RIB best with an RFC 4659
+        // two-address (global + link-local) next-hop must reconstruct the
+        // full 48-byte next-hop on the BMP RouteMonitoring PDU. Before the
+        // fix the mirror dropped the link-local half and emitted a 24-byte
+        // single next-hop, unlike the live BGP UPDATE to peers.
+        let mut route = vpn_route();
+        route.nlri = VpnNlri {
+            labels: vec![MplsLabelEntry {
+                label: 1042,
+                traffic_class: 0,
+                bottom_of_stack: true,
+            }],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 7]),
+            prefix: VpnPrefix::V6 {
+                addr: "2001:db8:40::".parse().unwrap(),
+                len: 48,
+            },
+        };
+        route.next_hop = "2001:db8::1".parse().unwrap();
+        route.link_local_next_hop = Some("fe80::1".parse().unwrap());
+        route.attributes = Arc::new(rich_attrs());
+
+        let mut mp_reach = empty_mp_reach(Afi::Ipv6, Safi::MplsVpn, route.next_hop);
+        mp_reach.link_local_next_hop = route.link_local_next_hop;
         mp_reach.vpn_announced = vec![VpnNlriEntry {
             path_id: 0,
             nlri: route.nlri.clone(),

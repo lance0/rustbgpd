@@ -452,6 +452,18 @@ impl Config {
                         ),
                     });
                 }
+                // A wildcard (0.0.0.0 / ::) or loopback vantage names no real
+                // BGP-LS topology node, so ORR silently degenerates to plain
+                // reflection. Reject it at load rather than run inert.
+                if vantage.is_unspecified() || vantage.is_loopback() {
+                    return Err(ConfigError::InvalidRrConfig {
+                        reason: format!(
+                            "orr_vantage {vantage} on neighbor {} must be a real topology \
+                             address, not an unspecified or loopback address",
+                            neighbor.address
+                        ),
+                    });
+                }
             }
 
             let route_server_client = neighbor

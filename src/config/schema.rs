@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use rustbgpd_wire::BgpRole;
 
-pub(super) const DEFAULT_HOLD_TIME: u16 = 90;
+/// Sourced from the fsm crate so the daemon hold-time default lives in
+/// exactly one place (completes the LAN-211 dedup; `PeerConfig::default()`
+/// and the gRPC send-hold-time validation use the same constant).
+pub(super) const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
 pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
 

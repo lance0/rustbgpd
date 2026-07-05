@@ -547,7 +547,6 @@ impl RibManager {
                         evaluation.matched_policy.as_deref(),
                     )
                 });
-                trace.modifications = result.modifications.clone();
             }
             if result.action != rustbgpd_policy::PolicyAction::Permit {
                 if let Some(trace) = target.trace() {
@@ -563,6 +562,9 @@ impl RibManager {
                 continue;
             }
             if let Some(trace) = target.trace() {
+                // Record staged modifications only after the Permit above — a
+                // denied route carries none (mirrors the unicast arm; #722).
+                trace.modifications = result.modifications.clone();
                 match trace.policy_label.clone() {
                     Some(label) => trace.push(
                         "export_policy",
