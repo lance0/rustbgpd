@@ -10901,6 +10901,31 @@ fn reload_matrix_pins_load_bearing_field_classes() {
     }
 }
 
+#[test]
+fn config_knob_contributor_guide_pins_required_review_surfaces() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/config-knob-contributor-guide.md");
+    let guide = fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "could not read {} for config-knob guide structural test: {err}",
+            path.display()
+        )
+    });
+    for required in [
+        "src/config/schema.rs",
+        "src/config/validation.rs",
+        "docs/reload-matrix.md",
+        "RELOAD_MATRIX_NEIGHBOR_FIELDS",
+        "RELOAD_MATRIX_PEER_GROUP_FIELDS",
+        "docs/CONFIGURATION.md",
+        "persist",
+    ] {
+        assert!(
+            guide.contains(required),
+            "config knob contributor guide must mention {required:?}"
+        );
+    }
+}
+
 /// Regression guard for the directive format itself: every string
 /// `per_peer_log_directives` emits must actually parse as an `EnvFilter`
 /// directive. The original `peer{peer_addr=X}=level` form (no brackets)

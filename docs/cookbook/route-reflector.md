@@ -186,7 +186,7 @@ read-only dry run of the same staging body live distribution executes,
 update groups included:
 
 ```console
-$ rbgp rib advertised 10.0.0.12 --explain --prefix 203.0.113.0/24
+$ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.12 --explain
 ```
 
 Each rung reports pass / STOP / n/a in live evaluation order

@@ -112,7 +112,7 @@ Once both containers are running (a few seconds):
 
 ```bash
 # See the FRR peer come up
-docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 summary
 
 # Browse the RIB
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
@@ -146,120 +146,20 @@ docker build --target dev -t rustbgpd:dev .   # dev/interop image (lab helpers, 
 
 ## Quick start (bare metal)
 
-For running rustbgpd on a real host with real peers.
+For running rustbgpd on a real host with real peers, see
+[docs/QUICKSTART.md](docs/QUICKSTART.md). It covers starter config generation,
+`--check` / `--diff`, local UDS access, HTTP probes, runtime peer operations,
+remote mTLS access, standalone Docker, and systemd.
 
-### 1. Configure
+The [cookbook](docs/cookbook/README.md) has complete receipt-proven recipes for
+the common deployment shapes: iBGP route reflector at scale, L3VPN reflection,
+IXP route server, BMP/event/MRT monitoring feed, EVPN fabric RR, and `.rpol`
+policy.
 
-Generate a starter config from a built-in profile — nothing to copy or hunt
-down:
-
-```bash
-# `lab` = minimal single-box setup (gRPC over a local UDS, state in /tmp).
-./target/release/rustbgpd --init-config lab --stdout > config.toml
-$EDITOR config.toml   # set your ASN, router ID, and peer address
-```
-
-`edge` is an eBGP edge skeleton with a default-route-dropping import chain.
-Each profile is validated through the real config loader before it is
-printed, so the output always loads. Prefer a worked example? Copy one
-instead:
-
-```bash
-cp examples/minimal/config.toml config.toml
-```
-
-The `lab` profile and the minimal example both set `runtime_state_dir` to a
-user-writable path under `/tmp` and include `prometheus_addr` for metrics. For
-a route-server deployment, start from `examples/route-server/config.toml`. Full
-reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-
-### 2. Validate and run
-
-```bash
-# Validate config without starting the daemon
-./target/release/rustbgpd --check config.toml
-
-# Preview what a config reload (SIGHUP) would change
-./target/release/rustbgpd --diff new-config.toml config.toml
-
-# Start the daemon
-./target/release/rustbgpd config.toml
-```
-
-### 3. Verify
-
-```bash
-# The minimal example uses /tmp/rustbgpd as state dir, so point the CLI there:
-export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
-
-rbgp health
-rbgp neighbor
-rbgp rib
-rbgp bfd       # BFD sessions, if configured
-rbgp top       # live TUI dashboard
-
-# If prometheus_addr is configured, HTTP probes share that listener:
-curl -fsS http://127.0.0.1:9179/livez
-curl -fsS http://127.0.0.1:9179/readyz
-```
-
-In production with the systemd unit, the default UDS path
-(`/var/lib/rustbgpd/grpc.sock`) matches the CLI default — no env var needed.
-
-### 4. Operate
-
-```bash
-# Add a peer at runtime (persisted to config file automatically)
-rbgp neighbor 10.0.0.5 add --asn 65005
-rbgp neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
-rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
-
-# Add a dynamic-neighbor accept range at runtime (queued to config when --config is used)
-rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
-
-# Manage Linux unicast FIB-export tables at runtime (ADR-0061)
-rbgp fib-table list
-
-# Explain why a route was selected as best
-rbgp rib --prefix 10.0.0.0/24 --explain
-
-# Reload config after editing the file
-kill -HUP $(pidof rustbgpd)
-
-# Graceful shutdown (writes GR marker, notifies peers)
-rbgp shutdown
-
-# Enable shell completions (bash example)
-rbgp completions bash > /etc/bash_completion.d/rbgp
-# Or use pre-generated: examples/completions/
-```
-
-**Next steps:** the [cookbook](docs/cookbook/README.md) has complete
-recipes — receipt-proven config, verification commands, metrics, and
-failure-mode debugging — for the common deployment shapes: iBGP route
-reflector at scale, L3VPN (VPNv4/VPNv6 + RT-Constrain) reflection,
-an IXP route server, a BMP/event/MRT monitoring feed, an EVPN fabric RR,
-and the `.rpol` policy workflow.
-
-gRPC defaults to a local Unix domain socket. For remote access, configure
-native mTLS on the TCP listener (`tls_cert_file` / `tls_key_file` /
-`tls_client_ca_file` — all three required together; partial config is
-rejected at load time and there is no TLS-without-mTLS half-mode). An
-Envoy proxy front-end is also a valid pattern for multi-host fan-out;
-see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
-[docs/SECURITY.md](docs/SECURITY.md).
-
-### Docker (standalone)
-
-```bash
-docker run -d --name rustbgpd \
-  -v $(pwd)/config.toml:/etc/rustbgpd/config.toml:ro \
-  -v rustbgpd-state:/var/lib/rustbgpd \
-  -p 179:179 -p 9179:9179 \
-  rustbgpd
-```
-
-Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustbgpd.service).
+For operators coming from FRR, BIRD, or ARouteServer, the CLI keeps familiar
+entry points for the daily checks: `rbgp summary`, `rbgp rib recv <peer>`,
+`rbgp rib sent <peer>`, `rbgp policy counters`, and `rbgp doctor` for a
+redacted support bundle. See the [CLI command map](crates/cli/README.md).
 
 ## gRPC API
 
@@ -336,7 +236,7 @@ and more explicit internal architecture.
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0–4.6.0 across labs and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md). |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RFC 9552 BGP-LS receive + reflection + API export (SAFI 71/72), RFC 4364/4659 VPNv4/VPNv6 route-reflection (SAFI 128, RR/controller-feed), RFC 4684 RT-Constrain (SAFI 132, constrained VPN distribution), RFC 8277 labeled-unicast route-reflection (SAFI 4, IPv4 + IPv6), RFC 9107 Optimal Route Reflection (per-client best paths via BGP-LS-sourced SPF), RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
+| Protocol coverage | Protocol details and conformance notes live in [docs/RFC_NOTES.md](docs/RFC_NOTES.md), [docs/INTEROP.md](docs/INTEROP.md), and [docs/RECEIPTS.md](docs/RECEIPTS.md). |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash
@@ -349,81 +249,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 
 ## Current limitations
 
-- Linux FIB integration is opt-in and scoped: RFC 7999 BLACKHOLE
-  discard routes and configured `[[fib_tables]]` unicast route
-  installation are available, with per-peer / peer-group allow-lists
-  and per-table route-count caps for the general FIB path. ADR-0066/0068
-  add opt-in unicast ECMP via `maximum_paths`, per-class
-  `maximum_paths_ebgp` / `maximum_paths_ibgp`, `multipath_relax`, and Link
-  Bandwidth weighted multipath. The general FIB actor persists exact owned-state
-  receipts for crash-restart recovery without adopting `RTPROT_BGP` by protocol
-  alone. Full router parity still needs broader redistribution policy and
-  non-BGP route-manager scope
-- EVPN (RFC 7432 / RFC 9136) is **alpha** and Linux / VXLAN-only.
-  Shipped and FRR-interop-tested: the Route Reflector role (all five
-  route types reflected end-to-end), a bidirectional single-homed L2VNI
-  VTEP (remote-MAC FDB programming, local MAC-only / MAC+IP / SVI Type 2
-  origination with RFC 7432 §15.1 mobility, Type 3 IMET, push-notified
-  sub-second convergence), symmetric Interface-less IRB / Type 5
-  (RFC 9136, transactional L3 FIB programming), opt-in active-active
-  multi-homing (DF election, Type 1/4, BUM suppression, aliasing ECMP via
-  FDB nexthop groups), duplicate-MAC detection with quarantine + manual
-  clear, and gRPC controller injection for Types 2 / 3 / 5. See
-  ADR-0052 / 0054–0059 / 0063 and
-  [docs/evpn-enablement.md](docs/evpn-enablement.md) for the full gate
-  ladder. Known gaps: runtime `[[evpn_instances]]` mutation is
-  alpha-complete with one by-design exception — `ApplyEvpnRuntime`
-  commits L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, atomic
-  tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as
-  deletes -> redefines -> `ip_vrf` relinks -> adds. L3VNI/device/table
-  IP-VRF identity changes remain restart-required by design; unsupported
-  dependency cycles fail closed before commit, and residual mid-sequence
-  convergence failures fail-stop after already committed generations;
-  ESI overlay-index origination plus single-active and all-active
-  ESI overlay-index receive now ship, with M71/M72 proving the receive
-  paths against GoBGP route sources.
-  VLAN-aware bridge support now covers VNI-per-broadcast-domain Linux
-  topologies, including SVD / collect-metadata VXLAN; opt-in bridge,
-  fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and
-  fixed-VNI L3VXLAN netdev lifecycle (create/adopt/reap) now ship under
-  [ADR-0091](docs/adr/0091-evpn-managed-netdev-creation.md)
-  (`[managed_netdevs]`), with derived altname ownership stamps and
-  `ListManagedNetdevs` status.
-  [ADR-0089](docs/adr/0089-evpn-vni-per-bd-vlan-aware-bridge-support.md)
-  scopes the first VLAN-aware bridge support to VNI-per-broadcast-domain
-  service with Ethernet Tag ID `0`.
-  Service-provider EVPN breadth (route types 6-11, PBB-EVPN, multicast
-  EVPN, MPLS/SRv6 encapsulation, VPWS/E-Tree) is demand-shaped rather than
-  part of the current VXLAN/Linux alpha lane
-- No VPNv4 / VPNv6 PE role (VRF import, MPLS label forwarding, CE-facing
-  attachment) — the shipped SAFI-128 support is the route-reflector /
-  controller-feed slice only. No Confederation support.
-- TCP-AO (RFC 5925) static-neighbor startup keys are supported on Linux;
-  dynamic-neighbor TCP-AO, runtime key rotation, and multi-key rollover remain
-  follow-up work. TCP MD5 and GTSM are also supported.
-- BFD (RFC 5880 / 5881 / 5882) single-hop **asynchronous** sessions are
-  supported: an in-process, no-GC actor runs sessions over UDP/3784, config via
-  `[[bfd_profiles]]` + `[neighbors.bfd]`, observable through
-  `BfdService.GetBfdSessions` / `rbgp bfd` / events + Prometheus, with
-  RFC 5882 BGP coupling in both strict (withhold BGP until BFD Up) and
-  non-strict (tear BGP down on BFD-down before the hold timer) modes —
-  FRR-`bfdd`-interop-tested (M51). IPv4 + IPv6 global, static neighbors only;
-  multihop (RFC 5883), echo / demand, authentication, dynamic-neighbor BFD, and
-  IPv6 link-local (v1.1) remain follow-up work.
-- BGP unnumbered (ADR-0069) static IPv6 link-local neighbors are supported for
-  IPv4 unicast: TOML uses `address` plus `interface`, while gRPC and
-  `rbgp` also render `fe80::...%ifname`; RFC 8950 route exchange uses the
-  FRR-proven link-local MP_REACH shape; and opt-in Linux FIB install carries the
-  egress device for `fe80::/10` next-hops. M53 validates this against FRR.
-  Interface-neighbor autodiscovery, capability 77, and link-local BFD remain
-  follow-up work.
-- BGP Roles + Only-to-Customer (RFC 9234, ADR-0071) are supported for static
-  eBGP IPv4/IPv6 unicast neighbors. `role` advertises the Role capability,
-  incompatible pairs fail closed with OPEN 2/11, `strict_role` requires the peer
-  to advertise a compatible Role, and OTC is set/checked on unicast UPDATEs
-  while FlowSpec/EVPN stay untouched in v1. M55 validates FRR interop plus
-  deliberate raw-BGP leak and malformed-OTC handling.
-- Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Capability-specific 24h soak harnesses now ship in-tree under `tests/soak/`: an EVPN BUM-flood-suppression BUM-state harness and a symmetric IRB (Type-5 / L3VNI) 24h Type 5 churn harness, both with post-mortems under `docs/soak-*.md`. Continuous / multi-day soak automation beyond those harnesses remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+The short version: rustbgpd is still not a general-purpose router replacement.
+Linux FIB integration is opt-in, EVPN is Linux/VXLAN alpha, VPNv4/VPNv6 is RR /
+controller-feed only, and a few transport/runtime edges remain deliberately
+scoped. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for the full boundary.
 
 ## Project status
 
@@ -452,6 +281,8 @@ evolving API.**
 | [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |
 | [docs/API.md](docs/API.md) | gRPC API reference with examples for every RPC |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Bare-metal first run: starter config, validate, run, verify, operate |
+| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | Current product boundaries and known non-goals |
 | [docs/deployment.md](docs/deployment.md) | End-to-end install + lifecycle walkthrough: systemd, Docker, containerlab quick-start, upgrade, sample profiles |
 | [docs/reload-matrix.md](docs/reload-matrix.md) | Per-field reload classification: which keys hot-apply, which need a restart, which are rejected at parse time |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |

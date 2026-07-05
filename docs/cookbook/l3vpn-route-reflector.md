@@ -151,7 +151,7 @@ origination). Confirm with the VPN export ladder, which includes the
 RT-membership gate:
 
 ```console
-$ rbgp rib advertised 10.0.0.11 --explain --prefix 10.1.0.0/24 --rd 65000:1
+$ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.11 --explain --rd 65000:1
 ```
 
 A STOP at `rt_membership` names exactly this condition; the ladder

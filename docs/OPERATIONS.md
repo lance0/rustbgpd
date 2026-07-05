@@ -1247,15 +1247,15 @@ rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 # exact order the live export path evaluates it. Each rung reports
 # pass / STOP / n/a with detail; a STOP names the gate that held the
 # route back.
-rbgp rib advertised 10.0.0.2 --explain --prefix 203.0.113.0/24
+rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 
 # VPNv4/VPNv6 (SAFI 128): explain the (RD, prefix) identity instead --
 # the ladder additionally includes the RFC 4684 RT-Constrain
 # membership gate.
-rbgp rib advertised 10.0.0.2 --explain --prefix 10.1.0.0/24 --rd 65000:1
+rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.2 --explain --rd 65000:1
 
 # JSON for scripting
-rbgp rib advertised 10.0.0.2 --explain --prefix 203.0.113.0/24 --json
+rbgp --json rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 ```
 
 The gate ladder, in live evaluation order (unicast single-best):

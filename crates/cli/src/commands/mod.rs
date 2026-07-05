@@ -1,6 +1,7 @@
 pub mod bfd;
 pub mod config;
 pub mod control;
+pub mod doctor;
 pub mod dynamic_neighbor;
 pub mod evpn;
 pub mod fib_table;

@@ -26,6 +26,7 @@ use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
     pub(crate) health_calls: AtomicUsize,
+    pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
     pub(crate) config_plan_calls: AtomicUsize,
@@ -526,6 +527,7 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         &self,
         _request: Request<server_proto::MetricsRequest>,
     ) -> Result<Response<server_proto::MetricsResponse>, Status> {
+        self.state.metrics_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(server_proto::MetricsResponse {
             prometheus_text: r#"# HELP test 1
 evpn_local_originations_total{action="inject"} 1

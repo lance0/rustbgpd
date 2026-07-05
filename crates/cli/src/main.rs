@@ -19,6 +19,7 @@ use crate::error::CliError;
 use crate::output::parse_family;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
+use std::path::PathBuf;
 
 const BINARY_NAME: &str = "rbgp";
 
@@ -66,6 +67,7 @@ enum Command {
     },
 
     /// Manage BGP neighbors
+    #[command(visible_alias = "summary")]
     Neighbor {
         /// Neighbor address (omit to list all)
         address: Option<String>,
@@ -193,6 +195,13 @@ enum Command {
 
     /// Check daemon health
     Health,
+
+    /// Write a redacted support bundle for operators and issue reports
+    Doctor {
+        /// Output directory. Defaults to `rustbgpd-support-<unix-seconds>`.
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+    },
 
     /// Show Prometheus metrics
     Metrics,
@@ -405,6 +414,7 @@ enum PolicyAction {
     /// routes matched each term of the installed export chains since
     /// chain install. Counters reset when a chain is replaced (policy
     /// reload / hot-apply). Import counters have no read surface yet.
+    #[command(visible_alias = "counters")]
     Stats {
         /// Restrict to one peer's installed chain
         #[arg(long)]
@@ -658,6 +668,7 @@ enum BfdAction {
 #[derive(Subcommand)]
 enum RibAction {
     /// Show received routes from a neighbor
+    #[command(visible_alias = "recv")]
     Received {
         /// Neighbor address
         address: String,
@@ -666,6 +677,7 @@ enum RibAction {
         family: Option<String>,
     },
     /// Show advertised routes to a neighbor
+    #[command(visible_alias = "sent")]
     Advertised {
         /// Neighbor address
         address: String,
@@ -1237,6 +1249,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         std::process::exit(commands::policy::check_local(file, cli.json));
     }
 
+    let addr = cli.addr.clone();
+    let token_file_configured = cli.token_file.is_some();
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -1968,6 +1982,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         }
 
         Command::Health => commands::control::health(connection, json).await,
+        Command::Doctor { output } => {
+            commands::doctor::run(
+                connection,
+                output.as_deref(),
+                &addr,
+                token_file_configured,
+                json,
+            )
+            .await
+        }
         Command::Metrics => commands::control::metrics(connection).await,
         Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
@@ -2302,8 +2326,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_doctor() {
+        let cli = Cli::try_parse_from(["rbgp", "doctor", "--output", "support"]).unwrap();
+        if let Command::Doctor { output } = cli.command {
+            assert_eq!(output.as_deref(), Some(std::path::Path::new("support")));
+        } else {
+            panic!("expected Doctor command");
+        }
+    }
+
+    #[test]
     fn test_parse_neighbor_list() {
         let cli = Cli::try_parse_from(["rbgp", "neighbor"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Neighbor {
+                address: None,
+                action: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_summary_alias() {
+        let cli = Cli::try_parse_from(["rbgp", "summary"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Neighbor {
@@ -2383,6 +2429,27 @@ mod tests {
         } else {
             panic!("expected Rib Received command");
         }
+    }
+
+    #[test]
+    fn test_parse_familiar_rib_aliases() {
+        let cli = Cli::try_parse_from(["rbgp", "rib", "recv", "10.0.0.1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Rib {
+                action: Some(RibAction::Received { .. }),
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["rbgp", "rib", "sent", "10.0.0.1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Rib {
+                action: Some(RibAction::Advertised { .. }),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2559,6 +2626,17 @@ mod tests {
         } else {
             panic!("expected Rib Advertised explain command");
         }
+    }
+
+    #[test]
+    fn test_parse_policy_counters_alias() {
+        let cli = Cli::try_parse_from(["rbgp", "policy", "counters"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Policy {
+                action: PolicyAction::Stats { .. }
+            }
+        ));
     }
 
     #[test]

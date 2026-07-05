@@ -25,6 +25,30 @@ shape derived from
 [`examples/route-server/`](../../examples/route-server/) — the same
 config the M83 lab runs.
 
+## Quickstart
+
+Start from the checked-in route-server example:
+
+```bash
+cp examples/route-server/config.toml ./rs.toml
+cp examples/route-server/hygiene.rpol ./hygiene.rpol
+rustbgpd --check rs.toml
+rbgp policy check hygiene.rpol
+```
+
+Edit `rs.toml` for your ASN, router ID, RTR cache, and member addresses. Then
+run the daemon and point the CLI at its UDS:
+
+```bash
+rustbgpd rs.toml
+export RUSTBGPD_ADDR=unix:///var/lib/rustbgpd/grpc.sock
+rbgp health
+rbgp summary
+```
+
+For a live exchange, run the shadow trial below before carrying production
+traffic.
+
 ## Config
 
 Two members, dual-stack, RPKI, and a hygiene chain. `member-alpha` can do
@@ -123,7 +147,7 @@ max_prefixes = 50000
 $ rustbgpd --check config.toml          # config + rpol validate offline
 $ rbgp policy check hygiene.rpol         # rpol in-language tests
 $ export RUSTBGPD_ADDR=unix:///var/lib/rustbgpd/grpc.sock
-$ rbgp neighbor                          # both members Established
+$ rbgp summary                           # both members Established
 ```
 
 Distribution mode per member — the mitigation each one uses is visible in
@@ -137,9 +161,9 @@ $ rbgp neighbor 198.51.100.3             # Distribution Mode: per-client-best
 Transparency and per-member views:
 
 ```console
-$ rbgp rib received 198.51.100.2         # what a member sent us
-$ rbgp rib advertised 198.51.100.3       # what that member sees back
-$ rbgp rib advertised 198.51.100.3 --explain --prefix 203.0.113.0/24
+$ rbgp rib recv 198.51.100.2             # what a member sent us
+$ rbgp rib sent 198.51.100.3             # what that member sees back
+$ rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
 ```
 
 For a `per-client-best` member the explain output is a ranked candidate
@@ -153,6 +177,43 @@ Members can be added and removed at runtime:
 $ rbgp neighbor 198.51.100.4 add --asn 64503 \
     --route-server-client --per-client-best --role rs
 ```
+
+## Shadow trial
+
+Use the shadow trial before production cutover. The goal is to prove import
+hygiene and per-member export views without carrying member traffic yet.
+
+1. Run rustbgpd beside the incumbent route server with a non-production listener
+   or `listen_port = 0`, and peer it to safe member-session copies where
+   possible.
+2. Keep `route_server_client = true`, `role = "route_server"`, and the same
+   import/export chains you intend to use after cutover.
+3. Compare the incumbent and rustbgpd views per member:
+
+   ```console
+   $ rbgp rib recv 198.51.100.2
+   $ rbgp rib sent 198.51.100.3
+   $ rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
+   ```
+
+4. For Add-Path members, verify multiple candidate paths are present. For
+   non-Add-Path members, verify `Distribution Mode: per-client-best` and inspect
+   the candidate ladder with `--explain`.
+5. Keep the session counters flat after convergence:
+
+   ```console
+   $ rbgp policy counters
+   $ rbgp metrics | grep -E 'bgp_session_state_transitions_total|route_refresh'
+   ```
+
+6. Generate a support bundle before and after the trial:
+
+   ```console
+   $ rbgp doctor --output ./support-rs-shadow
+   ```
+
+Migration mapping for FRR, BIRD, and ARouteServer lives in
+[`route-server-migration.md`](route-server-migration.md).
 
 ## Watch
 
@@ -173,7 +234,7 @@ but the session is Established).** Import hygiene dropped them. Run the
 import decision cache explain:
 
 ```console
-$ rbgp rib received 198.51.100.2 --explain --prefix 203.0.113.0/24
+$ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 ```
 
 It names the deciding term — typically `reject-rpki-invalid` (fix the

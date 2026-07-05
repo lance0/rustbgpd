@@ -47,6 +47,10 @@ convention in `CONTRIBUTING.md`:
 - [ ] Hot tracking docs such as `docs/evpn-alpha-soak.md` and
       `docs/evpn-enablement.md` update exact gates/rows instead of rewriting
       unrelated summary prose.
+- [ ] New config knobs follow
+      [`docs/config-knob-contributor-guide.md`](config-knob-contributor-guide.md):
+      schema, validation, reload matrix, runtime consumption, persistence,
+      docs, and tests all move together.
 - [ ] Process-only documentation changes intentionally omit CHANGELOG entries
       unless they affect users or operators.
 

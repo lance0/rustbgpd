@@ -15,6 +15,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ```bash
 rbgp global       # ASN, router ID, families, TCP-AO support
 rbgp health       # daemon health check
+rbgp doctor       # redacted support bundle
 rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard
 ```
@@ -41,6 +42,7 @@ rbgp config abort deploy-123
 
 ```bash
 rbgp neighbor
+rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
 rbgp neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role] [--route-server-client] [--per-client-best]
 rbgp neighbor <addr> enable
@@ -68,7 +70,9 @@ rbgp bfd show <addr>
 ```bash
 rbgp rib
 rbgp rib received <addr>
+rbgp rib recv <addr>                        # alias
 rbgp rib advertised <addr>
+rbgp rib sent <addr>                        # alias
 rbgp rib --prefix <prefix> --explain
 rbgp rib blackholes
 rbgp rib fib
@@ -90,6 +94,7 @@ rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
 rbgp policy check <file.rpol>                          # parse + typecheck an .rpol file in-process (no daemon)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--peer <addr>]   # dry-run over the live RIB
 rbgp policy stats [--peer <addr>]                     # live per-term hit counters
+rbgp policy counters [--peer <addr>]                  # alias
 
 rbgp flowspec
 rbgp fib-table list
@@ -137,6 +142,20 @@ Commands with fixed formats, such as `metrics`, `completions`, and `top`, keep
 their command-specific output. `--no-color` (or `NO_COLOR=1`) disables colored
 text output where color is used, and colors auto-disable when output is piped to
 a non-TTY.
+
+## Familiar command map
+
+| FRR / BIRD mental model | `rbgp` command |
+|-------------------------|----------------|
+| Neighbor summary | `rbgp summary` or `rbgp neighbor` |
+| Received routes | `rbgp rib received <peer>` or `rbgp rib recv <peer>` |
+| Advertised routes | `rbgp rib advertised <peer>` or `rbgp rib sent <peer>` |
+| Explain best path | `rbgp rib --prefix <cidr> --explain` |
+| Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
+| Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
+| Policy hit counters | `rbgp policy stats` or `rbgp policy counters` |
+| Route-server clients | `rbgp summary`, then `rbgp neighbor <peer>` for distribution mode |
+| Support bundle | `rbgp doctor --output ./support` |
 
 Confirmed config transaction handles must be non-empty, at most 128
 characters, and contain no control characters. `--confirm-timeout` requires

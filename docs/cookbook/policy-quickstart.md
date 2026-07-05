@@ -199,7 +199,7 @@ $ rbgp policy explain --neighbor 192.0.2.10 --prefix 203.0.113.0/26
 
 # Export: the full gate ladder toward a peer; the export_policy rung
 # names the deciding policy:term.
-$ rbgp rib advertised 192.0.2.20 --explain --prefix 203.0.113.0/26
+$ rbgp rib --prefix 203.0.113.0/26 advertised 192.0.2.20 --explain
 
 # Best path: why this candidate won in the Loc-RIB.
 $ rbgp rib --prefix 203.0.113.0/26 --explain
