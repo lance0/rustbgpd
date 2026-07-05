@@ -624,6 +624,84 @@ async fn advertised_route_reports_in_sync_and_staged_modifications() {
     handle.await.unwrap();
 }
 
+/// A denied route's explain trace must carry no staged modifications —
+/// `distribute_single_best_prefix` records `trace.modifications` only
+/// after the export policy permits, matching the per-client-best arm. A
+/// permitted route in the same chain still reports its modifications.
+#[tokio::test]
+async fn denied_route_explain_has_no_modifications() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    // One chain: deny one prefix (with configured — but dropped — mods,
+    // documenting that a deny carries none), permit + modify the other.
+    let mut denying = statement(denied_prefix, PolicyAction::Deny);
+    denying.modifications.set_med = Some(999);
+    let mut modifying = statement(permitted_prefix, PolicyAction::Permit);
+    modifying.modifications.set_med = Some(750);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![denying, modifying],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let _rx_s = explain_peer_up(
+        &tx,
+        source,
+        ipv4_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    let _rx_t = explain_peer_up(
+        &tx,
+        target,
+        ipv4_sendable(),
+        true,
+        false,
+        Some(chain),
+        vec![],
+        vec![],
+    )
+    .await;
+
+    feed_routes(
+        &tx,
+        source,
+        vec![
+            make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            make_route(permitted_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+    )
+    .await;
+
+    let denied = query_explain_advertised_route(&tx, target, Prefix::V4(denied_prefix)).await;
+    assert_eq!(denied.decision, crate::update::ExplainDecision::Deny);
+    assert!(
+        denied.modifications.is_empty(),
+        "denied route must carry no staged modifications, got {:?}",
+        denied.modifications
+    );
+
+    let permitted = query_explain_advertised_route(&tx, target, Prefix::V4(permitted_prefix)).await;
+    assert_eq!(
+        permitted.decision,
+        crate::update::ExplainDecision::Advertise
+    );
+    assert_eq!(permitted.modifications.set_med, Some(750));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// The differential oracle applied to explain: an update-grouped member
 /// and a content-equivalent ungrouped peer (peer-context chain, the
 /// grouping disqualifier) must produce identical gate ladders and

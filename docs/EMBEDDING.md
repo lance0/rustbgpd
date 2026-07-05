@@ -404,6 +404,10 @@ gRPC consumer gains from the recent proto additions
   (and the explain RPCs that embed `Route`) now carries its receive
   time, recovered from the monotonic RIB receive instant. Consumers
   no longer need to track route age themselves by diffing streams.
+  Approximation: the recovery reads the wall clock and the monotonic
+  elapsed separately, so a wall-clock step between the two reads skews
+  the reported epoch by that step. It is a display timestamp, not a
+  precise event ordering key — use the monotonic `event_id` for that.
 - **`RibService.ExplainAdvertisedRoute`** — the export decision as
   data: the full gate ladder (`split_horizon`, `rr_reflection`,
   `family`, `llgr`, `orf`, `rt_membership`, `export_policy`,

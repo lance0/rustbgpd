@@ -1627,6 +1627,13 @@ impl RibManager {
         // Dry run of the live single-best staging body. A grouped
         // member's advertised state is the group table (update-groups
         // design §2: members hold no per-peer unicast Adj-RIB-Out).
+        //
+        // Limitation: the group table still holds routes this member
+        // itself sourced, which split-horizon excludes from the live
+        // emit but which the dry-run's `already_advertised` gate does
+        // not filter. A member-scoped AdjRibOut view (`route.peer !=
+        // peer`) is not synthesized here, so for a member's own-sourced
+        // prefixes the dry-run may show them as already-advertised.
         let member_of = self.grouped_member_of(peer);
         let empty_rib_out;
         let rib_out = if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
