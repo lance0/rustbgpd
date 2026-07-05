@@ -15,20 +15,20 @@ file bootstraps initial state; after startup, gRPC owns the truth. No restarts
 to add peers, change policy, or inject routes.
 
 **Status: public alpha.** Feature-complete for the initial programmable
-control-plane target and expanding toward cloud / AI-scale data-center fabric
-use. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path
-verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN alpha, and full gRPC/CLI
-management are implemented. Default-off Linux FIB integration exists for RFC
-7999 discard routes and configured unicast FIB tables, including ECMP and
-weighted multipath; broader routing-suite features remain future work.
-Validated with a workspace test suite, fuzz targets, and an automated interop
-suite — primarily against FRR 10.3.1, plus GoBGP 3.37.0–4.6.0 across labs and
-StayRTR-backed RTR coverage; BIRD 2.0.12 has documented M0 validation and
-BIRD 3.2.1 backs the
-TCP-AO smoke. A foundation tier runs on every PR, and the privileged Linux
-dataplane smokes run in hosted kernel-dataplane CI; longer soaks and platform
-diversity scripts remain local / manual gates. See
-`docs/INTEROP.md` for the full matrix.
+control-plane target and expanding toward cloud / AI-scale data-center
+fabric use.
+
+- **Implemented:** dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA
+  path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full
+  gRPC/CLI management. Linux FIB integration is default-off and scoped to
+  RFC 7999 discard routes and configured unicast tables (including ECMP and
+  weighted multipath); broader routing-suite features remain future work.
+- **Validated** with a workspace test suite, fuzz targets, and an automated
+  interop suite — primarily against FRR 10.3.1, plus GoBGP 3.37.0–4.6.0 and
+  StayRTR-backed RTR coverage, with BIRD 2.0.12 (M0) and BIRD 3.2.1 (TCP-AO
+  smoke). A foundation tier runs on every PR and the privileged Linux
+  dataplane smokes run in hosted CI; longer soaks and platform-diversity
+  scripts remain local. Full matrix: [`docs/INTEROP.md`](docs/INTEROP.md).
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -55,7 +55,7 @@ diversity scripts remain local / manual gates. See
 - **Hosting provider prefix management** — API-driven customer prefix announcements
 - **Internet exchange route servers** — transparent mode, Add-Path, per-client best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member policy
 - **SDN / network automation controllers** — programmable BGP control plane
-- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
+- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, plus a birdwatcher-compatible looking glass via the external `examples/birdwatcher-adapter`
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
 BGP-LS receive/reflection/API export (RFC 9552), VPNv4/VPNv6 L3VPN
