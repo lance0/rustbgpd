@@ -790,6 +790,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BMP VPNv6 Adj-RIB-Out mirror preserves the link-local next-hop
+  (LAN-217 follow-up).** `synthesize_vpn_announce` now copies the route's
+  link-local half into the synthesized `MP_REACH`, mirroring the unicast
+  path — previously a VPNv6 RouteMonitoring PDU reconstructed a 24-byte
+  single next-hop and dropped the RFC 4659 link-local half (the live BGP
+  UPDATE to peers was unaffected). Tested via
+  `borrowed_encode_vpnv6_link_local_matches_clone_based_oracle`.
+- **ORR vantage validation also rejects wildcard/loopback addresses
+  (LAN-216 follow-up).** A `0.0.0.0` / `::` / loopback `orr_vantage` names
+  no real topology node and silently ran inert ORR; it now fails closed at
+  config load.
+- **Hold-time default fully deduplicated (LAN-211 follow-up).**
+  `config::schema::DEFAULT_HOLD_TIME` now sources
+  `rustbgpd_fsm::DEFAULT_HOLD_TIME`, so the daemon default lives in exactly
+  one place.
+- **VPN export-explain no longer records staged modifications for a denied
+  route (LAN-212 follow-up).** The VPN distribution arm now sets
+  `trace.modifications` only after a Permit, matching the unicast arm.
 - **VPNv6 reflection no longer drops the link-local next-hop (LAN-217).**
   `VpnRibRoute` stored only a single global next-hop, so a VPNv6 route
   received with an RFC 4659 §3.2.1.1 two-address next-hop (48-byte: RD +
