@@ -39,6 +39,12 @@ pub struct ParsedUpdate {
     pub attributes: Vec<PathAttribute>,
     /// Announced IPv4 NLRI entries.
     pub announced: Vec<Ipv4NlriEntry>,
+    /// Count of known BGP-LS NLRIs discarded during decode for out-of-order
+    /// descriptor TLVs (RFC 9552 fault management): the affected NLRI is
+    /// isolated, the session survives. Fatal framing errors are not counted
+    /// here — they abort the decode. Lets the session observe the otherwise
+    /// silent drop with peer context.
+    pub bgpls_nlri_discarded: u32,
 }
 impl UpdateMessage {
     /// Decode an UPDATE message body from a buffer.
@@ -123,7 +129,7 @@ impl UpdateMessage {
                 .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
                 .collect()
         };
-        let attributes = crate::attribute::decode_path_attributes(
+        let (attributes, bgpls_nlri_discarded) = crate::attribute::decode_path_attributes_counted(
             &self.path_attributes,
             four_octet_as,
             add_path_families,
@@ -140,6 +146,7 @@ impl UpdateMessage {
             withdrawn,
             attributes,
             announced,
+            bgpls_nlri_discarded,
         })
     }
     /// Encode a complete UPDATE message (header + body) into a buffer.

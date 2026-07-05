@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Observability for discarded malformed BGP-LS NLRIs (RFC 9552 fault
+  management).** Known BGP-LS NLRIs with out-of-order descriptor TLVs are
+  isolated and dropped while the session survives (PR #616); that discard was
+  previously silent. The decoder now reports the recoverable-discard count up
+  to the session, which increments a per-peer
+  `bgp_bgpls_nlri_discarded_total{peer}` counter and emits a `family=bgp_ls`
+  debug log line. Fatal BGP-LS framing/length errors stay fatal and are never
+  routed through the counter. Closes LAN-135.
+
 - **Durable commit-confirm: a restart inside the confirm window now
   reverts at boot instead of making the unconfirmed config permanent
   (ADR-0076 Decision 6 amendment).** Before a confirmed transaction
