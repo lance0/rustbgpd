@@ -13,8 +13,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`rbgp doctor` support bundle and familiar CLI aliases.** `rbgp doctor`
   writes a redacted support bundle for issue reports
-  (health/global/metrics/environment/manifest) — it never copies the daemon
-  config file or bearer-token material. New visible aliases match common
+  (health/global/metrics/environment/manifest, plus the neighbor list and a
+  bounded recent slice of session-lifecycle and policy events) — it never
+  copies the daemon config file or bearer-token material. New visible aliases match common
   operator muscle memory: `rbgp summary` (neighbor list), `rbgp rib recv
   <peer>` / `rbgp rib sent <peer>`, and `rbgp policy counters`. A slimmed
   README now links deep first-run/limitations content to `docs/QUICKSTART.md`

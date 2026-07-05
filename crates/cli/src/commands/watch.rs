@@ -580,7 +580,7 @@ impl Serialize for JsonBgpEvent<'_> {
     }
 }
 
-fn bgp_event_json_value(event: &BgpEvent) -> Result<serde_json::Value, CliError> {
+pub(crate) fn bgp_event_json_value(event: &BgpEvent) -> Result<serde_json::Value, CliError> {
     Ok(serde_json::to_value(JsonBgpEvent(event))?)
 }
 
