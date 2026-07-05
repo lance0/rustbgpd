@@ -770,6 +770,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Export-explain no longer reports staged modifications for a denied
+  route (LAN-212).** `distribute_single_best_prefix` recorded the export
+  policy's `modifications` into the explain trace before the deny gate,
+  so a policy-denied prefix could surface modifications it would never
+  apply; the assignment now happens only after a Permit, matching the
+  per-client-best explain arm. Regression-tested via
+  `denied_route_explain_has_no_modifications`. Also clarifies two
+  precision limitations in comments/docs: the grouped-member explain
+  dry-run still counts a member's own-sourced (split-horizon-excluded)
+  prefixes in its `already_advertised` gate, and
+  `Route.received_at_epoch_seconds` is recovered from two independent
+  clock reads and so is a display timestamp, not a precise ordering key.
 - **ORR vantage config validation now rejects a degenerate vantage IP
   (LAN-216).** An `orr_vantage` (RFC 9107) equal to the neighbor's own
   peering address or the reflector's `router_id` degenerates to the

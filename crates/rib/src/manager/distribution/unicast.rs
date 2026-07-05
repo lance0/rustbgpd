@@ -1346,7 +1346,6 @@ impl RibManager {
             trace.policy_label = export_pol.map(|chain| {
                 policy_label_with_term(Some(chain), &ctx, evaluation.matched_policy.as_deref())
             });
-            trace.modifications = result.modifications.clone();
         }
         if result.action != PolicyAction::Permit {
             if let Some(trace) = target.trace() {
@@ -1370,6 +1369,11 @@ impl RibManager {
             return;
         }
         if let Some(trace) = target.trace() {
+            // Record staged modifications only after the Permit above — a
+            // denied route carries no modifications (mirrors the
+            // per-client-best arm, which sets `explain.modifications`
+            // after its own deny early-return).
+            trace.modifications = result.modifications.clone();
             match trace.policy_label.clone() {
                 Some(label) => trace.push(
                     "export_policy",

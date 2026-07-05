@@ -1052,7 +1052,11 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         local_pref_attr: route.local_pref_attr(),
         // Receive wall time recovered from the monotonic receive
         // instant, the same recovery the BMP Loc-RIB dump uses for its
-        // RFC 9069 per-peer header timestamp.
+        // RFC 9069 per-peer header timestamp. Approximation: `now()` and
+        // `received_at.elapsed()` are two independent clock reads, so a
+        // wall-clock step between them skews the recovered epoch by that
+        // step. Acceptable for a display timestamp; not re-architected
+        // into a single stored wall time.
         received_at_epoch_seconds: std::time::SystemTime::now()
             .checked_sub(route.received_at.elapsed())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
