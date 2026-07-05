@@ -5,6 +5,33 @@ implementation choices made during development.
 
 ---
 
+## Supported standards at a glance
+
+Consolidated map of the RFCs, SAFIs, and features rustbgpd implements. The
+per-RFC sections below carry the conformance detail, interpretations, and
+deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
+[docs/RECEIPTS.md](RECEIPTS.md) the receipts index, and
+[docs/LIMITATIONS.md](LIMITATIONS.md) the boundaries and non-goals.
+
+| Area | Standards | Scope |
+|------|-----------|-------|
+| Core BGP | RFC 4271, RFC 6793 (4-byte ASN) | FSM + UPDATE validation, dual-stack IPv4/IPv6 unicast (SAFI 1) |
+| MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
+| Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
+| Communities | RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove |
+| Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
+| Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
+| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
+| EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks |
+| Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
+| Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor startup keys on Linux only |
+| FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
+| Liveness | RFC 5880/5881/5882 (BFD), RFC 9687 (Send Hold Timer) | Single-hop async BFD for static neighbors |
+| Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |
+| Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
+
+---
+
 ## Milestone 0 — RFC 4271 Sections
 
 ### §4.2 — OPEN Message
