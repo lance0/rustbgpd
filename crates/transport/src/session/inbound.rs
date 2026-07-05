@@ -436,6 +436,22 @@ impl PeerSession {
                 return;
             }
         };
+        // Observe recoverable BGP-LS NLRI discards (RFC 9552 fault management,
+        // PR #616): known NLRIs with out-of-order descriptor TLVs are dropped
+        // while the session survives. Fatal framing errors take the Err arm
+        // above, so this counter never conflates the two.
+        if parsed.bgpls_nlri_discarded > 0 {
+            debug!(
+                peer = %self.peer_label,
+                family = "bgp_ls",
+                discarded = parsed.bgpls_nlri_discarded,
+                "discarded malformed BGP-LS NLRIs with out-of-order descriptor TLVs"
+            );
+            self.metrics.record_bgpls_nlri_discarded(
+                &self.peer_label,
+                u64::from(parsed.bgpls_nlri_discarded),
+            );
+        }
         // 2. Semantic validation
         let has_mp_nlri = parsed
             .attributes
@@ -1572,6 +1588,10 @@ impl PeerSession {
                                 vpn_announced.push(VpnRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
+                                    // Carry the RFC 4659 two-address IPv6
+                                    // link-local half so VPNv6 reflection
+                                    // re-emits it (LAN-217).
+                                    link_local_next_hop: mp.link_local_next_hop,
                                     peer: self.peer_ip,
                                     attributes: attrs,
                                     received_at: now,

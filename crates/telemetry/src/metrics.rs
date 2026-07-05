@@ -144,6 +144,7 @@ pub struct BgpMetrics {
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
     rr_loop_detected: IntCounterVec,
+    bgpls_nlri_discarded: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
     role_mismatch: IntCounterVec,
 
@@ -715,6 +716,15 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_rr_loop_detected_total",
                 "Total updates rejected due to route reflector loop detection",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let bgpls_nlri_discarded = IntCounterVec::new(
+            Opts::new(
+                "bgp_bgpls_nlri_discarded_total",
+                "Total known BGP-LS NLRIs discarded for out-of-order descriptor TLVs (RFC 9552); the session is preserved",
             ),
             &["peer"],
         )
@@ -1383,6 +1393,9 @@ impl BgpMetrics {
             .register(Box::new(rr_loop_detected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bgpls_nlri_discarded.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(otc_routes_blocked.clone()))
             .expect("metric not already registered");
         registry
@@ -1613,6 +1626,7 @@ impl BgpMetrics {
             kernel_route_notify_subscription_failures,
             as_path_loop_detected,
             rr_loop_detected,
+            bgpls_nlri_discarded,
             otc_routes_blocked,
             role_mismatch,
             policy_routes,
@@ -1724,6 +1738,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.send_hold_expirations, peer);
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
+        Self::reap_peer_series_from_vec(&self.bgpls_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.role_mismatch, peer);
         Self::reap_peer_series_from_vec(&self.policy_routes, peer);
@@ -2246,6 +2261,15 @@ impl BgpMetrics {
     /// [`crate::reason_labels::RrLoopReason`].
     pub fn record_rr_loop_detected(&self, peer: &str) {
         self.rr_loop_detected.with_label_values(&[peer]).inc();
+    }
+
+    /// Record recoverable BGP-LS NLRI discards (RFC 9552): increment by the
+    /// number of known NLRIs dropped for out-of-order descriptor TLVs while
+    /// the session was preserved.
+    pub fn record_bgpls_nlri_discarded(&self, peer: &str, count: u64) {
+        self.bgpls_nlri_discarded
+            .with_label_values(&[peer])
+            .inc_by(count);
     }
 
     /// Record RFC 9234 OTC route-leak blocking. The `reason` label
@@ -3779,6 +3803,19 @@ mod tests {
     }
 
     #[test]
+    fn bgpls_nlri_discarded_counter_increments_by_discarded_nlris() {
+        let m = BgpMetrics::new();
+        m.record_bgpls_nlri_discarded("10.0.0.1", 2);
+        m.record_bgpls_nlri_discarded("10.0.0.1", 1);
+
+        let val = m
+            .bgpls_nlri_discarded
+            .with_label_values(&["10.0.0.1"])
+            .get();
+        assert_eq!(val, 3);
+    }
+
+    #[test]
     fn rr_loop_detected_counter_increments_per_update() {
         let m = BgpMetrics::new();
         m.record_rr_loop_detected("10.0.0.1");
@@ -3951,6 +3988,7 @@ mod tests {
         m.record_rib_outbound_registration_failover(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
+        m.record_bgpls_nlri_discarded(peer, 2);
         m.record_otc_routes_blocked(
             peer,
             crate::reason_labels::OtcBlockReason::IngressPeerMismatch,
@@ -3994,8 +4032,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 32 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 33);
+        // 33 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 34);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -4005,7 +4043,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 33);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 34);
     }
 
     #[test]

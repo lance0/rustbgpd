@@ -2341,6 +2341,7 @@ mod tests {
                 prefix: key.prefix,
             },
             next_hop: src,
+            link_local_next_hop: None,
             peer: src,
             attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: std::time::Instant::now(),

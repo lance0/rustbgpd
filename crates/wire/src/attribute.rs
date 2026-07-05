@@ -754,11 +754,28 @@ pub struct RawAttribute {
 ///
 /// Returns `DecodeError` on truncated data or malformed attribute values.
 pub fn decode_path_attributes(
-    mut buf: &[u8],
+    buf: &[u8],
     four_octet_as: bool,
     add_path_families: &[(Afi, Safi)],
 ) -> Result<Vec<PathAttribute>, DecodeError> {
+    Ok(decode_path_attributes_counted(buf, four_octet_as, add_path_families)?.0)
+}
+
+/// Like [`decode_path_attributes`] but also returns the number of BGP-LS NLRIs
+/// dropped for out-of-order descriptor TLVs (RFC 9552). The count lets the
+/// session layer observe an otherwise-silent recoverable discard; it never
+/// includes fatal framing/length errors, which still surface as `Err`.
+///
+/// # Errors
+///
+/// Same as [`decode_path_attributes`].
+pub fn decode_path_attributes_counted(
+    mut buf: &[u8],
+    four_octet_as: bool,
+    add_path_families: &[(Afi, Safi)],
+) -> Result<(Vec<PathAttribute>, u32), DecodeError> {
     let mut attrs = Vec::new();
+    let mut bgpls_discarded = 0_u32;
     while !buf.is_empty() {
         // Need at least flags(1) + type(1) = 2
         if buf.len() < 2 {
@@ -803,11 +820,17 @@ pub fn decode_path_attributes(
         }
         let value = &buf[..value_len];
         buf = &buf[value_len..];
-        let attr =
-            decode_attribute_value(flags, type_code, value, four_octet_as, add_path_families)?;
+        let attr = decode_attribute_value(
+            flags,
+            type_code,
+            value,
+            four_octet_as,
+            add_path_families,
+            &mut bgpls_discarded,
+        )?;
         attrs.push(attr);
     }
-    Ok(attrs)
+    Ok((attrs, bgpls_discarded))
 }
 /// Decode a single attribute value given its flags, type code, and raw bytes.
 #[expect(
@@ -820,6 +843,7 @@ fn decode_attribute_value(
     value: &[u8],
     four_octet_as: bool,
     add_path_families: &[(Afi, Safi)],
+    bgpls_discarded: &mut u32,
 ) -> Result<PathAttribute, DecodeError> {
     // Validate Optional + Transitive flags for known attribute types (RFC 4271 §6.3).
     let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
@@ -981,8 +1005,10 @@ fn decode_attribute_value(
                 .collect();
             Ok(PathAttribute::LargeCommunities(communities))
         }
-        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families),
-        attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value, add_path_families),
+        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families, bgpls_discarded),
+        attr_type::MP_UNREACH_NLRI => {
+            decode_mp_unreach_nlri(value, add_path_families, bgpls_discarded)
+        }
         attr_type::PMSI_TUNNEL => {
             let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
             Ok(PathAttribute::PmsiTunnel(pmsi))
@@ -1042,6 +1068,7 @@ fn decode_attribute_value(
 fn decode_mp_reach_nlri(
     value: &[u8],
     add_path_families: &[(Afi, Safi)],
+    bgpls_discarded: &mut u32,
 ) -> Result<PathAttribute, DecodeError> {
     if value.len() < 5 {
         return Err(DecodeError::MalformedField {
@@ -1214,11 +1241,12 @@ fn decode_mp_reach_nlri(
                 detail: "MP_REACH_NLRI BGP-LS Add-Path is not supported".to_string(),
             });
         }
-        let routes = if safi == Safi::BgpLsVpn {
-            crate::bgpls::decode_bgpls_vpn_nlri(nlri_bytes)?
+        let (routes, discarded) = if safi == Safi::BgpLsVpn {
+            crate::bgpls::decode_bgpls_vpn_nlri_counted(nlri_bytes)?
         } else {
-            crate::bgpls::decode_bgpls_nlri(nlri_bytes)?
+            crate::bgpls::decode_bgpls_nlri_counted(nlri_bytes)?
         };
+        *bgpls_discarded = bgpls_discarded.saturating_add(discarded);
         return Ok(PathAttribute::MpReachNlri(MpReachNlri {
             afi,
             safi,
@@ -1361,9 +1389,14 @@ fn decode_mp_reach_nlri(
 ///
 /// Wire layout (RFC 4760 §4):
 ///   AFI (2) | SAFI (1) | Withdrawn Routes (variable)
+#[expect(
+    clippy::too_many_lines,
+    reason = "MP_UNREACH decoder keeps family dispatch in one pass"
+)]
 fn decode_mp_unreach_nlri(
     value: &[u8],
     add_path_families: &[(Afi, Safi)],
+    bgpls_discarded: &mut u32,
 ) -> Result<PathAttribute, DecodeError> {
     if value.len() < 3 {
         return Err(DecodeError::MalformedField {
@@ -1414,7 +1447,13 @@ fn decode_mp_unreach_nlri(
         }));
     }
     if family == MpNlriFamily::BgpLs {
-        return decode_bgpls_mp_unreach(afi, safi, withdrawn_bytes, add_path_families);
+        return decode_bgpls_mp_unreach(
+            afi,
+            safi,
+            withdrawn_bytes,
+            add_path_families,
+            bgpls_discarded,
+        );
     }
     if family == MpNlriFamily::Vpn {
         return decode_vpn_mp_unreach(afi, safi, withdrawn_bytes, add_path_families);
@@ -1471,6 +1510,7 @@ fn decode_bgpls_mp_unreach(
     safi: Safi,
     withdrawn_bytes: &[u8],
     add_path_families: &[(Afi, Safi)],
+    bgpls_discarded: &mut u32,
 ) -> Result<PathAttribute, DecodeError> {
     // Kept alongside the VPN Add-Path slice: no demand for multi-path
     // BGP-LS feeds; negotiation never offers Add-Path for these families.
@@ -1480,11 +1520,12 @@ fn decode_bgpls_mp_unreach(
             detail: "MP_UNREACH_NLRI BGP-LS Add-Path is not supported".to_string(),
         });
     }
-    let routes = if safi == Safi::BgpLsVpn {
-        crate::bgpls::decode_bgpls_vpn_nlri(withdrawn_bytes)?
+    let (routes, discarded) = if safi == Safi::BgpLsVpn {
+        crate::bgpls::decode_bgpls_vpn_nlri_counted(withdrawn_bytes)?
     } else {
-        crate::bgpls::decode_bgpls_nlri(withdrawn_bytes)?
+        crate::bgpls::decode_bgpls_nlri_counted(withdrawn_bytes)?
     };
+    *bgpls_discarded = bgpls_discarded.saturating_add(discarded);
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
         afi,
         safi,
@@ -2659,6 +2700,46 @@ mod tests {
             vpn_rd()
         );
         assert!(decoded_mp.announced.is_empty());
+    }
+    /// LAN-217: a `VPNv6` `MP_REACH` carrying an RFC 4659 §3.2.1.1 48-byte
+    /// two-address next-hop (RD + global, RD + link-local) must emit the
+    /// 48-byte form and round-trip the link-local half, so a route reflector
+    /// re-advertising the route preserves `VPNv6` link-local forwarding.
+    #[test]
+    fn mp_reach_vpnv6_link_local_next_hop_roundtrip() {
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let route = vpnv6_nlri(100);
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::MplsVpn,
+            next_hop: IpAddr::V6(global),
+            link_local_next_hop: Some(link_local),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![vpn_entry(0, route.clone())],
+            rtc_announced: vec![],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false).unwrap();
+        // Value layout after the 3-byte attribute header: AFI(2) SAFI(1)
+        // NH-Len(1); NH-Len must be 48 (RD + global, RD + link-local), not 24.
+        assert_eq!(buf[6], 48, "VPNv6 two-address next-hop must be 48 bytes");
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode VPNv6 MP_REACH");
+        let PathAttribute::MpReachNlri(decoded_mp) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(decoded_mp.next_hop, IpAddr::V6(global));
+        assert_eq!(
+            decoded_mp.link_local_next_hop,
+            Some(link_local),
+            "VPNv6 link-local next-hop must survive encode/decode"
+        );
+        assert_eq!(decoded, vec![PathAttribute::MpReachNlri(mp)]);
     }
     #[test]
     fn mp_unreach_vpnv6_attribute_roundtrip() {
@@ -4394,7 +4475,7 @@ mod tests {
             0, // reserved
             3, 0, // EVPN-style NLRI (route type 3, length 0)
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -4412,7 +4493,7 @@ mod tests {
             70,   // SAFI = Evpn
             3, 0, // EVPN-style withdrawal (route type 3, length 0)
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -4592,7 +4673,7 @@ mod tests {
             40, // invalid IPv4 prefix length if parsed as unicast
             10, 0, 0, 0, 0,
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -4617,7 +4698,7 @@ mod tests {
             129,  // invalid IPv6 prefix length if parsed as unicast
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -4640,7 +4721,7 @@ mod tests {
             0,    // NH-Len = 0
             0,    // reserved
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -4657,7 +4738,7 @@ mod tests {
             0x00, 0x19, // AFI = L2VPN
             133,  // SAFI = FlowSpec
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(

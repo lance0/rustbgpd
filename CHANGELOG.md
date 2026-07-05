@@ -20,6 +20,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   steps that actually committed (no-op steps no longer inflate the
   count), and a `Failed` single-shot converge logs that decomposition
   was skipped (only `Unsupported` mixes decompose). (LAN-215)
+- **Observability for discarded malformed BGP-LS NLRIs (RFC 9552 fault
+  management).** Known BGP-LS NLRIs with out-of-order descriptor TLVs are
+  isolated and dropped while the session survives (PR #616); that discard was
+  previously silent. The decoder now reports the recoverable-discard count up
+  to the session, which increments a per-peer
+  `bgp_bgpls_nlri_discarded_total{peer}` counter and emits a `family=bgp_ls`
+  debug log line. Fatal BGP-LS framing/length errors stay fatal and are never
+  routed through the counter. Closes LAN-135.
 
 - **Durable commit-confirm: a restart inside the confirm window now
   reverts at boot instead of making the unconfirmed config permanent
@@ -780,6 +788,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **VPNv6 reflection no longer drops the link-local next-hop (LAN-217).**
+  `VpnRibRoute` stored only a single global next-hop, so a VPNv6 route
+  received with an RFC 4659 §3.2.1.1 two-address next-hop (48-byte: RD +
+  global, RD + link-local) was reflected with a 24-byte single-address
+  next-hop — the link-local half was silently discarded. Mirroring the
+  labeled-IPv6 fix (LAN-190), the route data model now carries
+  `link_local_next_hop` alongside the global next-hop; the receive path
+  populates it and the reflected `MP_REACH_NLRI` re-emits the 48-byte
+  form verbatim, so VPNv6 link-local forwarding survives reflection. A
+  change confined to the link-local half now correctly re-advertises.
+  (The wire codec already round-tripped the 48-byte two-address VPN
+  next-hop; the gap was purely the RIB/transport plumbing.)
 - **CLI/API consistency cleanup (LAN-211).** The default hold time (90s)
   is now a single `rustbgpd_fsm::DEFAULT_HOLD_TIME` constant reused by the
   gRPC neighbor service's send-hold-time validation instead of a duplicated
