@@ -27,10 +27,11 @@ suite implementation.
 | IPv6 Unicast | Yes | Yes | Yes | Yes | Yes |
 | IPv4 Multicast | No | Yes | Yes | Yes | No |
 | IPv6 Multicast | No | Yes | Yes | Yes | No |
-| IPv4 Labeled Unicast | No | Yes | Yes | Yes | No |
-| IPv6 Labeled Unicast | No | Yes | Yes | Yes | No |
-| VPNv4 (RFC 4364) | No | Yes | Yes | Yes | Yes |
-| VPNv6 | No | Yes | Yes | Yes | Yes |
+| IPv4 Labeled Unicast | Partial[^mpls-rr] | Yes | Yes | Yes | No |
+| IPv6 Labeled Unicast | Partial[^mpls-rr] | Yes | Yes | Yes | No |
+| VPNv4 (RFC 4364) | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
+| VPNv6 | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
+| RT-Constrain (RFC 4684) | Partial[^mpls-rr] | Yes | Yes | Yes | No |
 | L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Yes | Yes | No |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
@@ -39,15 +40,21 @@ suite implementation.
 | BGP-LS (RFC 9552) | Partial | Yes | No | Yes | No |
 | SR Policy | No | No | No | Yes | No |
 
-`No` for rustbgpd VPN/MPLS families is intentional today: ADR-0077 keeps those
-families out of OPEN negotiation, config, and route APIs until either private
-substrate remains unreachable or a complete typed family slice lands. BGP-LS is
-`Partial`: the receive/API slice negotiates `linkstate` / `linkstate_vpn`,
-stores opaque RFC 9552 objects, exposes them through gRPC/CLI, and reflects
-them to eligible negotiated peers, while local LSDB production remains
-deferred. The
-boundary avoids treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
+`Partial` for rustbgpd VPN/MPLS families means the route-reflector /
+controller-feed slice has shipped, not a PE/MPLS dataplane role. VPNv4/VPNv6,
+RT-Constrain, and IPv4/IPv6 labeled-unicast are negotiated as typed families,
+stored with their native route identity, exposed through gRPC/CLI, and reflected
+to eligible negotiated peers with labels / route targets / next-hop preserved.
+VRF import, MPLS label forwarding, CE-facing attachment circuits, and MPLS FIB
+programming remain out of scope. BGP-LS is also `Partial`: the receive/API slice
+negotiates `linkstate` / `linkstate_vpn`, stores opaque RFC 9552 objects,
+exposes them through gRPC/CLI, reflects them to eligible negotiated peers, and
+feeds ORR topology input; local LSDB production remains deferred. The boundary
+continues to avoid treating VPN, labeled, RTC, or BGP-LS NLRI as ordinary
 IPv4/IPv6 `Prefix` routes.
+
+[^mpls-rr]: RR/controller-feed only. No VRF import, MPLS label forwarding,
+    CE-facing attachment, or MPLS FIB programming.
 
 [^evpn]: rustbgpd EVPN is **alpha** and Linux/VXLAN-only. Shipped and
     FRR-interop-tested: the Route Reflector role (Types 1-5 reflection);

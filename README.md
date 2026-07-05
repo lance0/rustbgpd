@@ -14,6 +14,10 @@ interface for all peer lifecycle, routing, and policy operations. The config
 file bootstraps initial state; after startup, gRPC owns the truth. No restarts
 to add peers, change policy, or inject routes.
 
+The practical beachhead is explainable route-server and route-reflector
+operation: per-peer received / best / advertised views, policy and export-gate
+explain output, BMP/MRT/metrics, and receipt-backed interop around those roles.
+
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
 fabric use.
