@@ -217,11 +217,13 @@ cap_block() {
 # AND in the Remote (= rustbgpd) family set.
 assert_gr_cap_family() {
     local container=${1:?} peer=${2:?} family=${3:?} label=${4:?}
-    local block
+    local block first_line family_count
     block=$(cap_block "$container" "$peer" "graceful-restart")
-    if echo "$block" | head -1 | grep -q "advertised and received" \
-        && echo "$block" | grep -q "Remote:" \
-        && [ "$(echo "$block" | grep -cE "(^|[[:space:]])${family}(,|[[:space:]]|\$)")" -ge 2 ]; then
+    first_line=${block%%$'\n'*}
+    family_count=$(grep -cE "(^|[[:space:]])${family}(,|[[:space:]]|\$)" <<<"$block" || true)
+    if [[ "$first_line" == *"advertised and received"* ]] \
+        && grep -q "Remote:" <<<"$block" \
+        && [ "$family_count" -ge 2 ]; then
         ok "$label: $family in local AND remote graceful-restart capability"
     else
         fail "$label: $family missing from the graceful-restart capability exchange"

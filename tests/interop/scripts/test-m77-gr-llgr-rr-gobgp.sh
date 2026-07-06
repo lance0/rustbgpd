@@ -227,11 +227,13 @@ cap_block() {
 # received AND carries a Remote (peer = rustbgpd) section listing it.
 assert_gr_cap_family() {
     local container=${1:?} peer=${2:?} cap=${3:?} family=${4:?} label=${5:?}
-    local block
+    local block first_line family_count
     block=$(cap_block "$container" "$peer" "$cap")
-    if echo "$block" | head -1 | grep -q "advertised and received" \
-        && echo "$block" | grep -q "Remote:" \
-        && [ "$(echo "$block" | grep -cE "(^|[[:space:]])${family}(,|[[:space:]]|\$)")" -ge 2 ]; then
+    first_line=${block%%$'\n'*}
+    family_count=$(grep -cE "(^|[[:space:]])${family}(,|[[:space:]]|\$)" <<<"$block" || true)
+    if [[ "$first_line" == *"advertised and received"* ]] \
+        && grep -q "Remote:" <<<"$block" \
+        && [ "$family_count" -ge 2 ]; then
         ok "$label: $family in local AND remote $cap capability"
     else
         fail "$label: $family missing from the $cap capability exchange"
@@ -471,12 +473,17 @@ test_capabilities() {
     # on purpose — the strip gate keys on what the CLIENT advertised, and
     # the RR (no llgr_stale_time on the client neighbor) advertises none
     # back, so there is no "advertised and received" or Remote section.
-    if cap_block "$GOBGP_CLIENT" 10.0.0.1 "long-lived-graceful-restart" \
-        | grep -A 4 "Local:" | grep -qE "(^|[[:space:]])l3vpn-ipv4-unicast(,|[[:space:]]|\$)"; then
+    local client_llgr local_families
+    client_llgr=$(cap_block "$GOBGP_CLIENT" 10.0.0.1 "long-lived-graceful-restart")
+    local_families=$(awk '
+        /Local:/ {f=1; n=0; next}
+        f && n < 4 {print; n++}
+    ' <<<"$client_llgr")
+    if grep -qE "(^|[[:space:]])l3vpn-ipv4-unicast(,|[[:space:]]|\$)" <<<"$local_families"; then
         ok "client advertised the LLGR capability for l3vpn-ipv4-unicast"
     else
         fail "client did not advertise the LLGR capability for l3vpn-ipv4-unicast"
-        cap_block "$GOBGP_CLIENT" 10.0.0.1 "long-lived-graceful-restart" >&2
+        echo "$client_llgr" >&2
     fi
 }
 
