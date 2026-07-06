@@ -219,7 +219,7 @@ cap_block() {
     local container=${1:?} peer=${2:?} cap=${3:?}
     gobgp "$container" neighbor "$peer" | awk -v cap="    ${cap}:" '
         index($0, cap) == 1 {f=1; print; next}
-        f && (/^    [a-z0-9]/ || /^  [A-Z]/) {exit}
+        f && (/^    [a-z0-9]/ || /^  [A-Z]/) {f=0; next}
         f {print}'
 }
 
