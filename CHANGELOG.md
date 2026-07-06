@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-07-05
+
 ### Added
 
 - **`rbgp doctor` support bundle and familiar CLI aliases.** `rbgp doctor`
@@ -734,6 +736,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Published crates bumped: `rustbgpd-wire` 0.13.0 → 0.14.0 (breaking),
+  `rustbgpd-fsm` 0.1.0 → 0.2.0 (breaking).** Wire gained typed VPNv4/VPNv6,
+  RT-Constrain, labeled-unicast, and BGP-LS NLRI/topology types plus
+  origin-validation community constants; `MpReachNlri` / `MpUnreachNlri`
+  gained `pub` fields, so external struct-literal construction needs
+  updating. fsm's `default_send_hold_time` gained a `hold_time` parameter
+  and `PeerConfig` gained a `send_hold_time` field.
 - **`.rpol` `route.evpn-route-type` now accepts only 1-5 (LAN-192).**
   rustbgpd emits EVPN NLRIs of route types 1-5 (RFC 7432 §7), so a
   comparison against `0` or `6`-`255` could never match a real route.

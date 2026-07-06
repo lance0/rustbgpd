@@ -44,6 +44,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 8092 | Large communities (3× u32) |
+| 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
 | 8203 | Admin shutdown communication |
 | 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
@@ -148,6 +149,10 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
 - **Link Bandwidth** (draft-ietf-idr-link-bandwidth) — `ExtendedCommunity::as_link_bandwidth()` decodes the advertising AS and the IEEE-754 bytes/second bandwidth from a non-transitive two-octet-AS-specific community (type 0x40 subtype 0x04); `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` constructs one, for weighting unequal-cost multipath next hops
+- **Origin Validation State** (RFC 8097) — `ExtendedCommunity::ORIGIN_VALIDATION_VALID` /
+  `_NOT_FOUND` / `_INVALID` constants (type 0x43) for the RPKI prefix-origin
+  validation-state extended community, rendered `OV_VALID` / `OV_NOT_FOUND` /
+  `OV_INVALID` by `Display` (0.14.0)
 - **`UpdateValidationOptions`** — opt-in relaxations for
   `validate_update_attributes_with_options`, e.g. accepting a link-local-primary
   IPv4 `MP_REACH_NLRI` next-hop on a scoped unnumbered session (RFC 8950)
