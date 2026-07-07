@@ -13,7 +13,7 @@ bfd            (no internal deps)
 fsm            ──► wire
 policy         ──► wire
 rpki           ──► wire
-bmp            ──► telemetry
+bmp            ──► telemetry, wire
 mrt            ──► wire, rib
 telemetry      (no internal deps)
 event-history  ──► telemetry
