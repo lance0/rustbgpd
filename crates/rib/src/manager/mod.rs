@@ -2382,8 +2382,12 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_bgpls_keys(&affected);
-        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
-            rib.gc_intern_table();
+        if !affected.is_empty()
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            if needs_intern_gc {
+                rib.gc_intern_table();
+            }
             self.metrics
                 .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
@@ -2439,8 +2443,12 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_vpn_keys(&affected);
-        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
-            rib.gc_intern_table();
+        if !affected.is_empty()
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            if needs_intern_gc {
+                rib.gc_intern_table();
+            }
             self.metrics
                 .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
@@ -2506,8 +2514,12 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_labeled_keys(&affected);
-        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
-            rib.gc_intern_table();
+        if !affected.is_empty()
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            if needs_intern_gc {
+                rib.gc_intern_table();
+            }
             self.metrics
                 .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
@@ -2568,8 +2580,12 @@ impl RibManager {
         self.decrement_refresh_stale_count(peer, family.0, family.1, removed_stale);
         self.update_peer_refresh_metrics(peer);
         self.recompute_rtc_keys(&affected);
-        if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
-            rib.gc_intern_table();
+        if !affected.is_empty()
+            && let Some(rib) = self.ribs.get_mut(&peer)
+        {
+            if needs_intern_gc {
+                rib.gc_intern_table();
+            }
             self.metrics
                 .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }

@@ -420,6 +420,39 @@ fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
 }
 
 #[test]
+fn bgpls_pure_add_records_peer_attr_intern_size() {
+    // Per-peer intern-size telemetry must move on growth, not only on later
+    // replacement/withdraw GC. BGP-LS is representative of the RR-only
+    // families handled in manager/mod.rs: insert_* returns "replaced", so a
+    // first-time route add grows the intern table while `needs_intern_gc`
+    // remains false.
+    let (_tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let route = make_bgpls_route(peer_addr, 24, 100);
+    manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
+
+    assert_eq!(
+        manager.ribs[&peer].intern_len(),
+        1,
+        "the pure add should grow the peer's intern table"
+    );
+    let gauge = gauge_metric_value(
+        &metrics,
+        "bgp_rib_attr_intern_size",
+        &[("peer", &peer.to_string())],
+    );
+    assert!(
+        (gauge - 1.0).abs() < f64::EPSILON,
+        "pure-add growth must be visible in the exported per-peer gauge"
+    );
+}
+
+#[test]
 fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     // A GR-down that preserves some families keeps the peer Adj-RIB-In shell
     // alive. If EVPN is not preserved, that GR entry prunes EVPN routes through
