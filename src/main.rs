@@ -1742,9 +1742,8 @@ async fn run<T>(
         );
     }));
 
-    // ADR-0091 managed EVPN netdev desired state. PR1 is read-only:
-    // the Linux dataplane actor reports desired/observed status rows
-    // but does not create, adopt, or delete links.
+    // ADR-0091 managed EVPN netdev desired state. Empty by default;
+    // configured rows opt into class-scoped Linux link lifecycle.
     let evpn_managed_netdevs =
         std::sync::Arc::new(config.resolve_managed_netdevs().unwrap_or_else(|e| {
             fatal_startup_error(

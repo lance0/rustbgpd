@@ -3,9 +3,8 @@
 rustbgpd is **observe-only by default** for kernel netdev topology. It
 programs and reconciles FDB / L3 FIB state on top of interfaces you
 provide. ADR-0091 adds an explicit opt-in exception for Linux bridge,
-fixed-VNI VXLAN, VLAN upper, VRF, and L3VXLAN create/adopt/reap through
-`[managed_netdevs]`. SVD / collect-metadata VXLAN lifecycle creation remains
-operator-provisioned.
+fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN
+create/adopt/reap through `[managed_netdevs]`.
 You normally provision topology
 with your host's network layer (`ip link`, ifupdown2, systemd-networkd,
 NetworkManager, SONiC, a CNI, ansible, …); rustbgpd probes it each

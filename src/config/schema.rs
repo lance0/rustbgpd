@@ -67,8 +67,9 @@ pub struct Config {
     pub fib_tables: Vec<FibTableConfig>,
     /// Optional rustbgpd-managed EVPN Linux netdev lifecycle
     /// (ADR-0091). Empty by default — existing deployments keep the
-    /// operator-provisioned / observe-only contract. v1 accepts only
-    /// bridge rows; VXLAN and VRF creation stay deferred.
+    /// operator-provisioned / observe-only contract. Configured rows opt
+    /// into class-scoped bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper,
+    /// VRF, and L3VXLAN create/adopt/reap.
     #[serde(default)]
     pub managed_netdevs: ManagedNetdevsConfig,
     /// Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by
@@ -1201,13 +1202,12 @@ pub struct EvpnInstanceConfig {
 ///   value is operator-supplied (not auto-derived) — see ADR-0058
 ///   §4 for why.
 ///
-/// **Operator prerequisite for the follow-on dataplane slices**: the
-/// VRF device and the L3 VXLAN device must be pre-created (the daemon
-/// will not own their lifecycle — observe-only, same as L2 bridges and
-/// L2 VXLAN devices today). The planned reconciler will run the
-/// readiness predicates in ADR-0058 §3 before originating or installing
-/// anything; Gate 9's foundation slice only parses and validates the
-/// schema.
+/// **Operator prerequisite**: the VRF device and L3 VXLAN device must
+/// exist and satisfy the readiness predicates in ADR-0058 §3 before
+/// rustbgpd originates or installs anything. By default those links are
+/// operator-provisioned; deployments that want rustbgpd to own their
+/// lifecycle can opt in with matching ADR-0091 `[[managed_netdevs.vrfs]]`
+/// and `[[managed_netdevs.l3vxlans]]` rows.
 ///
 /// ## Fields
 ///

@@ -60,7 +60,8 @@ The first implementation slice was bridge create/adopt/reap. The second
 slice adds fixed-VNI VXLAN create/adopt/reap. The third slice adds
 VRF/L3VXLAN create/adopt/reap and the `managed_ip_vrf_ready` proof. The fourth
 slice adds VLAN upper create/adopt/reap and the `managed_vlan_upper` proof.
-SVD / collect-metadata VXLAN lifecycle is still a separate proof gate.
+The fifth slice adds SVD / collect-metadata VXLAN create/adopt/reap and the
+`managed_svd_vxlan` proof.
 
 ### 2. `IFLA_ALT_IFNAME` is the durable ownership marker
 
@@ -80,12 +81,13 @@ the logical fields are fixed:
   block's stable identity;
 - `owner-token`: operator-configured daemon / installation token.
 
-As shipped, bridge, fixed-VNI VXLAN, VLAN upper, VRF, and L3VXLAN classes
+As shipped, bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, and L3VXLAN classes
 encode this as a colon-delimited altname:
 
 ```text
 rustbgpd:bridge:<owner-token>:<bridge-name>
 rustbgpd:vxlan:<owner-token>:<vxlan-name>
+rustbgpd:svd-vxlan:<owner-token>:<svd-vxlan-name>
 rustbgpd:vlan-upper:<owner-token>:<vlan-upper-name>
 rustbgpd:vrf:<owner-token>:<vrf-name>
 rustbgpd:l3vxlan:<owner-token>:<l3vxlan-name>
@@ -325,9 +327,9 @@ foreign-vs-owned signal.
    dataplane reconciler, including the Decision 6 status / metric surface for
    owned-but-unsafe, orphan, and creation-skipped states. **Done for the bridge
    class.**
-4. Add VXLAN class support. **Done for fixed-VNI schema/status and
-   create/adopt/reap lifecycle.** SVD / collect-metadata VXLAN remains
-   deferred.
+4. Add VXLAN class support. **Done for fixed-VNI and SVD / collect-metadata
+   schema/status, ownership stamps, create/adopt/reap lifecycle, and real
+   kernel proofs.**
 5. Add VRF / L3VXLAN class support. **Done for schema/status, ownership
    stamps, create/adopt/reap lifecycle, and the `managed_ip_vrf_ready` real
    kernel proof.**
