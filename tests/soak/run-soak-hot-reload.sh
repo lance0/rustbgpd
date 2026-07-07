@@ -238,9 +238,10 @@ sample_row() {
     local cycles=${2:?}
     local apply_ok=${3:?}
     local apply_fail=${4:?}
-    local prom rss established
+    local prom rss intern_size established
     prom=$(prom_scrape)
     rss=$(container_rss_mb)
+    intern_size=$(prom_extract_or_zero "$prom" bgp_rib_attr_intern_size)
     if frr_established_seen; then
         established=1
     else
@@ -250,6 +251,7 @@ sample_row() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \
         "${rss:-nan}" \
+        "$intern_size" \
         "$established" \
         "$cycles" \
         "$apply_ok" \
@@ -279,7 +281,7 @@ main() {
     log "Warmup: waiting ${WARMUP_SEC}s"
     sleep "$WARMUP_SEC"
 
-    echo "timestamp,elapsed_sec,rss_mb,bgp_established,apply_cycles,apply_ok,apply_fail" >"$SAMPLES_CSV"
+    echo "timestamp,elapsed_sec,rss_mb,intern_size,bgp_established,apply_cycles,apply_ok,apply_fail" >"$SAMPLES_CSV"
 
     local start_epoch end_epoch next_sample next_apply cycles apply_ok apply_fail
     start_epoch=$(date +%s)

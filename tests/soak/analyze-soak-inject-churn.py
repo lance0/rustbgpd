@@ -5,6 +5,7 @@ Reads the CSV emitted by run-soak-inject-churn.sh and emits a JSON
 verdict against the soak-specific gates:
 
   - RSS slope (steady state, MB/hour) < 1.0
+  - intern table size (bgp_rib_attr_intern_size) slope per hour < 1.0
   - peak RSS < 512 MB
   - session established in final 3 samples (no flap)
   - at least one churn cycle recorded
@@ -47,14 +48,18 @@ def linreg(xs: list[float], ys: list[float]) -> float:
 
 def analyze(rows: list[dict[str, str]]) -> dict:
     rss_pts: list[tuple[float, float]] = []
+    intern_pts: list[tuple[float, float]] = []
     established_final: list[str] = []
     max_cycles = 0
 
     for row in rows:
         e = safe_float(row.get("elapsed_sec"))
         r = safe_float(row.get("rss_mb"))
+        i = safe_float(row.get("intern_size"))
         if e is not None and r is not None:
             rss_pts.append((e, r))
+        if e is not None and i is not None:
+            intern_pts.append((e, i))
         c = safe_float(row.get("churn_cycles"))
         if c is not None:
             max_cycles = max(max_cycles, int(c))
@@ -65,12 +70,22 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         if rss_pts
         else float("nan")
     )
+    intern_slope = (
+        linreg([e / 3600 for e, _ in intern_pts], [i for _, i in intern_pts])
+        if intern_pts
+        else float("nan")
+    )
     peak_rss = max((r for _, r in rss_pts), default=float("nan"))
 
     tail = established_final[-3:] if established_final else []
     final_established = tail.count("1") > 0 if tail else False
 
     gates = {
+        "intern_slope_per_hour": {
+            "value": intern_slope if not math.isnan(intern_slope) else None,
+            "limit": 1.0,
+            "pass": (not math.isnan(intern_slope)) and intern_slope < 1.0,
+        },
         "rss_slope_per_hour": {
             "value": rss_slope if not math.isnan(rss_slope) else None,
             "limit": 1.0,
@@ -96,6 +111,7 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     return {
         "verdict": "pass" if all_pass else "fail",
         "churn_cycles": max_cycles,
+        "intern_slope_per_hour": intern_slope if not math.isnan(intern_slope) else None,
         "rss_slope_per_hour": rss_slope if not math.isnan(rss_slope) else None,
         "peak_rss_mb": peak_rss if not math.isnan(peak_rss) else None,
         "samples": len(rows),

@@ -277,10 +277,11 @@ sample_row() {
         established=0
     fi
     intern_size=$(prom_extract_or_zero "$prom" bgp_rib_attr_intern_size)
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \
         "${rss:-nan}" \
+        "$intern_size" \
         "$LIVE_TARGET_PREFIXES" \
         "$frr_count" \
         "$established" \
@@ -338,7 +339,7 @@ main() {
     wait_established
     prefill_live_set
 
-    echo "timestamp,elapsed_sec,rss_mb,live_target,frr_route_count,bgp_established,churn_cycles,add_total,del_total" >"$SAMPLES_CSV"
+    echo "timestamp,elapsed_sec,rss_mb,intern_size,live_target,frr_route_count,bgp_established,churn_cycles,add_total,del_total" >"$SAMPLES_CSV"
 
     local start_epoch end_epoch next_sample next_churn cycles add_total del_total
     local del_idx_file add_idx_file now
