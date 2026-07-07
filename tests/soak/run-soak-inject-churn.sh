@@ -151,6 +151,15 @@ prom_extract_or_zero() {
     '
 }
 
+# Sum all per-peer series of a labeled gauge from a scraped /metrics blob.
+prom_extract_sum() {
+    local prom="$1" name="$2"
+    awk -v n="$name" '
+        $0 ~ "^"n"[{ ]" { s += $NF }
+        END { printf "%d", s+0 }
+    ' <<<"$prom"
+}
+
 prom_sum() {
     local text="$1" metric="$2"
     printf '%s' "$text" | awk -v m="$metric" '
@@ -276,7 +285,7 @@ sample_row() {
     else
         established=0
     fi
-    intern_size=$(prom_extract_or_zero "$prom" bgp_rib_attr_intern_size)
+    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_size)
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \

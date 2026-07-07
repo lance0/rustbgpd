@@ -805,6 +805,8 @@ impl RibManager {
             self.pending_distribute_affected.extend(affected);
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
     }
@@ -879,8 +881,12 @@ impl RibManager {
             let changed = self.recompute_best_after_announce(peer, &affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if any_replaced && let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                if any_replaced {
+                    rib.gc_intern_table();
+                }
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
     }
@@ -906,8 +912,12 @@ impl RibManager {
         affected.insert(prefix);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
-        if replaced && let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-            rib.gc_intern_table();
+        if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+            if replaced {
+                rib.gc_intern_table();
+            }
+            self.metrics
+                .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
         }
 
         let _ = reply.send(Ok(()));
@@ -933,6 +943,8 @@ impl RibManager {
             self.distribute_changes(&changed, &affected);
             if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
             }
             let _ = reply.send(Ok(()));
         } else {

@@ -809,3 +809,15 @@ per-cycle events recorded in `churn.log`.
   or the `evpn_l3_originator` / `evpn_l3_installer` daemon tasks.
 - **Before tagging any release that touches the symmetric IRB
   packet path or the L3 owned-state model.**
+
+# Intern-table / churn soak harnesses
+
+| Harness | Proves | Topology / analyzer |
+|---------|--------|---------------------|
+| `run-soak-gr-restart-intern-gc.sh` | The attribute intern table does not grow across GR-restart → EoR → stale-clear cycles: `sum(bgp_rib_attr_intern_size)` slope `< 1.0`/hr | containerlab topology + post-hoc slope analyzer |
+| `run-soak-hot-reload.sh` | Sustained SIGHUP / live-apply config churn leaks no state | containerlab topology + post-hoc analyzer |
+| `run-soak-inject-churn.sh` | Sustained gRPC AddPath/DeletePath churn holds RSS + intern-table size flat | containerlab topology + post-hoc analyzer |
+
+Each pairs a containerlab topology with a post-hoc analyzer and runs under the
+shared host mutex (see the top-of-file bench-vs-soak section); consult each
+script's header for the deploy step and its env vars.

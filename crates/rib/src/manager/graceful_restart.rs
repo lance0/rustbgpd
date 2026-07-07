@@ -168,6 +168,8 @@ impl RibManager {
             // attribute sets stranded by those removals now rather than
             // waiting for an unrelated future withdraw on this peer.
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
 
         if let Some(rib) = self.ribs.get(&peer) {
@@ -235,6 +237,8 @@ impl RibManager {
             // receive path's recompute-then-gc ordering.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !vpn_affected.is_empty() {
@@ -242,6 +246,8 @@ impl RibManager {
             // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !labeled_affected.is_empty() {
@@ -249,6 +255,8 @@ impl RibManager {
             // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !rtc_affected.is_empty() {
@@ -256,6 +264,8 @@ impl RibManager {
             // Same recompute-then-gc ordering rationale as BGP-LS above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         // No RTC membership rebuild here even when routes were deleted:
@@ -302,27 +312,6 @@ impl RibManager {
         });
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
-        self.record_rib_attr_intern_size();
-    }
-
-    /// Record the total interned attribute-set count, summed across every
-    /// peer's Adj-RIB-In intern table, into `bgp_rib_attr_intern_size`.
-    /// Called at the end of each operation that runs `gc_intern_table`
-    /// (GR entry, GR/LLGR stale sweeps, End-of-RIB, route-refresh finish) so
-    /// the gauge tracks reclamation across the full restart cycle rather than
-    /// flapping to whichever peer was collected last.
-    ///
-    // ponytail: intentionally NOT called on the per-chunk distribution GC
-    // path (process_announce_chunk / distribute_changes) — an O(peers) sum
-    // on the data-plane hot path is the wrong trade; steady-state churn
-    // refreshes this gauge at the next session-lifecycle GC instead.
-    pub(super) fn record_rib_attr_intern_size(&self) {
-        let total: usize = self
-            .ribs
-            .values()
-            .map(crate::adj_rib_in::AdjRibIn::intern_len)
-            .sum();
-        self.metrics.set_rib_attr_intern_size(gauge_val(total));
     }
 
     pub(super) fn handle_rpki_cache_update(&mut self, table: Arc<VrpTable>) {
@@ -521,6 +510,8 @@ impl RibManager {
                 // drops selected-route clones that were still holding old
                 // Arcs alive here.
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             if !non_llgr_families.is_empty() {
                 info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
@@ -559,6 +550,8 @@ impl RibManager {
                 && let Some(rib) = self.ribs.get_mut(&peer)
             {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             if rtc_changed {
                 // A non-LLGR purge (or a NO_LLGR removal during promotion)
@@ -611,6 +604,8 @@ impl RibManager {
             labeled_swept = rib.sweep_stale_labeled();
             rtc_swept = rib.sweep_stale_rtc();
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
         }
@@ -671,6 +666,8 @@ impl RibManager {
             && let Some(rib) = self.ribs.get_mut(&peer)
         {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
         if had_rtc_swept {
             // Same obligation as the LLGR branch: a re-established peer whose
@@ -680,7 +677,6 @@ impl RibManager {
         }
 
         self.release_peer_state_if_departed(peer);
-        self.record_rib_attr_intern_size();
     }
 
     /// Sweep LLGR-stale routes for a peer whose LLGR timer has expired.
@@ -713,6 +709,8 @@ impl RibManager {
             labeled_swept = rib.sweep_llgr_stale_labeled();
             rtc_swept = rib.sweep_llgr_stale_rtc();
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
         }
@@ -774,6 +772,8 @@ impl RibManager {
             && let Some(rib) = self.ribs.get_mut(&peer)
         {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
         if had_rtc_swept {
             // Same obligation as the GR-expiry sweeps: the down peer's
@@ -784,7 +784,6 @@ impl RibManager {
         }
 
         self.release_peer_state_if_departed(peer);
-        self.record_rib_attr_intern_size();
     }
 
     /// Release a departed peer's remaining per-peer state once GR/LLGR
