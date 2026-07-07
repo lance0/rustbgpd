@@ -1,0 +1,25 @@
+# Soak variant for the config live-apply (hot-reload) soak. Single
+# IPv4 eBGP peer (FRR receiver). The soak harness cycles
+# `rbgp config plan` / `config apply` against candidate TOMLs that
+# mutate the neighbor description, exercising the ADR-0063
+# shape-gated live-apply path.
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-soak-hot-reload-cycle-0"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

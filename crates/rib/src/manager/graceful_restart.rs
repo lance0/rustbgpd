@@ -302,6 +302,27 @@ impl RibManager {
         });
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+        self.record_rib_attr_intern_size();
+    }
+
+    /// Record the total interned attribute-set count, summed across every
+    /// peer's Adj-RIB-In intern table, into `bgp_rib_attr_intern_size`.
+    /// Called at the end of each operation that runs `gc_intern_table`
+    /// (GR entry, GR/LLGR stale sweeps, End-of-RIB, route-refresh finish) so
+    /// the gauge tracks reclamation across the full restart cycle rather than
+    /// flapping to whichever peer was collected last.
+    ///
+    // ponytail: intentionally NOT called on the per-chunk distribution GC
+    // path (process_announce_chunk / distribute_changes) — an O(peers) sum
+    // on the data-plane hot path is the wrong trade; steady-state churn
+    // refreshes this gauge at the next session-lifecycle GC instead.
+    pub(super) fn record_rib_attr_intern_size(&self) {
+        let total: usize = self
+            .ribs
+            .values()
+            .map(crate::adj_rib_in::AdjRibIn::intern_len)
+            .sum();
+        self.metrics.set_rib_attr_intern_size(gauge_val(total));
     }
 
     pub(super) fn handle_rpki_cache_update(&mut self, table: Arc<VrpTable>) {
@@ -659,6 +680,7 @@ impl RibManager {
         }
 
         self.release_peer_state_if_departed(peer);
+        self.record_rib_attr_intern_size();
     }
 
     /// Sweep LLGR-stale routes for a peer whose LLGR timer has expired.
@@ -762,6 +784,7 @@ impl RibManager {
         }
 
         self.release_peer_state_if_departed(peer);
+        self.record_rib_attr_intern_size();
     }
 
     /// Release a departed peer's remaining per-peer state once GR/LLGR

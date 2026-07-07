@@ -1,0 +1,48 @@
+# Containerlab topology: soak variant of M3 (gRPC route injection).
+#
+# Distinct `name:` (`soak-inject-churn`) so a hosted CI run of the M3
+# interop smoke cannot destroy the soak's containers by-name.
+#
+# rustbgpd peers with a single FRR receiver. The soak harness drives
+# `InjectionService.AddPath` / `DeletePath` over gRPC at a sustained
+# churn rate, proving the injection path (the automation-controller
+# beachhead) does not leak under steady-state add/delete cycling.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/soak/soak-inject-churn.clab.yml
+#   bash tests/soak/run-soak-inject-churn.sh
+#   containerlab destroy -t tests/soak/soak-inject-churn.clab.yml
+
+name: soak-inject-churn
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-soak-inject-churn.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-soak-inject-churn.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# rustbgpd: 10.0.0.1, AS 65001 — gRPC route injector
+# FRR:      10.0.0.2, AS 65002 — IPv4 receiver

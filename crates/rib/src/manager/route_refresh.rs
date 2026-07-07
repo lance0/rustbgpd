@@ -456,6 +456,7 @@ impl RibManager {
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }
         }
+        self.record_rib_attr_intern_size();
     }
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -1518,5 +1519,6 @@ impl RibManager {
             // withdrawn from this peer's Adj-RIB-Out.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
+        self.record_rib_attr_intern_size();
     }
 }

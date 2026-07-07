@@ -90,6 +90,7 @@ pub struct BgpMetrics {
     rib_prefixes: IntGaugeVec,
     rib_adj_out_prefixes: IntGaugeVec,
     rib_loc_prefixes: IntGaugeVec,
+    rib_attr_intern_size: IntGauge,
     route_event_history_depth: IntGauge,
     route_event_history_capacity: IntGauge,
 
@@ -361,6 +362,12 @@ impl BgpMetrics {
                 "Number of prefixes in the Loc-RIB per AFI/SAFI",
             ),
             &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let rib_attr_intern_size = IntGauge::new(
+            "bgp_rib_attr_intern_size",
+            "Total unique interned attribute sets summed across all peers' Adj-RIB-In intern tables (gc_intern_table reclaims unreferenced entries per peer).",
         )
         .expect("valid metric definition");
 
@@ -1273,6 +1280,9 @@ impl BgpMetrics {
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_attr_intern_size.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_event_history_depth.clone()))
             .expect("metric not already registered");
         registry
@@ -1586,6 +1596,7 @@ impl BgpMetrics {
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
+            rib_attr_intern_size,
             route_event_history_depth,
             route_event_history_capacity,
             orr_spf_runs_total,
@@ -1901,6 +1912,13 @@ impl BgpMetrics {
         self.rib_loc_prefixes
             .with_label_values(&[afi_safi])
             .set(count);
+    }
+
+    /// Set the total number of unique interned attribute sets summed across
+    /// every peer's Adj-RIB-In intern table. Monitors `gc_intern_table`
+    /// reclamation across GR-restart / `EoR` / stale-clear cycles.
+    pub fn set_rib_attr_intern_size(&self, count: i64) {
+        self.rib_attr_intern_size.set(count);
     }
 
     /// Set the number of retained events in the bounded route-event

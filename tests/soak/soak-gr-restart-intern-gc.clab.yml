@@ -1,0 +1,52 @@
+# Containerlab topology: soak variant of M16 (GR + LLGR).
+#
+# Distinct `name:` (`soak-gr-restart`) so a hosted CI run of the M16
+# interop smoke cannot destroy the soak's containers by-name — mirrors
+# the m37-soak / m37 split.
+#
+# FRR advertises 192.168.1.0/24 and 192.168.2.0/24 with GR + LLGR.
+# rustbgpd has gr_restart_time=15, gr_stale_routes_time=20,
+# llgr_stale_time=60. The soak harness cyclically restarts FRR's
+# bgpd to drive the rustbgpd GR-restart → stale-mark → EoR →
+# stale-clear → gc_intern_table path repeatedly, sampling RSS and
+# the bgp_rib_attr_intern_size gauge to prove the intern table
+# does not grow across restart cycles.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/soak/soak-gr-restart-intern-gc.clab.yml
+#   bash tests/soak/run-soak-gr-restart-intern-gc.sh
+#   containerlab destroy -t tests/soak/soak-gr-restart-intern-gc.clab.yml
+
+name: soak-gr-restart
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-soak-gr-restart.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m16-llgr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# rustbgpd: 10.0.0.1, AS 65001 (GR + LLGR helper)
+# FRR:      10.0.0.2, AS 65002 (GR + LLGR enabled, stale-time 30s)
