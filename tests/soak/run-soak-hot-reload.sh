@@ -99,6 +99,15 @@ prom_extract_or_zero() {
     '
 }
 
+# Sum all per-peer series of a labeled gauge from a scraped /metrics blob.
+prom_extract_sum() {
+    local prom="$1" name="$2"
+    awk -v n="$name" '
+        $0 ~ "^"n"[{ ]" { s += $NF }
+        END { printf "%d", s+0 }
+    ' <<<"$prom"
+}
+
 container_rss_mb() {
     docker exec "$RUSTBGPD" sh -c '
         pid=$(pidof rustbgpd 2>/dev/null || true)
@@ -241,7 +250,7 @@ sample_row() {
     local prom rss intern_size established
     prom=$(prom_scrape)
     rss=$(container_rss_mb)
-    intern_size=$(prom_extract_or_zero "$prom" bgp_rib_attr_intern_size)
+    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_size)
     if frr_established_seen; then
         established=1
     else

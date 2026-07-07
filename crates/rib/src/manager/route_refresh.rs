@@ -252,6 +252,8 @@ impl RibManager {
             }
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             if rtc_swept {
                 // The EoR sweep removed RT interest the peer did not
@@ -423,6 +425,8 @@ impl RibManager {
             }
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             if rtc_swept {
                 // The EoR sweep removed LLGR-stale RT interest the peer did
@@ -456,7 +460,6 @@ impl RibManager {
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }
         }
-        self.record_rib_attr_intern_size();
     }
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -1384,6 +1387,8 @@ impl RibManager {
                 || !rtc_affected.is_empty()
             {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
@@ -1491,6 +1496,8 @@ impl RibManager {
             // receive path's recompute-then-gc ordering.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !vpn_affected.is_empty() {
@@ -1500,6 +1507,8 @@ impl RibManager {
             // until recompute_vpn_keys drops it, so gc must run after it.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !labeled_affected.is_empty() {
@@ -1507,18 +1516,21 @@ impl RibManager {
             // Same gc-after-recompute ordering as VPN above.
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
             // The sweep just mutated this peer's RTC Adj-RIB-In — its RT
             // membership shrank, so VPN routes no longer covered must be
             // withdrawn from this peer's Adj-RIB-Out.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
-        self.record_rib_attr_intern_size();
     }
 }

@@ -46,6 +46,8 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&affected);
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
     }
@@ -91,8 +93,12 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
-            if any_replaced && let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                if any_replaced {
+                    rib.gc_intern_table();
+                }
+                self.metrics
+                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             }
         }
     }
@@ -112,8 +118,12 @@ impl RibManager {
         let mut evpn_affected = HashSet::new();
         evpn_affected.insert(key);
         self.recompute_and_distribute_evpn(&evpn_affected);
-        if replaced && let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-            rib.gc_intern_table();
+        if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
+            if replaced {
+                rib.gc_intern_table();
+            }
+            self.metrics
+                .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
         }
         let _ = reply.send(Ok(()));
     }
@@ -134,6 +144,8 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&evpn_affected);
             if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
                 rib.gc_intern_table();
+                self.metrics
+                    .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
             }
             let _ = reply.send(Ok(()));
         } else {

@@ -31,7 +31,7 @@ use crate::update::{
     NeighborPolicyStats, OutboundRouteUpdate, RibUpdate,
 };
 
-use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
+use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 
 /// Reverse index of unicast announcing peers: prefix → the peers whose
 /// Adj-RIB-In currently holds at least one route for it. `FxHash` +
@@ -2384,6 +2384,8 @@ impl RibManager {
         self.recompute_bgpls_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
     }
 
@@ -2439,6 +2441,8 @@ impl RibManager {
         self.recompute_vpn_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
     }
 
@@ -2504,6 +2508,8 @@ impl RibManager {
         self.recompute_labeled_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
     }
 
@@ -2564,6 +2570,8 @@ impl RibManager {
         self.recompute_rtc_keys(&affected);
         if needs_intern_gc && let Some(rib) = self.ribs.get_mut(&peer) {
             rib.gc_intern_table();
+            self.metrics
+                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
         }
         self.rebuild_rtc_membership_and_restage_vpn(peer);
     }

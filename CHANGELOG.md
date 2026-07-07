@@ -11,13 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`bgp_rib_attr_intern_size` gauge** — total unique interned attribute sets
-  summed across all peers' Adj-RIB-In tables, recorded after each
-  session-lifecycle GC (graceful-restart entry, GR/LLGR stale sweep,
-  End-of-RIB, route-refresh finish) and kept off the per-chunk distribution
-  hot path. Three containerlab soak harnesses (GR-restart intern-GC,
-  hot-reload, inject-churn), each with a topology and a post-hoc analyzer,
-  exercise it and adjacent long-run paths.
+- **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
+  in each peer's Adj-RIB-In table (attribute-memory dedup); sum across peers
+  for the daemon-wide total. Three containerlab soak harnesses (GR-restart
+  intern-GC, hot-reload, inject-churn), each with a topology and a post-hoc
+  analyzer, exercise it and adjacent long-run paths. Recorded O(1) per peer at
+  every Adj-RIB-In intern mutation site (GC, injection/withdraw, and announce
+  growth) so the series tracks the live intern table under churn.
 
 ## [0.50.0] — 2026-07-05
 
