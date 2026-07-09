@@ -3950,6 +3950,124 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
     rib_drainer.await.unwrap();
 }
 
+/// LAN-284: a rejected `sync_rpol_policies` (mid-apply chain resolution
+/// failure) must leave BOTH policy surfaces on the old registry — the
+/// live peer's chain (existing sessions) and `current_config` (what a
+/// session created afterwards resolves against). Asserted at decision
+/// level: the live chain still evaluates the OLD local-pref.
+#[tokio::test]
+async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessions() {
+    use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
+
+    fn registry(name: &str, source: &str) -> RpolPolicySet {
+        let file = std::sync::Arc::new(RpolFile::parse(source).expect("clean rpol"));
+        let mut set = RpolPolicySet::default();
+        set.policies.insert(
+            name.to_string(),
+            RpolPolicyEntry {
+                file,
+                params: 0,
+                path: "policies/core.rpol".to_string(),
+            },
+        );
+        set
+    }
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        acking_counted_policy_handle(peer, counters.clone()),
+        false,
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["edge-in".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+    mgr.current_config.policy.rpol = registry(
+        "edge-in",
+        "policy edge-in { term all { set local-pref 150; accept } }",
+    );
+    // Materialize the live chain from the OLD registry.
+    mgr.sync_rpol_policies(vec!["policies/core.rpol".to_string()], {
+        registry(
+            "edge-in",
+            "policy edge-in { term all { set local-pref 150; accept } }",
+        )
+    })
+    .await
+    .expect("baseline sync succeeds");
+
+    // Candidate registry renames the policy, so the static peer's
+    // `import_policy_chain = ["edge-in"]` no longer resolves: the sync
+    // is rejected mid-apply with zero peers touched.
+    mgr.sync_rpol_policies(
+        vec!["policies/core.rpol".to_string()],
+        registry(
+            "edge-in-renamed",
+            "policy edge-in-renamed { term all { set local-pref 250; accept } }",
+        ),
+    )
+    .await
+    .expect_err("chain resolution failure must reject the sync");
+
+    // Existing session: the live chain still evaluates the OLD decision.
+    let managed = mgr.peers.values().next().expect("peer present");
+    let chain = managed.import_policy.as_ref().expect("import chain set");
+    let ctx = rustbgpd_policy::RouteContext {
+        prefix: None,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(150));
+
+    // New session source: chains for a session created AFTER the
+    // rejection resolve from `current_config`, which must still carry
+    // the old registry — and evaluate the OLD decision.
+    let neighbor = mgr.current_config.neighbors[0].clone();
+    let (import, _export) = mgr
+        .current_config
+        .effective_policy_chains_for_neighbor(&neighbor)
+        .expect("new-session chains resolve against the old registry");
+    let chain = import.expect("import chain configured");
+    assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(150));
+
+    drop(mgr);
+    rib_drainer.await.unwrap();
+}
+
 /// Like `acking_policy_handle`, but counting `QueryState` and Route Refresh
 /// sends so policy fan-out coverage can be asserted per peer.
 fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounters>) -> PeerHandle {

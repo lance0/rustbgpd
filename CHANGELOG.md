@@ -44,6 +44,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   status, and the operator resolves it by retrying the abort, confirming the
   candidate, or restarting. Previously a second mutation accepted after such a
   failure could be silently clobbered by the retained journal's boot revert.
+- **A rejected `.rpol` reload no longer publishes the candidate registry to
+  the runtime snapshot.** When a SIGHUP/apply reload carried `.rpol` changes
+  and the peer manager rejected the sync (e.g. a chain failed to re-resolve
+  mid-apply), the reload's returned snapshot already carried the candidate
+  registry — so sessions created after the failed reload resolved policies
+  against the REJECTED registry while existing sessions kept the old one
+  (split-brain). The runtime snapshot now adopts the candidate only after the
+  peer manager commits it; on rejection every session — existing and new —
+  keeps resolving against the last-successfully-applied registry, and the
+  operator's `.rpol` files survive on disk as intent for the next successful
+  reload. (LAN-284)
 - **Outbound saturation teardown: Cease is the final frame, and cleanup runs
   from the run loop.** When a peer stopped draining and the bounded writer
   queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
