@@ -325,6 +325,14 @@ struct ActorState {
     /// kernel row occupies the exact key (route / neighbor / L3VXLAN
     /// FDB). Same warn-once discipline as `warned_foreign_fdb`.
     warned_foreign_l3: BTreeSet<L3OpKey>,
+    /// LAN-290: NHIDs inside rustbgpd's reserved ranges whose kernel
+    /// object is shape-conflicting (written by a co-resident netlink
+    /// agent in violation of the single-writer contract). Each ID is
+    /// quarantined: reserved in the allocator so it can never be
+    /// handed out (and thus never `NLM_F_REPLACE`-clobbered),
+    /// excluded from adoption and every reap/delete path, and warned
+    /// + counted once on first sight.
+    foreign_nhids: BTreeSet<u32>,
     /// LAN-283 foreign-state deltas (replaces blocked, deletes
     /// skipped, ownership relinquished) accumulated since the last
     /// [`DataplaneReport`]. Same drain-into-Prometheus contract as
@@ -525,6 +533,7 @@ impl ActorState {
             warned_ipv6_fallback: BTreeSet::new(),
             warned_foreign_fdb: BTreeSet::new(),
             warned_foreign_l3: BTreeSet::new(),
+            foreign_nhids: BTreeSet::new(),
             foreign_since_report: ForeignStateCounters::default(),
             warned_managed_netdevs: BTreeSet::new(),
             last_intent_generation: 0,
@@ -835,6 +844,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             match self.dataplane.dump_owned_nexthops().await {
                 Ok(adopted) => {
                     for nh in adopted {
+                        if self.quarantine_if_foreign_shape(&nh) {
+                            continue;
+                        }
                         match self.state.nh_id_alloc.reserve(nh.id) {
                             Ok(()) => {
                                 self.state.adopted_unreferenced.insert(nh.id, nh);
@@ -903,6 +915,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 match self.dataplane.dump_owned_l3_nexthops().await {
                     Ok(adopted) => {
                         for nh in adopted {
+                            if self.quarantine_if_foreign_shape(&nh) {
+                                continue;
+                            }
                             if self.state.adopted_l3_unreferenced.contains_key(&nh.id) {
                                 continue;
                             }
@@ -2092,6 +2107,47 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
     }
 
+    /// LAN-290 reserved-NHID-range contract enforcement: if `nh` is a
+    /// [`KernelNexthopKind::ShapeConflict`] (an in-range kernel object
+    /// not shaped like anything rustbgpd writes — i.e. a co-resident
+    /// netlink writer violated the single-writer contract on our
+    /// documented ranges, see `docs/deployment.md`), fail closed for
+    /// that ID and return `true` so the caller skips adoption:
+    ///
+    /// - reserve the allocator slot (best effort) so the ID can never
+    ///   be handed out — an alloc at this ID would `NLM_F_REPLACE` the
+    ///   foreign object;
+    /// - drop the ID from both adopted maps so no reap/cleanup pass
+    ///   can ever delete the object (covers an adopted well-shaped
+    ///   object later replaced by a foreign writer between dumps);
+    /// - warn + count once per ID (`evpn_foreign_nhid_range_conflicts_total`).
+    ///
+    /// Returns `false` (caller proceeds normally) for well-shaped
+    /// entries.
+    fn quarantine_if_foreign_shape(&mut self, nh: &crate::dataplane::KernelNexthop) -> bool {
+        if !matches!(nh.kind, crate::dataplane::KernelNexthopKind::ShapeConflict) {
+            return false;
+        }
+        // Best-effort reserve: `OutOfRange` means the bitmap portion
+        // is outside what the allocator can ever hand out, so there
+        // is no collision to prevent; the object is still excluded
+        // from adoption below.
+        let _ = self.state.nh_id_alloc.reserve(nh.id);
+        self.state.adopted_unreferenced.remove(&nh.id);
+        self.state.adopted_l3_unreferenced.remove(&nh.id);
+        if self.state.foreign_nhids.insert(nh.id) {
+            self.state.foreign_since_report.nhid_range_conflicts += 1;
+            tracing::warn!(
+                id = format_args!("{:#010x}", nh.id),
+                "foreign nexthop object inside a rustbgpd-reserved NHID range \
+                 (shape conflict — another netlink writer violated the reserved-range \
+                 contract, see docs/deployment.md); failing closed: ID quarantined, \
+                 object left untouched and excluded from adoption/cleanup"
+            );
+        }
+        true
+    }
+
     /// ADR-0059 slice 3b cleanup helper: walk `adopted_unreferenced`
     /// after the first reconcile's apply phase and delete any
     /// rustbgpd-tagged kernel nexthop that's *both* unclaimed by a
@@ -2311,7 +2367,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 KernelNexthopKind::Member { gateway } => {
                     members.insert(*gateway);
                 }
-                KernelNexthopKind::Group { .. } => {
+                KernelNexthopKind::Group { .. } | KernelNexthopKind::ShapeConflict => {
                     tracing::warn!(
                         ?key,
                         nh_id,
@@ -2623,7 +2679,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 None => true,
                 Some(nh) => match &nh.kind {
                     KernelNexthopKind::Member { gateway } => gateway != ip,
-                    KernelNexthopKind::Group { .. } => true,
+                    // A tracked ID is ours by construction; a group or
+                    // shape-conflicting object squatting on it is
+                    // drift to heal (LAN-290 quarantine applies only
+                    // to untracked IDs).
+                    KernelNexthopKind::Group { .. } | KernelNexthopKind::ShapeConflict => true,
                 },
             };
             if !needs_action {
@@ -2664,7 +2724,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         let eset: BTreeSet<u32> = expected_member_ids.iter().copied().collect();
                         kset != eset
                     }
-                    KernelNexthopKind::Member { .. } => true,
+                    KernelNexthopKind::Member { .. } | KernelNexthopKind::ShapeConflict => true,
                 },
             };
             if !needs_action {
@@ -2752,6 +2812,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let mut adopted_any = false;
         for (id, nh) in actual_by_id {
             if tracked_ids.contains(&id) {
+                // Tracked IDs are ours by construction (allocated and
+                // installed this run); shape drift at a tracked ID was
+                // healed by steps (1)/(2) above, not quarantined.
+                continue;
+            }
+            if self.quarantine_if_foreign_shape(&nh) {
                 continue;
             }
             if self.state.adopted_unreferenced.contains_key(&id) {
@@ -2850,7 +2916,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         let mut adopted_any = false;
         for (id, nh) in actual_by_id {
-            if tracked_ids.contains(&id) || self.state.adopted_l3_unreferenced.contains_key(&id) {
+            if tracked_ids.contains(&id) {
+                // Ours by construction; shape drift healed by the
+                // repair helpers above, not quarantined.
+                continue;
+            }
+            if self.quarantine_if_foreign_shape(&nh) {
+                continue;
+            }
+            if self.state.adopted_l3_unreferenced.contains_key(&id) {
                 continue;
             }
             match self.state.nh_id_alloc.reserve(id) {
@@ -2896,7 +2970,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 None => true,
                 Some(nh) => match &nh.kind {
                     KernelNexthopKind::Member { gateway } => gateway != ip,
-                    KernelNexthopKind::Group { .. } => true,
+                    // A tracked ID is ours by construction; a group or
+                    // shape-conflicting object squatting on it is
+                    // drift to heal (LAN-290 quarantine applies only
+                    // to untracked IDs).
+                    KernelNexthopKind::Group { .. } | KernelNexthopKind::ShapeConflict => true,
                 },
             };
             if !needs_action {
@@ -2941,7 +3019,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         let eset: BTreeSet<u32> = expected_member_ids.iter().copied().collect();
                         kset != eset
                     }
-                    KernelNexthopKind::Member { .. } => true,
+                    KernelNexthopKind::Member { .. } | KernelNexthopKind::ShapeConflict => true,
                 },
             };
             if !needs_action {

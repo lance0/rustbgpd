@@ -1473,7 +1473,8 @@ impl InMemoryHandle {
                 *member_ids = members;
                 Some(prev)
             }
-            crate::dataplane::KernelNexthopKind::Member { .. } => None,
+            crate::dataplane::KernelNexthopKind::Member { .. }
+            | crate::dataplane::KernelNexthopKind::ShapeConflict => None,
         }
     }
 

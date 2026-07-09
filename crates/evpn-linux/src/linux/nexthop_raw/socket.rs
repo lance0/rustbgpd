@@ -623,21 +623,45 @@ fn parse_dump_message_for_class(
         attrs = &attrs[advance..];
     }
 
-    // Filter: must have an ID, must be rustbgpd-tagged in the
-    // selected ownership domain, and must be FDB.
+    // Filter: must have an ID and be rustbgpd-tagged in the selected
+    // ownership domain. Foreign-tagged IDs are invisible to adoption.
     let Some(nh_id) = id else { return Ok(None) };
-    if !class.accepts(nh_id) || !is_fdb {
+    if !class.accepts(nh_id) {
         return Ok(None);
+    }
+
+    // LAN-290 shape validation: rustbgpd only ever writes FDB
+    // nexthops in its reserved ranges — a gateway member under a
+    // member tag, a group under a group tag, never both, never a
+    // non-FDB object (the kernel forbids `NHA_OIF` on FDB nexthops,
+    // so "has a device" is subsumed by the missing-FDB case). An
+    // in-range object failing these checks was written by another
+    // netlink agent in violation of the single-writer contract;
+    // surface it as `ShapeConflict` so the reconcile actor can fail
+    // closed (reserve the ID, never adopt, never delete) instead of
+    // silently dropping it — a dropped ID would leave its allocator
+    // slot free and a later alloc would `NLM_F_REPLACE` the foreign
+    // object.
+    let tag_is_group = NhIdAllocator::is_nhg(nh_id) || NhIdAllocator::is_l3_nhg(nh_id);
+    let shape_ok = is_fdb
+        && if tag_is_group {
+            member_ids.is_some() && gateway.is_none()
+        } else {
+            gateway.is_some() && member_ids.is_none()
+        };
+    if !shape_ok {
+        return Ok(Some(KernelNexthop {
+            id: nh_id,
+            kind: KernelNexthopKind::ShapeConflict,
+        }));
     }
 
     let kind = if let Some(member_ids) = member_ids {
         KernelNexthopKind::Group { member_ids }
-    } else if let Some(gateway) = gateway {
-        KernelNexthopKind::Member { gateway }
     } else {
-        // Tagged + FDB but neither group nor gateway — malformed;
-        // skip rather than fail the whole dump.
-        return Ok(None);
+        KernelNexthopKind::Member {
+            gateway: gateway.expect("shape_ok guarantees gateway for member tags"),
+        }
     };
 
     Ok(Some(KernelNexthop { id: nh_id, kind }))
@@ -809,7 +833,9 @@ mod tests {
             KernelNexthopKind::Member { gateway } => {
                 assert_eq!(gateway, "10.0.0.2".parse::<IpAddr>().unwrap());
             }
-            KernelNexthopKind::Group { .. } => panic!("expected Member, got Group"),
+            KernelNexthopKind::Group { .. } | KernelNexthopKind::ShapeConflict => {
+                panic!("expected Member, got {:?}", entry.kind)
+            }
         }
     }
 
@@ -835,7 +861,9 @@ mod tests {
             KernelNexthopKind::Group { member_ids } => {
                 assert_eq!(member_ids, vec![12, 13]);
             }
-            KernelNexthopKind::Member { .. } => panic!("expected Group, got Member"),
+            KernelNexthopKind::Member { .. } | KernelNexthopKind::ShapeConflict => {
+                panic!("expected Group, got other kind")
+            }
         }
     }
 
@@ -976,22 +1004,72 @@ mod tests {
             KernelNexthopKind::Group { member_ids } => {
                 assert_eq!(member_ids, vec![0x5000_0001, 0x5000_0002]);
             }
-            KernelNexthopKind::Member { .. } => panic!("expected Group, got Member"),
+            KernelNexthopKind::Member { .. } | KernelNexthopKind::ShapeConflict => {
+                panic!("expected Group, got other kind")
+            }
         }
     }
 
     #[test]
-    fn parse_dump_skips_non_fdb() {
-        // Rustbgpd-tagged but no NHA_FDB attribute — L3 nexthop, not ours.
+    fn parse_dump_flags_non_fdb_in_range_as_shape_conflict() {
+        // Rustbgpd-tagged but no NHA_FDB attribute — a co-resident
+        // writer squatting in our reserved range (LAN-290). Must be
+        // surfaced (not dropped) so the actor can fail closed.
         let body = build_dump_body(&[
             (NHA_ID, 0x3000_0001u32.to_ne_bytes().to_vec()),
             (NHA_GATEWAY, vec![10, 0, 0, 2]),
         ]);
-        assert!(
-            parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
-                .unwrap()
-                .is_none()
-        );
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("in-range object must be surfaced");
+        assert_eq!(entry.id, 0x3000_0001);
+        assert!(matches!(entry.kind, KernelNexthopKind::ShapeConflict));
+    }
+
+    #[test]
+    fn parse_dump_flags_group_under_member_tag_as_shape_conflict() {
+        // FDB group object squatting on a member-tagged ID.
+        let mut group_payload = Vec::new();
+        group_payload.extend_from_slice(&12u32.to_ne_bytes());
+        group_payload.extend_from_slice(&[0u8, 0, 0, 0]);
+        let body = build_dump_body(&[
+            (NHA_ID, 0x3000_0002u32.to_ne_bytes().to_vec()),
+            (NHA_GROUP, group_payload),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("entry");
+        assert!(matches!(entry.kind, KernelNexthopKind::ShapeConflict));
+    }
+
+    #[test]
+    fn parse_dump_flags_gateway_under_group_tag_as_shape_conflict() {
+        // FDB member object squatting on a group-tagged ID (L3 range
+        // exercised via the L3 class for coverage of both domains).
+        let body = build_dump_body(&[
+            (NHA_ID, 0x6000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 2]),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L3FdbNhg)
+            .unwrap()
+            .expect("entry");
+        assert!(matches!(entry.kind, KernelNexthopKind::ShapeConflict));
+    }
+
+    #[test]
+    fn parse_dump_flags_fdb_without_gateway_or_group_as_shape_conflict() {
+        // Tagged + FDB but neither gateway nor group — malformed /
+        // foreign; previously silently dropped, now fail-closed.
+        let body = build_dump_body(&[
+            (NHA_ID, 0x4000_0003u32.to_ne_bytes().to_vec()),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message_for_class(&body, NexthopDumpClass::L2FdbNhg)
+            .unwrap()
+            .expect("entry");
+        assert!(matches!(entry.kind, KernelNexthopKind::ShapeConflict));
     }
 
     #[test]

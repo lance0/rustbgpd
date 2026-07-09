@@ -24,6 +24,22 @@
 //! already exists in the kernel (which would silently `NLM_F_REPLACE`
 //! the existing object — see ADR-0059 §5 invariant 6 + slice 3 review
 //! callout #3).
+//!
+//! ## LAN-290: reserved-range single-writer contract
+//!
+//! The four tag ranges above are an **exclusive deployment contract**
+//! (documented for operators in `docs/deployment.md`): no co-resident
+//! netlink writer may create nexthop objects whose ID carries one of
+//! rustbgpd's high-nibble tags. The kernel does not enforce this, so
+//! the adoption/drift dump parse validates the *shape* of every
+//! in-range object (FDB flag, member-vs-group structure matching the
+//! tag) and the reconcile actor fails closed on conflicts: the ID is
+//! reserved here (never handed out → never clobbered), the object is
+//! excluded from adoption and every reap path, and the violation is
+//! counted on `evpn_foreign_nhid_range_conflicts_total`. Stamping
+//! `nh_protocol` on owned objects is a possible future
+//! defense-in-depth provenance marker only — another writer can set
+//! the same value, so it can never be the ownership basis.
 
 use thiserror::Error;
 

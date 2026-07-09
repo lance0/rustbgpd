@@ -99,6 +99,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   warn-once transition logs plus new `evpn_foreign_replaces_blocked_total`,
   `evpn_foreign_deletes_skipped_total`, and
   `evpn_foreign_owned_relinquished_total` counters. (LAN-283)
+- **EVPN Linux dataplane: reserved NHID ranges are now an enforced
+  single-writer contract.** rustbgpd's kernel nexthop-ID tag ranges
+  (`0x3000_0000`/`0x4000_0000` L2, `0x5000_0000`/`0x6000_0000` L3VXLAN) are
+  documented as exclusively rustbgpd-owned (`docs/deployment.md`), and the
+  startup-adoption and drift-recovery dumps now validate the shape of every
+  in-range object (FDB flag, member-vs-group structure matching the tag)
+  instead of silently dropping unexpected ones — previously a co-resident
+  writer's mis-shaped object in the range was invisible to the allocator, so
+  a later allocation could `NLM_F_REPLACE`-clobber it, while an FDB-flagged
+  one could be adopted and reaped. Shape conflicts now fail closed per ID:
+  the object is left untouched, excluded from adoption and every reap/delete
+  path, its ID quarantined so the allocator never hands it out, with a
+  warn-once log and a new `evpn_foreign_nhid_range_conflicts_total` counter.
+  (LAN-290)
 
 - **LLGR lifecycle is now per-AFI/SAFI and honors the original Long-Lived
   Stale Time through reconnects (RFC 9494).** LLGR stale deadlines are

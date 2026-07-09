@@ -207,6 +207,7 @@ pub struct BgpMetrics {
     evpn_foreign_replaces_blocked: IntCounter,
     evpn_foreign_deletes_skipped: IntCounter,
     evpn_foreign_owned_relinquished: IntCounter,
+    evpn_foreign_nhid_range_conflicts: IntCounter,
 
     // ── EVPN runtime apply (ADR-0063, #268 decomposition) ──────────
     evpn_runtime_decomposed_fail_stops: IntCounter,
@@ -1141,6 +1142,12 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_foreign_nhid_range_conflicts = IntCounter::new(
+            "evpn_foreign_nhid_range_conflicts_total",
+            "Foreign kernel nexthop objects found inside a rustbgpd-reserved NHID range (shape conflict; LAN-290 fail-closed quarantine). Counted once per conflicting ID.",
+        )
+        .expect("valid metric definition");
+
         let evpn_single_active_backup_active = IntGauge::new(
             "evpn_single_active_backup_active",
             "Number of (ESI, EthernetTag) single-active groups currently retargeted at \
@@ -1568,6 +1575,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_foreign_owned_relinquished.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_foreign_nhid_range_conflicts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_single_active_backup_active.clone()))
             .expect("metric not already registered");
         registry
@@ -1718,6 +1728,7 @@ impl BgpMetrics {
             evpn_foreign_replaces_blocked,
             evpn_foreign_deletes_skipped,
             evpn_foreign_owned_relinquished,
+            evpn_foreign_nhid_range_conflicts,
             evpn_runtime_decomposed_fail_stops,
             bmp_source_drops,
             bmp_collector_drops,
@@ -2837,6 +2848,14 @@ impl BgpMetrics {
             return;
         }
         self.evpn_foreign_owned_relinquished.inc_by(delta);
+    }
+
+    /// Increment the LAN-290 reserved-NHID-range conflict counter.
+    pub fn add_evpn_foreign_nhid_range_conflicts(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_foreign_nhid_range_conflicts.inc_by(delta);
     }
 
     /// Increment the #268 decomposed-apply fail-stop counter: a
