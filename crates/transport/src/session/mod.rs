@@ -80,8 +80,10 @@ pub(crate) struct PeerSession {
     /// - **At teardown**: `read_half` and both writer senders are
     ///   dropped synchronously. `writer_join` is **intentionally
     ///   retained** so the run-loop's writer-exit `select!` arm can
-    ///   observe the writer task draining its priority queue (e.g. a
-    ///   `Cease/8` we just enqueued) and exiting cleanly. The arm body
+    ///   observe the writer task exiting — cleanly after draining its
+    ///   priority queue on ordinary closes, or with
+    ///   `WriterExit::TornDown` after the saturation hard close (bulk
+    ///   backlog discarded, `Cease/8` flushed best-effort). The arm body
     ///   clears `writer_join = None` after `JoinHandle::await` resolves
     ///   exactly once — polling a completed `JoinHandle` again panics.
     /// - **Steady state**: `read_half.is_some() ==
@@ -103,6 +105,13 @@ pub(crate) struct PeerSession {
     /// timer and `None` when it stops it; dropping the sender (TCP
     /// teardown) also stops the cadence.
     writer_keepalive_tx: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
+    /// Hard-teardown signal for the writer task. Signalled (before the
+    /// senders are dropped) by `trigger_outbound_saturation_teardown`
+    /// only: the writer discards its bulk backlog so the `Cease/8` is
+    /// the final frame on the wire, then exits `WriterExit::TornDown`,
+    /// which the writer-exit arm maps to `TcpConnectionFails`. Ordinary
+    /// close paths drop it unsignalled (drain semantics preserved).
+    writer_teardown_tx: Option<watch::Sender<bool>>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687
     /// send-hold expiry) surfaces as a TCP-disconnect event.
@@ -491,6 +500,7 @@ impl PeerSession {
             writer_bulk_tx: None,
             writer_priority_tx: None,
             writer_keepalive_tx: None,
+            writer_teardown_tx: None,
             writer_join: None,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
@@ -601,6 +611,7 @@ impl PeerSession {
             writer_bulk_tx: Some(writer_handle.bulk_tx),
             writer_priority_tx: Some(writer_handle.priority_tx),
             writer_keepalive_tx: Some(writer_handle.keepalive_tx),
+            writer_teardown_tx: Some(writer_handle.teardown_tx),
             writer_join: Some(writer_handle.join),
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
@@ -947,6 +958,14 @@ impl PeerSession {
                     )),
                 );
             }
+            Ok(Err(writer::WriterExit::TornDown)) => {
+                // Saturation teardown: the writer discarded the bulk
+                // backlog, put the Cease/8 on the wire best-effort, and
+                // hard-closed. Fall through so the FSM sees
+                // `TcpConnectionFails` and the RIB gets its
+                // PeerDown/deregistration from this run-loop path.
+                debug!(peer = %self.peer_label, "writer task hard-closed by saturation teardown");
+            }
             Ok(Err(writer::WriterExit::Io(e))) => {
                 debug!(peer = %self.peer_label, error = %e, "writer task TCP error");
             }
@@ -983,6 +1002,10 @@ impl PeerSession {
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the run loop keeps every select! arm and its state wiring in one place"
+    )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
@@ -1109,6 +1132,7 @@ impl PeerSession {
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);
+                            self.writer_teardown_tx = Some(handle.teardown_tx);
                             self.writer_join = Some(handle.join);
                             self.drive_fsm(Event::TcpConnectionConfirmed).await;
                         }
@@ -1164,6 +1188,7 @@ impl PeerSession {
         self.writer_bulk_tx = Some(handle.bulk_tx);
         self.writer_priority_tx = Some(handle.priority_tx);
         self.writer_keepalive_tx = Some(handle.keepalive_tx);
+        self.writer_teardown_tx = Some(handle.teardown_tx);
         self.writer_join = Some(handle.join);
     }
 }

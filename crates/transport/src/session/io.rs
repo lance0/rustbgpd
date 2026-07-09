@@ -236,17 +236,20 @@ impl PeerSession {
     /// Tear the session down because the writer's bulk channel
     /// saturated — the peer hasn't drained `OUTBOUND_BUFFER` BGP
     /// messages, so we send a `Cease` / `Out of Resources` (RFC 4486
-    /// §4 subcode 8) NOTIFICATION on the priority channel ahead of
-    /// any pending bulk traffic, then drop the writer channels.
+    /// §4 subcode 8) NOTIFICATION on the priority channel, signal the
+    /// writer's hard-teardown watch, then drop the writer channels.
     ///
-    /// The writer's biased `select!` picks the priority NOTIFICATION
-    /// before falling through to the `else` arm, so the peer sees a
-    /// clean `Cease/8` if its TCP receive buffer ever drains. The
-    /// session's own writer-exit arm observes the resulting
-    /// `JoinHandle` resolution and drives the FSM through
-    /// `TcpConnectionFails` from there — no need to await an FSM
-    /// transition synchronously here, which keeps the bulk caller
-    /// chain (`send_route_update`) sync.
+    /// The teardown signal makes the writer **discard the queued bulk
+    /// backlog instead of draining it** — the Cease must be the final
+    /// frame the peer ever sees, and flushing a saturated queue would
+    /// delay the close indefinitely — flush the Cease best-effort
+    /// within a short bound (a saturated TCP window may never accept
+    /// it), and exit with `WriterExit::TornDown`. The session's
+    /// writer-exit arm observes that exit and drives the FSM through
+    /// `TcpConnectionFails` (→ `SessionDown` → RIB `PeerDown` /
+    /// deregistration) exactly as a real TCP failure would — no need
+    /// to await an FSM transition synchronously here, which keeps the
+    /// bulk caller chain (`send_route_update`) sync.
     pub(super) fn trigger_outbound_saturation_teardown(&mut self) {
         warn!(
             peer = %self.peer_label,
@@ -278,6 +281,12 @@ impl PeerSession {
         );
         self.metrics
             .record_message_sent(&self.peer_label, "notification");
+        // Signal the hard close BEFORE dropping the senders: the writer
+        // races this watch against any in-flight (wedged) write, so the
+        // teardown is never gated on the peer draining its window.
+        if let Some(tx) = &self.writer_teardown_tx {
+            let _ = tx.send(true);
+        }
         self.handle_tcp_disconnect();
     }
 
@@ -299,6 +308,7 @@ impl PeerSession {
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
+        self.writer_teardown_tx = None;
         self.read_buf.clear();
         self.clear_bmp_stream_repair();
     }
@@ -314,6 +324,7 @@ impl PeerSession {
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
+        self.writer_teardown_tx = None;
         self.read_buf.clear();
         self.clear_bmp_stream_repair();
     }
