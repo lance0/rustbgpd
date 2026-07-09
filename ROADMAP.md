@@ -31,8 +31,8 @@ those.
 |------|--------|-------|
 | BGP core (RFC 4271 FSM, 4-byte ASN, capabilities, collision detection) | Shipped | All 6 states, property-tested |
 | Address families: IPv4/IPv6 unicast (MP-BGP, RFC 4760) | Shipped | Dual-stack, FRR-interop validated |
-| Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Shipped | |
-| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Shipped | Helper + minimal restarting speaker |
+| Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Partial | Extended Message send/receive directionality correction queued from the post-v0.50 audit |
+| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; LLGR reconnect/consecutive-reset/per-AFI/SAFI timer corrections queued |
 | Route Refresh (2918) + Enhanced Route Refresh (7313) | Shipped | |
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
@@ -43,11 +43,11 @@ those.
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
-| RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
-| ASPA verification | Shipped | RTR v2, role-aware upstream/downstream verification, policy match |
+| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR reconnect/version/session/transaction corrections queued |
+| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics queued |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
-| BFD single-hop async + RFC 5882 coupling | Shipped | M51 |
+| BFD single-hop async + RFC 5882 coupling | Partial | M51 base receipt; receive-work budgeting and remote-AdminDown coupling correction queued |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4/path-marking drafts, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; ADR-0097, M81 receipt |
@@ -82,11 +82,12 @@ want an API-first BGP daemon with memory safety and predictable performance.
 
 ## Roadmap
 
-One prioritized, forward-looking list. Items are grouped **Next** (committed
-near-term), **Later** (planned, not yet scheduled), and **Maybe /
-demand-shaped** (deferred until operator signal). The current priority call is
-to finish the transaction surface and improve operational proof. Protocol
-breadth and additional performance work stay measurement- or demand-shaped.
+One prioritized, forward-looking list. Items are grouped **Immediate** (audited
+correctness and release work), **Next** (committed near-term), **Later**
+(planned, not yet scheduled), and **Maybe / demand-shaped** (deferred until
+operator signal). The current priority call is to finish the transaction
+surface and improve operational proof. Protocol breadth and additional
+performance work stay measurement- or demand-shaped.
 
 Prioritization is **technical-merit first, pilot-aware second**: lead with work
 that deepens rustbgpd's existing identity (a programmable BGP control plane),
@@ -96,6 +97,115 @@ need. Every major feature should leave behind **pilot-grade evidence** (interop,
 soak, or bench receipts), because credibility is a technical artifact, not
 marketing. Concretely: no speculative service-provider breadth just because FRR
 has it, no broad performance sprints without profile evidence.
+
+### Immediate: post-v0.50 audit remediation (2026-07-09)
+
+A repository-wide read-only audit at `155b24c2` found the workspace test,
+Clippy, formatting, and doc gates green, but adversarial lifecycle and
+failure-path review exposed correctness gaps that the happy-path suites do not
+exercise. This remediation tranche takes priority over new protocol breadth
+and the research-shaped queue below.
+
+**Release blockers — finish before the next tag:**
+
+- [ ] **Commit-confirm recovery state machine.** Preserve the pre-transaction
+  journal whenever apply completion is ambiguous (post-persist finalization,
+  reply loss, or compound rollback failure); do not clear the mutation fence
+  after failed abort/auto-revert while that journal can still boot-revert later
+  accepted intent. Add post-persist, failed-rollback, second-mutation, and boot
+  recovery tests (`src/config_transaction_control.rs`).
+- [ ] **Fail-closed release publication.** Require tag/version equality and a
+  named pre-release test/audit/package gate before publishing binaries or the
+  container image; include `LICENSE-MIT` and `LICENSE-APACHE` in release
+  archives and the runtime image, with artifact-content assertions.
+- [ ] **Restore dependency-audit green.** Update dev-only
+  `crossbeam-epoch 0.9.18` to a graph resolving `>= 0.9.20` for
+  RUSTSEC-2026-0204; keep the advisory gate fail-closed rather than adding an
+  ignore for a fixable dependency.
+- [ ] **Repair vacuous operational proofs.** Make M37 distinguish FRR query
+  failure from valid route absence; require numeric Gate 8b DF-counter samples
+  before restart monotonicity can pass; make M33 reject missing CSV columns.
+  Re-run or explicitly downgrade only the affected proof claims — the archived
+  Gate 8b memory/flip-cycle evidence and complete M33 receipt remain valid.
+
+**Correctness tranche 1 — highest-impact runtime work:**
+
+- [ ] **Transport saturation teardown.** After a bounded writer queue fills,
+  make Cease the final frame, close without draining queued UPDATEs, and drive
+  `TcpConnectionFails`/RIB/session cleanup from the real run loop. Add an
+  end-to-end regression that does not manually inject the FSM event.
+- [ ] **RTR/RPKI transaction state.** Model `(protocol version, session ID,
+  serial)` as one per-cache epoch; retain usable cache data through reconnect
+  until expiry/full replacement; validate Cache Response/EoD identity; correct
+  ASPA replacement and empty-provider withdrawal semantics; bound each RTR
+  transaction by deadline, expiry, PDU/record/byte budgets. Describe the
+  supported 8210bis subset honestly until the complete contract is proven.
+- [ ] **LLGR per-AFI/SAFI lifecycle.** Preserve the original LLST through
+  reconnect, retain LLGR-stale routes across consecutive resets until that
+  timer expires, and represent/sweep deadlines per AFI/SAFI. Prove mixed LLSTs
+  and reconnect-before-expiry across all supported families.
+- [ ] **Linux dataplane foreign-state ownership.** Preflight exact-key foreign
+  routes, neighbors, and FDB rows before any `replace`; relinquish cached L2/L3
+  ownership when a live snapshot shows a foreign replacement; revalidate
+  ownership before withdrawal, NotReady, or shutdown deletion. Pin same-key
+  foreign-state survival in in-memory and privileged netns tests.
+- [ ] **Failed `.rpol` reload consistency.** Do not publish the candidate rpol
+  registry as the runtime snapshot when `SyncRpolPolicies` rolls back or
+  rejects; keep existing and newly created sessions on one registry and retain
+  the failed candidate only as desired/config-file intent.
+
+**Correctness tranche 2 — bounded follow-through:**
+
+- [ ] **BFD receive and coupling bounds.** Cap socket packets/work per actor
+  turn so timers and shutdown cannot starve; bound or coalesce the state-change
+  channel; publish coupling-level changes when remote `AdminDown` changes even
+  if the local BFD state remains `Down`.
+- [ ] **Reload and listener truth.** Classify and pin `[security.grpc]`,
+  `[event_history]`, and `[managed_netdevs]` restart-only edits; bound the two
+  remaining PeerManager-to-RIB reply waits; make BGP bind failure visible in
+  readiness or fatal; turn readiness red and stop mutating/BGP admission at the
+  beginning of coordinated shutdown.
+- [ ] **EVPN mobility wrap policy.** Implement an RFC 7432-compliant policy for
+  a received MAC Mobility sequence of `u32::MAX` in MAC-only and MAC+IP
+  origination. Do not substitute unchecked or naive `wrapping_add`; pin all
+  first-learn and contender-update cases.
+- [ ] **RIB/API bounded reads.** Move filtering/pagination into bounded,
+  resumable RIB actor queries with cancellation; stop `rbgp best`, `received`,
+  and `advertised` from silently truncating at 100 rows; skip canceled MRT
+  requests before snapshot/encoding/file creation.
+- [ ] **FlowSpec policy context.** Represent a legal FlowSpec rule without a
+  destination-prefix component as `prefix = None`, never fabricated IPv4
+  `0.0.0.0/0`, and prove IPv4/IPv6 import/export policy behavior.
+- [ ] **BMP connection-generation synchronization.** Fence/cancel stale dump
+  tasks on collector reconnect and serialize initial Loc-RIB dump versus live
+  changes so an older dump announcement cannot follow a newer withdrawal.
+
+**Contained hardening and design follow-ups:**
+
+- [ ] Bound rpol `apply()` DAG depth, expansion, and evaluation work; remove the
+  unconditional policy-name allocation from the non-attributed hot path.
+- [ ] Make managed-netdev partial creation converge: roll back known in-process
+  pre-stamp failures, retry safely stamped incomplete bindings, and prune stale
+  managed/NHG permanent-suppression entries after intent withdrawal.
+- [ ] Make Type-1/2/4 EVPN origination acknowledgement-aware, with explicit
+  desired/pending/confirmed state and idempotent retry. Separately bound
+  unmatched pending IP bindings; design a safe-forget contract before pruning
+  MAC-mobility ratchet history.
+- [ ] Define NHID ownership authority. Numeric ranges plus `NHA_FDB` are not
+  kernel-enforced proof against arbitrary co-resident writers; either document
+  and validate a single-writer reserved-range deployment contract or stamp and
+  verify `nh_protocol` with a fail-closed fallback.
+- [ ] Correct Extended Message directionality and custom-limit encoding for
+  NOTIFICATION/ROUTE-REFRESH; rustbgpd's advertised capability controls inbound
+  acceptance, while the peer's capability controls outbound size.
+- [ ] Add CI compilation for transport `bench-internals`; make fuzz target
+  discovery fail on errors/zero targets and align public PR-smoke claims with
+  the actual workflow.
+
+The hosted-runner VRF/TCP-AO **skip-with-notice** behavior remains an accepted,
+documented availability contract, not an audit defect. A green conditional job
+does not claim a skipped receipt ran; coverage resumes automatically when the
+host capability is available.
 
 ### Next (research-shaped, July 2026)
 
