@@ -339,9 +339,11 @@ pre-commit config to `<runtime_state_dir>/commit-confirm-journal.json`; a
 restart that finds an unconfirmed journal reverts at boot before adopting the
 on-disk config, saves the unconfirmed candidate as `<config>.unconfirmed`, and
 fails closed on torn, unusable, or unremovable journal state. `GetConfigTransactionStatus`
-reports the current pending transaction or the last terminal lifecycle result,
-including failed abort/auto-revert attempts when rollback itself could not
-complete.
+reports the current pending transaction or the last terminal lifecycle result.
+A failed abort/auto-revert rollback is not terminal: the transaction stays
+pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
+fence stays closed until the abort is retried successfully, the candidate is
+confirmed, or a restart boot-reverts from the retained journal.
 
 `GetConfigTransactionStatus` (and the apply response) carries a
 `ConfigTransactionConfirmation`:

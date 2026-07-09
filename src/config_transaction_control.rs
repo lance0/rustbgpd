@@ -60,6 +60,15 @@ struct ConfirmedState {
     pending: Option<PendingConfirmedTransaction>,
     timer: Option<tokio::task::JoinHandle<()>>,
     last: Option<ConfirmedTransactionRecord>,
+    /// LAN-277: confirm id of a confirmed apply that failed in an
+    /// ambiguous-completion window (see [`ApplyFailure`]). The revert journal
+    /// is retained — it is the only proven path back — and every further
+    /// config mutation is fenced off: the daemon cannot prove what the failed
+    /// transaction left on disk, and a later-accepted mutation would be
+    /// silently clobbered by the retained journal's boot revert. Only a
+    /// restart resolves this state (boot revert consumes the journal, or the
+    /// operator removes it by hand).
+    ambiguous_failure_confirm_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +81,12 @@ struct PendingConfirmedTransaction {
     deadline_unix_seconds: u64,
     committed_sections: Vec<String>,
     runtime_snapshot_token: String,
+    /// LAN-277: set when an abort or timeout auto-revert rollback FAILED. The
+    /// transaction stays pending (fence closed, journal retained) because the
+    /// runtime/disk/journal are in a three-way inconsistency the daemon could
+    /// not repair; the operator resolves it by retrying abort, confirming the
+    /// candidate, or restarting (boot revert from the retained journal).
+    rollback_failed: Option<proto::ConfigTransactionConfirmationStatus>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +180,9 @@ impl ConfigTransactionController {
         operation: &'static str,
     ) -> Result<(), ConfigTransactionApplyError> {
         let state = self.state.lock().await;
+        if let Some(confirm_id) = &state.ambiguous_failure_confirm_id {
+            return Err(ambiguous_failure_fence_error(operation, confirm_id));
+        }
         if let Some(pending) = &state.pending {
             return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
                 "{operation} is blocked while confirmed config transaction {:?} is awaiting confirmation",
@@ -282,7 +300,7 @@ impl ConfigTransactionController {
                 // authoritative plan.
                 apply_config_transaction_locked(&self.deps, request)
                     .await
-                    .map_err(apply_error_to_gnmi_set_error)?
+                    .map_err(|failure| apply_error_to_gnmi_set_error(failure.error))?
             };
             gnmi_set_outcome_from_apply_response(response)
         });
@@ -315,7 +333,9 @@ impl ConfigTransactionController {
         } else {
             self.reject_if_pending("ConfigService.ApplyConfigTransaction")
                 .await?;
-            apply_config_transaction_locked(&self.deps, request).await
+            apply_config_transaction_locked(&self.deps, request)
+                .await
+                .map_err(|failure| failure.error)
         }
     }
 
@@ -363,11 +383,34 @@ impl ConfigTransactionController {
 
         let mut response = match apply_config_transaction_locked(&self.deps, request).await {
             Ok(response) => response,
-            Err(error) => {
-                // Nothing committed — a stale journal would only trigger a
-                // harmless same-content boot revert, but clean it up anyway.
+            Err(failure) => {
+                if failure.ambiguous {
+                    // LAN-277: the apply failed somewhere the daemon cannot
+                    // prove the candidate left no trace (lost persistence
+                    // acknowledgement, failed post-persist finalization, or
+                    // failed compound rollback). Retain the pre-transaction
+                    // journal — it is the only proven path back — and fence
+                    // off every further config mutation so a later-accepted
+                    // config cannot be clobbered by the retained journal's
+                    // boot revert.
+                    let mut state = self.state.lock().await;
+                    state.ambiguous_failure_confirm_id = Some(confirmed.confirm_id.clone());
+                    drop(state);
+                    error!(
+                        confirm_id = %confirmed.confirm_id,
+                        error = %failure.error,
+                        "confirmed config transaction failed with an ambiguous outcome; retaining the revert journal and blocking config mutations until restart"
+                    );
+                    return Err(append_error_context(
+                        failure.error,
+                        "the transaction outcome is ambiguous; the commit-confirm revert journal is retained and config mutations are blocked; restart rustbgpd to boot-revert to the pre-transaction config",
+                    ));
+                }
+                // Provably nothing committed — a stale journal would only
+                // trigger a harmless same-content boot revert, but clean it
+                // up anyway.
                 self.remove_confirm_journal_best_effort("confirmed apply failed");
-                return Err(error);
+                return Err(failure.error);
             }
         };
         if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
@@ -385,6 +428,7 @@ impl ConfigTransactionController {
             deadline_unix_seconds,
             committed_sections: response.committed_sections.clone(),
             runtime_snapshot_token: response.runtime_snapshot_token.clone(),
+            rollback_failed: None,
         };
         let confirmation = pending_confirmation_proto(
             &pending,
@@ -496,12 +540,16 @@ impl ConfigTransactionController {
                 })
             }
             Err(error) => {
-                self.remove_pending_after_rollback(
+                // LAN-277: a failed rollback is NOT a terminal outcome — the
+                // unconfirmed candidate is still running and the journal still
+                // holds the only proven way back. Keep the transaction
+                // pending: the mutation fence stays closed, the confirm timer
+                // stays armed (the timeout auto-revert retries the rollback),
+                // and the operator can retry abort, confirm to accept the
+                // candidate, or restart to boot-revert from the journal.
+                self.mark_pending_rollback_failed(
                     &confirm_id,
                     proto::ConfigTransactionConfirmationStatus::AbortFailed,
-                    pending.runtime_snapshot_token.clone(),
-                    "Abort requested, but rollback of the confirmed config transaction failed.",
-                    true,
                 )
                 .await;
                 self.metrics
@@ -551,12 +599,46 @@ impl ConfigTransactionController {
     ) -> Result<proto::ConfigTransactionStatusResponse, ConfigTransactionApplyError> {
         let state = self.state.lock().await;
         if let Some(pending) = &state.pending {
+            if let Some(status) = pending.rollback_failed {
+                let human_text = if status
+                    == proto::ConfigTransactionConfirmationStatus::AbortFailed
+                {
+                    "Abort rollback failed; the transaction is still pending: retry abort, confirm, or restart to boot-revert from the retained journal."
+                } else {
+                    "Automatic rollback failed; the transaction is still pending: retry abort, confirm, or restart to boot-revert from the retained journal."
+                };
+                let mut confirmation = pending_confirmation_proto(pending, human_text);
+                confirmation.status = status.into();
+                return Ok(proto::ConfigTransactionStatusResponse {
+                    confirmation: Some(confirmation),
+                    human_text: format!("{human_text}\n"),
+                });
+            }
             return Ok(proto::ConfigTransactionStatusResponse {
                 confirmation: Some(pending_confirmation_proto(
                     pending,
                     "Confirmed config transaction is awaiting confirmation.",
                 )),
                 human_text: "Confirmed config transaction is awaiting confirmation.\n".to_string(),
+            });
+        }
+        if let Some(confirm_id) = &state.ambiguous_failure_confirm_id {
+            let human_text = format!(
+                "Confirmed config transaction {confirm_id:?} failed with an ambiguous outcome; \
+                 config mutations are blocked and the revert journal is retained. Restart \
+                 rustbgpd to boot-revert to the pre-transaction config."
+            );
+            return Ok(proto::ConfigTransactionStatusResponse {
+                confirmation: Some(proto::ConfigTransactionConfirmation {
+                    status: proto::ConfigTransactionConfirmationStatus::None.into(),
+                    confirm_id: confirm_id.clone(),
+                    timeout_seconds: 0,
+                    deadline_unix_seconds: 0,
+                    committed_sections: Vec::new(),
+                    runtime_snapshot_token: String::new(),
+                    human_text: human_text.clone(),
+                }),
+                human_text: format!("{human_text}\n"),
             });
         }
         if let Some(confirm_id) = &state.applying_confirm_id {
@@ -598,6 +680,12 @@ impl ConfigTransactionController {
         confirm_id: &str,
     ) -> Result<(), ConfigTransactionApplyError> {
         let mut state = self.state.lock().await;
+        if let Some(failed) = &state.ambiguous_failure_confirm_id {
+            return Err(ambiguous_failure_fence_error(
+                "ConfigService.ApplyConfigTransaction",
+                failed,
+            ));
+        }
         if let Some(pending) = &state.pending {
             return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
                 "confirmed config transaction {:?} is already awaiting confirmation",
@@ -704,12 +792,16 @@ impl ConfigTransactionController {
                     Ok(())
                 }
                 Err(error) => {
-                    self.remove_pending_after_rollback(
+                    // LAN-277: keep the transaction pending on a failed
+                    // auto-revert (fence closed, journal retained). The
+                    // one-shot timer has already fired and is NOT re-armed —
+                    // retrying in a loop against a persistently failing
+                    // rollback would spin; the operator resolves it by
+                    // retrying abort, confirming, resetting the rollback
+                    // duration (which re-arms the timer), or restarting.
+                    self.mark_pending_rollback_failed(
                         &confirm_id,
                         proto::ConfigTransactionConfirmationStatus::AutoRevertFailed,
-                        pending.runtime_snapshot_token.clone(),
-                        "Confirmed config transaction timed out, but automatic rollback failed.",
-                        false,
                     )
                     .await;
                     self.metrics
@@ -793,7 +885,10 @@ impl ConfigTransactionController {
                 confirm_timeout_seconds: 0,
             },
         )
-        .await?;
+        .await
+        // A failed rollback keeps the transaction pending with the journal
+        // retained regardless of ambiguity, so the flag adds nothing here.
+        .map_err(|failure| failure.error)?;
         // A rollback whose re-apply plan did not commit leaves the
         // aborted/expired candidate running — that is a rollback failure,
         // not a success, and the caller must record AbortFailed /
@@ -837,6 +932,11 @@ impl ConfigTransactionController {
         }
     }
 
+    /// Consume the pending transaction after a SUCCESSFUL abort/auto-revert
+    /// rollback. The rollback re-persisted the pre-transaction config, so the
+    /// journal is consumed. A FAILED rollback never reaches here — it keeps
+    /// the transaction pending with the journal retained (see
+    /// `mark_pending_rollback_failed`).
     async fn remove_pending_after_rollback(
         &self,
         confirm_id: &str,
@@ -845,18 +945,7 @@ impl ConfigTransactionController {
         human_text: &'static str,
         abort_timer: bool,
     ) {
-        // Journal disposition mirrors the rollback outcome: a successful
-        // rollback re-persisted the pre-transaction config, so the journal is
-        // consumed. A FAILED rollback leaves the unconfirmed candidate
-        // running AND persisted — the journal is deliberately retained so the
-        // next daemon boot repairs what the running process could not.
-        if matches!(
-            status,
-            proto::ConfigTransactionConfirmationStatus::Aborted
-                | proto::ConfigTransactionConfirmationStatus::AutoReverted
-        ) {
-            self.remove_confirm_journal_best_effort("post-rollback cleanup");
-        }
+        self.remove_confirm_journal_best_effort("post-rollback cleanup");
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending.take() else {
             return;
@@ -880,6 +969,24 @@ impl ConfigTransactionController {
         });
     }
 
+    /// LAN-277: record a FAILED abort/auto-revert rollback on the still-pending
+    /// transaction. The pending entry (and with it the mutation fence and the
+    /// on-disk revert journal) is deliberately NOT consumed — the daemon could
+    /// not restore the pre-transaction state, so the transaction has not
+    /// reached a terminal outcome.
+    async fn mark_pending_rollback_failed(
+        &self,
+        confirm_id: &str,
+        status: proto::ConfigTransactionConfirmationStatus,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(pending) = state.pending.as_mut()
+            && pending.confirm_id == confirm_id
+        {
+            pending.rollback_failed = Some(status);
+        }
+    }
+
     async fn set_last_record(&self, record: ConfirmedTransactionRecord) {
         let mut state = self.state.lock().await;
         state.last = Some(record);
@@ -892,6 +999,80 @@ impl ConfigTransactionController {
             .last
             .as_ref()
             .map(record_confirmation_proto)
+    }
+}
+
+/// Internal apply-pipeline failure carrying whether the transaction's
+/// completion state is provably clean (LAN-277).
+///
+/// `ambiguous == false` means the daemon can prove nothing of the candidate
+/// survives: the config file was never replaced and every live mutation was
+/// rolled back, so the pre-transaction revert journal is redundant and may be
+/// removed. `ambiguous == true` marks the windows where that proof does not
+/// exist:
+///
+/// - **(a) post-persist finalization failure** — the candidate is already
+///   durable on disk when a later step (`commit_config_snapshot_stage`) fails;
+/// - **(b) persistence-acknowledgement loss** — the persister's reply channel
+///   dropped, so the config file may or may not now hold the candidate;
+/// - **(c) compound rollback failure** — the rollback of live/staged state
+///   itself failed, leaving the runtime part-candidate.
+///
+/// Public API surfaces strip this to the inner error; only the confirmed-apply
+/// path inspects the flag (journal retention + mutation fence).
+#[derive(Debug)]
+struct ApplyFailure {
+    error: ConfigTransactionApplyError,
+    ambiguous: bool,
+}
+
+impl ApplyFailure {
+    fn ambiguous(error: ConfigTransactionApplyError) -> Self {
+        Self {
+            error,
+            ambiguous: true,
+        }
+    }
+}
+
+impl From<ConfigTransactionApplyError> for ApplyFailure {
+    fn from(error: ConfigTransactionApplyError) -> Self {
+        Self {
+            error,
+            ambiguous: false,
+        }
+    }
+}
+
+/// The LAN-277 mutation-fence rejection for the wedged (ambiguous confirmed
+/// apply failure) state.
+fn ambiguous_failure_fence_error(operation: &str, confirm_id: &str) -> ConfigTransactionApplyError {
+    ConfigTransactionApplyError::FailedPrecondition(format!(
+        "{operation} is blocked: confirmed config transaction {confirm_id:?} failed with an \
+         ambiguous outcome and its revert journal is retained; restart rustbgpd to boot-revert \
+         to the pre-transaction config before further config mutations"
+    ))
+}
+
+/// Append operator guidance to an apply error without changing its variant
+/// (the variant maps to the gRPC status code).
+fn append_error_context(
+    error: ConfigTransactionApplyError,
+    context: &str,
+) -> ConfigTransactionApplyError {
+    match error {
+        ConfigTransactionApplyError::InvalidArgument(message) => {
+            ConfigTransactionApplyError::InvalidArgument(format!("{message}; {context}"))
+        }
+        ConfigTransactionApplyError::FailedPrecondition(message) => {
+            ConfigTransactionApplyError::FailedPrecondition(format!("{message}; {context}"))
+        }
+        ConfigTransactionApplyError::Unavailable(message) => {
+            ConfigTransactionApplyError::Unavailable(format!("{message}; {context}"))
+        }
+        ConfigTransactionApplyError::Internal(message) => {
+            ConfigTransactionApplyError::Internal(format!("{message}; {context}"))
+        }
     }
 }
 
@@ -1003,7 +1184,9 @@ async fn apply_config_transaction(
 
     let join = tokio::spawn(async move {
         let _guard = deps.lock.lock().await;
-        apply_config_transaction_locked(&deps, request).await
+        apply_config_transaction_locked(&deps, request)
+            .await
+            .map_err(|failure| failure.error)
     });
 
     join.await.map_err(|_| {
@@ -1016,7 +1199,7 @@ async fn apply_config_transaction(
 async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
-) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let plan = plan_candidate(
         &deps.peer_mgr_tx,
         request.candidate_toml.clone(),
@@ -1076,7 +1259,7 @@ async fn commit_apply_family(
     candidate: Config,
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
-) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     match family {
         ApplyFamily::FibTables => {
             commit_fib_transaction(
@@ -1164,7 +1347,7 @@ async fn commit_fib_transaction(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate: &Config,
     post_commit_runtime_snapshot_token: String,
-) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
     })?;
@@ -1175,7 +1358,10 @@ async fn commit_fib_transaction(
         candidate.fib_tables.clone(),
     )
     .await
-    .map_err(fib_error_to_apply_error)?;
+    .map_err(|failure| ApplyFailure {
+        error: fib_error_to_apply_error(failure.error),
+        ambiguous: failure.ambiguous,
+    })?;
     Ok(committable_response(
         post_commit_runtime_snapshot_token,
         vec![FIB_SECTION.to_string()],
@@ -1284,13 +1470,17 @@ async fn commit_candidate_snapshot_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
-) -> Result<(), ConfigTransactionApplyError> {
+) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
-    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
-        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, failure).await);
     }
-    commit_config_snapshot_stage(peer_mgr_tx).await?;
+    // LAN-277 window (a): the candidate is durable on disk from here on — a
+    // finalization failure must not be reported as a clean no-commit failure.
+    commit_config_snapshot_stage(peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
     Ok(())
 }
 
@@ -1300,7 +1490,7 @@ async fn commit_static_neighbors_locked(
     candidate_toml: String,
     candidate: &Config,
     committed_sections: &[String],
-) -> Result<(), ConfigTransactionApplyError> {
+) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
@@ -1310,7 +1500,9 @@ async fn commit_static_neighbors_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
     let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
@@ -1320,29 +1512,39 @@ async fn commit_static_neighbors_locked(
         let error = ConfigTransactionApplyError::Internal(
             "static-neighbor transaction executor received a non-static-neighbor diff".to_string(),
         );
-        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
     }
 
     let mut applied = Vec::new();
     let added = match resolve_static_neighbors(candidate, &neighbor_diff.added) {
         Ok(added) => added,
         Err(error) => {
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
     let changed = match resolve_static_neighbors(candidate, &neighbor_diff.changed) {
         Ok(changed) => changed,
         Err(error) => {
-            return Err(
-                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await,
-            );
+            return Err(rollback_static_and_snapshot(
+                peer_mgr_tx,
+                applied,
+                previous_toml,
+                error.into(),
+            )
+            .await);
         }
     };
     for config in added {
         if let Err(error) = add_static_peer(peer_mgr_tx, config.clone()).await {
-            return Err(
-                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await,
-            );
+            return Err(rollback_static_and_snapshot(
+                peer_mgr_tx,
+                applied,
+                previous_toml,
+                error.into(),
+            )
+            .await);
         }
         applied.push(AppliedStaticOp::Added(PeerKey::new(
             config.address,
@@ -1357,7 +1559,7 @@ async fn commit_static_neighbors_locked(
                     peer_mgr_tx,
                     applied,
                     previous_toml,
-                    error,
+                    error.into(),
                 )
                 .await);
             }
@@ -1371,17 +1573,22 @@ async fn commit_static_neighbors_locked(
                     peer_mgr_tx,
                     applied,
                     previous_toml,
-                    error,
+                    error.into(),
                 )
                 .await);
             }
         }
     }
 
-    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
-        return Err(rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await);
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(
+            rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, failure).await,
+        );
     }
-    commit_config_snapshot_stage(peer_mgr_tx).await?;
+    // LAN-277 window (a): candidate durable on disk from here on.
+    commit_config_snapshot_stage(peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
     Ok(())
 }
 
@@ -1394,7 +1601,7 @@ async fn commit_live_policy_impact_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
-) -> Result<usize, ConfigTransactionApplyError> {
+) -> Result<usize, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
@@ -1404,14 +1611,18 @@ async fn commit_live_policy_impact_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
 
     let targets = match resolve_live_policy_targets(&previous, candidate) {
         Ok(targets) => targets,
         Err(error) => {
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
 
@@ -1420,16 +1631,21 @@ async fn commit_live_policy_impact_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
 
-    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         return Err(
-            rollback_live_policy_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
+            rollback_live_policy_and_snapshot(peer_mgr_tx, priors, previous_toml, failure).await,
         );
     }
-    commit_config_snapshot_stage(peer_mgr_tx).await?;
+    // LAN-277 window (a): candidate durable on disk from here on.
+    commit_config_snapshot_stage(peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
     Ok(priors.len())
 }
 
@@ -1483,7 +1699,7 @@ async fn commit_peer_session_reshape_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
-) -> Result<PeerSessionReshapeCommit, ConfigTransactionApplyError> {
+) -> Result<PeerSessionReshapeCommit, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
@@ -1493,14 +1709,18 @@ async fn commit_peer_session_reshape_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
 
     let targets = match resolve_peer_session_reshape_targets(&previous, candidate) {
         Ok(targets) => targets,
         Err(error) => {
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
     let reconfigured = targets.static_targets.len();
@@ -1510,16 +1730,25 @@ async fn commit_peer_session_reshape_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
-            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
         }
     };
 
-    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
-        return Err(
-            rollback_peer_reshape_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
-        );
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(rollback_peer_reshape_and_snapshot(
+            peer_mgr_tx,
+            priors,
+            previous_toml,
+            failure,
+        )
+        .await);
     }
-    commit_config_snapshot_stage(peer_mgr_tx).await?;
+    // LAN-277 window (a): candidate durable on disk from here on.
+    commit_config_snapshot_stage(peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
 
     let dynamic_bounce =
         send_bounce_dynamic_range_peers(peer_mgr_tx, targets.dynamic_bounce_ranges).await;
@@ -1850,8 +2079,8 @@ async fn rollback_live_policy_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     priors: Vec<ResolvedPeerPolicy>,
     previous_toml: String,
-    original: ConfigTransactionApplyError,
-) -> ConfigTransactionApplyError {
+    original: ApplyFailure,
+) -> ApplyFailure {
     let live_rollback = send_apply_resolved_policy_snapshot(peer_mgr_tx, priors)
         .await
         .map(|_| ());
@@ -1859,7 +2088,7 @@ async fn rollback_live_policy_and_snapshot(
     match (live_rollback, snapshot_rollback) {
         (Ok(()), Ok(())) => original,
         (live_result, snapshot_result) => combine_rollback_errors(
-            &original,
+            &original.error,
             "live policy rollback",
             live_result.err(),
             snapshot_result.err(),
@@ -1871,8 +2100,8 @@ async fn rollback_peer_reshape_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     priors: Vec<PeerManagerNeighborConfig>,
     previous_toml: String,
-    original: ConfigTransactionApplyError,
-) -> ConfigTransactionApplyError {
+    original: ApplyFailure,
+) -> ApplyFailure {
     let live_rollback = send_apply_peer_reshape_snapshot(peer_mgr_tx, priors)
         .await
         .map(|_| ());
@@ -1880,7 +2109,7 @@ async fn rollback_peer_reshape_and_snapshot(
     match (live_rollback, snapshot_rollback) {
         (Ok(()), Ok(())) => original,
         (live_result, snapshot_result) => combine_rollback_errors(
-            &original,
+            &original.error,
             "peer reshape rollback",
             live_result.err(),
             snapshot_result.err(),
@@ -1989,12 +2218,12 @@ async fn commit_config_snapshot_stage(
 async fn rollback_snapshot_after_error(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     previous_toml: String,
-    original: ConfigTransactionApplyError,
-) -> ConfigTransactionApplyError {
+    original: ApplyFailure,
+) -> ApplyFailure {
     match rollback_config_snapshot(peer_mgr_tx, previous_toml).await {
         Ok(()) => original,
         Err(rollback_error) => {
-            combine_rollback_errors(&original, "rollback", None, Some(rollback_error))
+            combine_rollback_errors(&original.error, "rollback", None, Some(rollback_error))
         }
     }
 }
@@ -2017,20 +2246,26 @@ async fn reserve_persist_permit(
 async fn persist_candidate_config(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     candidate_toml: String,
-) -> Result<(), ConfigTransactionApplyError> {
+) -> Result<(), ApplyFailure> {
     let (ack_tx, ack_rx) = oneshot::channel();
     permit.send(ConfigEvent::ConfigTransactionCommitted {
         candidate_toml,
         ack: Some(ack_tx),
     });
-    ack_rx
-        .await
-        .map_err(|_| {
+    match ack_rx.await {
+        Ok(Ok(())) => Ok(()),
+        // The persister reported failure: the atomic write did not replace the
+        // config file, so disk provably still holds the previous config.
+        Ok(Err(message)) => Err(ConfigTransactionApplyError::FailedPrecondition(message).into()),
+        // LAN-277 window (b): the acknowledgement was lost. The persister may
+        // or may not have written the candidate — the on-disk outcome is
+        // unknowable from here.
+        Err(_) => Err(ApplyFailure::ambiguous(
             ConfigTransactionApplyError::Internal(
                 "config bridge dropped transaction persistence acknowledgement".to_string(),
-            )
-        })?
-        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+            ),
+        )),
+    }
 }
 
 async fn add_static_peer(
@@ -2155,14 +2390,14 @@ async fn rollback_static_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     applied: Vec<AppliedStaticOp>,
     previous_toml: String,
-    original: ConfigTransactionApplyError,
-) -> ConfigTransactionApplyError {
+    original: ApplyFailure,
+) -> ApplyFailure {
     let static_rollback = rollback_static_ops(peer_mgr_tx, applied).await;
     let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
     match (static_rollback, snapshot_rollback) {
         (Ok(()), Ok(())) => original,
         (static_result, snapshot_result) => combine_rollback_errors(
-            &original,
+            &original.error,
             "static rollback",
             static_result.err(),
             snapshot_result.err(),
@@ -2170,12 +2405,14 @@ async fn rollback_static_and_snapshot(
     }
 }
 
+/// LAN-277 window (c): only reached when a rollback component failed, so the
+/// runtime is left part-candidate — always an ambiguous completion.
 fn combine_rollback_errors(
     original: &ConfigTransactionApplyError,
     first_label: &str,
     first_rollback: Option<ConfigTransactionApplyError>,
     snapshot_rollback: Option<ConfigTransactionApplyError>,
-) -> ConfigTransactionApplyError {
+) -> ApplyFailure {
     error!(
         %original,
         ?first_rollback,
@@ -2189,7 +2426,7 @@ fn combine_rollback_errors(
     if let Some(error) = snapshot_rollback {
         let _ = write!(message, "; snapshot rollback: {error}");
     }
-    ConfigTransactionApplyError::Internal(message)
+    ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(message))
 }
 
 fn committable_response(
@@ -3582,6 +3819,71 @@ remote_asn = 65010
         }
     }
 
+    /// Persister that reports a clean write failure: the config file was
+    /// provably NOT replaced (unambiguous persist failure).
+    async fn reject_config_transaction_commits(mut config_rx: mpsc::Receiver<ConfigEvent>) {
+        while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
+        {
+            if let Some(ack) = ack {
+                let _ = ack.send(Err("persist rejected by test".to_string()));
+            }
+        }
+    }
+
+    /// Persister whose acknowledgement is lost (LAN-277 window (b)): the
+    /// caller can never learn whether the write happened.
+    async fn drop_config_transaction_commit_acks(mut config_rx: mpsc::Receiver<ConfigEvent>) {
+        while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
+        {
+            drop(ack);
+        }
+    }
+
+    /// `fake_snapshot_peer_manager`, except `CommitConfigSnapshotStage` drops
+    /// its reply — the persist has already succeeded when that command runs,
+    /// so this simulates a post-persist finalization failure (LAN-277 window
+    /// (a)).
+    async fn fake_snapshot_peer_manager_dropping_stage_commit(
+        mut rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                    let _ = reply.send(Ok(plan.clone()));
+                }
+                PeerManagerCommand::StageConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    let mut snapshot = snapshot_toml.lock().await;
+                    let previous = snapshot.clone();
+                    *snapshot = candidate_toml;
+                    let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                    drop(reply);
+                }
+                PeerManagerCommand::RestoreConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    *snapshot_toml.lock().await = candidate_toml;
+                    let _ = reply.send(Ok(()));
+                }
+                PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                    let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                        toml: snapshot_toml.lock().await.clone(),
+                        rpol_files: Vec::new(),
+                        rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                    }));
+                }
+                _ => panic!("unexpected peer-manager command in stage-commit-drop test"),
+            }
+        }
+    }
+
     fn confirmed_dynamic_request(
         candidate_toml: String,
         confirm_id: &str,
@@ -3809,7 +4111,7 @@ remote_asn = 65010
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("commit-confirm-journal.json");
         let previous_toml = base_toml("");
-        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
         let peers = Arc::new(Mutex::new(Vec::new()));
         // First stage (confirmed apply) succeeds; second (abort rollback) fails,
         // leaving the unconfirmed candidate running.
@@ -3861,6 +4163,33 @@ remote_asn = 65010
             journal_path.exists(),
             "a failed rollback must retain the journal so the next boot repairs it"
         );
+        // LAN-277: the fence must stay closed while the retained journal can
+        // still boot-revert later-accepted intent.
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("failed abort must keep the mutation fence closed");
+
+        // Boot recovery from the retained journal: the on-disk candidate is
+        // reverted to the journaled pre-transaction config.
+        let config_path = dir.path().join("rustbgpd.toml");
+        std::fs::write(&config_path, "unconfirmed candidate bytes").unwrap();
+        let revert = crate::confirm_journal::boot_revert_check(&journal_path, &config_path)
+            .expect("boot revert must apply")
+            .expect("retained journal must trigger a boot revert");
+        assert_eq!(revert.notice.confirm_id, "deploy-1");
+        assert_snapshot_matches_config(
+            &std::fs::read_to_string(&config_path).unwrap(),
+            &previous_toml,
+        );
+        assert_eq!(
+            std::fs::read_to_string(&revert.notice.backup_path).unwrap(),
+            "unconfirmed candidate bytes"
+        );
+        assert!(
+            !journal_path.exists(),
+            "boot revert must consume the journal"
+        );
         ack_task.abort();
     }
 
@@ -3904,6 +4233,263 @@ remote_asn = 65010
             !journal_path.exists(),
             "a rejected confirmed apply must not leave a journal behind"
         );
+        ack_task.abort();
+    }
+
+    /// Shared body for the LAN-277 ambiguous-completion apply tests: run one
+    /// confirmed apply expecting an error, then assert the journal is
+    /// retained, the mutation fence is closed (both for plain mutations and a
+    /// second confirmed apply), status names the wedge, and a boot revert from
+    /// the retained journal restores the pre-transaction config.
+    async fn assert_ambiguous_apply_failure_wedges(
+        controller: &ConfigTransactionController,
+        dir: &tempfile::TempDir,
+        journal_path: &std::path::Path,
+        previous_toml: &str,
+    ) -> ConfigTransactionApplyError {
+        let err = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect_err("the ambiguous confirmed apply must fail");
+        assert!(
+            journal_path.exists(),
+            "an ambiguous completion must retain the revert journal"
+        );
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("the mutation fence must stay closed after an ambiguous failure");
+        let overlap_err = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-2",
+                60,
+            ))
+            .await
+            .expect_err("a second confirmed apply must be rejected while wedged");
+        assert!(
+            matches!(overlap_err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("ambiguous")),
+            "{overlap_err:?}"
+        );
+        let status = controller.status().await.expect("status must succeed");
+        assert!(
+            status.human_text.contains("ambiguous"),
+            "status must name the wedged state: {}",
+            status.human_text
+        );
+
+        // Boot recovery: the retained journal reverts the (possibly-committed)
+        // on-disk candidate back to the pre-transaction config.
+        let config_path = dir.path().join("rustbgpd.toml");
+        std::fs::write(&config_path, "unconfirmed candidate bytes").unwrap();
+        let revert = crate::confirm_journal::boot_revert_check(journal_path, &config_path)
+            .expect("boot revert must apply")
+            .expect("retained journal must trigger a boot revert");
+        assert_eq!(revert.notice.confirm_id, "deploy-1");
+        assert_snapshot_matches_config(
+            &std::fs::read_to_string(&config_path).unwrap(),
+            previous_toml,
+        );
+        assert!(
+            !journal_path.exists(),
+            "boot revert must consume the journal"
+        );
+        err
+    }
+
+    /// LAN-277 window (a): the candidate persisted, then finalization
+    /// (`CommitConfigSnapshotStage`) failed. On disk the candidate IS
+    /// committed while the caller sees an error — the journal must be
+    /// retained and mutations fenced until a restart boot-reverts.
+    #[tokio::test]
+    async fn confirmed_apply_post_persist_finalize_failure_retains_journal_and_fences_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_dropping_stage_commit(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        let err =
+            assert_ambiguous_apply_failure_wedges(&controller, &dir, &journal_path, &previous_toml)
+                .await;
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Unavailable(ref message)
+                if message.contains("snapshot commit") && message.contains("ambiguous")),
+            "{err:?}"
+        );
+        ack_task.abort();
+    }
+
+    /// LAN-277 window (b): the persistence acknowledgement was lost — the
+    /// caller never learns whether the config file now holds the candidate.
+    /// Even though the runtime snapshot rollback succeeds, the journal must
+    /// be retained and mutations fenced.
+    #[tokio::test]
+    async fn confirmed_apply_persist_ack_loss_retains_journal_and_fences_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(drop_config_transaction_commit_acks(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        let err =
+            assert_ambiguous_apply_failure_wedges(&controller, &dir, &journal_path, &previous_toml)
+                .await;
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+                if message.contains("persistence acknowledgement") && message.contains("ambiguous")),
+            "{err:?}"
+        );
+        ack_task.abort();
+    }
+
+    /// LAN-277 window (c): the persist failed cleanly but the compound
+    /// rollback of the staged snapshot then failed too — the runtime is left
+    /// part-candidate. The journal must be retained and mutations fenced.
+    #[tokio::test]
+    async fn confirmed_apply_compound_rollback_failure_retains_journal_and_fences_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        // First stage (confirmed apply) succeeds; the rollback's
+        // RestoreConfigSnapshot fails.
+        let stage_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err(StageConfigSnapshotError::InvalidCandidate(
+                "restore rollback failed".to_string(),
+            )),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_stage_results(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+            stage_results,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(reject_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        let err =
+            assert_ambiguous_apply_failure_wedges(&controller, &dir, &journal_path, &previous_toml)
+                .await;
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+                if message.contains("rollback failed") && message.contains("ambiguous")),
+            "{err:?}"
+        );
+        ack_task.abort();
+    }
+
+    /// Counterpart to the ambiguous-window tests: a persist failure the
+    /// persister itself reported, followed by a successful rollback, is a
+    /// provably-clean failure — the journal is removed and the fence opens.
+    #[tokio::test]
+    async fn confirmed_apply_clean_persist_failure_removes_journal_and_opens_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(reject_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+
+        let err = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect_err("the rejected persist must fail the apply");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("persist rejected by test")),
+            "{err:?}"
+        );
+        assert!(
+            !journal_path.exists(),
+            "a provably-clean failure must not retain the journal"
+        );
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("a clean failure must not fence later mutations");
+        // The rollback restored the pre-transaction snapshot.
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
         ack_task.abort();
     }
 
@@ -4098,8 +4684,13 @@ remote_asn = 65010
         ack_task.abort();
     }
 
+    /// LAN-277: a failed abort rollback leaves the unconfirmed candidate
+    /// running — that is NOT a terminal outcome. The transaction must stay
+    /// pending (mutation fence closed, second mutations rejected) and a retry
+    /// of the abort must be able to resolve it.
     #[tokio::test]
-    async fn confirmed_abort_failure_clears_pending_with_failed_record() {
+    #[allow(clippy::too_many_lines)] // full failed-abort → fence → retry → resolution lifecycle
+    async fn confirmed_abort_failure_keeps_pending_fence_and_allows_retry() {
         let previous_toml = base_toml("");
         let candidate_toml = base_toml(
             r#"
@@ -4111,7 +4702,7 @@ peer_group = "ix-members"
 remote_asn = 65010
 "#,
         );
-        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let stage_results = Arc::new(Mutex::new(VecDeque::from([
             Ok(()),
@@ -4174,11 +4765,48 @@ remote_asn = 65010
         assert_eq!(confirmation.confirm_id, "deploy-1");
         assert_config_transaction_lifecycle_metric(&controller, "abort", "failure", 1.0);
         assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 0.0);
+        // The fence must stay closed: the unconfirmed candidate is still
+        // running, and a second mutation on top of that inconsistency would
+        // later be clobbered by a boot revert from the retained journal.
         controller
             .reject_if_pending("test mutation")
             .await
-            .expect("failed abort must clear the pending mutation gate");
+            .expect_err("failed abort must keep the pending mutation gate closed");
+        let overlap_err = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml.clone(),
+                "deploy-2",
+                60,
+            ))
+            .await
+            .expect_err("a second confirmed apply must be rejected after a failed abort");
+        assert!(
+            matches!(overlap_err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("awaiting confirmation")),
+            "{overlap_err:?}"
+        );
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+
+        // Retrying the abort (the queued stage failure is consumed) resolves
+        // the inconsistency: rollback succeeds, the fence opens.
+        let aborted = controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("abort retry must succeed once the rollback can commit");
+        assert_eq!(
+            aborted.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Aborted as i32
+        );
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 1.0);
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("successful abort retry must open the mutation gate");
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
         ack_task.abort();
     }
 
@@ -4186,8 +4814,10 @@ remote_asn = 65010
     /// at the RPC level but commits nothing — the aborted candidate is
     /// still running. The abort must report `AbortFailed`, not record a
     /// success while the runtime still holds the unconfirmed config.
+    /// LAN-277: the transaction stays pending (fence closed) and the
+    /// operator can resolve it by confirming the candidate.
     #[tokio::test]
-    async fn confirmed_abort_with_rejected_rollback_records_abort_failed() {
+    async fn confirmed_abort_with_rejected_rollback_keeps_pending_until_confirm() {
         let previous_toml = base_toml("");
         let candidate_toml = base_toml(
             r#"
@@ -4253,11 +4883,36 @@ remote_asn = 65010
             confirmation.status,
             proto::ConfigTransactionConfirmationStatus::AbortFailed as i32
         );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
         assert_config_transaction_lifecycle_metric(&controller, "abort", "failure", 1.0);
         assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 0.0);
         // The candidate snapshot is untouched — the rejected rollback
         // committed nothing.
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+        // LAN-277: the fence stays closed while the inconsistency persists.
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("failed abort must keep the pending mutation gate closed");
+
+        // Confirming the still-running candidate is a valid resolution: it
+        // clears the pending state (and would consume the journal), and the
+        // fence opens.
+        let confirmed = controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("confirm must resolve a failed-abort pending transaction");
+        assert_eq!(
+            confirmed.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+        );
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("confirm must open the mutation gate");
         ack_task.abort();
     }
 
@@ -4483,9 +5138,16 @@ remote_asn = 65010
             confirmation.status,
             proto::ConfigTransactionConfirmationStatus::AutoRevertFailed as i32
         );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
         assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "failure", 1.0);
         assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "success", 0.0);
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+        // LAN-277: a failed auto-revert keeps the transaction pending and the
+        // mutation fence closed until the operator resolves it.
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("failed auto-revert must keep the mutation fence closed");
         ack_task.abort();
     }
 

@@ -127,10 +127,16 @@ aborted, or auto-reverted.
 
 `rbgp config status` reports the lifecycle outcome: `pending` (timer running),
 `confirmed`, `aborted`, `auto_reverted` (timer expired and the pre-commit
-snapshot was re-applied), or one of the two rollback-failure terminal states,
-`auto_revert_failed` / `abort_failed` — these mean the daemon could not re-apply
-the pre-commit snapshot, the fence has been cleared, and the running config
-needs manual correction.
+snapshot was re-applied), or one of the two rollback-failure states,
+`auto_revert_failed` / `abort_failed` — these mean the daemon could not
+re-apply the pre-commit snapshot. The transaction then stays pending and the
+mutation fence stays closed (the revert journal is retained, so a mutation
+accepted on top of the inconsistency would be clobbered by a boot revert);
+resolve it by retrying the abort, confirming the candidate, or restarting the
+daemon to boot-revert. A confirmed apply that itself fails without proof of a
+terminal outcome (lost persistence acknowledgement, post-persist finalization
+failure, or compound rollback failure) likewise retains the journal and blocks
+all config mutations until a restart boot-reverts.
 
 Commit-confirmed also survives a daemon restart or crash inside the confirm
 window. Before the candidate commits, the daemon journals the pre-commit config
