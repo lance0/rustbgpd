@@ -212,6 +212,16 @@ impl RibManager {
 
             // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
+            //
+            // GR-stale (`is_stale`) EVPN routes are deliberately NOT gated
+            // here: RFC 4724 permits advertising stale paths during the
+            // restart window, and withdrawing them would tear down remote
+            // VXLAN forwarding state (MAC/IP bindings, flood lists) for a
+            // peer expected back within the restart time — flood-and-relearn
+            // churn that usually costs more than briefly forwarding toward a
+            // stale VTEP. Operators who cannot tolerate stale MAC/IP
+            // forwarding should shorten `stale_routes_time`. Pinned by
+            // `evpn_gr_stale_routes_keep_exporting_during_gr_window`.
             if super::llgr_stale_export_suppressed(
                 best.is_llgr_stale,
                 best.communities(),

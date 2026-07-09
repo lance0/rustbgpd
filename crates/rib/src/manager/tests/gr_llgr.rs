@@ -1204,7 +1204,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
     );
 
     // LLGR expires with the peer still gone — the config must not leak.
-    manager.sweep_llgr_stale(peer);
+    manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::Unicast)]);
     assert!(
         !manager.llgr_peer_config.contains_key(&peer),
         "LLGR expiry must drop the per-peer LLGR config"
@@ -1313,7 +1313,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
     assert!(manager.ribs.contains_key(&peer), "LLGR retains the rib");
 
     // LLGR expires with the peer still gone.
-    manager.sweep_llgr_stale(peer);
+    manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::Unicast)]);
 
     assert!(
         !manager.ribs.contains_key(&peer),
@@ -1396,3 +1396,496 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
 }
 
 // --- Route Reflector tests ---
+
+// --- Per-family LLGR lifecycle (LAN-282) + LLGR export coupling (LAN-191) ---
+
+/// Re-establish `peer` through the run loop as an iBGP RR client with the
+/// given sendable families.
+async fn channel_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    sendable: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: sendable,
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, afi: Afi, safi: Safi) {
+    tx.send(RibUpdate::EndOfRib {
+        peer,
+        session_id: 0,
+        afi,
+        safi,
+    })
+    .await
+    .unwrap();
+}
+
+/// RFC 9494 §4.3: the stale time is per AFI/SAFI. Two families with
+/// different peer-advertised stale times must be swept on their OWN
+/// deadlines — the shorter one first, the longer one retained until its
+/// own timer expires (the old peer-wide min purged both at the shorter).
+#[tokio::test]
+async fn llgr_mixed_stale_times_sweep_per_family() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // GR with per-family LLGR stale times: unicast 10 s, VPN 60 s.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![
+            rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 10,
+            },
+            rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::MplsVpn,
+                forwarding_preserved: false,
+                stale_time: 60,
+            },
+        ],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+    assert!(query_best_routes(&tx).await[0].is_stale);
+
+    // Past the GR timer: both families promote to LLGR-stale.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    assert!(query_best_routes(&tx).await[0].is_llgr_stale);
+    assert!(query_vpn_routes(&tx).await[0].is_llgr_stale);
+
+    // Past the unicast stale time only: unicast swept, VPN retained.
+    tokio::time::advance(Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        query_best_routes(&tx).await.is_empty(),
+        "shorter-stale-time family must be swept on its own deadline"
+    );
+    let vpn = query_vpn_routes(&tx).await;
+    assert_eq!(
+        vpn.len(),
+        1,
+        "longer-stale-time family must survive the shorter family's sweep"
+    );
+    assert!(vpn[0].is_llgr_stale);
+
+    // Past the VPN stale time: the remaining family is swept.
+    tokio::time::advance(Duration::from_secs(50)).await;
+    tokio::task::yield_now().await;
+    assert!(query_vpn_routes(&tx).await.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 9494: the ORIGINAL Long-Lived Stale Time bounds total retention.
+/// A peer that re-establishes during LLGR and goes down again must not
+/// restart the timer — the surviving deadline is re-used, and the
+/// LLGR-stale routes are retained (not purged) across the second reset.
+#[tokio::test]
+async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // GR down with a 20 s LLST; promotion happens ~t=3, deadline ~t=23.
+    tx.send(gr_with_llgr(source, 2, family.clone(), family.clone(), 20))
+        .await
+        .unwrap();
+    assert!(query_best_routes(&tx).await[0].is_stale);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    assert!(query_best_routes(&tx).await[0].is_llgr_stale);
+
+    // ~t=13: re-establish during LLGR, then drop again WITHOUT refreshing.
+    // A restarted timer would push the sweep out to ~t=33.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    tx.send(gr_with_llgr(source, 100, family.clone(), family, 20))
+        .await
+        .unwrap();
+
+    // The LLGR-stale route survives the second reset (RFC 9494 retention —
+    // the old purge-on-second-reset would have deleted it here)...
+    let best = query_best_routes(&tx).await;
+    assert_eq!(
+        best.len(),
+        1,
+        "LLGR-stale route must be retained across consecutive resets"
+    );
+    assert!(best[0].is_llgr_stale);
+    assert!(!best[0].is_stale, "must not be demoted back to GR-stale");
+
+    // ...but only until the ORIGINAL deadline (~t=23): at ~t=25 it is gone,
+    // long before both the restarted-timer horizon (~t=33) and the second
+    // session's GR window (~t=113).
+    tokio::time::advance(Duration::from_secs(12)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        query_best_routes(&tx).await.is_empty(),
+        "original LLST must bound total retention through reconnects"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LLGR→GR re-establishment carries the `LLGR_STALE` state: routes stay
+/// LLGR-stale (flag + community) through the new session until End-of-RIB,
+/// which retires both the staleness and the family's surviving original
+/// deadline — a refreshed table must NOT be swept at the old LLST horizon.
+#[tokio::test]
+async fn llgr_reestablish_carries_llgr_stale_until_eor() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(gr_with_llgr(source, 2, family.clone(), family, 60))
+        .await
+        .unwrap();
+    assert!(query_best_routes(&tx).await[0].is_stale);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    // Re-establish during LLGR: the unrefreshed route keeps its LLGR-stale
+    // flag and community while the session waits for End-of-RIB.
+    let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(
+        best[0].is_llgr_stale,
+        "LLGR_STALE state must carry through re-establishment until EoR"
+    );
+    assert!(
+        best[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+    );
+
+    // The peer re-advertises the route and completes with End-of-RIB.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    send_eor(&tx, source, Afi::Ipv4, Safi::Unicast).await;
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(!best[0].is_stale && !best[0].is_llgr_stale);
+    assert!(
+        !best[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+        "locally injected LLGR_STALE community must be stripped after EoR"
+    );
+
+    // Past the original 60 s LLST: the refreshed route must survive — EoR
+    // retired the family's deadline.
+    tokio::time::advance(Duration::from_secs(70)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        query_best_routes(&tx).await.len(),
+        1,
+        "EoR must retire the surviving original deadline for the family"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Reconnect-before-expiry across every LLGR-capable family on one peer
+/// (unicast, VPN, labeled, EVPN, RTC): promotion marks all five families
+/// LLGR-stale; the peer re-establishes, re-advertises everything, and
+/// sends per-family End-of-RIB — every route survives past the original
+/// LLST fresh.
+#[expect(
+    clippy::too_many_lines,
+    reason = "announce + assert across five address families"
+)]
+#[tokio::test]
+async fn llgr_reconnect_before_expiry_across_families() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let src_v4 = Ipv4Addr::new(10, 0, 0, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let families = vec![
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::RtConstrain),
+    ];
+
+    let announce_all = |tx: mpsc::Sender<RibUpdate>| async move {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_route(prefix, src_v4)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![make_evpn_imet(src_v4, 100)],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_vpn_rib_route(src_v4, 31, 100, 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::LabeledRoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_labeled_rib_route(src_v4, 41, 100, 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_rtc_rib_route(src_v4, 7, 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    };
+    announce_all(tx.clone()).await;
+
+    tx.send(gr_with_llgr(
+        source,
+        2,
+        families.clone(),
+        families.clone(),
+        30,
+    ))
+    .await
+    .unwrap();
+    // Sync: the GR entry must be processed before time advances.
+    assert!(query_best_routes(&tx).await[0].is_stale);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    assert!(query_best_routes(&tx).await[0].is_llgr_stale);
+    assert!(query_vpn_routes(&tx).await[0].is_llgr_stale);
+    assert!(query_labeled_routes(&tx).await[0].is_llgr_stale);
+    assert!(query_evpn_routes(&tx).await[0].is_llgr_stale);
+    assert!(query_rtc_routes(&tx).await[0].is_llgr_stale);
+
+    // Re-establish before expiry, re-advertise everything, EoR per family.
+    let _out_rx = channel_peer_up(&tx, source, families.clone()).await;
+    announce_all(tx.clone()).await;
+    for &(afi, safi) in &families {
+        send_eor(&tx, source, afi, safi).await;
+    }
+
+    // Past the original 30 s LLST: every family survived, fresh.
+    tokio::time::advance(Duration::from_secs(35)).await;
+    tokio::task::yield_now().await;
+    let best = query_best_routes(&tx).await;
+    assert_eq!(
+        best.len(),
+        1,
+        "unicast must survive reconnect-before-expiry"
+    );
+    assert!(!best[0].is_stale && !best[0].is_llgr_stale);
+    let vpn = query_vpn_routes(&tx).await;
+    assert_eq!(vpn.len(), 1, "VPN must survive reconnect-before-expiry");
+    assert!(!vpn[0].is_stale && !vpn[0].is_llgr_stale);
+    let labeled = query_labeled_routes(&tx).await;
+    assert_eq!(
+        labeled.len(),
+        1,
+        "labeled must survive reconnect-before-expiry"
+    );
+    assert!(!labeled[0].is_stale && !labeled[0].is_llgr_stale);
+    let evpn = query_evpn_routes(&tx).await;
+    assert_eq!(evpn.len(), 1, "EVPN must survive reconnect-before-expiry");
+    assert!(!evpn[0].is_stale && !evpn[0].is_llgr_stale);
+    // The RTC-capable re-establishment also self-originates the default
+    // wildcard RTC NLRI — pick out the peer's own route.
+    let rtc = query_rtc_routes(&tx).await;
+    let peer_rtc: Vec<_> = rtc.iter().filter(|r| r.peer == source).collect();
+    assert_eq!(
+        peer_rtc.len(),
+        1,
+        "RTC must survive reconnect-before-expiry"
+    );
+    assert!(!peer_rtc[0].is_stale && !peer_rtc[0].is_llgr_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-191: EVPN GR-stale routes deliberately continue to be exported
+/// during the GR window (RFC 4724 permits advertising stale paths) — the
+/// operational tradeoff is documented at the EVPN staging gate. A GR entry
+/// must not withdraw the already-advertised EVPN route from other peers.
+#[tokio::test]
+async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // eBGP target: iBGP targets would be split-horizon-suppressed without
+    // an RR cluster-id, and GR-stale export is not eBGP-gated (only
+    // LLGR-stale toward a non-LLGR eBGP peer is).
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut out_rx = llgr_gate_peer_up(&tx, target, evpn_sendable(), true, vec![], None).await;
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let key = imet.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let first = out_rx.recv().await.unwrap();
+    assert_eq!(first.evpn_announce.len(), 1);
+
+    // Source enters GR covering EVPN (no LLGR).
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let evpn = query_evpn_routes(&tx).await;
+    assert_eq!(evpn.len(), 1);
+    assert!(evpn[0].is_stale, "route must be GR-stale during the window");
+
+    // The stale route stays exported: no withdraw toward the target.
+    while let Ok(update) = out_rx.try_recv() {
+        assert!(
+            !update.evpn_withdraw.contains(&key),
+            "GR-stale EVPN route must keep exporting during the GR window"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}

@@ -133,6 +133,16 @@ impl PeerSession {
     /// LLGR peers too). This lives beside the other per-peer attribute
     /// rewrites (eBGP `LOCAL_PREF` strip, `ORIGINATOR_ID`/`CLUSTER_LIST`,
     /// `GShut` attach) rather than at RIB staging.
+    ///
+    /// Detection is by the `LLGR_STALE` community rather than the RIB's
+    /// `is_llgr_stale` flag — deliberately: the community is the superset.
+    /// A route *received* already tagged by an upstream LLGR helper carries
+    /// only the community (the local flag is never set for it), yet §4.6
+    /// applies to it all the same. For locally promoted routes the flag and
+    /// community are coupled by construction (promotion injects the
+    /// community; the flag is never set anywhere else), and that coupling
+    /// is pinned by `llgr_stale_flag_implies_community_across_mutations` in
+    /// `rustbgpd-rib::adj_rib_in`.
     fn apply_llgr_stale_export_form(
         &self,
         attrs: &mut Vec<PathAttribute>,

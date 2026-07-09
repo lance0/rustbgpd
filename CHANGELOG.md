@@ -87,6 +87,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `evpn_foreign_deletes_skipped_total`, and
   `evpn_foreign_owned_relinquished_total` counters. (LAN-283)
 
+- **LLGR lifecycle is now per-AFI/SAFI and honors the original Long-Lived
+  Stale Time through reconnects (RFC 9494).** LLGR stale deadlines are
+  tracked per (peer, AFI, SAFI) instead of one peer-wide minimum, so a
+  family with a longer negotiated stale time is no longer purged when a
+  shorter-lived family's timer fires; each family sweeps on its own
+  deadline. A family's deadline is stamped once when it enters the LLGR
+  stale phase and survives re-establishment while routes remain
+  LLGR-stale: a peer that reconnects during LLGR and goes down again
+  re-uses the surviving deadline instead of restarting the timer, and
+  LLGR-stale routes are retained (not purged) across consecutive resets
+  until that original deadline expires — End-of-RIB for the family retires
+  it. Also documented and pinned two deliberate LLGR export behaviors:
+  transport's LLGR-stale export form detects staleness by the `LLGR_STALE`
+  community (superset of the flag — it also catches upstream-tagged
+  routes) with a regression test proving flag/community coupling across
+  the Adj-RIB-In mutation paths, and EVPN GR-stale routes intentionally
+  continue to be exported during the GR window (RFC 4724) rather than
+  triggering VXLAN flood-and-relearn churn. (LAN-282, LAN-191)
 - **Outbound saturation teardown: Cease is the final frame, and cleanup runs
   from the run loop.** When a peer stopped draining and the bounded writer
   queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
