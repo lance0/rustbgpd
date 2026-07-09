@@ -356,7 +356,11 @@ pub fn synthesize_end_of_rib(afi: Afi, safi: Safi) -> Option<Bytes> {
 /// # Panics
 ///
 /// Panics if the fabricated OPEN cannot be encoded — impossible by
-/// construction (fixed capability set, bounded size).
+/// construction: the capability set is the compile-time
+/// [`LOC_RIB_FAMILIES`] constant plus one 4-octet-ASN capability, and
+/// the `fabricated_open_optional_params_bounded` test pins the encoded
+/// optional-parameters size well under the RFC 4271 one-octet limit,
+/// so capability growth breaks CI, never a running daemon.
 #[must_use]
 pub fn loc_rib_open_pdu(local_asn: u32, router_id: Ipv4Addr) -> Bytes {
     let mut capabilities: Vec<Capability> = LOC_RIB_FAMILIES
@@ -813,6 +817,34 @@ mod tests {
         // A decisive step without a registered code yields no reason.
         let unmapped = loc_rib_path_status(false, Some(BestPathReason::RpkiPreference));
         assert_eq!(unmapped.reason, None);
+    }
+
+    /// LAN-193: the bounded-size proof behind `loc_rib_open_pdu`'s
+    /// infallible `expect`. The fabricated OPEN's capability set is the
+    /// compile-time `LOC_RIB_FAMILIES` constant plus the 4-octet-ASN
+    /// capability; its encoded optional-parameters block must stay
+    /// comfortably under the RFC 4271 §4.2 one-octet length limit
+    /// (255) even with maximal field values. Family growth that
+    /// approaches the limit fails HERE, in CI — never as a runtime
+    /// panic in a running daemon.
+    #[test]
+    fn fabricated_open_optional_params_bounded() {
+        let pdu = loc_rib_open_pdu(u32::MAX, Ipv4Addr::BROADCAST);
+        // OPEN body after the 19-byte BGP header: version(1) +
+        // my_as(2) + hold_time(2) + bgp_identifier(4), then the
+        // optional-parameters length octet.
+        let opt_params_len = pdu[19 + 9];
+        assert!(
+            opt_params_len <= 200,
+            "fabricated Loc-RIB OPEN optional parameters ({opt_params_len} B) are \
+             approaching the RFC 4271 255 B limit — switch loc_rib_open_pdu to \
+             typed error propagation before growing LOC_RIB_FAMILIES further"
+        );
+        // The PDU is exactly what its header claims (fully encodable).
+        assert_eq!(
+            usize::from(u16::from_be_bytes([pdu[16], pdu[17]])),
+            pdu.len()
+        );
     }
 
     /// The fabricated OPEN (RFC 9069 §5.2.1) carries the 4-octet-ASN

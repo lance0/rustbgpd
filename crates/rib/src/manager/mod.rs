@@ -1229,8 +1229,10 @@ impl RibManager {
     /// robust to mutations between chunks — a route that survives the
     /// dump is emitted exactly once, a removed route simply stops
     /// matching, and an insertion behind the cursor reaches the
-    /// collector via the live stream (the accepted dump-vs-live race,
-    /// ADR-0097). A phase yielding fewer than `N` keys is exhausted:
+    /// collector via the live stream (which the BMP manager holds back
+    /// until the dump's End-of-RIB, so deltas always follow the
+    /// snapshot rows on the wire). A phase yielding fewer than `N`
+    /// keys is exhausted:
     /// unicast hands over to VPN, VPN closes the dump with one
     /// End-of-RIB per streamed family (dump→EoR→live ordering).
     // ponytail: each chunk re-scans the family's key set (O(table) per
@@ -1245,10 +1247,6 @@ impl RibManager {
         use crate::bmp_sync;
         use rustbgpd_bmp::BmpDumpCursor as Cursor;
         let now = std::time::SystemTime::now();
-        // Install time ≈ receive wall time, recovered from the monotonic
-        // receive instant (RFC 9069 per-peer header timestamp).
-        let install_time =
-            |received_at: std::time::Instant| now.checked_sub(received_at.elapsed()).unwrap_or(now);
         // Dump entries carry the Path Marking status bits (Best +
         // stale flags) but no reason code — deriving one would mean a
         // full best-path re-comparison per prefix; live emissions
@@ -1270,7 +1268,12 @@ impl RibManager {
                     BMP_DUMP_CHUNK_SIZE,
                 );
                 for key in &keys {
-                    let Some(route) = self.loc_rib.get(key) else {
+                    // Stored wall-clock install time (RFC 9069 per-peer
+                    // header timestamp) — identical to the live tap's
+                    // emission timestamp for the same install, immune to
+                    // clock steps between install and dump (LAN-193).
+                    let Some((route, installed_at)) = self.loc_rib.get_with_install_time(key)
+                    else {
                         continue;
                     };
                     if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
@@ -1278,7 +1281,7 @@ impl RibManager {
                             route.is_stale || route.is_llgr_stale,
                             None,
                         );
-                        messages.push((pdu, install_time(route.received_at), Some(status)));
+                        messages.push((pdu, installed_at, Some(status)));
                     }
                 }
                 match keys.last() {
@@ -1293,7 +1296,8 @@ impl RibManager {
                     BMP_DUMP_CHUNK_SIZE,
                 );
                 for key in &keys {
-                    let Some(route) = self.loc_rib.get_vpn(key) else {
+                    let Some((route, installed_at)) = self.loc_rib.get_vpn_with_install_time(key)
+                    else {
                         continue;
                     };
                     if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
@@ -1301,7 +1305,7 @@ impl RibManager {
                             route.is_stale || route.is_llgr_stale,
                             None,
                         );
-                        messages.push((pdu, install_time(route.received_at), Some(status)));
+                        messages.push((pdu, installed_at, Some(status)));
                     }
                 }
                 match keys.last() {

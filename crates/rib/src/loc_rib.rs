@@ -4,6 +4,7 @@
 
 use std::cmp::Ordering;
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Origin, PathAttribute, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
@@ -19,7 +20,12 @@ use crate::route::{
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
-    routes: HashMap<Prefix, Route>,
+    /// Best route per prefix, paired with its wall-clock install time —
+    /// captured when the best last changed. The RFC 9069 BMP dump path
+    /// reads the stored stamp (not a reconstruction from the monotonic
+    /// clock), so an NTP step between install and dump cannot skew the
+    /// per-peer header timestamp (LAN-193).
+    routes: HashMap<Prefix, (Route, SystemTime)>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
@@ -29,8 +35,9 @@ pub struct LocRib {
     /// VPNv4/VPNv6 Loc-RIB: best route per RFC 4364 RD + prefix identity.
     /// Selected VPN routes keyed by RD+prefix identity alone: Loc-RIB best
     /// selection collapses Add-Path path IDs — the winning route's own
-    /// `path_id` records which received path won.
-    vpn_routes: HashMap<rustbgpd_wire::VpnRouteKey, VpnRibRoute>,
+    /// `path_id` records which received path won. Paired with the
+    /// wall-clock install time, like `routes`.
+    vpn_routes: HashMap<rustbgpd_wire::VpnRouteKey, (VpnRibRoute, SystemTime)>,
     /// Labeled-unicast Loc-RIB: best route per prefix identity, collapsing
     /// Add-Path path IDs like `vpn_routes` — the winning route's own
     /// `path_id` records which received path won. Deliberately separate from
@@ -82,7 +89,7 @@ impl LocRib {
                 // would never be redistributed to single-best downstream
                 // peers or FIB install candidates. Mirrors the
                 // `recompute_evpn` payload comparison below.
-                let changed = self.routes.get(&prefix).is_none_or(|old| {
+                let changed = self.routes.get(&prefix).is_none_or(|(old, _)| {
                     best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
                         || old.next_hop != new_best.next_hop
                         || old.link_local_next_hop != new_best.link_local_next_hop
@@ -92,7 +99,7 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.routes.insert(prefix, new_best);
+                    self.routes.insert(prefix, (new_best, SystemTime::now()));
                 }
                 changed
             }
@@ -102,7 +109,7 @@ impl LocRib {
 
     /// Iterate over all best routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
-        self.routes.values()
+        self.routes.values().map(|(route, _)| route)
     }
 
     /// Return the number of best routes.
@@ -130,7 +137,26 @@ impl LocRib {
     /// Look up the best route for a prefix.
     #[must_use]
     pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
-        self.routes.get(prefix)
+        self.routes.get(prefix).map(|(route, _)| route)
+    }
+
+    /// Look up the best route for a prefix together with its
+    /// wall-clock Loc-RIB install time (RFC 9069 per-peer header
+    /// timestamp for the BMP dump path).
+    #[must_use]
+    pub fn get_with_install_time(&self, prefix: &Prefix) -> Option<(&Route, SystemTime)> {
+        self.routes
+            .get(prefix)
+            .map(|(route, installed_at)| (route, *installed_at))
+    }
+
+    /// Wall-clock install time of the current best for `prefix`,
+    /// captured when the best last changed.
+    #[must_use]
+    pub fn install_time(&self, prefix: &Prefix) -> Option<SystemTime> {
+        self.routes
+            .get(prefix)
+            .map(|(_, installed_at)| *installed_at)
     }
 
     // --- FlowSpec methods ---
@@ -335,7 +361,7 @@ impl LocRib {
         let best = candidates.min_by(|a, b| vpn_tiebreak(a, b)).cloned();
         match best {
             Some(new_best) => {
-                let changed = self.vpn_routes.get(&key).is_none_or(|old| {
+                let changed = self.vpn_routes.get(&key).is_none_or(|(old, _)| {
                     old.peer != new_best.peer
                         || old.path_id != new_best.path_id
                         || old.is_stale != new_best.is_stale
@@ -346,7 +372,7 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.vpn_routes.insert(key, new_best);
+                    self.vpn_routes.insert(key, (new_best, SystemTime::now()));
                 }
                 changed
             }
@@ -356,18 +382,41 @@ impl LocRib {
 
     /// Insert or replace the selected VPN route for a key.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
-        self.vpn_routes.insert(route.nlri.key(), route);
+        self.vpn_routes
+            .insert(route.nlri.key(), (route, SystemTime::now()));
     }
 
     /// Look up the selected VPN route for an RD+prefix identity.
     #[must_use]
     pub fn get_vpn(&self, key: &rustbgpd_wire::VpnRouteKey) -> Option<&VpnRibRoute> {
-        self.vpn_routes.get(key)
+        self.vpn_routes.get(key).map(|(route, _)| route)
+    }
+
+    /// Look up the selected VPN route together with its wall-clock
+    /// Loc-RIB install time (RFC 9069 per-peer header timestamp for
+    /// the BMP dump path).
+    #[must_use]
+    pub fn get_vpn_with_install_time(
+        &self,
+        key: &rustbgpd_wire::VpnRouteKey,
+    ) -> Option<(&VpnRibRoute, SystemTime)> {
+        self.vpn_routes
+            .get(key)
+            .map(|(route, installed_at)| (route, *installed_at))
+    }
+
+    /// Wall-clock install time of the current selected VPN route for
+    /// `key`, captured when the selection last changed.
+    #[must_use]
+    pub fn vpn_install_time(&self, key: &rustbgpd_wire::VpnRouteKey) -> Option<SystemTime> {
+        self.vpn_routes
+            .get(key)
+            .map(|(_, installed_at)| *installed_at)
     }
 
     /// Iterate over all selected VPN routes.
     pub fn iter_vpn(&self) -> impl Iterator<Item = &VpnRibRoute> {
-        self.vpn_routes.values()
+        self.vpn_routes.values().map(|(route, _)| route)
     }
 
     /// Return the number of selected VPN routes.

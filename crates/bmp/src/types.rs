@@ -124,7 +124,10 @@ impl BmpLocRibConfig {
 /// position, it stays valid across route insertions and removals
 /// between chunks: each chunk is "the smallest keys strictly greater
 /// than the cursor", so a surviving route is emitted exactly once and
-/// mutations land on the live stream (the accepted dump-vs-live race).
+/// mutations land on the live stream. The BMP manager holds a
+/// collector's live Loc-RIB messages back until the dump's End-of-RIB,
+/// so on the wire the deltas always follow the snapshot rows they
+/// supersede (dump → `EoR` → live; no dump-vs-live reordering).
 #[derive(Debug, Clone, Copy)]
 pub enum BmpDumpCursor {
     /// Resuming the unicast Loc-RIB walk after this prefix.
