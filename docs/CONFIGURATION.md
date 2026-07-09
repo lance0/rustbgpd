@@ -2188,10 +2188,13 @@ policy/peer-group CRUD, FIB-table CRUD, and another config transaction are
 rejected with `FAILED_PRECONDITION`; SIGHUP reload is skipped and logged until
 the transaction is confirmed, aborted, or auto-reverted. Use
 `rbgp config status` to inspect the redacted pending or last
-confirmed-transaction state. If abort or timer rollback fails, status records
-the failed lifecycle result and clears the pending fence so operators can apply
-a corrective transaction instead of leaving runtime config mutations blocked
-indefinitely.
+confirmed-transaction state. If abort or timer rollback fails, the transaction
+stays pending with the failed lifecycle result (`abort_failed` /
+`auto_revert_failed`) and the mutation fence stays closed — the unconfirmed
+candidate is still running and the revert journal is retained, so a mutation
+accepted on top of it would be clobbered by the journal's boot revert. Resolve
+it by retrying the abort, confirming the candidate, or restarting the daemon
+(boot revert).
 
 Confirm handles are operator-chosen correlation IDs. They must be non-empty, at
 most 128 characters, and free of control characters; the CLI validates those

@@ -74,6 +74,26 @@ pub struct FibTableControlDeps {
     pub confirm_journal_path: Option<std::path::PathBuf>,
 }
 
+/// FIB commit failure carrying whether the commit's completion state is
+/// provably clean (LAN-277, mirrors `ApplyFailure` in
+/// `config_transaction_control`). `ambiguous == true` when the persistence
+/// acknowledgement was lost or a rollback component failed — the confirmed
+/// config-transaction path must then retain its revert journal. Targeted FIB
+/// CRUD strips the flag.
+pub(crate) struct FibCommitFailure {
+    pub(crate) error: FibTableControlError,
+    pub(crate) ambiguous: bool,
+}
+
+impl From<FibTableControlError> for FibCommitFailure {
+    fn from(error: FibTableControlError) -> Self {
+        Self {
+            error,
+            ambiguous: false,
+        }
+    }
+}
+
 /// Build the `FibTableControlFn` the RIB service calls for FIB-table CRUD.
 #[must_use]
 pub fn make_fib_table_control_fn(deps: FibTableControlDeps) -> FibTableControlFn {
@@ -160,7 +180,12 @@ async fn mutate(
             .await?
             .unwrap_or_default();
         let candidate = apply_mutation(current, mutation)?;
-        commit_fib_tables_locked(&fib_cmd_tx, &peer_mgr_tx, &config_tx, candidate).await
+        commit_fib_tables_locked(&fib_cmd_tx, &peer_mgr_tx, &config_tx, candidate)
+            .await
+            // Targeted FIB CRUD has no commit-confirm journal to protect, so
+            // the LAN-277 ambiguity flag is only consumed by the confirmed
+            // config-transaction path.
+            .map_err(|failure| failure.error)
     });
 
     join.await.map_err(|_| {
@@ -180,7 +205,7 @@ pub(crate) async fn commit_fib_tables_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate: Vec<FibTableConfig>,
-) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
+) -> Result<proto::ListFibTablesResponse, FibCommitFailure> {
     let previous_tables = read_current_tables(Some(fib_cmd_tx))
         .await?
         .unwrap_or_default();
@@ -203,15 +228,20 @@ pub(crate) async fn commit_fib_tables_locked(
     let permit = match reserve_persist_permit(config_tx).await {
         Ok(permit) => permit,
         Err(error) => {
-            return Err(
-                rollback_snapshot_after_error(peer_mgr_tx, previous_snapshots, error).await,
-            );
+            return Err(rollback_snapshot_after_error(
+                peer_mgr_tx,
+                previous_snapshots,
+                error.into(),
+            )
+            .await);
         }
     };
 
     // Apply to the reconciler and wait for its acknowledgement.
     if let Err(error) = replace_tables(fib_cmd_tx, candidate.clone()).await {
-        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_snapshots, error).await);
+        return Err(
+            rollback_snapshot_after_error(peer_mgr_tx, previous_snapshots, error.into()).await,
+        );
     }
 
     // Persist exactly the accepted set, only after the ack. The live config
@@ -224,18 +254,23 @@ pub(crate) async fn commit_fib_tables_locked(
         tables: snapshots,
         ack: Some(persist_ack_tx),
     });
-    let persist_result = persist_ack_rx.await.map_err(|_| {
-        FibTableControlError::Internal(
-            "config bridge dropped FIB-table persistence acknowledgement".to_string(),
-        )
-    })?;
+    // LAN-277 window (b): a lost acknowledgement means the on-disk outcome of
+    // the persistence attempt is unknowable from here.
+    let Ok(persist_result) = persist_ack_rx.await else {
+        return Err(FibCommitFailure {
+            error: FibTableControlError::Internal(
+                "config bridge dropped FIB-table persistence acknowledgement".to_string(),
+            ),
+            ambiguous: true,
+        });
+    };
     if let Err(error) = persist_result {
         return Err(rollback_applied_tables_after_error(
             fib_cmd_tx,
             peer_mgr_tx,
             previous_tables,
             previous_snapshots,
-            FibTableControlError::FailedPrecondition(error),
+            FibTableControlError::FailedPrecondition(error).into(),
         )
         .await);
     }
@@ -349,12 +384,12 @@ async fn rollback_snapshot(
 async fn rollback_snapshot_after_error(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     previous_snapshots: Vec<FibTableSnapshot>,
-    original: FibTableControlError,
-) -> FibTableControlError {
+    original: FibCommitFailure,
+) -> FibCommitFailure {
     match rollback_snapshot(peer_mgr_tx, previous_snapshots).await {
         Ok(()) => original,
         Err(snapshot_rollback) => {
-            combine_fib_rollback_errors(&original, None, Some(snapshot_rollback))
+            combine_fib_rollback_errors(&original.error, None, Some(snapshot_rollback))
         }
     }
 }
@@ -364,24 +399,27 @@ async fn rollback_applied_tables_after_error(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     previous_tables: Vec<FibTableConfig>,
     previous_snapshots: Vec<FibTableSnapshot>,
-    original: FibTableControlError,
-) -> FibTableControlError {
+    original: FibCommitFailure,
+) -> FibCommitFailure {
     if let Err(runtime_rollback) = replace_tables(fib_cmd_tx, previous_tables).await {
-        return combine_fib_rollback_errors(&original, Some(runtime_rollback), None);
+        return combine_fib_rollback_errors(&original.error, Some(runtime_rollback), None);
     }
     match rollback_snapshot(peer_mgr_tx, previous_snapshots).await {
         Ok(()) => original,
         Err(snapshot_rollback) => {
-            combine_fib_rollback_errors(&original, None, Some(snapshot_rollback))
+            combine_fib_rollback_errors(&original.error, None, Some(snapshot_rollback))
         }
     }
 }
 
+/// LAN-277 window (c): only reached when a rollback component failed, so the
+/// runtime/staged state is left part-candidate — always an ambiguous
+/// completion.
 fn combine_fib_rollback_errors(
     original: &FibTableControlError,
     runtime_rollback: Option<FibTableControlError>,
     snapshot_rollback: Option<FibTableControlError>,
-) -> FibTableControlError {
+) -> FibCommitFailure {
     error!(
         %original,
         ?runtime_rollback,
@@ -395,7 +433,10 @@ fn combine_fib_rollback_errors(
     if let Some(error) = snapshot_rollback {
         let _ = write!(message, "; snapshot rollback: {error}");
     }
-    FibTableControlError::Internal(message)
+    FibCommitFailure {
+        error: FibTableControlError::Internal(message),
+        ambiguous: true,
+    }
 }
 
 async fn reserve_persist_permit(

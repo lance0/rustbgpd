@@ -199,9 +199,16 @@ section executors behind that public contract.
   rollback reporting. This also means abort or auto-revert can fail if the
   current runtime snapshot no longer matches the post-commit snapshot token; the
   pending mutation fence is what keeps ordinary runtime config writes from
-  creating that mismatch. A failed abort or auto-revert clears the pending fence
-  and records a failed lifecycle status so operators can inspect the failure and
-  issue a new corrective transaction.
+  creating that mismatch. A failed abort or auto-revert keeps the transaction
+  pending with a failed lifecycle status (`ABORT_FAILED`/`AUTO_REVERT_FAILED`):
+  the mutation fence stays closed and the revert journal is retained, because
+  the daemon could not restore the pre-transaction state and a later-accepted
+  mutation would otherwise be clobbered by the journal's boot revert. Operators
+  resolve it by retrying the abort, confirming the candidate, or restarting
+  (boot revert). Likewise, a confirmed apply that fails without proof of a
+  terminal outcome — lost persistence acknowledgement, post-persist
+  finalization failure, or compound rollback failure — retains the journal and
+  fences all further config mutations until a restart boot-reverts.
 
 See also ADR-0043 (config persistence and SIGHUP reload), ADR-0061 (unicast FIB
 integration), ADR-0064 (gRPC authorization), ADR-0074 (FIB-table CRUD tier), and
