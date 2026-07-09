@@ -271,7 +271,6 @@ impl RibManager {
         }
 
         if self.llgr_peers.remove(&peer).is_some() {
-            self.llgr_stale_deadlines.remove(&peer);
             // The LLGR config survives GR→LLGR promotion (handle_peer_up
             // reads it on re-establishment), so an LLGR abort must drop it
             // here — the GR arm above won't fire for a peer already
@@ -282,6 +281,10 @@ impl RibManager {
             self.metrics.set_gr_active(&peer_label, false);
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
+        // Per-family LLGR deadlines can outlive both maps above (they
+        // survive re-establishment while routes remain LLGR-stale); a full
+        // teardown ends retention outright.
+        self.llgr_stale_deadlines.retain(|&(p, _, _), _| p != peer);
 
         self.clear_peer_adj_rib_in(peer);
 
@@ -599,7 +602,13 @@ impl RibManager {
         } else if self.llgr_peers.contains_key(&peer)
             && let Some(llgr_families) = self.llgr_peers.remove(&peer)
         {
-            self.llgr_stale_deadlines.remove(&peer);
+            // The per-family LLGR deadlines are deliberately NOT cleared:
+            // routes stay LLGR-stale until End-of-RIB, and RFC 9494 bounds
+            // total retention by the ORIGINAL Long-Lived Stale Time — if a
+            // deadline fires before this session's End-of-RIB (or the peer
+            // flaps again), the family's unrefreshed routes are purged on
+            // the original schedule. End-of-RIB removes the deadline once
+            // the family is refreshed.
             let srt = self
                 .llgr_peer_config
                 .get(&peer)

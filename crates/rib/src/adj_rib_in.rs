@@ -296,16 +296,20 @@ impl AdjRibIn {
     /// Mark all routes matching the given address family as stale
     /// (RFC 4724 §4.1 helper retention on session drop).
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted prefixes so the
-    /// caller can withdraw them downstream.
+    /// A route that is already *GR*-stale when a new mark arrives survived a
+    /// previous restart without ever being refreshed and is deleted instead
+    /// of re-marked (RFC 4724 §4.1: stale routes must not be retained across
+    /// consecutive restarts). An *LLGR*-stale route is the RFC 9494
+    /// exception: it is retained as-is across consecutive resets — neither
+    /// deleted nor demoted back to GR-stale — until its original per-family
+    /// Long-Lived Stale Time deadline (held by the manager) expires.
+    /// Returns the deleted prefixes so the caller can withdraw them
+    /// downstream.
     pub fn mark_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
         let already_stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && route_matches_family(r, family))
+            .filter(|(_, r)| r.is_stale && route_matches_family(r, family))
             .map(|(k, _)| *k)
             .collect();
         let mut deleted = Vec::new();
@@ -316,7 +320,7 @@ impl AdjRibIn {
             self.remove_from_prefix_index(&key.0, key.1);
         }
         for route in self.routes.values_mut() {
-            if route_matches_family(route, family) {
+            if route_matches_family(route, family) && !route.is_llgr_stale {
                 route.is_stale = true;
             }
         }
@@ -621,15 +625,19 @@ impl AdjRibIn {
         let already_stale: Vec<EvpnRouteKey> = self
             .evpn_routes
             .iter()
-            .filter(|(_, r)| r.is_stale || r.is_llgr_stale)
+            .filter(|(_, r)| r.is_stale)
             .map(|(k, _)| *k)
             .collect();
         for key in &already_stale {
             self.evpn_llgr_stale_local_tags.remove(key);
             self.evpn_routes.remove(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.evpn_routes.values_mut() {
-            route.is_stale = true;
+            if !route.is_llgr_stale {
+                route.is_stale = true;
+            }
         }
         already_stale
     }
@@ -854,15 +862,17 @@ impl AdjRibIn {
         let already_stale: Vec<BgpLsRouteKey> = self
             .bgpls_routes
             .iter()
-            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.family == fam)
+            .filter(|(_, r)| r.is_stale && r.family == fam)
             .map(|(k, _)| k.clone())
             .collect();
         for key in &already_stale {
             self.bgpls_llgr_stale_local_tags.remove(key);
             self.bgpls_routes.remove(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.bgpls_routes.values_mut() {
-            if route.family == fam {
+            if route.family == fam && !route.is_llgr_stale {
                 route.is_stale = true;
             }
         }
@@ -1159,14 +1169,16 @@ impl AdjRibIn {
         let already_stale: Vec<VpnRibRouteKey> = self
             .vpn_routes
             .iter()
-            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.afi_safi() == family)
+            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
             .map(|(k, _)| k.clone())
             .collect();
         for key in &already_stale {
             self.remove_vpn_entry(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.vpn_routes.values_mut() {
-            if route.afi_safi() == family {
+            if route.afi_safi() == family && !route.is_llgr_stale {
                 route.is_stale = true;
             }
         }
@@ -1456,14 +1468,16 @@ impl AdjRibIn {
         let already_stale: Vec<LabeledRibRouteKey> = self
             .labeled_routes
             .iter()
-            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.afi_safi() == family)
+            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
             .map(|(k, _)| *k)
             .collect();
         for key in &already_stale {
             self.remove_labeled_entry(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.labeled_routes.values_mut() {
-            if route.afi_safi() == family {
+            if route.afi_safi() == family && !route.is_llgr_stale {
                 route.is_stale = true;
             }
         }
@@ -1721,15 +1735,19 @@ impl AdjRibIn {
         let already_stale: Vec<RtcRibRouteKey> = self
             .rtc_routes
             .iter()
-            .filter(|(_, r)| r.is_stale || r.is_llgr_stale)
+            .filter(|(_, r)| r.is_stale)
             .map(|(k, _)| k.clone())
             .collect();
         for key in &already_stale {
             self.rtc_llgr_stale_local_tags.remove(key);
             self.rtc_routes.remove(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.rtc_routes.values_mut() {
-            route.is_stale = true;
+            if !route.is_llgr_stale {
+                route.is_stale = true;
+            }
         }
         already_stale
     }
@@ -1902,7 +1920,7 @@ impl AdjRibIn {
         let already_stale: Vec<(FlowSpecRule, u32)> = self
             .flowspec_routes
             .iter()
-            .filter(|(_, r)| (r.is_stale || r.is_llgr_stale) && r.afi == family.0)
+            .filter(|(_, r)| r.is_stale && r.afi == family.0)
             .map(|(k, _)| k.clone())
             .collect();
         let mut deleted = Vec::new();
@@ -1911,8 +1929,10 @@ impl AdjRibIn {
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
+        // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
+        // neither delete nor re-mark them; the original deadline governs).
         for route in self.flowspec_routes.values_mut() {
-            if route.afi == family.0 {
+            if route.afi == family.0 && !route.is_llgr_stale {
                 route.is_stale = true;
             }
         }
@@ -2698,33 +2718,102 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
         let gr_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let llgr_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
-        rib.insert(make_route(gr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
+
+        // First cycle: one route goes GR-stale, then GR expiry promotes it
+        // to LLGR-stale (real promotion path — injects the community).
         rib.insert(make_route(llgr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
-
-        // First session drop: both routes go GR-stale; one then enters LLGR.
         rib.mark_stale((Afi::Ipv4, Safi::Unicast));
-        let llgr_route = rib.routes.get_mut(&(Prefix::V4(llgr_prefix), 0)).unwrap();
-        llgr_route.is_stale = false;
-        llgr_route.is_llgr_stale = true;
+        rib.promote_to_llgr_stale((Afi::Ipv4, Safi::Unicast));
 
-        // Second session drop before any refresh: both already-stale routes
-        // (GR-stale and LLGR-stale) are deleted, not re-marked
-        // (RFC 4724 §4.1: no retention across consecutive restarts).
-        let mut deleted = rib.mark_stale((Afi::Ipv4, Safi::Unicast));
-        deleted.sort_by_key(std::string::ToString::to_string);
-        assert_eq!(
-            deleted,
-            vec![Prefix::V4(gr_prefix), Prefix::V4(llgr_prefix)]
-        );
-        assert_eq!(rib.len(), 0);
+        // Reconnect re-advertises a second prefix (not the first); the
+        // session drops again, marking the fresh route GR-stale.
+        rib.insert(make_route(gr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(rib.mark_stale((Afi::Ipv4, Safi::Unicast)).is_empty());
+
+        // Third drop before any refresh: the GR-stale route is deleted
+        // (RFC 4724 §4.1: no retention across consecutive restarts) but the
+        // LLGR-stale route is retained unchanged (RFC 9494: its original
+        // stale-time deadline governs), keeping flag and community coupled.
+        let deleted = rib.mark_stale((Afi::Ipv4, Safi::Unicast));
+        assert_eq!(deleted, vec![Prefix::V4(gr_prefix)]);
+        assert_eq!(rib.len(), 1);
         // The secondary prefix index is maintained through the deletion.
         assert_eq!(rib.iter_prefix(&Prefix::V4(gr_prefix)).count(), 0);
-        assert_eq!(rib.iter_prefix(&Prefix::V4(llgr_prefix)).count(), 0);
+        let retained = rib.routes.get(&(Prefix::V4(llgr_prefix), 0)).unwrap();
+        assert!(retained.is_llgr_stale);
+        assert!(!retained.is_stale, "LLGR-stale must not be re-marked");
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+            "retained LLGR-stale route keeps its LLGR_STALE community"
+        );
+    }
+
+    /// Transport's `apply_llgr_stale_export_form` detects LLGR staleness by
+    /// scanning for the `LLGR_STALE` community (the superset — it also
+    /// catches routes tagged by an upstream helper). That is only safe for
+    /// locally promoted routes if every mutation path keeps the
+    /// `is_llgr_stale` flag and the community coupled: flag set ⇒ community
+    /// present. This walks the full lifecycle and asserts the invariant
+    /// after every step (LAN-191).
+    #[test]
+    fn llgr_stale_flag_implies_community_across_mutations() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let family = (Afi::Ipv4, Safi::Unicast);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        let assert_coupled = |rib: &AdjRibIn, step: &str| {
+            for route in rib.iter() {
+                assert!(
+                    !route.is_llgr_stale
+                        || route
+                            .communities()
+                            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+                    "flag set without LLGR_STALE community after {step}"
+                );
+            }
+        };
+
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+        assert_coupled(&rib, "insert");
+
+        rib.mark_stale(family); // session drop
+        assert_coupled(&rib, "mark_stale");
+
+        rib.promote_to_llgr_stale(family); // GR timer expiry
+        assert_coupled(&rib, "promote_to_llgr_stale");
+        assert!(rib.iter().any(|r| r.is_llgr_stale));
+
+        rib.mark_stale(family); // consecutive reset: LLGR-stale retained
+        assert_coupled(&rib, "mark_stale on LLGR-stale");
+        assert!(rib.iter().any(|r| r.is_llgr_stale));
+
+        // Re-advertisement replaces the entry, clearing the flag with the
+        // (locally added) community gone from the fresh attributes.
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+        assert_coupled(&rib, "re-advertisement insert");
+        assert!(rib.iter().all(|r| !r.is_llgr_stale));
+
+        // Second cycle ending in End-of-RIB hygiene: both clear paths drop
+        // the flag together with the locally injected community.
+        rib.mark_stale(family);
+        rib.promote_to_llgr_stale(family);
+        rib.clear_llgr_stale(family);
+        assert_coupled(&rib, "clear_llgr_stale");
+        assert!(rib.iter().all(|r| !r.is_llgr_stale));
+
+        rib.mark_stale(family);
+        rib.promote_to_llgr_stale(family);
+        rib.clear_stale(family);
+        assert_coupled(&rib, "clear_stale");
+        assert!(rib.iter().all(|r| !r.is_llgr_stale));
     }
 
     #[test]
@@ -2926,23 +3015,43 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_flowspec_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_flowspec_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
-        let route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
-        let rule = route.rule.clone();
-        rib.insert_flowspec(route);
+        let llgr_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        let llgr_rule = llgr_route.rule.clone();
+        let mut gr_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        gr_route.rule = FlowSpecRule {
+            components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(198, 51, 100, 0),
+                    24,
+                )),
+            )],
+        };
+        let gr_rule = gr_route.rule.clone();
 
-        // First session drop marks the rule stale; a second drop before any
-        // refresh deletes it (RFC 4724 §4.1: no retention across
-        // consecutive restarts).
+        // First cycle: rule goes GR-stale, then promotes to LLGR-stale.
+        rib.insert_flowspec(llgr_route);
+        rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+
+        // Reconnect advertises a second rule; two more drops follow.
+        rib.insert_flowspec(gr_route);
         assert!(
             rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec))
                 .is_empty()
         );
         let deleted = rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
-        assert_eq!(deleted, vec![rule]);
-        assert_eq!(rib.flowspec_len(), 0);
+        assert_eq!(deleted, vec![gr_rule]);
+        assert_eq!(rib.flowspec_len(), 1);
+        let retained = rib.flowspec_routes.get(&(llgr_rule, 0)).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]
@@ -3162,26 +3271,30 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_evpn_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_evpn_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer_ip);
-        let gr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+
+        // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
-
-        // First session drop: both routes go GR-stale; one then enters LLGR.
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        let llgr_route = rib.evpn_routes.get_mut(&llgr_key).unwrap();
-        llgr_route.is_stale = false;
-        llgr_route.is_llgr_stale = true;
+        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
 
-        // Second session drop before any refresh: both already-stale routes
-        // (GR-stale and LLGR-stale) are deleted, not re-marked
-        // (RFC 4724 §4.1: no retention across consecutive restarts).
+        // Reconnect advertises a second route; two more drops follow. The
+        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
+        // retained unchanged (RFC 9494: original deadline governs).
+        let gr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        assert!(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)).is_empty());
         let deleted = rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        assert_eq!(deleted.len(), 2);
-        assert!(deleted.contains(&gr_key));
-        assert!(deleted.contains(&llgr_key));
-        assert_eq!(rib.evpn_len(), 0);
+        assert_eq!(deleted, vec![gr_key]);
+        assert_eq!(rib.evpn_len(), 1);
+        let retained = rib.evpn_routes.get(&llgr_key).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]
@@ -3452,23 +3565,30 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_vpn_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_vpn_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
-        let gr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
-        let llgr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 2, 0], 24, 200), vec![]);
 
-        // First session drop: both routes go GR-stale; one then enters LLGR.
+        // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
+        let llgr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 2, 0], 24, 200), vec![]);
         rib.mark_stale_vpn(VPN_V4);
-        let llgr_route = rib.vpn_routes.get_mut(&llgr_key).unwrap();
-        llgr_route.is_stale = false;
-        llgr_route.is_llgr_stale = true;
-        // Second session drop before any refresh: both already-stale routes
-        // (GR-stale and LLGR-stale) are deleted, not re-marked.
-        let mut deleted = rib.mark_stale_vpn(VPN_V4);
-        deleted.sort_by_key(|k| k.nlri_key.prefix.to_string());
-        assert_eq!(deleted, vec![gr_key, llgr_key]);
-        assert_eq!(rib.vpn_len(), 0);
+        rib.promote_to_llgr_stale_vpn(VPN_V4);
+
+        // Reconnect advertises a second route; two more drops follow. The
+        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
+        // retained unchanged (RFC 9494: original deadline governs).
+        let gr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        assert!(rib.mark_stale_vpn(VPN_V4).is_empty());
+        let deleted = rib.mark_stale_vpn(VPN_V4);
+        assert_eq!(deleted, vec![gr_key]);
+        assert_eq!(rib.vpn_len(), 1);
+        let retained = rib.vpn_routes.get(&llgr_key).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]
@@ -3838,23 +3958,30 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_labeled_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_labeled_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
-        let gr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
-        let llgr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 2, 0], 24, 200), vec![]);
 
-        // First session drop: both routes go GR-stale; one then enters LLGR.
+        // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
+        let llgr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 2, 0], 24, 200), vec![]);
         rib.mark_stale_labeled(LU_V4);
-        let llgr_route = rib.labeled_routes.get_mut(&llgr_key).unwrap();
-        llgr_route.is_stale = false;
-        llgr_route.is_llgr_stale = true;
-        // Second session drop before any refresh: both already-stale routes
-        // (GR-stale and LLGR-stale) are deleted, not re-marked.
-        let mut deleted = rib.mark_stale_labeled(LU_V4);
-        deleted.sort_by_key(|k| k.prefix.to_string());
-        assert_eq!(deleted, vec![gr_key, llgr_key]);
-        assert_eq!(rib.labeled_len(), 0);
+        rib.promote_to_llgr_stale_labeled(LU_V4);
+
+        // Reconnect advertises a second route; two more drops follow. The
+        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
+        // retained unchanged (RFC 9494: original deadline governs).
+        let gr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
+        assert!(rib.mark_stale_labeled(LU_V4).is_empty());
+        let deleted = rib.mark_stale_labeled(LU_V4);
+        assert_eq!(deleted, vec![gr_key]);
+        assert_eq!(rib.labeled_len(), 1);
+        let retained = rib.labeled_routes.get(&llgr_key).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]
@@ -4048,15 +4175,30 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_bgpls_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_bgpls_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
-        let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
 
+        // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
+        let llgr_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(2), vec![]);
         rib.mark_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+
+        // Reconnect advertises a second route; two more drops follow. The
+        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
+        // retained unchanged (RFC 9494: original deadline governs).
+        let gr_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
+        assert!(rib.mark_stale_bgpls(LS_BASE).is_empty());
         let deleted = rib.mark_stale_bgpls(LS_BASE);
-        assert_eq!(deleted, vec![key]);
-        assert_eq!(rib.bgpls_len(), 0);
+        assert_eq!(deleted, vec![gr_key]);
+        assert_eq!(rib.bgpls_len(), 1);
+        let retained = rib.bgpls_routes.get(&llgr_key).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]
@@ -4224,15 +4366,30 @@ mod tests {
     }
 
     #[test]
-    fn mark_stale_rtc_deletes_already_stale_routes_on_consecutive_restart() {
+    fn mark_stale_rtc_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
-        let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
 
+        // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
+        let llgr_key = insert_rtc_with(&mut rib, rtc_nlri(200), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+
+        // Reconnect advertises a second route; two more drops follow. The
+        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
+        // retained unchanged (RFC 9494: original deadline governs).
+        let gr_key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
+        assert!(rib.mark_stale_rtc(RTC_FAM).is_empty());
         let deleted = rib.mark_stale_rtc(RTC_FAM);
-        assert_eq!(deleted, vec![key]);
-        assert_eq!(rib.rtc_len(), 0);
+        assert_eq!(deleted, vec![gr_key]);
+        assert_eq!(rib.rtc_len(), 1);
+        let retained = rib.rtc_routes.get(&llgr_key).unwrap();
+        assert!(retained.is_llgr_stale && !retained.is_stale);
+        assert!(
+            retained
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        );
     }
 
     #[test]

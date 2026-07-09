@@ -187,8 +187,13 @@ pub struct RibManager {
     /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
     /// Value is the set of (AFI, SAFI) families in LLGR.
     llgr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
-    /// Deadlines for sweeping LLGR-stale routes per peer.
-    llgr_stale_deadlines: HashMap<IpAddr, tokio::time::Instant>,
+    /// Deadlines for sweeping LLGR-stale routes, per (peer, AFI, SAFI) —
+    /// RFC 9494 §4.3 stale time is negotiated per family. An entry is
+    /// stamped ONCE when the family enters the LLGR stale phase and
+    /// deliberately survives re-establishment while routes remain
+    /// LLGR-stale: the ORIGINAL Long-Lived Stale Time bounds total
+    /// retention, so a reconnect-then-down never restarts the timer.
+    llgr_stale_deadlines: HashMap<(IpAddr, Afi, Safi), tokio::time::Instant>,
     /// Configured per-peer LLGR parameters, stored on `PeerGracefulRestart`.
     llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
@@ -3013,15 +3018,7 @@ impl RibManager {
                 if self.drain_ready_updates() {
                     continue;
                 }
-                let expired: Vec<IpAddr> = self
-                    .llgr_stale_deadlines
-                    .iter()
-                    .filter(|&(_, &deadline)| deadline <= now)
-                    .map(|(&peer, _)| peer)
-                    .collect();
-                for peer in expired {
-                    self.sweep_llgr_stale(peer);
-                }
+                self.sweep_expired_llgr_stale();
                 continue;
             }
             if has_refresh_timers && refresh_sleep.deadline() <= now {
@@ -3091,17 +3088,7 @@ impl RibManager {
                         if self.drain_ready_updates() {
                             continue;
                         }
-                        // Find all peers whose LLGR deadline has expired
-                        let now = tokio::time::Instant::now();
-                        let expired: Vec<IpAddr> = self
-                            .llgr_stale_deadlines
-                            .iter()
-                            .filter(|&(_, &deadline)| deadline <= now)
-                            .map(|(&peer, _)| peer)
-                            .collect();
-                        for peer in expired {
-                            self.sweep_llgr_stale(peer);
-                        }
+                        self.sweep_expired_llgr_stale();
                     }
                     () = refresh_sleep.as_mut(), if has_refresh_timers => {
                         if self.drain_ready_updates() {

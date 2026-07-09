@@ -219,6 +219,11 @@ impl RibManager {
                 rtc_swept |= !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
                 rib.clear_stale_rtc((afi, safi));
             }
+            // End-of-RIB resolves this family's LLGR retention (routes were
+            // either re-advertised or swept just above), so its surviving
+            // original-LLST deadline — kept across the re-establishment —
+            // is retired here.
+            self.llgr_stale_deadlines.remove(&(peer, afi, safi));
 
             // FlowSpec/EVPN affected keys were collected BEFORE the sweep,
             // so removed keys are already in their sets; the unicast set is
@@ -393,6 +398,8 @@ impl RibManager {
                 rtc_swept = !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
                 rib.clear_llgr_stale_rtc((afi, safi));
             }
+            // This family's LLGR retention is resolved — retire its deadline.
+            self.llgr_stale_deadlines.remove(&(peer, afi, safi));
 
             // Same shape as the GR arm: FlowSpec/EVPN affected keys already
             // include the swept ones (collected pre-sweep); join the swept
@@ -452,7 +459,6 @@ impl RibManager {
             if all_done {
                 info!(%peer, "LLGR complete — all End-of-RIB received");
                 self.llgr_peers.remove(&peer);
-                self.llgr_stale_deadlines.remove(&peer);
                 // The LLGR config outlives GR→LLGR promotion; LLGR
                 // completion is a terminal point, mirror the GR arm above.
                 self.llgr_peer_config.remove(&peer);

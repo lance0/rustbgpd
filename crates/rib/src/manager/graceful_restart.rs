@@ -67,13 +67,16 @@ impl RibManager {
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // RFC 4724 helper retention: mark GR-covered families stale.
             // Every mark helper returns the keys of routes that were
-            // ALREADY stale from a previous restart and were deleted
+            // ALREADY GR-stale from a previous restart and were deleted
             // (RFC 4724 §4.1: no retention across consecutive restarts) —
             // collect them so the recompute below withdraws them
-            // downstream. Each helper is a family-scoped no-op for
-            // non-matching tuples. EVPN has a single family tuple, so its
-            // mark call is hoisted out of the loop and made once when
-            // (L2Vpn, Evpn) is among the GR-preserved families.
+            // downstream. LLGR-stale routes are the RFC 9494 exception:
+            // the helpers retain them unchanged across consecutive resets,
+            // bounded by their surviving per-family original-LLST deadline
+            // in `llgr_stale_deadlines`. Each helper is a family-scoped
+            // no-op for non-matching tuples. EVPN has a single family
+            // tuple, so its mark call is hoisted out of the loop and made
+            // once when (L2Vpn, Evpn) is among the GR-preserved families.
             for &family in &gr_families {
                 affected.extend(rib.mark_stale(family));
                 fs_affected.extend(rib.mark_stale_flowspec(family));
@@ -433,16 +436,6 @@ impl RibManager {
                 .filter(|f| !llgr_family_set.contains(f))
                 .collect();
 
-            // Compute effective stale time: min(local, peer per-family minimum)
-            let peer_min_stale = llgr_config
-                .peer_llgr_families
-                .iter()
-                .filter(|f| llgr_families.contains(&(f.afi, f.safi)))
-                .map(|f| f.stale_time)
-                .min()
-                .unwrap_or(llgr_config.local_llgr_stale_time);
-            let effective_stale_time = peer_min_stale.min(llgr_config.local_llgr_stale_time);
-
             let mut affected = HashSet::new();
             let mut fs_affected = HashSet::new();
             let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
@@ -568,10 +561,26 @@ impl RibManager {
             self.metrics
                 .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
 
-            // Set LLGR timer
-            let deadline = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(u64::from(effective_stale_time));
-            self.llgr_stale_deadlines.insert(peer, deadline);
+            // Set the LLGR timer per family (RFC 9494 §4.3: stale time is
+            // negotiated per AFI/SAFI): min(local config, the peer's
+            // advertised stale time for that family). `or_insert` is the
+            // original-LLST rule — a deadline that survived a
+            // reconnect-then-down is re-used, never restarted, so total
+            // retention stays bounded by the FIRST promotion's deadline.
+            let now = tokio::time::Instant::now();
+            for &(afi, safi) in &llgr_families {
+                let peer_family_stale = llgr_config
+                    .peer_llgr_families
+                    .iter()
+                    .filter(|f| (f.afi, f.safi) == (afi, safi))
+                    .map(|f| f.stale_time)
+                    .min()
+                    .unwrap_or(llgr_config.local_llgr_stale_time);
+                let effective = peer_family_stale.min(llgr_config.local_llgr_stale_time);
+                self.llgr_stale_deadlines
+                    .entry((peer, afi, safi))
+                    .or_insert(now + std::time::Duration::from_secs(u64::from(effective)));
+            }
             self.llgr_peers
                 .insert(peer, llgr_families.into_iter().collect());
             // GR remains "active" for metrics until LLGR completes
@@ -583,8 +592,15 @@ impl RibManager {
         // so this is defensive — but the map must not outlive GR).
         self.llgr_peer_config.remove(&peer);
         info!(%peer, "graceful restart timer expired — sweeping stale routes");
-        self.metrics.set_gr_active(&peer_label, false);
-        self.metrics.set_gr_stale_routes(&peer_label, 0);
+        // LLGR-stale routes from a PREVIOUS retention cycle (their original
+        // per-family deadlines survive reconnects) are not touched by the
+        // GR-stale sweeps below; they stay until those deadlines fire, so
+        // retention accounting stays active while any remain.
+        let llgr_retention_remains = self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer);
+        if !llgr_retention_remains {
+            self.metrics.set_gr_active(&peer_label, false);
+            self.metrics.set_gr_stale_routes(&peer_label, 0);
+        }
 
         let mut swept = Vec::new();
         let mut fs_swept = Vec::new();
@@ -676,20 +692,42 @@ impl RibManager {
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
-        self.release_peer_state_if_departed(peer);
+        if !llgr_retention_remains {
+            self.release_peer_state_if_departed(peer);
+        }
     }
 
-    /// Sweep LLGR-stale routes for a peer whose LLGR timer has expired.
-    pub(super) fn sweep_llgr_stale(&mut self, peer: IpAddr) {
-        info!(%peer, "LLGR timer expired — sweeping LLGR-stale routes");
-        self.llgr_peers.remove(&peer);
-        self.llgr_stale_deadlines.remove(&peer);
-        // LLGR is the last retention phase — the per-peer LLGR config has
-        // no further reader once the stale routes are swept.
-        self.llgr_peer_config.remove(&peer);
+    /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline has expired,
+    /// grouped per peer. Called from the manager run loop's LLGR timer arm.
+    pub(super) fn sweep_expired_llgr_stale(&mut self) {
+        let now = tokio::time::Instant::now();
+        let mut expired: std::collections::HashMap<IpAddr, Vec<(Afi, Safi)>> =
+            std::collections::HashMap::new();
+        for (&(peer, afi, safi), &deadline) in &self.llgr_stale_deadlines {
+            if deadline <= now {
+                expired.entry(peer).or_default().push((afi, safi));
+            }
+        }
+        for (peer, families) in expired {
+            self.sweep_llgr_stale(peer, &families);
+        }
+    }
+
+    /// Sweep LLGR-stale routes for the given families of a peer whose LLGR
+    /// stale deadlines have expired (RFC 9494 §4.3: the stale time — and so
+    /// the sweep — is per AFI/SAFI; longer-lived families keep their routes).
+    ///
+    /// Deadlines survive re-establishment while routes remain LLGR-stale,
+    /// so this can fire for a peer that is back up and awaiting End-of-RIB
+    /// (`gr_peers`): the original Long-Lived Stale Time bounds retention
+    /// regardless — routes the peer has not re-advertised by then are purged.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "family-scoped sweeps and recomputes across all seven route tables"
+    )]
+    pub(super) fn sweep_llgr_stale(&mut self, peer: IpAddr, families: &[(Afi, Safi)]) {
+        info!(%peer, ?families, "LLGR timer expired — sweeping LLGR-stale routes");
         let peer_label = peer.to_string();
-        self.metrics.set_gr_active(&peer_label, false);
-        self.metrics.set_gr_stale_routes(&peer_label, 0);
 
         let mut swept = Vec::new();
         let mut fs_swept = Vec::new();
@@ -700,19 +738,36 @@ impl RibManager {
         let mut rtc_swept = Vec::new();
         let mut rib_len = 0;
         let mut evpn_len = 0;
+        let mut llgr_stale_remaining = 0;
+        for &(afi, safi) in families {
+            self.llgr_stale_deadlines.remove(&(peer, afi, safi));
+            if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
+                awaiting.remove(&(afi, safi));
+            }
+        }
         if let Some(rib) = self.ribs.get_mut(&peer) {
-            swept = rib.sweep_llgr_stale();
-            fs_swept = rib.sweep_llgr_stale_flowspec();
-            evpn_swept = rib.sweep_llgr_stale_evpn();
-            bgpls_swept = rib.sweep_llgr_stale_bgpls();
-            l3vpn_swept = rib.sweep_llgr_stale_vpn();
-            labeled_swept = rib.sweep_llgr_stale_labeled();
-            rtc_swept = rib.sweep_llgr_stale_rtc();
+            // Each helper is a family-scoped no-op for non-matching tuples.
+            for &family in families {
+                swept.extend(rib.sweep_llgr_stale_family(family));
+                fs_swept.extend(rib.sweep_llgr_stale_flowspec_family(family));
+                evpn_swept.extend(rib.sweep_llgr_stale_family_evpn(family));
+                bgpls_swept.extend(rib.sweep_llgr_stale_family_bgpls(family));
+                l3vpn_swept.extend(rib.sweep_llgr_stale_family_vpn(family));
+                labeled_swept.extend(rib.sweep_llgr_stale_family_labeled(family));
+                rtc_swept.extend(rib.sweep_llgr_stale_family_rtc(family));
+            }
             rib.gc_intern_table();
             self.metrics
                 .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
+            llgr_stale_remaining = rib.iter().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_vpn().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_labeled().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_bgpls().filter(|r| r.is_llgr_stale).count()
+                + rib.iter_rtc().filter(|r| r.is_llgr_stale).count();
         }
         let had_swept = !swept.is_empty();
         let had_fs_swept = !fs_swept.is_empty();
@@ -783,6 +838,27 @@ impl RibManager {
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
+        // Terminal only when no family retains an LLGR deadline: other
+        // families with longer stale times keep their retention (and the
+        // peer's config, needed for a later re-promotion) alive.
+        if self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer) {
+            self.metrics
+                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_remaining));
+            return;
+        }
+        self.llgr_peers.remove(&peer);
+        if self.gr_peers.contains_key(&peer) {
+            // Re-established and awaiting End-of-RIB: the GR machinery owns
+            // the remaining lifecycle (and still reads `llgr_peer_config`).
+            self.metrics
+                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_remaining));
+            return;
+        }
+        // LLGR is the last retention phase — the per-peer LLGR config has
+        // no further reader once the stale routes are swept.
+        self.llgr_peer_config.remove(&peer);
+        self.metrics.set_gr_active(&peer_label, false);
+        self.metrics.set_gr_stale_routes(&peer_label, 0);
         self.release_peer_state_if_departed(peer);
     }
 
