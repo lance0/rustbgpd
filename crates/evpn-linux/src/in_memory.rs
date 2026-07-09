@@ -551,96 +551,74 @@ impl InMemoryDataplane {
                 name,
                 spec,
                 ownership_stamp,
-            } => match state.kernel.vxlans.get_mut(name) {
-                Some(link) if managed_svd_vxlan_exact(link, name, spec, ownership_stamp) => {}
-                Some(_) => {
-                    return Err(crate::error::DataplaneError::InvalidArgument(format!(
-                        "managed SVD VXLAN {name} changed during apply"
-                    )));
-                }
-                None => {
-                    if state.kernel.link_name_exists(name) {
+            } => {
+                let existing = state.kernel.vxlans.get(name).map(|link| {
+                    (
+                        link.ifindex,
+                        managed_svd_vxlan_exact(link, name, spec, ownership_stamp),
+                    )
+                });
+                match existing {
+                    // LAN-290: convergent re-apply on our own
+                    // exactly-stamped link — (re-)ensure the bridge
+                    // VLAN/tunnel bindings, mirroring the linux impl's
+                    // `ensure_svd_vlan_bindings` completion steps.
+                    Some((ifindex, true)) => {
+                        svd_populate_bridge_bindings(&mut state.kernel, spec, ifindex, name);
+                    }
+                    Some((_, false)) => {
                         return Err(crate::error::DataplaneError::InvalidArgument(format!(
-                            "managed SVD VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+                            "managed SVD VXLAN {name} changed during apply"
                         )));
                     }
-                    if !state.kernel.links.contains_key(&spec.bridge) {
-                        if state.kernel.link_name_exists(&spec.bridge) {
+                    None => {
+                        if state.kernel.link_name_exists(name) {
                             return Err(crate::error::DataplaneError::InvalidArgument(format!(
-                                "managed SVD VXLAN {name} cannot be created: desired bridge name {} is occupied by a non-bridge link",
+                                "managed SVD VXLAN {name} cannot be created: desired name is occupied by a non-VXLAN link"
+                            )));
+                        }
+                        if !state.kernel.links.contains_key(&spec.bridge) {
+                            if state.kernel.link_name_exists(&spec.bridge) {
+                                return Err(crate::error::DataplaneError::InvalidArgument(
+                                    format!(
+                                        "managed SVD VXLAN {name} cannot be created: desired bridge name {} is occupied by a non-bridge link",
+                                        spec.bridge
+                                    ),
+                                ));
+                            }
+                            return Err(crate::error::DataplaneError::Other(format!(
+                                "managed SVD VXLAN {name} cannot be created: desired bridge {} is absent",
                                 spec.bridge
                             )));
                         }
-                        return Err(crate::error::DataplaneError::Other(format!(
-                            "managed SVD VXLAN {name} cannot be created: desired bridge {} is absent",
-                            spec.bridge
-                        )));
-                    }
-                    let next_ifindex = state
-                        .kernel
-                        .links
-                        .values()
-                        .map(|link| link.ifindex)
-                        .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(1);
-                    state.kernel.insert_vxlan(KernelVxlanLinkInfo {
-                        ifindex: next_ifindex,
-                        name: name.clone(),
-                        altnames: vec![ownership_stamp.clone()],
-                        up: true,
-                        vni: None,
-                        local_ip: spec.local_ip,
-                        dstport: Some(spec.dstport),
-                        learning_disabled: Some(true),
-                        collect_metadata: true,
-                        vnifilter: true,
-                        bridge: Some(spec.bridge.clone()),
-                        master: Some(spec.bridge.clone()),
-                        mac: None,
-                    });
-                    if let Some(bridge) = state.kernel.links.get_mut(&spec.bridge) {
-                        for binding in &spec.bindings {
-                            if !bridge
-                                .vlans
-                                .iter()
-                                .any(|row| row.vid == binding.bridge_vlan)
-                            {
-                                bridge.vlans.push(KernelBridgeVlanInfo {
-                                    vid: binding.bridge_vlan,
-                                    flags: KernelBridgeVlanFlags::default(),
-                                });
-                            }
-                        }
-                        bridge.port_vlan_inventory.retain(|row| {
-                            !(row.ifindex == next_ifindex || row.name.as_deref() == Some(name))
-                        });
-                        bridge.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+                        let next_ifindex = state
+                            .kernel
+                            .links
+                            .values()
+                            .map(|link| link.ifindex)
+                            .chain(state.kernel.vxlans.values().map(|link| link.ifindex))
+                            .max()
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        state.kernel.insert_vxlan(KernelVxlanLinkInfo {
                             ifindex: next_ifindex,
-                            name: Some(name.clone()),
-                            is_vxlan: true,
-                            vlans: spec
-                                .bindings
-                                .iter()
-                                .map(|binding| KernelBridgeVlanInfo {
-                                    vid: binding.bridge_vlan,
-                                    flags: KernelBridgeVlanFlags::default(),
-                                })
-                                .collect(),
-                            vlan_tunnels: spec
-                                .bindings
-                                .iter()
-                                .map(|binding| KernelBridgeVlanTunnelInfo {
-                                    tunnel_id: Some(binding.vni),
-                                    vid: Some(binding.bridge_vlan),
-                                    flags: KernelBridgeVlanFlags::default(),
-                                })
-                                .collect(),
+                            name: name.clone(),
+                            altnames: vec![ownership_stamp.clone()],
+                            up: true,
+                            vni: None,
+                            local_ip: spec.local_ip,
+                            dstport: Some(spec.dstport),
+                            learning_disabled: Some(true),
+                            collect_metadata: true,
+                            vnifilter: true,
+                            bridge: Some(spec.bridge.clone()),
+                            master: Some(spec.bridge.clone()),
+                            mac: None,
                         });
+                        svd_populate_bridge_bindings(&mut state.kernel, spec, next_ifindex, name);
                     }
                 }
-            },
+            }
             DataplaneOp::RemoveManagedSvdVxlan {
                 name,
                 ownership_stamp,
@@ -1708,6 +1686,59 @@ impl InMemoryHandle {
     pub fn l3_op_log(&self) -> Vec<DataplaneOp> {
         self.state.lock().expect("poisoned").l3_op_log.clone()
     }
+}
+
+/// Populate (or repair) the fake bridge's VLAN + port-VLAN/tunnel
+/// inventory for an SVD VXLAN's bindings — the fake-kernel analogue of
+/// the linux impl's `ensure_svd_vlan_bindings` completion steps. Called
+/// on fresh create and on convergent re-apply against an exactly-ours
+/// stamped link (LAN-290 stamped-but-incomplete retry).
+fn svd_populate_bridge_bindings(
+    kernel: &mut KernelSnapshot,
+    spec: &rustbgpd_evpn::ManagedSvdVxlanNetdevSpec,
+    vxlan_ifindex: u32,
+    name: &str,
+) {
+    let Some(bridge) = kernel.links.get_mut(&spec.bridge) else {
+        return;
+    };
+    for binding in &spec.bindings {
+        if !bridge
+            .vlans
+            .iter()
+            .any(|row| row.vid == binding.bridge_vlan)
+        {
+            bridge.vlans.push(KernelBridgeVlanInfo {
+                vid: binding.bridge_vlan,
+                flags: KernelBridgeVlanFlags::default(),
+            });
+        }
+    }
+    bridge
+        .port_vlan_inventory
+        .retain(|row| !(row.ifindex == vxlan_ifindex || row.name.as_deref() == Some(name)));
+    bridge.port_vlan_inventory.push(KernelBridgePortVlanInfo {
+        ifindex: vxlan_ifindex,
+        name: Some(name.to_string()),
+        is_vxlan: true,
+        vlans: spec
+            .bindings
+            .iter()
+            .map(|binding| KernelBridgeVlanInfo {
+                vid: binding.bridge_vlan,
+                flags: KernelBridgeVlanFlags::default(),
+            })
+            .collect(),
+        vlan_tunnels: spec
+            .bindings
+            .iter()
+            .map(|binding| KernelBridgeVlanTunnelInfo {
+                tunnel_id: Some(binding.vni),
+                vid: Some(binding.bridge_vlan),
+                flags: KernelBridgeVlanFlags::default(),
+            })
+            .collect(),
+    });
 }
 
 fn managed_bridge_exact(

@@ -236,6 +236,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails to encode toward an extended-message peer, and a ROUTE-REFRESH with
   a large ORF section can no longer exceed 4096 bytes toward a peer that
   never advertised the capability. (LAN-290)
+- **Partial managed-netdev creation now converges instead of wedging.** An
+  ADR-0091 managed link create that failed between the netlink add and the
+  `IFLA_ALT_IFNAME` ownership stamp used to strand an unstamped link the
+  daemon would forever classify foreign-present; the failed create now
+  deletes its own unstamped link before surfacing the error, so the next
+  pass retries from absent. A link that *is* stamped but whose follow-on
+  completion steps failed (SVD bridge VLAN/tunnel bindings, VLAN-upper
+  admin-up) used to be treated complete-by-existence and/or permanently
+  suppressed; the reconciler now re-emits the convergent create for
+  exactly-ours stamped-but-incomplete links and classifies post-stamp
+  completion failures as retryable. Transiently failed managed-netdev ops
+  also wake the actor on their own backoff deadline (previously only
+  FDB/BUM/AC-gate/NHG retries did). Finally, managed-netdev and FDB-NHG
+  permanent-failure suppressions are pruned once the underlying intent is
+  withdrawn — completing LAN-124's pruning, which covered the FDB and L3
+  maps but left a withdrawn-then-re-added managed link or NHG member
+  update suppressed until restart (and the stale NHG record kept the
+  adoption-cleanup gate blocked). (LAN-290)
 
 ## [0.50.0] — 2026-07-05
 

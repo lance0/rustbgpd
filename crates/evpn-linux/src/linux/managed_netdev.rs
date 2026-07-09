@@ -148,10 +148,9 @@ async fn create_bridge(
         Ok(()) => {}
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
         Err(err) => {
-            return Err(classify_link_apply_error(
-                &err,
-                "managed bridge altname stamp",
-            ));
+            let stamp_err = classify_link_apply_error(&err, "managed bridge altname stamp");
+            rollback_unstamped_create(handle, bridge.ifindex, name, "managed bridge").await;
+            return Err(stamp_err);
         }
     }
 
@@ -255,10 +254,9 @@ async fn create_vxlan(
         Ok(()) => {}
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
         Err(err) => {
-            return Err(classify_link_apply_error(
-                &err,
-                "managed VXLAN altname stamp",
-            ));
+            let stamp_err = classify_link_apply_error(&err, "managed VXLAN altname stamp");
+            rollback_unstamped_create(handle, vxlan.ifindex, name, "managed VXLAN").await;
+            return Err(stamp_err);
         }
     }
 
@@ -381,10 +379,9 @@ async fn create_svd_vxlan(
             Ok(()) => {}
             Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
             Err(err) => {
-                return Err(classify_link_apply_error(
-                    &err,
-                    "managed SVD VXLAN altname stamp",
-                ));
+                let stamp_err = classify_link_apply_error(&err, "managed SVD VXLAN altname stamp");
+                rollback_unstamped_create(handle, vxlan.ifindex, name, "managed SVD VXLAN").await;
+                return Err(stamp_err);
             }
         }
     }
@@ -411,7 +408,11 @@ async fn ensure_svd_vxlan_converged(
     bridges: &std::collections::HashMap<String, BridgeLink>,
 ) -> Result<(), DataplaneError> {
     ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, bridges)?;
-    ensure_svd_vlan_bindings(handle, name, vxlan.ifindex, spec, bridges).await?;
+    // Completion steps past this point run on a link that provably
+    // carries our exact stamp; failures are retried, never suppressed.
+    ensure_svd_vlan_bindings(handle, name, vxlan.ifindex, spec, bridges)
+        .await
+        .map_err(retryable_completion)?;
     let fresh = fresh_vxlan_state(handle, name).await?;
     let Some(vxlan) = fresh.vxlan.as_ref() else {
         return Err(transient_link_race(format!(
@@ -420,6 +421,7 @@ async fn ensure_svd_vxlan_converged(
     };
     ensure_exact_owned_svd_vxlan(name, vxlan, spec, ownership_stamp, &fresh.bridges)?;
     ensure_svd_vlan_bindings_observed(name, vxlan, spec, &fresh.bridges)
+        .map_err(retryable_completion)
 }
 
 async fn ensure_svd_vlan_bindings(
@@ -569,7 +571,9 @@ async fn create_vrf(
         Ok(()) => {}
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
         Err(err) => {
-            return Err(classify_link_apply_error(&err, "managed VRF altname stamp"));
+            let stamp_err = classify_link_apply_error(&err, "managed VRF altname stamp");
+            rollback_unstamped_create(handle, vrf.ifindex, name, "managed VRF").await;
+            return Err(stamp_err);
         }
     }
 
@@ -678,10 +682,9 @@ async fn create_l3vxlan(
         Ok(()) => {}
         Err(err) if is_errno(&err, ERRNO_EEXIST) => {}
         Err(err) => {
-            return Err(classify_link_apply_error(
-                &err,
-                "managed L3VXLAN altname stamp",
-            ));
+            let stamp_err = classify_link_apply_error(&err, "managed L3VXLAN altname stamp");
+            rollback_unstamped_create(handle, vxlan.ifindex, name, "managed L3VXLAN").await;
+            return Err(stamp_err);
         }
     }
 
@@ -762,9 +765,15 @@ async fn create_vlan_upper(
     if !created {
         return adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await;
     }
-    ensure_vlan_upper_attrs(name, link, spec)?;
-    if !link.altnames.iter().any(|alt| alt == ownership_stamp) {
-        stamp_vlan_upper(handle, link.ifindex, ownership_stamp).await?;
+    if let Err(err) = ensure_vlan_upper_attrs(name, link, spec) {
+        rollback_unstamped_create(handle, link.ifindex, name, "managed VLAN upper").await;
+        return Err(err);
+    }
+    if !link.altnames.iter().any(|alt| alt == ownership_stamp)
+        && let Err(err) = stamp_vlan_upper(handle, link.ifindex, ownership_stamp).await
+    {
+        rollback_unstamped_create(handle, link.ifindex, name, "managed VLAN upper").await;
+        return Err(err);
     }
     let fresh = fresh_vlan_upper_state(handle, name).await?;
     let Some(link) = fresh.vlan_upper.as_ref() else {
@@ -794,7 +803,11 @@ async fn ensure_vlan_upper_up_and_owned(
     if link.up {
         return ensure_exact_owned_vlan_upper(name, link, spec, ownership_stamp);
     }
-    set_link_up(handle, link.ifindex, "managed VLAN upper set up").await?;
+    // Stamp + attrs were verified above; a set-up failure is our own
+    // incomplete state — keep it retryable, never permanently suppressed.
+    set_link_up(handle, link.ifindex, "managed VLAN upper set up")
+        .await
+        .map_err(retryable_completion)?;
     let fresh = fresh_vlan_upper_state(handle, name).await?;
     let Some(link) = fresh.vlan_upper.as_ref() else {
         return Err(missing_vlan_upper_after(name, &fresh, "set up"));
@@ -1340,6 +1353,42 @@ fn ensure_exact_vlan_upper_stamp(
         "managed VLAN upper {name} ownership stamp changed during apply: observed {:?}, expected {ownership_stamp}",
         link.altnames
     )))
+}
+
+/// Best-effort delete of a link this operation just created but failed
+/// to stamp. An unstamped link would be classified foreign-present on
+/// every later pass — a self-inflicted permanent wedge — so the failed
+/// create rolls its own creation back and leaves the kernel as if the
+/// create never ran; the next pass retries from absent.
+async fn rollback_unstamped_create(handle: &Handle, ifindex: u32, name: &str, context: &str) {
+    match handle.link().del(ifindex).execute().await {
+        Ok(()) => {
+            tracing::debug!(name, context, "rolled back unstamped just-created link");
+        }
+        Err(err) if is_errno(&err, ERRNO_ENODEV) || is_errno(&err, ERRNO_ENOENT) => {}
+        Err(err) => {
+            tracing::warn!(
+                name,
+                context,
+                error = ?err,
+                "failed to roll back unstamped just-created link; \
+                 it will be reported foreign-present until removed out of band"
+            );
+        }
+    }
+}
+
+/// Downgrade a would-be-permanent failure from a post-stamp completion
+/// step to the transient class. The link provably carries our exact
+/// ownership stamp at this point, so incomplete follow-on state
+/// (bridge VLAN bindings, admin-up) is ours to finish — the reconciler
+/// must retry the completion steps on backoff instead of permanently
+/// suppressing the op until restart.
+fn retryable_completion(err: DataplaneError) -> DataplaneError {
+    match err.class() {
+        crate::error::FailureClass::Permanent => DataplaneError::Other(err.to_string()),
+        _ => err,
+    }
 }
 
 async fn set_link_up(

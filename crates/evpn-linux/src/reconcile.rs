@@ -621,16 +621,20 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         loop {
-            // Compute the next retry deadline across the four retry
+            // Compute the next retry deadline across the five retry
             // schedules — FDB ops keyed by `(VNI, MAC)`, BUM and
-            // AC-gate ops keyed by ifindex (separate schedules), and
-            // FDB-NHG group-level ops keyed by `AliasGroupKey`. The
-            // earliest wakes the actor.
+            // AC-gate ops keyed by ifindex (separate schedules),
+            // FDB-NHG group-level ops keyed by `AliasGroupKey`, and
+            // managed-netdev ops keyed by `ManagedNetdevOpKey` (LAN-290:
+            // previously missing, so a transiently failed managed op
+            // only retried on the next unrelated wake). The earliest
+            // wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
             let next_ac_gate = self.state.ac_gate_retry.earliest_due();
             let next_nhg = self.state.nhg_retry.earliest_due();
-            let retry_due = [next_fdb, next_bum, next_ac_gate, next_nhg]
+            let next_managed = self.state.managed_retry.earliest_due();
+            let retry_due = [next_fdb, next_bum, next_ac_gate, next_nhg, next_managed]
                 .into_iter()
                 .flatten()
                 .min()
@@ -1118,6 +1122,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             &intent.managed_netdevs,
             &snapshot,
         ));
+        self.prune_stale_managed_permanent_failures(&intent.managed_netdevs, &snapshot);
 
         let attempted_managed_netdev_op = plan.ops.iter().any(|op| {
             matches!(
@@ -1137,6 +1142,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             )
         });
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
+        // Runs after apply so a group torn down this pass (intent
+        // withdrawal → RemoveFdbNhg) is already gone from owned state
+        // and its stale suppression record is pruned in the same pass.
+        self.prune_stale_nhg_permanent_failures(intent.remote_macs.as_ref());
         let managed_status_snapshot = if attempted_managed_netdev_op {
             match self.dataplane.dump_snapshot().await {
                 Ok(snapshot) => snapshot,
@@ -3663,6 +3672,108 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
     }
 
+    /// LAN-290 counterpart of [`Self::prune_stale_fdb_permanent_failures`]
+    /// for the FDB-NHG group-op suppression map. A group key is live
+    /// while any desired remote-MAC entry still derives it or while the
+    /// group is still tracked in owned state; once the intent is
+    /// withdrawn and the group torn down, the suppression record must
+    /// go — it would otherwise block a later same-shape
+    /// `UpdateFdbNhgMembers` forever and permanently wedge the
+    /// adoption-cleanup gate (which blocks while this map is non-empty).
+    fn prune_stale_nhg_permanent_failures(&mut self, desired: &RemoteMacTable) {
+        if self.state.nhg_permanent_failures.is_empty() {
+            return;
+        }
+
+        let mut live_keys: BTreeSet<crate::group_state::AliasGroupKey> = desired
+            .iter()
+            .filter_map(|(&(vni, _mac), entry)| {
+                entry
+                    .alias_group_key
+                    .map(|(esi, tag)| crate::group_state::AliasGroupKey::new(vni, esi, tag))
+            })
+            .collect();
+        live_keys.extend(self.state.groups.iter_groups().map(|(key, _)| *key));
+
+        let before = self.state.nhg_permanent_failures.len();
+        self.state
+            .nhg_permanent_failures
+            .retain(|key, _| live_keys.contains(key));
+        let removed = before.saturating_sub(self.state.nhg_permanent_failures.len());
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                "pruned stale FDB-NHG permanent-failure suppressions for withdrawn groups"
+            );
+        }
+    }
+
+    /// LAN-290 counterpart for the managed-netdev suppression map. A
+    /// suppressed Create stays live while its name is still desired in
+    /// its class; a suppressed Remove stays live while the link still
+    /// exists in the kernel and is not desired (i.e. the orphan-reap
+    /// Remove could still be emitted). Everything else — withdrawn
+    /// intent, links deleted out of band — is pruned so a later
+    /// same-shape re-add is retried without a daemon restart.
+    fn prune_stale_managed_permanent_failures(
+        &mut self,
+        managed: &ManagedNetdevTable,
+        snapshot: &KernelSnapshot,
+    ) {
+        if self.state.managed_permanent_failures.is_empty() {
+            return;
+        }
+
+        let bridges: BTreeSet<&str> = managed.bridges().map(|n| n.name.as_str()).collect();
+        let vxlans: BTreeSet<&str> = managed.vxlans().map(|n| n.name.as_str()).collect();
+        let svd_vxlans: BTreeSet<&str> = managed.svd_vxlans().map(|n| n.name.as_str()).collect();
+        let vrfs: BTreeSet<&str> = managed.vrfs().map(|n| n.name.as_str()).collect();
+        let l3vxlans: BTreeSet<&str> = managed.l3vxlans().map(|n| n.name.as_str()).collect();
+        let vlan_uppers: BTreeSet<&str> = managed.vlan_uppers().map(|n| n.name.as_str()).collect();
+
+        let before = self.state.managed_permanent_failures.len();
+        self.state
+            .managed_permanent_failures
+            .retain(|_, op| match op {
+                DataplaneOp::CreateManagedBridge { name, .. } => bridges.contains(name.as_str()),
+                DataplaneOp::RemoveManagedBridge { name, .. } => {
+                    !bridges.contains(name.as_str()) && snapshot.links.contains_key(name)
+                }
+                DataplaneOp::CreateManagedVxlan { name, .. } => vxlans.contains(name.as_str()),
+                DataplaneOp::RemoveManagedVxlan { name, .. } => {
+                    !vxlans.contains(name.as_str()) && snapshot.vxlans.contains_key(name)
+                }
+                DataplaneOp::CreateManagedSvdVxlan { name, .. } => {
+                    svd_vxlans.contains(name.as_str())
+                }
+                DataplaneOp::RemoveManagedSvdVxlan { name, .. } => {
+                    !svd_vxlans.contains(name.as_str()) && snapshot.vxlans.contains_key(name)
+                }
+                DataplaneOp::CreateManagedVrf { name, .. } => vrfs.contains(name.as_str()),
+                DataplaneOp::RemoveManagedVrf { name, .. } => {
+                    !vrfs.contains(name.as_str()) && snapshot.vrfs.contains_key(name)
+                }
+                DataplaneOp::CreateManagedL3Vxlan { name, .. } => l3vxlans.contains(name.as_str()),
+                DataplaneOp::RemoveManagedL3Vxlan { name, .. } => {
+                    !l3vxlans.contains(name.as_str()) && snapshot.vxlans.contains_key(name)
+                }
+                DataplaneOp::CreateManagedVlanUpper { name, .. } => {
+                    vlan_uppers.contains(name.as_str())
+                }
+                DataplaneOp::RemoveManagedVlanUpper { name, .. } => {
+                    !vlan_uppers.contains(name.as_str()) && snapshot.vlan_uppers.contains_key(name)
+                }
+                _ => true,
+            });
+        let removed = before.saturating_sub(self.state.managed_permanent_failures.len());
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                "pruned stale managed-netdev permanent-failure suppressions for withdrawn intent"
+            );
+        }
+    }
+
     fn prune_stale_l3_permanent_failures(
         &mut self,
         desired: &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
@@ -4488,14 +4599,27 @@ fn compute_managed_netdev_create_ops(
     }
     for svd_vxlan in managed.svd_vxlans() {
         desired.svd_vxlans.insert(svd_vxlan.name.clone());
-        if !snapshot.vxlans.contains_key(&svd_vxlan.name)
-            && !snapshot.link_name_exists(&svd_vxlan.name)
-        {
-            ops.push(DataplaneOp::CreateManagedSvdVxlan {
-                name: svd_vxlan.name.clone(),
-                spec: svd_vxlan.spec.clone(),
-                ownership_stamp: svd_vxlan.ownership_stamp.clone(),
-            });
+        match snapshot.vxlans.get(&svd_vxlan.name) {
+            None if !snapshot.link_name_exists(&svd_vxlan.name) => {
+                ops.push(DataplaneOp::CreateManagedSvdVxlan {
+                    name: svd_vxlan.name.clone(),
+                    spec: svd_vxlan.spec.clone(),
+                    ownership_stamp: svd_vxlan.ownership_stamp.clone(),
+                });
+            }
+            // LAN-290: a link that carries exactly our stamp but whose
+            // bridge VLAN/tunnel bindings are missing is our own
+            // incomplete creation (stamp landed, binding steps failed).
+            // Re-emit the convergent Create so the completion steps are
+            // retried instead of the link sitting incomplete forever.
+            Some(link) if svd_stamped_ours_incomplete(svd_vxlan, link, snapshot) => {
+                ops.push(DataplaneOp::CreateManagedSvdVxlan {
+                    name: svd_vxlan.name.clone(),
+                    spec: svd_vxlan.spec.clone(),
+                    ownership_stamp: svd_vxlan.ownership_stamp.clone(),
+                });
+            }
+            _ => {}
         }
     }
     for vrf in managed.vrfs() {
@@ -4521,18 +4645,69 @@ fn compute_managed_netdev_create_ops(
     }
     for vlan_upper in managed.vlan_uppers() {
         desired.vlan_uppers.insert(vlan_upper.name.clone());
-        if !snapshot.vlan_uppers.contains_key(&vlan_upper.name)
-            && !snapshot.link_name_exists(&vlan_upper.name)
-        {
-            ops.push(DataplaneOp::CreateManagedVlanUpper {
-                name: vlan_upper.name.clone(),
-                spec: vlan_upper.spec.clone(),
-                ownership_stamp: vlan_upper.ownership_stamp.clone(),
-            });
+        match snapshot.vlan_uppers.get(&vlan_upper.name) {
+            None if !snapshot.link_name_exists(&vlan_upper.name) => {
+                ops.push(DataplaneOp::CreateManagedVlanUpper {
+                    name: vlan_upper.name.clone(),
+                    spec: vlan_upper.spec.clone(),
+                    ownership_stamp: vlan_upper.ownership_stamp.clone(),
+                });
+            }
+            // LAN-290: exactly-ours-stamped but administratively down —
+            // the post-stamp set-up step failed. Re-emit the convergent
+            // Create so the completion step is retried.
+            Some(link) if vlan_upper_stamped_ours_incomplete(vlan_upper, link) => {
+                ops.push(DataplaneOp::CreateManagedVlanUpper {
+                    name: vlan_upper.name.clone(),
+                    spec: vlan_upper.spec.clone(),
+                    ownership_stamp: vlan_upper.ownership_stamp.clone(),
+                });
+            }
+            _ => {}
         }
     }
 
     desired
+}
+
+/// A desired SVD VXLAN that exists, is exclusively ours (exactly one
+/// rustbgpd stamp, equal to the expected one), and whose link attrs
+/// all match — but whose bridge VLAN/tunnel bindings are not fully
+/// observed. This is stamped-but-incomplete state from a partial
+/// creation; it is safe to re-run the convergent Create against it.
+fn svd_stamped_ours_incomplete(
+    svd_vxlan: &ManagedSvdVxlanNetdev,
+    link: &KernelVxlanLinkInfo,
+    snapshot: &KernelSnapshot,
+) -> bool {
+    let stamps = rustbgpd_stamps(&link.altnames);
+    if stamps.len() != 1 || stamps[0] != svd_vxlan.ownership_stamp {
+        return false;
+    }
+    if classify_svd_link_attrs(svd_vxlan, link).is_some() {
+        return false;
+    }
+    !snapshot
+        .links
+        .get(&svd_vxlan.spec.bridge)
+        .is_some_and(|bridge| {
+            svd_vlan_bindings_present(bridge, link.ifindex, &link.name, &svd_vxlan.spec.bindings)
+        })
+}
+
+/// A desired VLAN upper that exists with exactly our stamp and matching
+/// bridge/VLAN attrs, but is administratively down — the post-stamp
+/// set-up completion step failed. Safe to re-run the convergent Create.
+fn vlan_upper_stamped_ours_incomplete(
+    vlan_upper: &ManagedVlanUpperNetdev,
+    link: &KernelVlanUpperLinkInfo,
+) -> bool {
+    let stamps = rustbgpd_stamps(&link.altnames);
+    stamps.len() == 1
+        && stamps[0] == vlan_upper.ownership_stamp
+        && link.bridge.as_deref() == Some(vlan_upper.spec.bridge.as_str())
+        && link.vlan == Some(vlan_upper.spec.vlan)
+        && !link.up
 }
 
 fn compute_managed_netdev_orphan_reap_ops(
@@ -8534,6 +8709,147 @@ mod managed_netdev_tests {
         ));
         occupied.insert_link_name("br100.10");
         assert!(compute_managed_netdev_ops(&table, &occupied).is_empty());
+    }
+
+    // LAN-290: a desired SVD VXLAN that exists with exactly our stamp
+    // and matching attrs but missing bridge VLAN/tunnel bindings is a
+    // stamped-but-incomplete creation — the convergent Create must be
+    // re-emitted; once the bindings are observed, no op is emitted.
+    #[test]
+    fn managed_netdev_ops_reemit_create_for_stamped_incomplete_svd() {
+        let spec = rustbgpd_evpn::ManagedSvdVxlanNetdevSpec {
+            local_ip: Some("10.0.0.1".parse().unwrap()),
+            dstport: 4789,
+            bridge: "br100".to_string(),
+            bindings: vec![rustbgpd_evpn::ManagedSvdVxlanBinding {
+                bridge_vlan: 10,
+                vni: 100,
+            }],
+        };
+        let table = ManagedNetdevTable::from_all_maps_with_svd(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([("vxlan-svd".to_string(), spec.clone())]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+
+        let mut svd = vxlan_link(
+            "vxlan-svd",
+            20,
+            vec!["rustbgpd:svd-vxlan:leaf-1:vxlan-svd"],
+            0,
+        );
+        svd.vni = None;
+        svd.collect_metadata = true;
+        svd.vnifilter = true;
+
+        // Bridge present but with no port/VLAN inventory — bindings
+        // are missing, so the Create must be re-emitted.
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link("br100", 10, true, Vec::new()));
+        snapshot.insert_vxlan(svd.clone());
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &snapshot),
+            vec![DataplaneOp::CreateManagedSvdVxlan {
+                name: "vxlan-svd".to_string(),
+                spec: spec.clone(),
+                ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxlan-svd".to_string(),
+            }]
+        );
+
+        // With the bindings observed, the link is complete — no op.
+        let mut bridge = link("br100", 10, true, Vec::new());
+        bridge.vlans.push(crate::snapshot::KernelBridgeVlanInfo {
+            vid: 10,
+            flags: crate::snapshot::KernelBridgeVlanFlags::default(),
+        });
+        bridge
+            .port_vlan_inventory
+            .push(crate::snapshot::KernelBridgePortVlanInfo {
+                ifindex: 20,
+                name: Some("vxlan-svd".to_string()),
+                is_vxlan: true,
+                vlans: vec![crate::snapshot::KernelBridgeVlanInfo {
+                    vid: 10,
+                    flags: crate::snapshot::KernelBridgeVlanFlags::default(),
+                }],
+                vlan_tunnels: vec![crate::snapshot::KernelBridgeVlanTunnelInfo {
+                    tunnel_id: Some(100),
+                    vid: Some(10),
+                    flags: crate::snapshot::KernelBridgeVlanFlags::default(),
+                }],
+            });
+        let mut complete = KernelSnapshot::new();
+        complete.insert_link(bridge);
+        complete.insert_vxlan(svd.clone());
+        assert!(compute_managed_netdev_ops(&table, &complete).is_empty());
+
+        // A foreign (unstamped) incomplete link must NOT be touched.
+        let mut foreign_snapshot = KernelSnapshot::new();
+        foreign_snapshot.insert_link(link("br100", 10, true, Vec::new()));
+        svd.altnames.clear();
+        foreign_snapshot.insert_vxlan(svd);
+        assert!(compute_managed_netdev_ops(&table, &foreign_snapshot).is_empty());
+    }
+
+    // LAN-290: a desired VLAN upper with exactly our stamp and matching
+    // attrs but administratively down had its post-stamp set-up step
+    // fail — the convergent Create must be re-emitted. Foreign
+    // (unstamped) down links are left alone.
+    #[test]
+    fn managed_netdev_ops_reemit_create_for_stamped_down_vlan_upper() {
+        let table = ManagedNetdevTable::from_all_maps(
+            "leaf-1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "br100.10".to_string(),
+                rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                    bridge: "br100".to_string(),
+                    vlan: 10,
+                },
+            )]),
+        );
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_link(link("br100", 10, true, Vec::new()));
+        snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            50,
+            vec!["rustbgpd:vlan-upper:leaf-1:br100.10"],
+            Some("br100"),
+            Some(10),
+            false,
+        ));
+        assert_eq!(
+            compute_managed_netdev_ops(&table, &snapshot),
+            vec![DataplaneOp::CreateManagedVlanUpper {
+                name: "br100.10".to_string(),
+                spec: rustbgpd_evpn::ManagedVlanUpperNetdevSpec {
+                    bridge: "br100".to_string(),
+                    vlan: 10,
+                },
+                ownership_stamp: "rustbgpd:vlan-upper:leaf-1:br100.10".to_string(),
+            }]
+        );
+
+        // Same link but foreign (no stamp): no op.
+        let mut foreign_snapshot = KernelSnapshot::new();
+        foreign_snapshot.insert_link(link("br100", 10, true, Vec::new()));
+        foreign_snapshot.insert_vlan_upper(vlan_upper_link(
+            "br100.10",
+            50,
+            Vec::new(),
+            Some("br100"),
+            Some(10),
+            false,
+        ));
+        assert!(compute_managed_netdev_ops(&table, &foreign_snapshot).is_empty());
     }
 
     #[test]
