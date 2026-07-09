@@ -59,6 +59,20 @@
 //!    advertise the MAC, then drops `originated_key`. The state entry
 //!    is **kept** so a subsequent re-Learn preserves the seq ratchet.
 //!
+//! # Sequence saturation at `u32::MAX`
+//!
+//! RFC 7432 does not define what happens when an increment would
+//! exceed `u32::MAX`. Emitting a wrapped 0 would lose every §15
+//! comparison and re-trigger a bump on every subsequent remote event —
+//! a permanent flap. Policy: **every sequence increment saturates at
+//! `u32::MAX`**. A received `u32::MAX` is unbeatable-by-increment; we
+//! originate at `u32::MAX` too and the RFC 7432 §7.7 lowest-VTEP-IP
+//! tiebreaker (implemented in [`crate::projection`]) becomes the
+//! standing resolution. [`LocalMacOriginator::on_remote_changed`] suppresses the
+//! re-Inject when the saturated bump cannot exceed the sequence we
+//! already advertise, so a MAX-vs-MAX tie is quiet, not a churn loop.
+//! [`crate::origination_macip`] follows the same policy.
+//!
 //! # Sticky bit (RFC 7432 §15.4)
 //!
 //! [`OriginationAction::Inject::sticky`] is plumbed through but the
@@ -302,6 +316,9 @@ impl LocalMacOriginator {
         // that was previously advertised, then Aged, must preserve its
         // sequence ratchet on re-Learn (otherwise a peer that still
         // remembers our prior seq could win the contention).
+        // All increments saturate at u32::MAX — see "Sequence
+        // saturation at `u32::MAX`" in the module docs. Never wrap
+        // to 0 (a wrapped 0 loses every comparison and flaps forever).
         let is_first_ever = prior.is_none();
         let new_seq = match new_last_seen {
             None => {
@@ -309,7 +326,7 @@ impl LocalMacOriginator {
                 if is_first_ever {
                     0
                 } else if was_advertising && (port_changed || sticky_changed) {
-                    prior_seq + 1
+                    prior_seq.saturating_add(1)
                 } else {
                     // Idempotent re-Learn or re-Learn after Aged with
                     // unchanged identity — preserve ratchet.
@@ -319,15 +336,15 @@ impl LocalMacOriginator {
             Some(remote_seq) => {
                 // A contender has been observed at some point.
                 if is_first_ever {
-                    remote_seq + 1
+                    remote_seq.saturating_add(1)
                 } else if !was_advertising {
                     // Re-Learn after Aged with contention history —
                     // bump above contender AND above our prior seq.
-                    (remote_seq + 1).max(prior_seq + 1)
+                    remote_seq.max(prior_seq).saturating_add(1)
                 } else if remote_seq >= prior_seq {
-                    remote_seq + 1
+                    remote_seq.saturating_add(1)
                 } else if port_changed || sticky_changed {
-                    prior_seq + 1
+                    prior_seq.saturating_add(1)
                 } else {
                     prior_seq
                 }
@@ -412,7 +429,15 @@ impl LocalMacOriginator {
             return Vec::new();
         }
 
-        let new_seq = remote_seq.max(entry.our_seq) + 1;
+        let new_seq = remote_seq.max(entry.our_seq).saturating_add(1);
+        if new_seq == entry.our_seq {
+            // Only reachable via saturation: both sides sit at
+            // u32::MAX. An increment cannot outbid the contender —
+            // the §7.7 lowest-VTEP-IP tiebreak (crate::projection)
+            // is the standing resolution. Re-emitting the same seq
+            // would just churn; stay quiet. See module docs.
+            return Vec::new();
+        }
         entry.our_seq = new_seq;
         let mobility_seq = entry.rendered_seq();
         let sticky = entry.sticky;
@@ -560,6 +585,85 @@ mod tests {
         let actions = o.on_remote_changed(mac(0xAA), Some(&v));
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(101), false);
+    }
+
+    // --- u32::MAX boundary (sequence saturation policy) ---
+
+    #[test]
+    fn first_learned_outbids_remote_at_max_minus_one_with_max() {
+        let mut o = fresh();
+        let v = remote(Some(u32::MAX - 1));
+        let actions = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(u32::MAX), false);
+    }
+
+    #[test]
+    fn first_learned_with_remote_at_max_saturates_never_wraps_to_zero() {
+        let mut o = fresh();
+        let v = remote(Some(u32::MAX));
+        let actions = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+        assert_eq!(actions.len(), 1);
+        // Unbeatable-by-increment: originate at u32::MAX too and let
+        // the §7.7 lowest-VTEP-IP tiebreak stand. A wrapped 0 would
+        // lose every comparison and flap forever.
+        assert_inject(&actions[0], Some(u32::MAX), false);
+    }
+
+    #[test]
+    fn remote_changed_to_max_minus_one_bumps_to_max() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let v = remote(Some(u32::MAX - 1));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&v));
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(u32::MAX), false);
+    }
+
+    #[test]
+    fn remote_at_max_against_our_max_is_a_quiet_standing_tie() {
+        let mut o = fresh();
+        // Outbid MAX-1 → we advertise u32::MAX.
+        let v = remote(Some(u32::MAX - 1));
+        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+
+        // Remote catches up to MAX. An increment can't outbid it —
+        // no wrapped-0 emission, no same-seq re-Inject churn.
+        let vmax = remote(Some(u32::MAX));
+        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax));
+        assert!(actions.is_empty(), "got {actions:?}");
+        // Repeat events stay quiet too — no flap loop.
+        let actions = o.on_remote_changed(mac(0xAA), Some(&vmax));
+        assert!(actions.is_empty(), "got {actions:?}");
+    }
+
+    #[test]
+    fn local_port_move_at_max_saturates_never_wraps_to_zero() {
+        let mut o = fresh();
+        // Outbid MAX-2 → our_seq = MAX-1.
+        let v = remote(Some(u32::MAX - 2));
+        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+        // Port move bumps MAX-1 → MAX.
+        let a1 = o.on_local_learned(mac(0xAA), 11, false, None);
+        assert_eq!(a1.len(), 1);
+        assert_inject(&a1[0], Some(u32::MAX), false);
+        // Another move at the ceiling: saturate, don't wrap.
+        let a2 = o.on_local_learned(mac(0xAA), 12, false, None);
+        assert_eq!(a2.len(), 1);
+        assert_inject(&a2[0], Some(u32::MAX), false);
+    }
+
+    #[test]
+    fn relearn_after_aged_with_contender_at_max_saturates() {
+        let mut o = fresh();
+        let v = remote(Some(u32::MAX));
+        let _ = o.on_local_learned(mac(0xAA), 10, false, Some(&v));
+        let _ = o.on_local_aged(mac(0xAA));
+        // Re-Learn after Aged with contention history at the ceiling:
+        // ratchet is preserved at u32::MAX, never wrapped.
+        let actions = o.on_local_learned(mac(0xAA), 10, false, None);
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(u32::MAX), false);
     }
 
     #[test]
