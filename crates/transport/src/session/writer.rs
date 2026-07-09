@@ -26,10 +26,17 @@
 //! Saturation policy lives in the session task, not here:
 //! `bulk_tx.try_send` failing with `Full` means the peer hasn't drained
 //! 4096 BGP messages, the session emits a `Cease/8` (Out of Resources,
-//! RFC 4486 §4 subcode 8) through `priority_tx`, then drops both
-//! senders so this task exits cleanly. Wiring lives in
+//! RFC 4486 §4 subcode 8) through `priority_tx`, signals `teardown_tx`,
+//! and drops the senders. The teardown signal makes this task **discard
+//! the queued bulk backlog instead of draining it** — the Cease must be
+//! the final frame the peer sees, and flushing a saturated queue would
+//! delay the close indefinitely — flush the already-enqueued priority
+//! frames best-effort within [`TEARDOWN_LINGER`], and exit with
+//! [`WriterExit::TornDown`] so the session's writer-exit arm drives
+//! `TcpConnectionFails` + FSM/RIB cleanup exactly like a real TCP
+//! failure. Wiring lives in
 //! `PeerSession::trigger_outbound_saturation_teardown`; this module
-//! just provides the channels and the pipe.
+//! owns the discard/flush/close mechanics.
 //!
 //! # Send hold timer (RFC 9687)
 //!
@@ -76,7 +83,20 @@ pub(super) enum WriterExit {
         /// The configured `SendHoldTime` that elapsed.
         limit: Duration,
     },
+    /// Session-requested hard close (outbound saturation `Cease/8`):
+    /// the queued bulk backlog was discarded — never drained — the
+    /// Cease was flushed best-effort within [`TEARDOWN_LINGER`], and
+    /// the socket closed. The session's writer-exit arm maps this to
+    /// `TcpConnectionFails` so FSM/RIB cleanup runs from the run loop.
+    TornDown,
 }
+
+/// Best-effort bound on teardown writes: how long the writer will wait
+/// for an in-flight frame to reach a frame boundary and for the Cease
+/// NOTIFICATION to reach the wire before hard-closing anyway. A
+/// saturated TCP window may never accept the Cease; the close must not
+/// wait on it.
+const TEARDOWN_LINGER: Duration = Duration::from_secs(2);
 
 /// Channel handles + a [`JoinHandle`] held by the session task.
 ///
@@ -100,6 +120,15 @@ pub(super) struct WriterHandle {
     /// retimes the writer-owned periodic KEEPALIVE, `None` stops it.
     /// Dropping the sender also stops it.
     pub(super) keepalive_tx: watch::Sender<Option<Duration>>,
+    /// Hard-teardown signal (saturation `Cease/8`): sending `true`
+    /// makes the writer discard the bulk backlog, flush pending
+    /// priority frames within [`TEARDOWN_LINGER`], and exit with
+    /// [`WriterExit::TornDown`]. Racing an in-flight write is part of
+    /// the contract — a writer wedged in `write_all` observes the
+    /// signal without waiting for the write to complete. Dropping the
+    /// sender without signalling is the ordinary close path and keeps
+    /// today's drain semantics.
+    pub(super) teardown_tx: watch::Sender<bool>,
     /// Resolves when the writer exits: `Ok(())` on clean shutdown,
     /// `Err(WriterExit)` on TCP write/flush failure or send-hold expiry.
     pub(super) join: JoinHandle<Result<(), WriterExit>>,
@@ -131,11 +160,13 @@ pub(super) fn spawn(
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
     let (priority_tx, priority_rx) = mpsc::unbounded_channel::<Bytes>();
     let (keepalive_tx, keepalive_rx) = watch::channel(None);
+    let (teardown_tx, teardown_rx) = watch::channel(false);
     let task = WriterTask {
         write_half,
         bulk_rx,
         priority_rx,
         keepalive_rx,
+        teardown_rx,
         metrics,
         peer_label,
         send_hold_time,
@@ -145,6 +176,7 @@ pub(super) fn spawn(
         bulk_tx,
         priority_tx,
         keepalive_tx,
+        teardown_tx,
         join,
     }
 }
@@ -154,9 +186,34 @@ struct WriterTask {
     bulk_rx: mpsc::Receiver<Bytes>,
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     keepalive_rx: watch::Receiver<Option<Duration>>,
+    teardown_rx: watch::Receiver<bool>,
     metrics: BgpMetrics,
     peer_label: String,
     send_hold_time: Option<Duration>,
+}
+
+/// Resolve once the session has signalled hard teardown. Pends forever
+/// otherwise — including when the sender is dropped *without*
+/// signalling, which is the ordinary (non-saturation) close path and
+/// must keep the writer's drain-then-exit semantics.
+async fn teardown_requested(rx: &mut watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Apply the RFC 9687 send-hold bound to a write when configured.
+/// `Err(limit)` means the timer expired.
+async fn with_send_hold(
+    write: impl Future<Output = std::io::Result<()>>,
+    send_hold_time: Option<Duration>,
+) -> Result<std::io::Result<()>, Duration> {
+    match send_hold_time {
+        Some(limit) => tokio::time::timeout(limit, write).await.map_err(|_| limit),
+        None => Ok(write.await),
+    }
 }
 
 impl WriterTask {
@@ -164,9 +221,17 @@ impl WriterTask {
         let mut bulk_open = true;
         let mut priority_open = true;
         let mut cadence_open = true;
+        let mut teardown_open = true;
         let mut cadence: Option<Duration> = *self.keepalive_rx.borrow();
         let mut next_keepalive = cadence.map(|interval| tokio::time::Instant::now() + interval);
         loop {
+            // Hard teardown (saturation Cease/8): discard the bulk
+            // backlog, flush the pending priority frames best-effort,
+            // close. Checked at the top of every iteration so no bulk
+            // frame can slip out between the signal and the close.
+            if *self.teardown_rx.borrow() {
+                return self.teardown_close().await;
+            }
             // Exit only when both message channels have closed — the
             // cadence alone must not keep a writer alive for a session
             // that already tore down its senders.
@@ -179,6 +244,15 @@ impl WriterTask {
             // `Cease/8` reaches the wire before any further bulk work.
             let bytes = tokio::select! {
                 biased;
+                changed = self.teardown_rx.changed(), if teardown_open => {
+                    if changed.is_err() {
+                        // Sender dropped without signalling: ordinary
+                        // close path, keep drain semantics and never
+                        // poll this arm again.
+                        teardown_open = false;
+                    }
+                    continue;
+                }
                 changed = self.keepalive_rx.changed(), if cadence_open => {
                     if changed.is_ok() {
                         cadence = *self.keepalive_rx.borrow();
@@ -225,31 +299,91 @@ impl WriterTask {
     }
 
     /// `write_all + flush` one message, bounded by the RFC 9687 send
-    /// hold timer when configured.
+    /// hold timer when configured, and raced against the session's
+    /// hard-teardown signal — a writer wedged mid-write on a saturated
+    /// TCP window must not delay the teardown indefinitely.
     async fn write_message(&mut self, bytes: &Bytes) -> Result<(), WriterExit> {
+        let Self {
+            write_half,
+            teardown_rx,
+            send_hold_time,
+            peer_label,
+            ..
+        } = self;
         let write = async {
-            self.write_half.write_all(bytes).await?;
-            self.write_half.flush().await
+            write_half.write_all(bytes).await?;
+            write_half.flush().await
         };
-        let result = match self.send_hold_time {
-            Some(limit) => match tokio::time::timeout(limit, write).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    warn!(
-                        peer = %self.peer_label,
-                        send_hold_time = ?limit,
-                        "send hold timer expired: peer stopped draining our TCP output \
-                         (RFC 9687); terminating session without NOTIFICATION"
-                    );
-                    return Err(WriterExit::SendHoldExpired { limit });
+        tokio::pin!(write);
+        let outcome = tokio::select! {
+            biased;
+            result = with_send_hold(write.as_mut(), *send_hold_time) => Some(result),
+            () = teardown_requested(teardown_rx) => None,
+        };
+        let result = match outcome {
+            Some(Ok(result)) => result,
+            Some(Err(limit)) => {
+                warn!(
+                    peer = %peer_label,
+                    send_hold_time = ?limit,
+                    "send hold timer expired: peer stopped draining our TCP output \
+                     (RFC 9687); terminating session without NOTIFICATION"
+                );
+                return Err(WriterExit::SendHoldExpired { limit });
+            }
+            None => {
+                // Hard teardown while this frame is in flight: give the
+                // write a short linger to reach a frame boundary (so
+                // the Cease can still follow it intact), then abandon —
+                // a `write_all` cancelled mid-frame may have left a
+                // partial PDU on the wire, so nothing (not even the
+                // Cease) may be written after an abandoned write. On
+                // completion the run loop's top-of-iteration check
+                // routes into `teardown_close`.
+                match tokio::time::timeout(TEARDOWN_LINGER, write.as_mut()).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        debug!(
+                            peer = %peer_label,
+                            "teardown: abandoned in-flight write after linger; hard close"
+                        );
+                        return Err(WriterExit::TornDown);
+                    }
                 }
-            },
-            None => write.await,
+            }
         };
         result.map_err(|e| {
             warn!(error = %e, "writer: write/flush failed");
             WriterExit::Io(e)
         })
+    }
+
+    /// Session-requested hard close: drop the queued bulk backlog on
+    /// the floor — the `Cease/8` already enqueued on the priority
+    /// channel must be the FINAL frame the peer sees, and draining a
+    /// saturated queue could take unbounded time — then flush the
+    /// pending priority frames best-effort within [`TEARDOWN_LINGER`]
+    /// and exit. Returning drops the write half, which closes the
+    /// socket without draining.
+    async fn teardown_close(mut self) -> Result<(), WriterExit> {
+        let deadline = tokio::time::Instant::now() + TEARDOWN_LINGER;
+        // The session enqueues the Cease before signalling teardown and
+        // then drops its senders, so `try_recv` yields exactly the
+        // still-buffered priority frames (normally just the Cease/8).
+        while let Ok(bytes) = self.priority_rx.try_recv() {
+            let write = async {
+                self.write_half.write_all(&bytes).await?;
+                self.write_half.flush().await
+            };
+            match tokio::time::timeout_at(deadline, write).await {
+                Ok(Ok(())) => {}
+                // Best-effort: a saturated TCP window may never accept
+                // the Cease. Do not delay the close for it.
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        debug!(peer = %self.peer_label, "writer: hard close after saturation teardown");
+        Err(WriterExit::TornDown)
     }
 }
 

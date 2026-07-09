@@ -1525,7 +1525,10 @@ async fn oversized_bgpls_output_tears_down_session() {
         .await
         .expect("writer should exit after oversize-triggered teardown")
         .expect("writer join should not panic");
-    assert!(result.is_ok());
+    assert!(
+        matches!(result, Err(super::writer::WriterExit::TornDown)),
+        "oversize output routes through the saturation hard close, got: {result:?}"
+    );
 }
 fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
     rustbgpd_rib::VpnRibRoute {
@@ -6736,15 +6739,170 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         cease_subcode::OUT_OF_RESOURCES,
         "saturation must surface as Cease/Out-of-Resources, not silent drop"
     );
-    // After the priority message drains and both senders are gone, the
-    // biased select's `else` arm fires and the writer exits Ok.
+    // After flushing the Cease the writer hard-closes with `TornDown`
+    // (never draining any bulk backlog), which is what the run loop's
+    // writer-exit arm maps to `TcpConnectionFails` + FSM/RIB cleanup.
     let result = tokio::time::timeout(Duration::from_secs(2), join)
         .await
-        .expect("writer should exit within 2s of senders dropped")
+        .expect("writer should exit within 2s of the teardown signal")
         .expect("writer task should not panic");
     assert!(
-        result.is_ok(),
-        "writer should exit Ok after clean shutdown, got: {result:?}"
+        matches!(result, Err(super::writer::WriterExit::TornDown)),
+        "writer should exit TornDown after the saturation hard close, got: {result:?}"
+    );
+}
+/// Split a captured wire byte stream into BGP frames as
+/// `(message_type, frame_bytes)` pairs, asserting the stream contains
+/// no truncated trailing frame.
+fn parse_wire_frames(mut wire: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut frames = Vec::new();
+    while !wire.is_empty() {
+        assert!(
+            wire.len() >= 19,
+            "trailing partial BGP header on the wire: {} bytes left",
+            wire.len()
+        );
+        let len = usize::from(u16::from_be_bytes([wire[16], wire[17]]));
+        assert!(
+            (19..=wire.len()).contains(&len),
+            "truncated BGP frame: declared {len}, {} bytes left",
+            wire.len()
+        );
+        frames.push((wire[18], wire[..len].to_vec()));
+        wire = &wire[len..];
+    }
+    frames
+}
+/// LAN-280 end-to-end regression: outbound saturation detected on the
+/// REAL run-loop path — a peer draining too slowly while outbound
+/// updates flood in through the RIB channel — must:
+///
+/// 1. put the `Cease/8` NOTIFICATION on the wire as the FINAL frame:
+///    the queued UPDATE backlog is discarded, never drained after the
+///    NOTIFICATION;
+/// 2. deregister the peer from the RIB (`PeerDown`) via the
+///    writer-exit → `TcpConnectionFails` wiring, with **no manually
+///    injected FSM events** (the vacuity this test exists to prevent);
+/// 3. leave the session task alive and responsive afterwards.
+#[tokio::test]
+async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    // The harness drops its command sender, which would end `run()`
+    // immediately — install a live command channel instead.
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    // Small socket buffers so the writer wedges in `write_all` after a
+    // few KiB and the bounded bulk queue actually fills.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.connect(addr).await.unwrap()
+    });
+    let (server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    let peer = connect.await.unwrap();
+    session.test_install_stream(server);
+    establish_test_session(&mut session, 65002).await;
+    match rib_rx.recv().await.unwrap() {
+        RibUpdate::PeerUp { .. } => {}
+        _ => panic!("expected RIB PeerUp after establishment"),
+    }
+    let outbound_tx = session.outbound_tx.clone();
+    let session_task = tokio::spawn(async move { session.run().await });
+    // Slow reader: trickles just enough that the writer stays wedged
+    // while the flood fills the bulk queue, but keeps draining so the
+    // in-flight frame completes within the teardown linger and the
+    // whole wire (including the final Cease) is observable to EOF.
+    let reader = tokio::spawn(async move {
+        let mut peer = peer;
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            match peer.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => collected.extend_from_slice(&buf[..n]),
+            }
+        }
+        collected
+    });
+    // Flood through the REAL outbound path (outbound channel → run
+    // loop → send_route_update → enqueue_bulk). 3× the writer queue
+    // depth guarantees `try_send` hits `Full` and the production
+    // saturation detection fires. No `trigger_outbound_saturation_-
+    // teardown` call, no injected FSM events.
+    let flood_total = 3 * OUTBOUND_BUFFER;
+    for _ in 0..flood_total {
+        let mut update = empty_outbound_update();
+        update.announce = vec![make_route(100)].into();
+        update.next_hop_override = vec![None].into();
+        if outbound_tx.send(update).await.is_err() {
+            // SessionDown already recreated the outbound channel.
+            break;
+        }
+    }
+    // (2) Production wiring: the RIB observes the PeerDown without any
+    // manually injected `TcpConnectionFails`. Skip other session-up
+    // messages (e.g. `SetPeerPolicyContext`) on the way.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let msg = tokio::time::timeout_at(deadline, rib_rx.recv())
+            .await
+            .expect("RIB must observe the saturation teardown (writer-exit → TcpConnectionFails)")
+            .expect("rib channel must stay open");
+        match msg {
+            RibUpdate::PeerDown { peer, .. } => {
+                assert_eq!(peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+                break;
+            }
+            RibUpdate::PeerGracefulRestart { .. } => {
+                panic!("saturation teardown must deregister via PeerDown, not GR-preserve")
+            }
+            _ => {}
+        }
+    }
+    // (3) The session task survived the teardown and terminates
+    // cleanly on command.
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), session_task)
+        .await
+        .expect("session task must terminate on Shutdown")
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+    // (1) The wire: the writer hard-closed, so the peer reaches EOF;
+    // the Cease/8 is the FINAL frame and no UPDATE follows it.
+    let wire = tokio::time::timeout(Duration::from_secs(15), reader)
+        .await
+        .expect("peer must observe EOF after the hard close")
+        .unwrap();
+    let frames = parse_wire_frames(&wire);
+    let notif_idx = frames
+        .iter()
+        .position(|(msg_type, _)| *msg_type == 3)
+        .expect("the Cease NOTIFICATION must reach the wire");
+    assert_eq!(
+        &frames[notif_idx].1[19..21],
+        &[6, 8],
+        "NOTIFICATION must be Cease/Out of Resources"
+    );
+    assert_eq!(
+        notif_idx,
+        frames.len() - 1,
+        "the NOTIFICATION must be the final frame — the saturated backlog \
+         must be discarded, never drained after the Cease"
+    );
+    let updates_on_wire = frames.iter().filter(|(t, _)| *t == 2).count();
+    assert!(
+        updates_on_wire > 0,
+        "sanity: UPDATEs must have flowed before saturation"
+    );
+    assert!(
+        updates_on_wire < flood_total,
+        "sanity: the flood must have outrun the wire"
     );
 }
 // ── Inbound ORF ROUTE-REFRESH handling (RFC 5291/5292) ──────────────────
