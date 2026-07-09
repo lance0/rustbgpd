@@ -355,10 +355,12 @@ impl PeerSession {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
         }
     }
-    /// Check whether a prefix's address family is among the negotiated families.
-    /// Negotiated maximum message length: 65535 if Extended Messages was
-    /// negotiated, otherwise 4096.
-    pub(super) fn max_message_len(&self) -> u16 {
+    /// Maximum message length we may SEND to this peer: 65535 if the PEER
+    /// advertised Extended Messages, otherwise 4096 (RFC 8654 §2 — the
+    /// peer's capability governs our outbound sizes). The inbound limit is
+    /// governed by OUR advertised capability and lives on the framing
+    /// buffer (see the `SessionEstablished` arm in fsm.rs).
+    pub(super) fn outbound_max_message_len(&self) -> u16 {
         if self
             .negotiated
             .as_ref()
@@ -369,6 +371,7 @@ impl PeerSession {
             rustbgpd_wire::MAX_MESSAGE_LEN
         }
     }
+    /// Check whether a prefix's address family is among the negotiated families.
     pub(super) fn is_family_negotiated(&self, prefix: &Prefix) -> bool {
         let family = match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),

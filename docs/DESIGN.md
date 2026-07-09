@@ -533,7 +533,7 @@ libFuzzer harnesses for:
 - Attribute decoding (all supported attributes)
 - NLRI parsing (IPv4 unicast)
 
-Short fuzz runs on every PR. Extended fuzz on nightly CI schedule.
+Fuzz runs on a nightly CI schedule (`fuzz.yml`, all targets); PRs gate on the unit/property/interop suites.
 
 ### Property Tests
 
@@ -544,8 +544,7 @@ Short fuzz runs on every PR. Extended fuzz on nightly CI schedule.
 ### CI Pipeline
 
 - Unit tests (every PR)
-- Fuzz smoke — short run (every PR)
-- Extended fuzz (nightly)
+- Fuzz — all targets, nightly schedule (not PR-gated)
 - Interop tests via containerlab (every PR, against FRR and BIRD at minimum)
 - Clippy + deny(warnings) + cargo deny for dependency audit
 
@@ -709,7 +708,7 @@ gRPC proto definitions are treated with semver discipline:
 ### Release Process
 
 Milestone-based releases. Each milestone (M0–M4) is a tagged release with:
-- Passing CI (unit tests, fuzz smoke, interop)
+- Passing CI (unit tests, interop; fuzz runs nightly)
 - Updated compatibility matrix
 - Updated CHANGELOG
 - Migration notes if protos changed

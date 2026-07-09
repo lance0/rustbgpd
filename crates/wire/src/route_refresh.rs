@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 
 use crate::capability::{Afi, Safi};
-use crate::constants::{HEADER_LEN, MARKER, message_type};
+use crate::constants::{HEADER_LEN, MARKER, MAX_MESSAGE_LEN, message_type};
 use crate::error::{DecodeError, EncodeError};
 use crate::orf::{
     OrfPayload, decode_route_refresh_orf, encode_route_refresh_orf, route_refresh_orf_len,
@@ -176,14 +176,36 @@ impl RouteRefreshMessage {
         })
     }
 
-    /// Encode a complete ROUTE-REFRESH message (header + body) into a buffer.
+    /// Encode a complete ROUTE-REFRESH message (header + body) into a buffer
+    /// using the standard 4096-byte limit.
     ///
     /// # Errors
     ///
     /// Returns [`EncodeError`] if the total message length (with an ORF
-    /// section) exceeds the 16-bit length field.
+    /// section) exceeds the maximum BGP message size.
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
+        self.encode_with_limit(buf, MAX_MESSAGE_LEN)
+    }
+
+    /// Encode with a custom maximum message length. RFC 8654 §3: Extended
+    /// Messages apply to every message type except OPEN and KEEPALIVE, so a
+    /// ROUTE-REFRESH (e.g. with a large ORF section) may use the extended
+    /// 65535-byte limit when negotiated — and MUST stay within 4096 bytes
+    /// when it was not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::MessageTooLong`] if the encoded message exceeds
+    /// `max_message_len`.
+    pub fn encode_with_limit(
+        &self,
+        buf: &mut impl BufMut,
+        max_message_len: u16,
+    ) -> Result<(), EncodeError> {
         let total = self.encoded_len();
+        if total > usize::from(max_message_len) {
+            return Err(EncodeError::MessageTooLong { size: total });
+        }
         let total_u16 = u16::try_from(total).map_err(|_| EncodeError::ValueOutOfRange {
             field: "route_refresh_message_length",
             value: total.to_string(),

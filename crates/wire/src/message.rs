@@ -134,8 +134,10 @@ pub fn encode_message(msg: &Message) -> Result<BytesMut, EncodeError> {
 
 /// Encode a BGP message with a custom maximum message length.
 ///
-/// Same as [`encode_message`] but uses `max_message_len` for UPDATE
-/// size validation (RFC 8654 Extended Messages).
+/// Same as [`encode_message`] but uses `max_message_len` for UPDATE,
+/// NOTIFICATION, and ROUTE-REFRESH size validation (RFC 8654 §3: Extended
+/// Messages apply to every message type except OPEN and KEEPALIVE, which
+/// always use the standard 4096-byte limit).
 ///
 /// # Errors
 ///
@@ -158,16 +160,17 @@ pub fn encode_message_with_limit(
             keepalive::encode_keepalive(&mut buf);
         }
         Message::Notification(n) => {
-            n.encode(&mut buf)?;
+            n.encode_with_limit(&mut buf, max_message_len)?;
         }
         Message::Open(o) => {
+            // RFC 8654 §3: OPEN is never extended — always 4096.
             o.encode(&mut buf)?;
         }
         Message::Update(u) => {
             u.encode_with_limit(&mut buf, max_message_len)?;
         }
         Message::RouteRefresh(rr) => {
-            rr.encode(&mut buf)?;
+            rr.encode_with_limit(&mut buf, max_message_len)?;
         }
     }
 
@@ -180,7 +183,7 @@ mod tests {
 
     use super::*;
     use crate::capability::{Afi, Capability, Safi};
-    use crate::constants::{BGP_VERSION, MAX_MESSAGE_LEN};
+    use crate::constants::{BGP_VERSION, EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
     use crate::notification::NotificationCode;
 
     #[test]
@@ -202,6 +205,99 @@ mod tests {
         let mut bytes = encoded.freeze();
         let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    // RFC 8654 §3: the extended limit applies to NOTIFICATION and
+    // ROUTE-REFRESH, not just UPDATE — and the standard 4096-byte limit
+    // must still bound them when Extended Messages was not negotiated.
+
+    fn big_notification(data_len: usize) -> Message {
+        Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            2,
+            Bytes::from(vec![0_u8; data_len]),
+        ))
+    }
+
+    fn big_route_refresh(raw_orf_len: usize) -> Message {
+        use crate::orf::{OrfEntries, OrfEntryGroup, OrfPayload, OrfType, WhenToRefresh};
+        Message::RouteRefresh(RouteRefreshMessage::new_with_orf(
+            Afi::Ipv4,
+            Safi::Unicast,
+            OrfPayload {
+                when_to_refresh: WhenToRefresh::Immediate,
+                groups: vec![OrfEntryGroup {
+                    orf_type: OrfType::AddressPrefix,
+                    entries: OrfEntries::Raw(Bytes::from(vec![0_u8; raw_orf_len])),
+                }],
+            },
+        ))
+    }
+
+    #[test]
+    fn notification_respects_extended_limit_both_directions() {
+        let msg = big_notification(5000); // total 5021 bytes
+        assert!(matches!(
+            encode_message_with_limit(&msg, MAX_MESSAGE_LEN),
+            Err(EncodeError::MessageTooLong { size: 5021 })
+        ));
+        let encoded = encode_message_with_limit(&msg, EXTENDED_MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(encoded.len(), 5021);
+        // Inbound: accepted at the extended limit, rejected at the standard one.
+        let decoded = decode_message(&mut encoded.clone().freeze(), EXTENDED_MAX_MESSAGE_LEN);
+        assert_eq!(decoded.unwrap(), msg);
+        assert!(decode_message(&mut encoded.freeze(), MAX_MESSAGE_LEN).is_err());
+    }
+
+    #[test]
+    fn route_refresh_respects_extended_limit_both_directions() {
+        let msg = big_route_refresh(5000); // header + body + ORF section > 4096
+        assert!(matches!(
+            encode_message_with_limit(&msg, MAX_MESSAGE_LEN),
+            Err(EncodeError::MessageTooLong { .. })
+        ));
+        let encoded = encode_message_with_limit(&msg, EXTENDED_MAX_MESSAGE_LEN).unwrap();
+        assert!(encoded.len() > usize::from(MAX_MESSAGE_LEN));
+        // Inbound: accepted at the extended limit (the raw ORF bytes
+        // re-decode as parsed entries, so compare the type, not the value),
+        // rejected at the standard one.
+        let decoded = decode_message(&mut encoded.clone().freeze(), EXTENDED_MAX_MESSAGE_LEN);
+        assert!(matches!(decoded.unwrap(), Message::RouteRefresh(_)));
+        assert!(decode_message(&mut encoded.freeze(), MAX_MESSAGE_LEN).is_err());
+    }
+
+    #[test]
+    fn notification_boundary_at_4096_and_65535() {
+        // Exactly 4096 total fits the standard limit; one more byte does not.
+        let at_limit = big_notification(usize::from(MAX_MESSAGE_LEN) - HEADER_LEN - 2);
+        let encoded = encode_message_with_limit(&at_limit, MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(encoded.len(), usize::from(MAX_MESSAGE_LEN));
+        let over = big_notification(usize::from(MAX_MESSAGE_LEN) - HEADER_LEN - 1);
+        assert!(encode_message_with_limit(&over, MAX_MESSAGE_LEN).is_err());
+        assert!(encode_message_with_limit(&over, EXTENDED_MAX_MESSAGE_LEN).is_ok());
+        // Exactly 65535 total fits the extended limit; one more byte does not.
+        let at_ext = big_notification(usize::from(EXTENDED_MAX_MESSAGE_LEN) - HEADER_LEN - 2);
+        let encoded = encode_message_with_limit(&at_ext, EXTENDED_MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(encoded.len(), usize::from(EXTENDED_MAX_MESSAGE_LEN));
+        let over_ext = big_notification(usize::from(EXTENDED_MAX_MESSAGE_LEN) - HEADER_LEN - 1);
+        assert!(encode_message_with_limit(&over_ext, EXTENDED_MAX_MESSAGE_LEN).is_err());
+    }
+
+    #[test]
+    fn open_never_uses_extended_limit() {
+        // RFC 8654 §3: OPEN is excluded from Extended Messages — an
+        // oversized OPEN must fail even with the extended limit.
+        let msg = Message::Open(OpenMessage {
+            version: BGP_VERSION,
+            my_as: 65001,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 1),
+            capabilities: vec![Capability::Unknown {
+                code: 128,
+                data: Bytes::from(vec![0_u8; 5000]),
+            }],
+        });
+        assert!(encode_message_with_limit(&msg, EXTENDED_MAX_MESSAGE_LEN).is_err());
     }
 
     #[test]

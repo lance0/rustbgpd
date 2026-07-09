@@ -211,6 +211,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   call. Separately, every chain evaluation cloned the terminal policy's
   name for attribution even on the hot per-route path that discards it; the
   non-attributed path now skips that allocation entirely. (LAN-290)
+- **Extended Message (RFC 8654) directionality and per-type size limits.**
+  The framing layer only accepted inbound messages over 4096 bytes when the
+  PEER advertised the Extended Message capability — inverted: RFC 8654 §2
+  ties inbound acceptance to OUR advertised capability (always sent), and
+  the peer's capability only governs what we may send, which is now the sole
+  thing it gates. NOTIFICATION and ROUTE-REFRESH size limits now follow the
+  negotiated maximum in both directions (§3: extended messages apply to
+  every type except OPEN and KEEPALIVE): an extended NOTIFICATION no longer
+  fails to encode toward an extended-message peer, and a ROUTE-REFRESH with
+  a large ORF section can no longer exceed 4096 bytes toward a peer that
+  never advertised the capability. (LAN-290)
 
 ## [0.50.0] — 2026-07-05
 
