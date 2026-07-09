@@ -34,8 +34,13 @@ pub struct AspaTableUpdate {
 pub struct VrpManager {
     /// Per-server VRP entry sets.
     server_tables: HashMap<SocketAddr, Vec<VrpEntry>>,
-    /// Per-server ASPA record sets.
-    server_aspa_tables: HashMap<SocketAddr, Vec<AspaRecord>>,
+    /// Per-server ASPA state, keyed by customer ASN.
+    ///
+    /// Keyed (not a record list) because 8210bis ASPA PDUs carry the
+    /// complete provider set per customer ASN: an announce REPLACES the
+    /// customer's previous provider set, and a withdraw removes the
+    /// customer ASN entirely.
+    server_aspa_tables: HashMap<SocketAddr, HashMap<u32, Vec<u32>>>,
     /// Current merged VRP table.
     current_table: Arc<VrpTable>,
     /// Current merged ASPA table.
@@ -95,7 +100,15 @@ impl VrpManager {
                     "full table from cache"
                 );
                 self.server_tables.insert(server, entries);
-                self.server_aspa_tables.insert(server, aspa_records);
+                // Later PDUs for the same customer ASN replace earlier
+                // ones within a full table (8210bis replacement semantics).
+                self.server_aspa_tables.insert(
+                    server,
+                    aspa_records
+                        .into_iter()
+                        .map(|r| (r.customer_asn, r.provider_asns))
+                        .collect(),
+                );
             }
             VrpUpdate::IncrementalUpdate {
                 server,
@@ -119,12 +132,17 @@ impl VrpManager {
                 }
                 table.extend(announced);
 
-                // ASPA incremental
+                // ASPA incremental (8210bis semantics): a withdraw (which
+                // carries an empty provider set on the wire) removes the
+                // customer ASN; an announce replaces the customer's entire
+                // provider set.
                 let aspa_table = self.server_aspa_tables.entry(server).or_default();
                 for w in &aspa_withdrawn {
-                    aspa_table.retain(|r| r != w);
+                    aspa_table.remove(&w.customer_asn);
                 }
-                aspa_table.extend(aspa_announced);
+                for a in aspa_announced {
+                    aspa_table.insert(a.customer_asn, a.provider_asns);
+                }
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
@@ -169,7 +187,12 @@ impl VrpManager {
         let merged: Vec<AspaRecord> = self
             .server_aspa_tables
             .values()
-            .flat_map(|v| v.iter().cloned())
+            .flat_map(|per_customer| {
+                per_customer.iter().map(|(customer, providers)| AspaRecord {
+                    customer_asn: *customer,
+                    provider_asns: providers.clone(),
+                })
+            })
             .collect();
 
         let new_table = Arc::new(AspaTable::new(merged));
@@ -420,7 +443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aspa_incremental_withdraw_is_record_level() {
+    async fn aspa_reannounce_replaces_provider_set() {
         use crate::aspa::ProviderAuth;
 
         let (_vrp_tx, vrp_rx) = mpsc::channel(16);
@@ -428,49 +451,115 @@ mod tests {
         let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
         let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
 
-        // Two ASPA records for the same customer from different CAs
-        let record_a = AspaRecord {
-            customer_asn: 65001,
-            provider_asns: vec![65002],
-        };
-        let record_b = AspaRecord {
-            customer_asn: 65001,
-            provider_asns: vec![65003],
-        };
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![],
+            aspa_records: vec![AspaRecord {
+                customer_asn: 65001,
+                provider_asns: vec![65002, 65003],
+            }],
+        })
+        .await;
+        let _ = aspa_rx.try_recv().unwrap();
+
+        // Re-announce with a different provider set: the new set REPLACES
+        // the old one (8210bis), it does not merge.
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![],
+            aspa_announced: vec![AspaRecord {
+                customer_asn: 65001,
+                provider_asns: vec![65004],
+            }],
+            aspa_withdrawn: vec![],
+        })
+        .await;
+        let update = aspa_rx.try_recv().unwrap();
+        assert_eq!(
+            update.table.authorized(65001, 65004),
+            ProviderAuth::ProviderPlus
+        );
+        assert_eq!(
+            update.table.authorized(65001, 65002),
+            ProviderAuth::NotProviderPlus
+        );
+        assert_eq!(
+            update.table.authorized(65001, 65003),
+            ProviderAuth::NotProviderPlus
+        );
+    }
+
+    #[tokio::test]
+    async fn aspa_empty_provider_withdraw_removes_customer() {
+        use crate::aspa::ProviderAuth;
+
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
 
         mgr.handle_update(VrpUpdate::FullTable {
             server: server1(),
             entries: vec![],
-            aspa_records: vec![record_a.clone(), record_b.clone()],
+            aspa_records: vec![AspaRecord {
+                customer_asn: 65001,
+                provider_asns: vec![65002],
+            }],
         })
         .await;
-        let update = aspa_rx.try_recv().unwrap();
-        // Both records merged: 65001 has providers {65002, 65003}
-        assert_eq!(
-            update.table.authorized(65001, 65002),
-            ProviderAuth::ProviderPlus
-        );
-        assert_eq!(
-            update.table.authorized(65001, 65003),
-            ProviderAuth::ProviderPlus
-        );
+        let _ = aspa_rx.try_recv().unwrap();
 
-        // Withdraw only record_a — record_b should survive
+        // 8210bis withdraw carries an empty provider set and withdraws the
+        // whole customer ASN.
         mgr.handle_update(VrpUpdate::IncrementalUpdate {
             server: server1(),
             announced: vec![],
             withdrawn: vec![],
             aspa_announced: vec![],
-            aspa_withdrawn: vec![record_a],
+            aspa_withdrawn: vec![AspaRecord {
+                customer_asn: 65001,
+                provider_asns: vec![],
+            }],
         })
         .await;
         let update = aspa_rx.try_recv().unwrap();
-        // 65003 should still be authorized (from record_b)
+        assert!(update.table.is_empty());
+        assert_eq!(
+            update.table.authorized(65001, 65002),
+            ProviderAuth::NoAttestation
+        );
+    }
+
+    #[tokio::test]
+    async fn aspa_full_table_last_record_per_customer_wins() {
+        use crate::aspa::ProviderAuth;
+
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![],
+            aspa_records: vec![
+                AspaRecord {
+                    customer_asn: 65001,
+                    provider_asns: vec![65002],
+                },
+                AspaRecord {
+                    customer_asn: 65001,
+                    provider_asns: vec![65003],
+                },
+            ],
+        })
+        .await;
+        let update = aspa_rx.try_recv().unwrap();
         assert_eq!(
             update.table.authorized(65001, 65003),
             ProviderAuth::ProviderPlus
         );
-        // 65002 should no longer be authorized (record_a withdrawn)
         assert_eq!(
             update.table.authorized(65001, 65002),
             ProviderAuth::NotProviderPlus

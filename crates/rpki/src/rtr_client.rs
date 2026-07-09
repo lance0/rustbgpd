@@ -3,6 +3,15 @@
 //! Connects via TCP, prefers RTR protocol version 2 for ASPA support, falls
 //! back to version 1 on explicit server rejection, and sends VRP updates to
 //! the [`VrpManager`](super::vrp_manager::VrpManager).
+//!
+//! Cache state is modeled as one per-cache epoch — the
+//! `(protocol version, session ID, serial)` triple — advanced only as a
+//! unit at a validated End of Data. Any identity mismatch mid-stream
+//! triggers a full resynchronization (Reset Query), never a splice.
+//! Validated data is retained through reconnects and Cache Reset until a
+//! full replacement completes or the expire interval passes. Each
+//! transaction is bounded by a deadline and record/byte budgets. See the
+//! crate-level docs for the supported RFC 8210 / 8210bis subset.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -19,6 +28,43 @@ use crate::vrp::VrpEntry;
 
 /// Maximum read buffer size (256 KiB).
 const MAX_READ_BUF: usize = 256 * 1024;
+
+/// Wall-clock budget for one RTR transaction (query → End of Data).
+/// A full production table transfers in seconds; a cache that cannot
+/// complete within this window is broken or hostile.
+const TRANSACTION_DEADLINE: Duration = Duration::from_mins(5);
+
+/// Record budget for one RTR transaction (VRPs + ASPAs, announce +
+/// withdraw). The global VRP set is well under 1M; 4M leaves years of
+/// headroom while bounding worst-case collection memory.
+const MAX_TRANSACTION_RECORDS: usize = 4_000_000;
+
+/// Wire-byte budget for one RTR transaction.
+const MAX_TRANSACTION_BYTES: usize = 256 * 1024 * 1024;
+
+/// Maximum in-transaction restarts (identity mismatch, Cache Reset)
+/// before the connection is dropped and retries are paced by
+/// `retry_interval`.
+const MAX_TRANSACTION_RESTARTS: u8 = 2;
+
+/// RFC 1982 serial-number order: `new` is the same as or after `old`.
+fn serial_not_before(old: u32, new: u32) -> bool {
+    new.wrapping_sub(old) < (1 << 31)
+}
+
+/// One cache epoch: the `(protocol version, session ID, serial)` triple
+/// identifying a coherent cache state.
+///
+/// The three values advance together and are only ever set as a unit, at a
+/// validated End of Data. Incremental (Serial Query) data may only be
+/// spliced onto a table whose epoch matches the response identity; any
+/// mismatch forces a full resynchronization via Reset Query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheEpoch {
+    version: u8,
+    session_id: u16,
+    serial: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryKind {
@@ -77,8 +123,8 @@ pub struct RtrClientConfig {
 /// updates to the manager, and reconnects on failure.
 pub struct RtrClient {
     config: RtrClientConfig,
-    session_id: Option<u16>,
-    serial: Option<u32>,
+    /// The cache epoch backing the currently held data, if any.
+    epoch: Option<CacheEpoch>,
     vrp_tx: mpsc::Sender<VrpUpdate>,
     refresh_interval: Duration,
     retry_interval: Duration,
@@ -88,6 +134,10 @@ pub struct RtrClient {
     /// Protocol version used for the current connection attempt
     /// (2 = ASPA capable, 1 = VRP only).
     negotiated_version: u8,
+    /// Per-transaction budgets (consts in production; shrunk in tests).
+    transaction_deadline: Duration,
+    max_transaction_records: usize,
+    max_transaction_bytes: usize,
 }
 
 impl RtrClient {
@@ -102,9 +152,11 @@ impl RtrClient {
             data_expires_at: None,
             vrp_tx,
             config,
-            session_id: None,
-            serial: None,
+            epoch: None,
             negotiated_version: crate::rtr_codec::RTR_VERSION_2,
+            transaction_deadline: TRANSACTION_DEADLINE,
+            max_transaction_records: MAX_TRANSACTION_RECORDS,
+            max_transaction_bytes: MAX_TRANSACTION_BYTES,
         }
     }
 
@@ -126,10 +178,10 @@ impl RtrClient {
 
     fn prepare_fresh_connection_attempt(&mut self) {
         // Only reset to v2 if we have had a successful session before.
-        // If we never completed a v2 handshake (session_id is None and
-        // version is still v2), the previous attempt was rejected — keep
-        // the downgraded version so the v1 fallback sticks across retries.
-        if self.session_id.is_some() {
+        // If we never completed a v2 transaction (no epoch and version is
+        // still v2), the previous attempt was rejected — keep the
+        // downgraded version so the v1 fallback sticks across retries.
+        if self.epoch.is_some() {
             self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
         }
     }
@@ -168,14 +220,18 @@ impl RtrClient {
         if matches!(error, RtrError::ServerError { code: 4, .. }) {
             return true;
         }
-        // Server closed the connection without completing the handshake
-        // (no session established). Real-world caches like GoRTR and
+        // Server closed the connection, answered with a lower version
+        // byte, or sent garbage without ever completing a transaction
+        // (no epoch established). Real-world caches like GoRTR and
         // StayRTR disconnect on unsupported versions instead of sending
         // error code 4.
-        self.session_id.is_none()
+        self.epoch.is_none()
             && matches!(
                 error,
-                RtrError::Io(_) | RtrError::ConnectionClosed | RtrError::Decode(_)
+                RtrError::Io(_)
+                    | RtrError::ConnectionClosed
+                    | RtrError::Decode(_)
+                    | RtrError::VersionMismatch { .. }
             )
     }
 
@@ -185,10 +241,10 @@ impl RtrClient {
             "RTR server does not support v2, falling back to v1 (no ASPA)"
         );
         self.negotiated_version = crate::rtr_codec::RTR_VERSION;
-        self.session_id = None;
-        self.serial = None;
-        self.last_end_of_data_at = None;
-        self.data_expires_at = None;
+        // The v2 epoch is no longer valid at v1, so the next query is a
+        // full Reset Query. Held data and its expiry are retained until
+        // the v1 full table replaces them or the expire interval passes.
+        self.epoch = None;
 
         match TcpStream::connect(self.config.server_addr).await {
             Ok(stream) => {
@@ -218,37 +274,78 @@ impl RtrClient {
         }
     }
 
-    async fn handle_disconnected_session(&mut self, reset_session: bool) {
-        let _ = self
-            .vrp_tx
-            .send(VrpUpdate::ServerDown {
-                server: self.config.server_addr,
-            })
-            .await;
-        self.last_end_of_data_at = None;
-        self.data_expires_at = None;
-        if reset_session {
-            self.session_id = None;
-            self.serial = None;
+    /// Handle a lost or failed session.
+    ///
+    /// Validated data is RETAINED through reconnect: `ServerDown` (which
+    /// drops the cache's entries from the merged tables) is only sent once
+    /// the expire interval passes without a fresh End of Data — either
+    /// signalled by the session (`expired_now`) or detected here while
+    /// retrying. A mere disconnect must not flap route validation.
+    async fn handle_disconnected_session(&mut self, expired_now: bool) {
+        let now = TokioInstant::now();
+        let expired = expired_now || self.data_expires_at.is_some_and(|at| now >= at);
+        if expired {
+            let _ = self
+                .vrp_tx
+                .send(VrpUpdate::ServerDown {
+                    server: self.config.server_addr,
+                })
+                .await;
+            self.epoch = None;
+            self.last_end_of_data_at = None;
+            self.data_expires_at = None;
         }
-        tokio::time::sleep(self.retry_interval).await;
+        // Wake at expiry if it lands inside the retry window, so retained
+        // data cannot outlive its expire interval across failed retries.
+        let sleep_for = self.data_expires_at.map_or(self.retry_interval, |at| {
+            self.retry_interval.min(at.saturating_duration_since(now))
+        });
+        tokio::time::sleep(sleep_for).await;
     }
 
     fn current_query_kind(&self) -> QueryKind {
-        if self.session_id.is_some() && self.serial.is_some() {
-            QueryKind::Serial
-        } else {
-            QueryKind::Reset
+        // An epoch is only usable for incremental queries at the version
+        // it was established under; after a version change the next query
+        // must be a full Reset Query.
+        match self.epoch {
+            Some(epoch) if epoch.version == self.negotiated_version => QueryKind::Serial,
+            _ => QueryKind::Reset,
         }
     }
 
     fn build_query_pdu(&self, query: QueryKind) -> RtrPdu {
-        match (query, self.session_id, self.serial) {
-            (QueryKind::Serial, Some(session_id), Some(serial)) => {
-                RtrPdu::SerialQuery { session_id, serial }
-            }
+        match (query, self.epoch) {
+            (QueryKind::Serial, Some(epoch)) => RtrPdu::SerialQuery {
+                session_id: epoch.session_id,
+                serial: epoch.serial,
+            },
             _ => RtrPdu::ResetQuery,
         }
+    }
+
+    /// Pop the next complete PDU off `parse_buf`, enforcing that its
+    /// version byte matches the negotiated connection version so records
+    /// from different protocol versions can never mix in one session.
+    fn next_pdu(&self, parse_buf: &mut Vec<u8>) -> Result<Option<RtrPdu>, RtrError> {
+        if parse_buf.len() < 8 {
+            return Ok(None);
+        }
+        let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
+            return Ok(None);
+        };
+        if parse_buf.len() < pdu_len as usize {
+            return Ok(None);
+        }
+        let got = parse_buf[0];
+        if got != self.negotiated_version {
+            return Err(RtrError::VersionMismatch {
+                expected: self.negotiated_version,
+                got,
+            });
+        }
+        let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
+        parse_buf.drain(..consumed);
+        Ok(Some(pdu))
     }
 
     async fn send_query(&self, stream: &mut TcpStream, query: QueryKind) -> Result<bool, RtrError> {
@@ -274,26 +371,10 @@ impl RtrClient {
         }
     }
 
-    async fn handle_idle_pdus(
-        &mut self,
-        parse_buf: &mut Vec<u8>,
-    ) -> Result<Option<QueryKind>, RtrError> {
+    fn handle_idle_pdus(&mut self, parse_buf: &mut Vec<u8>) -> Result<Option<QueryKind>, RtrError> {
         let mut next_query = None;
 
-        loop {
-            if parse_buf.len() < 8 {
-                break;
-            }
-            let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
-                break;
-            };
-            if parse_buf.len() < pdu_len as usize {
-                break;
-            }
-
-            let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
-            parse_buf.drain(..consumed);
-
+        while let Some(pdu) = self.next_pdu(parse_buf)? {
             match pdu {
                 RtrPdu::SerialNotify { session_id, serial } => {
                     debug!(
@@ -302,8 +383,8 @@ impl RtrClient {
                         serial,
                         "RTR Serial Notify received"
                     );
-                    let query = if self.session_id == Some(session_id) && self.serial.is_some() {
-                        QueryKind::Serial
+                    let query = if self.epoch.map(|e| e.session_id) == Some(session_id) {
+                        self.current_query_kind()
                     } else {
                         QueryKind::Reset
                     };
@@ -312,22 +393,14 @@ impl RtrClient {
                     }
                 }
                 RtrPdu::CacheReset => {
+                    // The epoch is gone but the data is still the most
+                    // recent validated state — retain it (and its expiry)
+                    // until the Reset Query's full table replaces it.
                     info!(
                         server = %self.config.server_addr,
-                        "RTR cache reset received while idle, sending Reset Query"
+                        "RTR cache reset received while idle, resynchronizing with Reset Query"
                     );
-                    let _ = self
-                        .vrp_tx
-                        .send(VrpUpdate::FullTable {
-                            server: self.config.server_addr,
-                            entries: vec![],
-                            aspa_records: vec![],
-                        })
-                        .await;
-                    self.session_id = None;
-                    self.serial = None;
-                    self.last_end_of_data_at = None;
-                    self.data_expires_at = None;
+                    self.epoch = None;
                     next_query = Some(QueryKind::Reset);
                 }
                 RtrPdu::ErrorReport { code, text, .. } => {
@@ -367,7 +440,7 @@ impl RtrClient {
         ));
 
         loop {
-            if let Some(query) = self.handle_idle_pdus(parse_buf).await? {
+            if let Some(query) = self.handle_idle_pdus(parse_buf)? {
                 return Ok(query);
             }
 
@@ -398,9 +471,16 @@ impl RtrClient {
     }
 
     /// Fetch VRPs until `EndOfData`, then publish the resulting update.
+    ///
+    /// One call is one bounded RTR transaction: it is limited by a
+    /// wall-clock deadline and record/byte budgets, and every response's
+    /// identity (session ID, serial progression) is validated against the
+    /// held [`CacheEpoch`] before its records may replace or extend the
+    /// table. On any identity mismatch the response is discarded and the
+    /// client resynchronizes with a full Reset Query — it never splices.
     #[expect(
         clippy::too_many_lines,
-        reason = "RTR serial-query transaction keeps collection, timers, and publish ordering together"
+        reason = "RTR transaction keeps identity checks, collection, budgets, and publish ordering together"
     )]
     async fn fetch_until_end_of_data(
         &mut self,
@@ -409,8 +489,38 @@ impl RtrClient {
         parse_buf: &mut Vec<u8>,
         mut query: QueryKind,
     ) -> Result<(), RtrError> {
-        'fetch: loop {
-            let mut collecting = false;
+        let deadline = TokioInstant::now() + self.transaction_deadline;
+        let mut bytes: usize = 0;
+        let mut restarts: u8 = 0;
+
+        // Bump the restart counter, failing the transaction once a broken
+        // cache keeps forcing resynchronization.
+        macro_rules! restart {
+            () => {{
+                restarts += 1;
+                if restarts > MAX_TRANSACTION_RESTARTS {
+                    return Err(RtrError::ProtocolViolation(
+                        "too many restarts in one transaction",
+                    ));
+                }
+            }};
+        }
+
+        'transaction: loop {
+            // Session identity expected for an incremental response, and
+            // the serial it must not regress behind.
+            let expected_session = match query {
+                QueryKind::Serial => self.epoch.map(|e| e.session_id),
+                QueryKind::Reset => None,
+            };
+            let prior_serial = self.epoch.map(|e| e.serial);
+            // Session ID from this transaction's Cache Response; records
+            // are only collected once it is set.
+            let mut pending_session: Option<u16> = None;
+            // Identity mismatch seen: drain the rest of the response
+            // without collecting, then resync with a Reset Query.
+            let mut discarding = false;
+            let mut records: usize = 0;
             let mut announced = Vec::new();
             let mut withdrawn = Vec::new();
             let mut aspa_announced: Vec<AspaRecord> = Vec::new();
@@ -418,21 +528,27 @@ impl RtrClient {
             let is_reset = self.send_query(stream, query).await?;
 
             loop {
-                while parse_buf.len() >= 8 {
-                    let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
-                        break;
-                    };
-                    if parse_buf.len() < pdu_len as usize {
-                        break;
-                    }
-
-                    let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
-                    parse_buf.drain(..consumed);
-
+                while let Some(pdu) = self.next_pdu(parse_buf)? {
                     match pdu {
                         RtrPdu::CacheResponse { session_id } => {
-                            self.session_id = Some(session_id);
-                            collecting = true;
+                            if expected_session.is_some_and(|expected| expected != session_id) {
+                                // The cache is answering from a different
+                                // session than the one our data belongs to.
+                                // Never splice: discard this response and
+                                // resynchronize with a full Reset Query.
+                                warn!(
+                                    server = %self.config.server_addr,
+                                    expected = expected_session,
+                                    got = session_id,
+                                    "RTR Cache Response session mismatch — resynchronizing"
+                                );
+                                restart!();
+                                self.epoch = None;
+                                discarding = true;
+                                continue;
+                            }
+                            pending_session = Some(session_id);
+                            records = 0;
                             announced.clear();
                             withdrawn.clear();
                             aspa_announced.clear();
@@ -444,7 +560,7 @@ impl RtrClient {
                             max_len,
                             prefix,
                             asn,
-                        } if collecting => {
+                        } if pending_session.is_some() => {
                             let entry = VrpEntry {
                                 prefix: std::net::IpAddr::V4(prefix),
                                 prefix_len,
@@ -456,6 +572,10 @@ impl RtrClient {
                             } else {
                                 withdrawn.push(entry);
                             }
+                            records += 1;
+                            if records > self.max_transaction_records {
+                                return Err(RtrError::TransactionLimit("record budget exceeded"));
+                            }
                         }
                         RtrPdu::Ipv6Prefix {
                             flags,
@@ -463,7 +583,7 @@ impl RtrClient {
                             max_len,
                             prefix,
                             asn,
-                        } if collecting => {
+                        } if pending_session.is_some() => {
                             let entry = VrpEntry {
                                 prefix: std::net::IpAddr::V6(prefix),
                                 prefix_len,
@@ -475,12 +595,16 @@ impl RtrClient {
                             } else {
                                 withdrawn.push(entry);
                             }
+                            records += 1;
+                            if records > self.max_transaction_records {
+                                return Err(RtrError::TransactionLimit("record budget exceeded"));
+                            }
                         }
                         RtrPdu::Aspa {
                             flags,
                             customer_asn,
                             provider_asns,
-                        } if collecting => {
+                        } if pending_session.is_some() => {
                             let record = AspaRecord {
                                 customer_asn,
                                 provider_asns,
@@ -490,6 +614,10 @@ impl RtrClient {
                             } else {
                                 aspa_withdrawn.push(record);
                             }
+                            records += 1;
+                            if records > self.max_transaction_records {
+                                return Err(RtrError::TransactionLimit("record budget exceeded"));
+                            }
                         }
                         RtrPdu::EndOfData {
                             session_id,
@@ -498,8 +626,32 @@ impl RtrClient {
                             retry,
                             expire,
                         } => {
-                            self.session_id = Some(session_id);
-                            self.serial = Some(serial);
+                            if discarding {
+                                // Mismatched response fully drained;
+                                // resynchronize from scratch.
+                                query = QueryKind::Reset;
+                                continue 'transaction;
+                            }
+                            let serial_sane = is_reset
+                                || prior_serial.is_none_or(|old| serial_not_before(old, serial));
+                            if pending_session != Some(session_id) || !serial_sane {
+                                // End of Data identity does not match the
+                                // Cache Response (or was never preceded by
+                                // one), or the serial went backwards: the
+                                // response cannot be trusted as one
+                                // coherent cache state.
+                                warn!(
+                                    server = %self.config.server_addr,
+                                    expected = pending_session,
+                                    got = session_id,
+                                    serial,
+                                    "RTR End of Data identity mismatch — resynchronizing"
+                                );
+                                restart!();
+                                self.epoch = None;
+                                query = QueryKind::Reset;
+                                continue 'transaction;
+                            }
                             if refresh > 0 {
                                 self.refresh_interval = Duration::from_secs(u64::from(refresh));
                             }
@@ -512,6 +664,13 @@ impl RtrClient {
                             let now = TokioInstant::now();
                             self.last_end_of_data_at = Some(now);
                             self.data_expires_at = Some(now + self.expire_interval);
+                            // The transaction is complete and validated:
+                            // advance the epoch as one unit.
+                            self.epoch = Some(CacheEpoch {
+                                version: self.negotiated_version,
+                                session_id,
+                                serial,
+                            });
 
                             let aspa_count = aspa_announced.len() + aspa_withdrawn.len();
                             let update = if is_reset {
@@ -556,24 +715,16 @@ impl RtrClient {
                             return Ok(());
                         }
                         RtrPdu::CacheReset => {
+                            // Retain held data (and its expiry) until the
+                            // Reset Query's full table replaces it.
                             info!(
                                 server = %self.config.server_addr,
-                                "RTR cache reset received, sending Reset Query"
+                                "RTR cache reset received, resynchronizing with Reset Query"
                             );
-                            let _ = self
-                                .vrp_tx
-                                .send(VrpUpdate::FullTable {
-                                    server: self.config.server_addr,
-                                    entries: vec![],
-                                    aspa_records: vec![],
-                                })
-                                .await;
-                            self.session_id = None;
-                            self.serial = None;
-                            self.last_end_of_data_at = None;
-                            self.data_expires_at = None;
+                            restart!();
+                            self.epoch = None;
                             query = QueryKind::Reset;
-                            continue 'fetch;
+                            continue 'transaction;
                         }
                         RtrPdu::SerialNotify { .. } => {
                             debug!(
@@ -600,9 +751,16 @@ impl RtrClient {
                     }
                 }
 
-                let n = stream.read(read_buf).await.map_err(RtrError::Io)?;
+                let n = tokio::time::timeout_at(deadline, stream.read(read_buf))
+                    .await
+                    .map_err(|_| RtrError::TransactionTimeout)?
+                    .map_err(RtrError::Io)?;
                 if n == 0 {
                     return Err(RtrError::ConnectionClosed);
+                }
+                bytes += n;
+                if bytes > self.max_transaction_bytes {
+                    return Err(RtrError::TransactionLimit("byte budget exceeded"));
                 }
                 parse_buf.extend_from_slice(&read_buf[..n]);
                 if parse_buf.len() > MAX_READ_BUF {
@@ -631,6 +789,25 @@ pub enum RtrError {
     /// Inbound data exceeded the read buffer limit.
     #[error("read buffer overflow")]
     BufferOverflow,
+    /// A PDU arrived with a version byte different from the negotiated
+    /// session version.
+    #[error("RTR version mismatch: negotiated {expected}, received {got}")]
+    VersionMismatch {
+        /// Version negotiated for this session.
+        expected: u8,
+        /// Version byte carried by the offending PDU.
+        got: u8,
+    },
+    /// An RTR transaction exceeded its wall-clock deadline.
+    #[error("RTR transaction deadline exceeded")]
+    TransactionTimeout,
+    /// An RTR transaction exceeded a record or byte budget.
+    #[error("RTR transaction limit: {0}")]
+    TransactionLimit(&'static str),
+    /// The cache repeatedly violated session identity within one
+    /// transaction.
+    #[error("RTR protocol violation: {0}")]
+    ProtocolViolation(&'static str),
     /// Cache data expired without a fresh `EndOfData`.
     #[error("cache data expired")]
     Expired,
@@ -695,9 +872,28 @@ mod tests {
         (header[0], pdu)
     }
 
-    async fn write_pdu(stream: &mut TcpStream, pdu: RtrPdu) {
+    async fn write_pdu_version(stream: &mut TcpStream, pdu: RtrPdu, version: u8) {
         let mut buf = Vec::new();
-        pdu.encode(&mut buf).unwrap();
+        pdu.encode_with_version(&mut buf, version).unwrap();
+        stream.write_all(&buf).await.unwrap();
+    }
+
+    /// Write a PDU at v2 — the version the client negotiates by default
+    /// and now enforces on every received PDU.
+    async fn write_pdu(stream: &mut TcpStream, pdu: RtrPdu) {
+        write_pdu_version(stream, pdu, crate::rtr_codec::RTR_VERSION_2).await;
+    }
+
+    /// Write a whole response as ONE write. Required in `start_paused`
+    /// tests: if the client parks between two writes while its
+    /// transaction-deadline timer is pending, tokio's paused clock
+    /// auto-advances to that timer and the transaction times out.
+    async fn write_pdus(stream: &mut TcpStream, pdus: &[RtrPdu]) {
+        let mut buf = Vec::new();
+        for pdu in pdus {
+            pdu.encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION_2)
+                .unwrap();
+        }
         stream.write_all(&buf).await.unwrap();
     }
 
@@ -819,27 +1015,25 @@ mod tests {
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
 
-        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
-        write_pdu(
+        write_pdus(
             &mut stream,
-            RtrPdu::Ipv4Prefix {
-                flags: 1,
-                prefix_len: 24,
-                max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 113, 0),
-                asn: 65001,
-            },
-        )
-        .await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 7,
-                serial: 100,
-                refresh: 10,
-                retry: 5,
-                expire: 30,
-            },
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 10,
+                    retry: 5,
+                    expire: 30,
+                },
+            ],
         )
         .await;
 
@@ -856,16 +1050,18 @@ mod tests {
             }
         );
 
-        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
-        write_pdu(
+        write_pdus(
             &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 7,
-                serial: 101,
-                refresh: 10,
-                retry: 5,
-                expire: 30,
-            },
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 101,
+                    refresh: 10,
+                    retry: 5,
+                    expire: 30,
+                },
+            ],
         )
         .await;
 
@@ -896,27 +1092,25 @@ mod tests {
         let (mut stream1, _) = listener.accept().await.unwrap();
         assert_eq!(read_pdu(&mut stream1).await, RtrPdu::ResetQuery);
 
-        write_pdu(&mut stream1, RtrPdu::CacheResponse { session_id: 7 }).await;
-        write_pdu(
+        write_pdus(
             &mut stream1,
-            RtrPdu::Ipv4Prefix {
-                flags: 1,
-                prefix_len: 24,
-                max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 113, 0),
-                asn: 65001,
-            },
-        )
-        .await;
-        write_pdu(
-            &mut stream1,
-            RtrPdu::EndOfData {
-                session_id: 7,
-                serial: 100,
-                refresh: 60,
-                retry: 2,
-                expire: 10,
-            },
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 2,
+                    expire: 10,
+                },
+            ],
         )
         .await;
 
@@ -940,7 +1134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_reset_clears_entries_and_refetches_on_same_session() {
+    async fn cache_reset_retains_entries_until_replacement_full_table() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
@@ -978,20 +1172,10 @@ mod tests {
 
         write_pdu(&mut stream, RtrPdu::CacheReset).await;
 
-        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            update,
-            VrpUpdate::FullTable {
-                server: addr,
-                entries: vec![],
-                aspa_records: vec![],
-            }
-        );
-
         assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        // No update between Cache Reset and the replacement full table:
+        // the previous data stays valid until it is replaced.
+        assert!(vrp_rx.try_recv().is_err());
 
         write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 8 }).await;
         write_pdu(
@@ -1063,8 +1247,13 @@ mod tests {
         assert_eq!(version, crate::rtr_codec::RTR_VERSION);
         assert_eq!(pdu, RtrPdu::ResetQuery);
 
-        write_pdu(&mut stream_v1, RtrPdu::CacheResponse { session_id: 7 }).await;
-        write_pdu(
+        write_pdu_version(
+            &mut stream_v1,
+            RtrPdu::CacheResponse { session_id: 7 },
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        write_pdu_version(
             &mut stream_v1,
             RtrPdu::Ipv4Prefix {
                 flags: 1,
@@ -1073,9 +1262,10 @@ mod tests {
                 prefix: Ipv4Addr::new(203, 0, 113, 0),
                 asn: 65001,
             },
+            crate::rtr_codec::RTR_VERSION,
         )
         .await;
-        write_pdu(
+        write_pdu_version(
             &mut stream_v1,
             RtrPdu::EndOfData {
                 session_id: 7,
@@ -1084,6 +1274,7 @@ mod tests {
                 retry: 5,
                 expire: 120,
             },
+            crate::rtr_codec::RTR_VERSION,
         )
         .await;
 
@@ -1156,6 +1347,401 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Establish an epoch (session 7, serial 100) on `stream` with one
+    /// IPv4 prefix and consume the resulting `FullTable` update.
+    async fn establish_epoch(stream: &mut TcpStream, vrp_rx: &mut mpsc::Receiver<VrpUpdate>) {
+        assert_eq!(read_pdu(stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+        let _ = vrp_rx.recv().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_response_session_mismatch_resyncs_instead_of_splicing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch(&mut stream, &mut vrp_rx).await;
+
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        // The cache answers the Serial Query from a DIFFERENT session:
+        // this delta belongs to another cache state and must not be
+        // spliced onto ours.
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 9 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 114, 0),
+                asn: 65002,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 9,
+                serial: 200,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        // The client drains the mismatched response, publishes nothing,
+        // and resynchronizes with a full Reset Query.
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 9 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 114, 0),
+                asn: 65002,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 9,
+                serial: 200,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // Full replacement, never an incremental splice.
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn end_of_data_session_mismatch_triggers_full_requery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        // End of Data carries a session ID that does not match the Cache
+        // Response: the response is not one coherent cache state.
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 8,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 8 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 8,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![],
+                aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn serial_regression_triggers_full_requery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch(&mut stream, &mut vrp_rx).await;
+
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        // Incremental response whose serial went backwards (RFC 1982).
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 50,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_retains_data_and_resumes_with_serial_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch(&mut stream, &mut vrp_rx).await;
+
+        // Connection drops. The retained data must NOT be flushed: no
+        // ServerDown, and the client resumes the same epoch with a Serial
+        // Query on reconnect.
+        drop(stream);
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_pdu(&mut stream2).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn version_mismatch_mid_session_reconnects_and_retains_data() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch(&mut stream, &mut vrp_rx).await;
+
+        // A PDU with a different version byte mid-session: records from
+        // different protocol versions must never mix in one epoch.
+        write_pdu_version(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+
+        // The client drops the session but retains data and epoch.
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream2).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(
+            pdu,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn record_budget_exceeded_drops_connection_without_publishing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let mut client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        client.max_transaction_records = 2;
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        let mut pdus = vec![RtrPdu::CacheResponse { session_id: 7 }];
+        for i in 0..3u8 {
+            pdus.push(RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, i),
+                asn: 65001,
+            });
+        }
+        write_pdus(&mut stream, &pdus).await;
+
+        // Budget exceeded: the client drops the connection (bounded
+        // error, no wedge/OOM) and publishes nothing.
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn byte_budget_exceeded_drops_connection_without_publishing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let mut client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        client.max_transaction_bytes = 4;
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transaction_deadline_drops_stalled_transfer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let mut client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        client.transaction_deadline = Duration::from_secs(30);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        // Cache Response and then… nothing. The transaction must not
+        // wedge: the deadline fires (paused clock auto-advances) and the
+        // client reconnects.
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
 
         client_handle.abort();
         let _ = client_handle.await;

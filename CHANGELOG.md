@@ -31,6 +31,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+<<<<<<< HEAD
 - **Commit-confirm recovery now fails safe through ambiguous transaction
   outcomes.** A confirmed config transaction whose apply failed after the
   point of no proof — the persistence acknowledgement was lost, post-persist
@@ -55,6 +56,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps resolving against the last-successfully-applied registry, and the
   operator's `.rpol` files survive on disk as intent for the next successful
   reload. (LAN-284)
+- **RTR client models cache state as one epoch and retains data through
+  reconnect.** The RTR (RFC 8210/8210bis) client tracked protocol version,
+  session ID, and serial loosely, so a version downgrade or session-ID
+  change mid-stream could mix records from different cache states, and any
+  disconnect or Cache Reset immediately flushed the cache's validated VRPs
+  and ASPAs — flapping route validation on every reconnect. Cache state is
+  now one per-cache `(version, session ID, serial)` epoch advanced only at
+  a validated End of Data; Cache Response / End of Data identity mismatches
+  and RFC 1982 serial regressions force a full Reset Query resync instead
+  of splicing; validated data is retained through reconnect, version
+  fallback, and Cache Reset until a full replacement completes or the
+  expire interval passes; every received PDU must carry the negotiated
+  version; ASPA updates now follow 8210bis replacement semantics (announce
+  replaces the customer's provider set, empty-provider withdraw removes the
+  customer ASN — previously sets merged and could never shrink); and each
+  RTR transaction is bounded by a wall-clock deadline plus record and byte
+  budgets so a broken or malicious cache cannot wedge or OOM the client.
+  (LAN-281)
 - **Outbound saturation teardown: Cease is the final frame, and cleanup runs
   from the run loop.** When a peer stopped draining and the bounded writer
   queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
