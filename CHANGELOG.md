@@ -127,6 +127,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message instead of passing vacuously); the M33 soak analyzer rejects a
   samples CSV whose expected columns are missing instead of silently gating
   on all-zero deltas.
+- **EVPN MAC Mobility sequence numbers saturate at `u32::MAX` instead of
+  wrapping.** RFC 7432 leaves sequence wrap undefined; outbidding a received
+  `u32::MAX` with a naive `+1` would have overflowed (panic in debug builds,
+  wrap to 0 in release — and a wrapped 0 loses every §15 comparison, flapping
+  forever). Every sequence increment in the MAC-only and MAC+IP origination
+  state machines now saturates at `u32::MAX`: a received `u32::MAX` is
+  unbeatable-by-increment, rustbgpd originates at `u32::MAX` too, and the
+  RFC 7432 §7.7 lowest-VTEP-IP tiebreak becomes the standing resolution —
+  the MAX-vs-MAX tie stays quiet instead of re-emitting the same sequence on
+  every remote event. (LAN-287)
 
 ## [0.50.0] — 2026-07-05
 
