@@ -187,6 +187,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identical timestamp in both views. The fabricated Loc-RIB OPEN's
   infallible encoding is now backed by an explicit bounded-size test on the
   declared family set instead of an unproven `expect`. (LAN-193)
+- **RIB route listings are bounded, resumable, and never silently
+  truncated.** `ListReceivedRoutes`/`ListBestRoutes`/`ListAdvertisedRoutes`
+  used to materialize the full table out of the RIB task per call and
+  filter/slice it in the API layer with numeric-offset tokens; filtering and
+  pagination now run inside the RIB task as bounded resumable queries
+  (opaque last-key cursor, per-page allocation capped at 1000 rows, the same
+  mutation-robust cursor step as the BMP Loc-RIB dump), and a canceled gRPC
+  request whose page query is already enqueued is skipped before any scan.
+  `rbgp best` / `rbgp rib received` / `rbgp rib advertised` used to silently
+  truncate at 100 rows; they now paginate transparently until the listing
+  completes. Canceled on-demand MRT dump requests are likewise skipped
+  before the RIB snapshot, encode, and file write. (LAN-288)
 
 ## [0.50.0] — 2026-07-05
 

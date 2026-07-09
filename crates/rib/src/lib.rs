@@ -60,4 +60,5 @@ pub use update::{
     AdjRibOutCounts, BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision,
     ExplainReason, ExportGateStep, ExportGateVerdict, MrtPeerEntry, MrtSnapshotData,
     NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate, RibCommandError, RibUpdate,
+    RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, route_query_key,
 };

@@ -326,6 +326,50 @@ pub struct BestPathCandidate {
     pub multipath: crate::best_path::MultipathEligibility,
 }
 
+/// Which table a paged route query ([`RibUpdate::QueryRoutesPage`]) reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteQueryScope {
+    /// Adj-RIB-In routes, optionally narrowed to one peer.
+    Received {
+        /// Optional peer filter; `None` reads all peers.
+        peer: Option<IpAddr>,
+    },
+    /// Loc-RIB best routes.
+    Best,
+    /// Routes advertised to a specific peer (Adj-RIB-Out, or the
+    /// synthesized view for an update-grouped member).
+    Advertised {
+        /// The target peer.
+        peer: IpAddr,
+    },
+}
+
+/// Resume cursor for a paged route query: the identity key of the last
+/// route on the previous page. The tuple's derived total order carries
+/// no routing meaning; it exists so stable cursors can be cut through
+/// the unordered route tables (see the `Ord` note on [`Prefix`]).
+pub type RouteQueryKey = (Prefix, IpAddr, u32);
+
+/// Identity key of a route within a paged-query scope.
+#[must_use]
+pub fn route_query_key(route: &Route) -> RouteQueryKey {
+    (route.prefix, route.peer, route.path_id)
+}
+
+/// Row filter evaluated inside the RIB task during a paged route query.
+pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
+
+/// One page of a resumable route query.
+#[derive(Debug, Clone, Default)]
+pub struct RoutePage {
+    /// Routes on this page, ascending by identity key.
+    pub routes: Vec<Route>,
+    /// Total filter-matching routes in scope (cursor-independent).
+    pub total: u64,
+    /// Whether matching routes remain beyond this page.
+    pub has_more: bool,
+}
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
     /// Peer session sent us routes.
@@ -530,6 +574,25 @@ pub enum RibUpdate {
         peer: Option<IpAddr>,
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Query: one bounded page of a resumable route listing. Filtering
+    /// and pagination run inside the RIB task with per-page bounded
+    /// allocation (same mutation-robust cursor step as the BMP Loc-RIB
+    /// dump), and the reply channel doubles as the cancellation token:
+    /// an abandoned caller (dropped receiver) skips the scan entirely.
+    QueryRoutesPage {
+        /// Which table to read.
+        scope: RouteQueryScope,
+        /// Optional row filter evaluated inside the RIB task; `None`
+        /// keeps every route in scope.
+        filter: Option<RouteQueryFilter>,
+        /// Resume strictly after this key; `None` starts from the
+        /// beginning.
+        after: Option<RouteQueryKey>,
+        /// Maximum routes on the page (clamped to a server-side cap).
+        page_size: usize,
+        /// Response channel; a dropped receiver cancels the query.
+        reply: oneshot::Sender<RoutePage>,
     },
     /// Query: return best routes from the Loc-RIB.
     QueryBestRoutes {

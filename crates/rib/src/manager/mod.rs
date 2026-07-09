@@ -28,7 +28,8 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, OutboundRouteUpdate, RibUpdate,
+    NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage, RouteQueryFilter,
+    RouteQueryKey, RouteQueryScope, route_query_key,
 };
 
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
@@ -407,6 +408,79 @@ fn smallest_keys_after<K: Ord + Copy>(
         }
     }
     heap.into_sorted_vec()
+}
+
+/// Server-side hard cap on a paged route-query page — bounds per-page
+/// allocation regardless of the client-requested size.
+pub(crate) const ROUTE_QUERY_MAX_PAGE_SIZE: usize = 1000;
+
+/// One bounded page over an unordered route iterator: the filter-matching
+/// routes with the `page_size` smallest identity keys strictly greater
+/// than `after`, ascending, plus the scope's total matching count.
+/// Single pass, O(page) allocation — the same mutation-robust cursor
+/// step as [`smallest_keys_after`], carrying the routes alongside the
+/// keys so no per-key re-lookup is needed.
+fn page_routes<'a>(
+    routes: impl Iterator<Item = &'a crate::route::Route>,
+    filter: Option<&RouteQueryFilter>,
+    after: Option<RouteQueryKey>,
+    page_size: usize,
+) -> RoutePage {
+    /// Max-heap entry ordered by identity key only.
+    struct Entry<'a>(RouteQueryKey, &'a crate::route::Route);
+    impl PartialEq for Entry<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+    impl Eq for Entry<'_> {}
+    impl PartialOrd for Entry<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry<'_> {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.cmp(&other.0)
+        }
+    }
+
+    let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+    let mut heap = std::collections::BinaryHeap::with_capacity(n + 1);
+    let mut total: u64 = 0;
+    // Matching routes strictly past the cursor — tells whether routes
+    // remain beyond this page.
+    let mut remaining: u64 = 0;
+    for route in routes {
+        if let Some(filter) = filter
+            && !filter(route)
+        {
+            continue;
+        }
+        total += 1;
+        let key = route_query_key(route);
+        if after.is_some_and(|a| key <= a) {
+            continue;
+        }
+        remaining += 1;
+        if heap.len() < n {
+            heap.push(Entry(key, route));
+        } else if heap.peek().is_some_and(|top| key < top.0) {
+            heap.pop();
+            heap.push(Entry(key, route));
+        }
+    }
+    let routes: Vec<_> = heap
+        .into_sorted_vec()
+        .into_iter()
+        .map(|entry| entry.1.clone())
+        .collect();
+    let has_more = remaining > routes.len() as u64;
+    RoutePage {
+        routes,
+        total,
+        has_more,
+    }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
@@ -1007,6 +1081,15 @@ impl RibManager {
             RibUpdate::QueryReceivedRoutes { peer, reply } => {
                 self.handle_query_received_routes(peer, reply);
             }
+            RibUpdate::QueryRoutesPage {
+                scope,
+                filter,
+                after,
+                page_size,
+                reply,
+            } => {
+                self.handle_query_routes_page(scope, filter.as_ref(), after, page_size, reply);
+            }
             RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
             RibUpdate::QueryFibInstallCandidates {
                 max_paths,
@@ -1384,6 +1467,64 @@ impl RibManager {
         };
 
         if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// One bounded page of a resumable route listing. The reply channel
+    /// doubles as the cancellation token: an abandoned caller (dropped
+    /// receiver — e.g. a canceled gRPC request whose page query was
+    /// already enqueued) skips the scan entirely, so abandoned
+    /// pagination stops costing the RIB task anything.
+    // ponytail: each page re-scans the scope (O(table) per page, like
+    // the BMP Loc-RIB dump) — allocation is bounded per page; swap in a
+    // sorted index if paging CPU at DFZ scale ever bites.
+    fn handle_query_routes_page(
+        &mut self,
+        scope: RouteQueryScope,
+        filter: Option<&RouteQueryFilter>,
+        after: Option<RouteQueryKey>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<RoutePage>,
+    ) {
+        if reply.is_closed() {
+            debug!("route page query canceled before scan; skipping");
+            return;
+        }
+        let page = match scope {
+            RouteQueryScope::Received { peer: Some(peer) } => page_routes(
+                self.ribs.get(&peer).into_iter().flat_map(AdjRibIn::iter),
+                filter,
+                after,
+                page_size,
+            ),
+            RouteQueryScope::Received { peer: None } => page_routes(
+                self.ribs.values().flat_map(AdjRibIn::iter),
+                filter,
+                after,
+                page_size,
+            ),
+            RouteQueryScope::Best => page_routes(self.loc_rib.iter(), filter, after, page_size),
+            RouteQueryScope::Advertised { peer } => {
+                // A grouped member holds no per-peer unicast Adj-RIB-Out;
+                // its advertised set is synthesized (group table − own-
+                // sourced) — materialized by that synthesis, then paged
+                // so the reply stays bounded either way.
+                match self.grouped_advertised_routes(peer) {
+                    Some(routes) => page_routes(routes.iter(), filter, after, page_size),
+                    None => page_routes(
+                        self.adj_ribs_out
+                            .get(&peer)
+                            .into_iter()
+                            .flat_map(AdjRibOut::iter),
+                        filter,
+                        after,
+                        page_size,
+                    ),
+                }
+            }
+        };
+        if reply.send(page).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }

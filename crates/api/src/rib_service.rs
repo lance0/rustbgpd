@@ -15,7 +15,8 @@ use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
     ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot,
     OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route,
-    RouteEventType, RtcRibRoute, VpnRibRoute,
+    RouteEventType, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, RtcRibRoute,
+    VpnRibRoute, route_query_key,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -202,25 +203,26 @@ impl RibService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))
     }
 
-    async fn query_routes(&self, peer: Option<IpAddr>) -> Result<Vec<Route>, Status> {
+    /// One bounded, resumable page from the RIB task. Filtering and
+    /// pagination run inside the actor; the reply channel doubles as
+    /// the cancellation token (dropping this future drops the receiver,
+    /// so an already-enqueued page query is skipped by the actor).
+    async fn query_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<RouteQueryFilter>,
+        after: Option<RouteQueryKey>,
+        page_size: usize,
+    ) -> Result<RoutePage, Status> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
-            .send(RibUpdate::QueryReceivedRoutes {
-                peer,
+            .send(RibUpdate::QueryRoutesPage {
+                scope,
+                filter,
+                after,
+                page_size,
                 reply: reply_tx,
             })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
-    }
-
-    async fn query_best_routes(&self) -> Result<Vec<Route>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
             .await
             .map_err(|_| Status::internal("RIB manager unavailable"))?;
 
@@ -694,87 +696,88 @@ fn prefix_parts(prefix: Prefix) -> (String, u32) {
     }
 }
 
-fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
-    let offset: usize = if req.page_token.is_empty() {
-        0
-    } else {
-        req.page_token.parse().map_err(|_| "invalid page_token")?
-    };
+/// Default page size when the request leaves `page_size` at 0.
+const DEFAULT_ROUTE_PAGE_SIZE: usize = 100;
 
+/// Decode the pagination fields of a route-listing request: the resume
+/// cursor (from the opaque `page_token`) and the requested page size.
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for validation helpers"
+)]
+fn parse_route_page_params(
+    req: &proto::ListRoutesRequest,
+) -> Result<(Option<RouteQueryKey>, usize), Status> {
+    let after = if req.page_token.is_empty() {
+        None
+    } else {
+        Some(decode_route_page_token(&req.page_token)?)
+    };
     let page_size = if req.page_size == 0 {
-        100
+        DEFAULT_ROUTE_PAGE_SIZE
     } else {
         req.page_size as usize
     };
-
-    Ok((offset, page_size))
+    Ok((after, page_size))
 }
 
-fn build_filtered_response(
-    routes: Vec<Route>,
-    afi_safi: i32,
-    filters: &RouteFilters,
-    offset: usize,
-    page_size: usize,
-    best: bool,
-) -> proto::ListRoutesResponse {
-    let filters_active = !filters.is_empty();
+/// Encode a resume cursor as the opaque `next_page_token`: the identity
+/// key (`prefix|peer|path_id`) of the last row on the page.
+fn encode_route_page_token(key: &RouteQueryKey) -> String {
+    let (prefix, peer, path_id) = key;
+    let (addr, len) = prefix_parts(*prefix);
+    format!("{addr}/{len}|{peer}|{path_id}")
+}
 
-    // Fast path: when neither the family filter nor the route filters narrow the
-    // snapshot, `total_count` is just the snapshot length and the page is a
-    // plain offset/limit slice — no full scan to count. This preserves the
-    // pre-fusion O(offset + page_size) cost for the common "list, first page"
-    // call instead of walking the whole RIB just to recompute `routes.len()`.
-    if !filters_active && family_filter_is_noop(afi_safi) {
-        let total_count = routes.len();
-        let page: Vec<proto::Route> = routes
-            .iter()
-            .skip(offset)
-            .take(page_size)
-            .map(|r| route_to_proto(r, best))
-            .collect();
-        let next_offset = offset.saturating_add(page.len());
-        let next_page_token = if next_offset < total_count {
-            next_offset.to_string()
-        } else {
-            String::new()
-        };
-        return proto::ListRoutesResponse {
-            routes: page,
-            next_page_token,
-            total_count: u64::try_from(total_count).unwrap_or(u64::MAX),
-        };
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic::Status is the direct gRPC error type for validation helpers"
+)]
+fn decode_route_page_token(token: &str) -> Result<RouteQueryKey, Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    let mut parts = token.split('|');
+    let (Some(prefix), Some(peer), Some(path_id), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid());
+    };
+    let (addr, len) = prefix.split_once('/').ok_or_else(invalid)?;
+    let len: u32 = len.parse().map_err(|_| invalid())?;
+    let prefix = parse_prefix_request(addr, len).map_err(|_| invalid())?;
+    let peer: IpAddr = peer.parse().map_err(|_| invalid())?;
+    let path_id: u32 = path_id.parse().map_err(|_| invalid())?;
+    Ok((prefix, peer, path_id))
+}
+
+/// Build the row filter evaluated inside the RIB task. `None` when
+/// neither the family filter nor the route filters narrow the scope, so
+/// the actor skips per-route predicate calls entirely.
+fn build_route_query_filter(afi_safi: i32, filters: RouteFilters) -> Option<RouteQueryFilter> {
+    if filters.is_empty() && family_filter_is_noop(afi_safi) {
+        return None;
     }
+    Some(Box::new(move |route| {
+        route_matches_family(route, afi_safi) && filters.matches(route)
+    }))
+}
 
-    let mut total_count = 0usize;
-    let mut page = Vec::new();
-
-    for route in routes {
-        if !route_matches_family(&route, afi_safi) {
-            continue;
-        }
-        if filters_active && !filters.matches(&route) {
-            continue;
-        }
-
-        let row_index = total_count;
-        total_count = total_count.saturating_add(1);
-        if row_index >= offset && page.len() < page_size {
-            page.push(route_to_proto(&route, best));
-        }
-    }
-
-    let next_offset = offset.saturating_add(page.len());
-    let next_page_token = if next_offset < total_count {
-        next_offset.to_string()
+fn route_page_to_response(page: &RoutePage, best: bool) -> proto::ListRoutesResponse {
+    let next_page_token = if page.has_more {
+        page.routes
+            .last()
+            .map(|route| encode_route_page_token(&route_query_key(route)))
+            .unwrap_or_default()
     } else {
         String::new()
     };
-
     proto::ListRoutesResponse {
-        routes: page,
+        routes: page
+            .routes
+            .iter()
+            .map(|route| route_to_proto(route, best))
+            .collect(),
         next_page_token,
-        total_count: u64::try_from(total_count).unwrap_or(u64::MAX),
+        total_count: page.total,
     }
 }
 
@@ -1158,16 +1161,16 @@ impl proto::rib_service_server::RibService for RibService {
         };
 
         let filters = RouteFilters::from_request(&req)?;
-        let all_routes = self.query_routes(peer).await?;
-        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_filtered_response(
-            all_routes,
-            req.afi_safi,
-            &filters,
-            offset,
-            page_size,
-            false,
-        )))
+        let (after, page_size) = parse_route_page_params(&req)?;
+        let page = self
+            .query_routes_page(
+                RouteQueryScope::Received { peer },
+                build_route_query_filter(req.afi_safi, filters),
+                after,
+                page_size,
+            )
+            .await?;
+        Ok(Response::new(route_page_to_response(&page, false)))
     }
 
     async fn list_best_routes(
@@ -1177,16 +1180,16 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         validate_unicast_afi_safi(req.afi_safi)?;
         let filters = RouteFilters::from_request(&req)?;
-        let all_routes = self.query_best_routes().await?;
-        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_filtered_response(
-            all_routes,
-            req.afi_safi,
-            &filters,
-            offset,
-            page_size,
-            true,
-        )))
+        let (after, page_size) = parse_route_page_params(&req)?;
+        let page = self
+            .query_routes_page(
+                RouteQueryScope::Best,
+                build_route_query_filter(req.afi_safi, filters),
+                after,
+                page_size,
+            )
+            .await?;
+        Ok(Response::new(route_page_to_response(&page, true)))
     }
 
     async fn list_advertised_routes(
@@ -1207,29 +1210,17 @@ impl proto::rib_service_server::RibService for RibService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryAdvertisedRoutes {
-                peer,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
         let filters = RouteFilters::from_request(&req)?;
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
-
-        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_filtered_response(
-            all_routes,
-            req.afi_safi,
-            &filters,
-            offset,
-            page_size,
-            false,
-        )))
+        let (after, page_size) = parse_route_page_params(&req)?;
+        let page = self
+            .query_routes_page(
+                RouteQueryScope::Advertised { peer },
+                build_route_query_filter(req.afi_safi, filters),
+                after,
+                page_size,
+            )
+            .await?;
+        Ok(Response::new(route_page_to_response(&page, false)))
     }
 
     async fn explain_advertised_route(
@@ -3958,17 +3949,6 @@ mod tests {
         }
     }
 
-    fn empty_route_filters() -> RouteFilters {
-        RouteFilters {
-            prefix: None,
-            longer: false,
-            origin_asn: 0,
-            communities: vec![],
-            large_community_filter_active: false,
-            large_communities: vec![],
-        }
-    }
-
     #[test]
     fn route_filters_exact_prefix() {
         let route = Route {
@@ -4151,79 +4131,100 @@ mod tests {
     }
 
     #[test]
-    fn build_filtered_response_counts_and_paginates_after_family_filtering() {
-        let routes = vec![
-            test_route(
+    fn route_page_token_round_trips() {
+        for key in [
+            (
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-                vec![],
+                "192.0.2.1".parse::<IpAddr>().unwrap(),
+                0u32,
             ),
-            test_route(
+            (
                 Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
-                vec![],
+                "2001:db8::1".parse::<IpAddr>().unwrap(),
+                7u32,
             ),
-            test_route(
-                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
-                vec![],
-            ),
-        ];
-
-        let first = build_filtered_response(
-            routes.clone(),
-            proto::AddressFamily::Ipv4Unicast as i32,
-            &empty_route_filters(),
-            0,
-            1,
-            true,
-        );
-        assert_eq!(first.total_count, 2);
-        assert_eq!(first.routes.len(), 1);
-        assert_eq!(first.routes[0].prefix, "10.0.0.0");
-        assert!(first.routes[0].best);
-        assert_eq!(first.next_page_token, "1");
-
-        let second = build_filtered_response(
-            routes,
-            proto::AddressFamily::Ipv4Unicast as i32,
-            &empty_route_filters(),
-            1,
-            1,
-            true,
-        );
-        assert_eq!(second.total_count, 2);
-        assert_eq!(second.routes.len(), 1);
-        assert_eq!(second.routes[0].prefix, "10.0.1.0");
-        assert!(second.next_page_token.is_empty());
+        ] {
+            let token = encode_route_page_token(&key);
+            assert_eq!(decode_route_page_token(&token).unwrap(), key);
+        }
     }
 
     #[test]
-    fn build_filtered_response_fast_path_counts_full_snapshot_without_filters() {
-        // No family filter (afi_safi = 0) and no route filters → the fast path
-        // counts the whole snapshot via len() and slices the page, with the
-        // same total_count / pagination as the fused path.
-        let routes = vec![
-            test_route(
+    fn route_page_token_rejects_garbage() {
+        for token in ["", "5", "not-a-token", "10.0.0.0/24|192.0.2.1", "a|b|c|d"] {
+            let err = decode_route_page_token(token).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[tokio::test]
+    async fn list_received_routes_pages_through_the_actor() {
+        // The RPC forwards cursor + page size to the actor and turns the
+        // page's last key into the next_page_token when more rows remain.
+        let (tx, mut rx) = mpsc::channel(16);
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let route = {
+            let mut route = test_route(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
                 vec![],
-            ),
-            test_route(
-                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
-                vec![],
-            ),
-            test_route(
-                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
-                vec![],
-            ),
-        ];
+            );
+            route.peer = peer;
+            route
+        };
+        let page_route = route.clone();
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                if let RibUpdate::QueryRoutesPage {
+                    scope,
+                    filter,
+                    after,
+                    page_size,
+                    reply,
+                } = update
+                {
+                    assert_eq!(scope, RouteQueryScope::Received { peer: None });
+                    assert!(filter.is_none(), "unfiltered list sends no predicate");
+                    assert!(after.is_none());
+                    assert_eq!(page_size, 1);
+                    let _ = reply.send(RoutePage {
+                        routes: vec![page_route.clone()],
+                        total: 2,
+                        has_more: true,
+                    });
+                }
+            }
+        });
 
-        let first = build_filtered_response(routes.clone(), 0, &empty_route_filters(), 0, 2, false);
-        assert_eq!(first.total_count, 3, "fast path counts every family");
-        assert_eq!(first.routes.len(), 2);
-        assert_eq!(first.routes[0].prefix, "10.0.0.0");
-        assert_eq!(first.next_page_token, "2");
+        let svc = RibService::new(tx);
+        let resp = svc
+            .list_received_routes(Request::new(proto::ListRoutesRequest {
+                page_size: 1,
+                ..list_routes_request()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
 
-        let last = build_filtered_response(routes, 0, &empty_route_filters(), 2, 2, false);
-        assert_eq!(last.total_count, 3);
-        assert_eq!(last.routes.len(), 1);
-        assert!(last.next_page_token.is_empty());
+        assert_eq!(resp.total_count, 2);
+        assert_eq!(resp.routes.len(), 1);
+        assert_eq!(resp.routes[0].prefix, "10.0.0.0");
+        assert_eq!(
+            resp.next_page_token,
+            encode_route_page_token(&route_query_key(&route))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_received_routes_rejects_invalid_page_token() {
+        let svc = make_service();
+        let err = svc
+            .list_received_routes(Request::new(proto::ListRoutesRequest {
+                page_token: "not-a-token".to_string(),
+                ..list_routes_request()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("page_token"));
     }
 }

@@ -904,11 +904,16 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"page_size": 2}' \
   localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
 
-# Next page
+# Next page (pass the previous response's next_page_token verbatim)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"page_size": 2, "page_token": "2"}' \
+  -d '{"page_size": 2, "page_token": "<next_page_token>"}' \
   localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
 ```
+
+`page_token` is opaque: always pass the `next_page_token` from the previous
+response (empty = listing complete). Pages are keyed, not offset-based, so a
+listing stays consistent while the RIB mutates underneath it. `page_size` is
+capped server-side at 1000 rows per page (0 = default of 100).
 
 ### Watch route changes (streaming)
 
