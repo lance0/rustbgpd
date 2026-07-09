@@ -5845,6 +5845,140 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn gshut_toggle_times_out_when_rib_reply_wedges() {
+    use rustbgpd_transport::PeerCommand;
+
+    // LAN-286: a wedged RIB (accepts RefreshPeerOutbound but never
+    // replies) must surface as a bounded error — not park the
+    // peer-manager actor (and the reload/apply path driving the
+    // toggle) forever.
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let session_task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            if let PeerCommand::UpdateGracefulShutdown { reply, .. } = cmd {
+                let _ = reply.send(Ok(()));
+            }
+        }
+        Ok(())
+    });
+    let handle = PeerHandle::from_parts(session_tx, session_task);
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { reply, .. } = update {
+                // Wedged RIB: hold the reply channel open, never answer.
+                held.push(reply);
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    let err = mgr
+        .set_graceful_shutdown(Some(key(addr)), true)
+        .await
+        .expect_err("wedged RIB reply must fail the toggle, not hang it");
+    assert!(
+        err.to_string().contains("timed out"),
+        "error must name the RIB reply timeout: {err}"
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test(start_paused = true)]
+async fn export_policy_apply_times_out_when_rib_reply_wedges() {
+    use rustbgpd_transport::PeerCommand;
+
+    // LAN-286: same wedge class as the gshut refresh — the
+    // ReplacePeerExportPolicy reply await must be bounded so a wedged
+    // RIB cannot hang a SIGHUP reload / gRPC policy apply forever.
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let session_task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Established,
+                        peer_ip: addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    let handle = PeerHandle::from_parts(session_tx, session_task);
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                // Wedged RIB: hold the reply channel open, never answer.
+                held.push(reply);
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    let err = mgr
+        .update_runtime_policies(addr, None, Some(deny_policy_chain()))
+        .await
+        .expect_err("wedged RIB reply must fail the export apply, not hang it");
+    assert!(
+        err.contains("did not reply within"),
+        "error must name the RIB reply timeout: {err}"
+    );
+}
+
 #[tokio::test]
 async fn gshut_not_found_preserves_scoped_peer_label() {
     let (_tx, rx) = mpsc::channel(16);

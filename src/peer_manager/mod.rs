@@ -68,6 +68,13 @@ const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// blocking every peer's RPC/reconcile work behind one stalled session.
 const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
+/// actor (export-policy swap, per-peer outbound refresh). Generous — the
+/// RIB answers these inline and never legitimately takes seconds — but
+/// bounded so a wedged RIB task cannot park the peer-manager actor (and
+/// therefore SIGHUP reload / gRPC policy apply) forever.
+const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// ADR-0073: deadline for an `ExplainImportPolicy` round-trip to a
 /// session task. Bounded for the same reason as the policy-update
 /// timeout — a session parked on TCP back-pressure must not park the

@@ -4205,6 +4205,73 @@ fn diff_config_no_policy_explain_change_is_clean() {
 }
 
 #[test]
+fn diff_config_flags_security_grpc_as_restart_required() {
+    // LAN-286: `[security.grpc]` is resolved once at startup when the
+    // gRPC listeners are built — an edit must classify as
+    // restart-required, not vanish from the diff.
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.security
+        .grpc
+        .roles
+        .insert("observer-readonly".to_string(), GrpcRoleConfig::Observer);
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.security_grpc_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "a security-only edit does not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["security_grpc_changed"], true);
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[security.grpc]"), "{text}");
+
+    let sections = super::classify_config_transaction_v1(&diff);
+    assert!(
+        sections
+            .restart_required_sections
+            .contains(&"[security.grpc]".to_string()),
+        "{sections:?}"
+    );
+}
+
+#[test]
+fn diff_config_flags_event_history_as_restart_required() {
+    // LAN-286: every `[event_history]` field is restart-required (the
+    // ADR-0072 outbox is configured once at startup) — an edit must
+    // classify as restart-required, not vanish from the diff.
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.event_history.enabled = !new.event_history.enabled;
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.event_history_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "an event-history-only edit does not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["event_history_changed"], true);
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[event_history]"), "{text}");
+
+    let sections = super::classify_config_transaction_v1(&diff);
+    assert!(
+        sections
+            .restart_required_sections
+            .contains(&"[event_history]".to_string()),
+        "{sections:?}"
+    );
+}
+
+#[test]
 fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].hold_time = Some(90);

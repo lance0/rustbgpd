@@ -874,12 +874,21 @@ impl PeerManager {
                 failures.push(format!("{addr}: rib send: {e}"));
                 continue;
             }
-            match reply_rx.await {
+            // Bounded: a wedged RIB task must not park the peer-manager
+            // actor (and the SIGHUP reload driving this toggle) forever.
+            match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
                 Err(_) => {
+                    warn!(%addr, "RIB did not reply to gshut refresh within deadline");
+                    failures.push(format!(
+                        "{addr}: rib reply timed out after {:?}",
+                        super::RIB_REPLY_TIMEOUT
+                    ));
+                }
+                Ok(Err(_)) => {
                     warn!(%addr, "RIB dropped reply for gshut refresh");
                     failures.push(format!("{addr}: rib reply dropped"));
                 }
-                Ok(Err(e)) => {
+                Ok(Ok(Err(e))) => {
                     // "peer X not registered for outbound updates" is
                     // expected for peers not yet Established — log at
                     // debug, not as a failure.
@@ -889,7 +898,7 @@ impl PeerManager {
                          desired state stored, will apply on next PeerUp"
                     );
                 }
-                Ok(Ok(())) => {}
+                Ok(Ok(Ok(()))) => {}
             }
         }
 
