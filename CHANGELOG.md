@@ -19,6 +19,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every Adj-RIB-In intern mutation site (GC, injection/withdraw, and announce
   growth) so the series tracks the live intern table under churn.
 
+### Changed
+
+- **Release publication is now fail-closed.** The binary-release and
+  container-image workflows refuse to publish unless the pushed tag
+  `vX.Y.Z` equals the workspace `[workspace.package]` version and
+  `cargo test --workspace` passed for the tagged commit in the same
+  run. Release tarballs and the runtime container image now ship
+  `LICENSE-MIT` and `LICENSE-APACHE`, with workflow assertions that
+  fail the build if either file is missing from an artifact. (LAN-278)
+
 ## [0.50.0] — 2026-07-05
 
 ### Added

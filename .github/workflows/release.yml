@@ -8,7 +8,40 @@ permissions:
   contents: write
 
 jobs:
+  verify-tag-version:
+    # Fail-closed publication gate: the pushed tag `vX.Y.Z` must equal
+    # the workspace `[workspace.package] version` (X.Y.Z). A mismatch
+    # means the tag points at a commit that was never version-bumped
+    # for this release — nothing may be built or published from it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Assert tag matches workspace version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error file=Cargo.toml::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest_version}; refusing to publish"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches workspace version ${manifest_version}"
+
+  test:
+    # Fail-closed publication gate: the `release` job `needs:` this,
+    # so no artifact can ship from a tagged commit whose tests did
+    # not run and pass in this exact workflow run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-protobuf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
   build:
+    needs: verify-tag-version
     strategy:
       matrix:
         include:
@@ -57,9 +90,22 @@ jobs:
           mkdir -p dist staging
           cp target/${{ matrix.target }}/release/rustbgpd staging/
           cp target/${{ matrix.target }}/release/rbgp staging/
-          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp
+          cp LICENSE-MIT LICENSE-APACHE staging/
+          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz \
+            rustbgpd rbgp LICENSE-MIT LICENSE-APACHE
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
+
+      - name: Assert tarball contains license files
+        run: |
+          set -euo pipefail
+          SUFFIX=${{ matrix.suffix }}
+          for f in LICENSE-MIT LICENSE-APACHE; do
+            if ! tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz" | grep -qx "$f"; then
+              echo "::error::${f} missing from dist/rustbgpd-${SUFFIX}.tar.gz"
+              exit 1
+            fi
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -68,7 +114,9 @@ jobs:
           path: dist/
 
   release:
-    needs: build
+    # Publication is impossible unless the tag/version gate, the test
+    # gate, and both package builds all succeeded for this commit.
+    needs: [verify-tag-version, test, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
