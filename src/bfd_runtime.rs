@@ -6,8 +6,10 @@
 //! `PeerManager` (a `watch` channel) and never derives lifecycle from BGP
 //! itself. It publishes status via a `watch` channel + Prometheus metrics, a
 //! lossy [`BfdRuntimeEvent`] broadcast for the operator event stream, and a
-//! lossless [`BfdStateChange`] channel that `PeerManager` consumes for RFC 5882
-//! BGP coupling (non-strict teardown shipped; strict withholding lands next).
+//! per-peer coalescing [`BfdStateChange`] channel (bounded by the session
+//! count; latest state wins, a real transition is never masked by an ack) that
+//! `PeerManager` consumes for RFC 5882 BGP coupling (non-strict teardown
+//! shipped; strict withholding lands next).
 //!
 //! Design: a single actor task `select!`s over the shared per-AF receive
 //! sockets and a min-deadline timer heap covering every session's transmit and
@@ -56,9 +58,9 @@ pub struct BfdRuntimeConfig {
 }
 
 /// A BFD session state change delivered to `PeerManager` (ADR-0067 step 4) over
-/// a lossless `mpsc` channel — distinct from the lossy [`BfdRuntimeEvent`]
-/// broadcast that feeds the operator event stream, because a missed Down would
-/// leave BGP up.
+/// the per-peer coalescing channel from [`state_change_channel`] — distinct
+/// from the lossy [`BfdRuntimeEvent`] broadcast that feeds the operator event
+/// stream, because a missed Down would leave BGP up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BfdStateChange {
     /// Peer IP address.
@@ -79,9 +81,103 @@ pub struct BfdStateChange {
     /// `PeerManager` across a coalesced disable→re-enable (where the session may
     /// stay Up with no new transition), so the strict withhold can be released
     /// without ever trusting a possibly-stale cached state — and without a
-    /// deadlock when no fresh edge is coming. (A single-task actor + FIFO
-    /// channel guarantee ordering, so a monotonic generation is unnecessary.)
+    /// deadlock when no fresh edge is coming. (A single-task actor + a
+    /// per-peer coalescing channel that always delivers the latest state make
+    /// a monotonic generation unnecessary.)
     pub resync: bool,
+}
+
+/// Create the BFD → `PeerManager` state-change channel.
+///
+/// The channel coalesces per peer: at most one pending [`BfdStateChange`] per
+/// peer, latest state wins. So a burst (e.g. a session flapped by a packet
+/// flood faster than `PeerManager` drains) is bounded by the session count
+/// instead of growing without limit — and the coupling only ever needs the
+/// *current* per-peer level, not the intermediate flaps (a flap that resolved
+/// before the consumer looked is one BGP flap avoided). One rule keeps the
+/// merge lossless where it matters: a pending real transition
+/// (`resync = false`) is never masked by a later reconcile ack — the merged
+/// change keeps `resync = false`, so a genuine Down still tears BGP down.
+#[must_use]
+pub fn state_change_channel() -> (BfdStateChangeSender, BfdStateChangeReceiver) {
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
+    (
+        BfdStateChangeSender {
+            pending: std::sync::Arc::clone(&pending),
+            wake: wake_tx,
+        },
+        BfdStateChangeReceiver {
+            pending,
+            wake: wake_rx,
+        },
+    )
+}
+
+/// Sending half of [`state_change_channel`].
+#[derive(Clone)]
+pub struct BfdStateChangeSender {
+    /// At most one pending change per peer (latest wins, see the merge rule).
+    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, BfdStateChange>>>,
+    /// One wake token per peer with a pending entry — so this queue is bounded
+    /// by the session count, never by the burst rate.
+    wake: tokio::sync::mpsc::UnboundedSender<IpAddr>,
+}
+
+impl BfdStateChangeSender {
+    /// Enqueue a state change, coalescing with any pending change for the same
+    /// peer (latest state/diagnostic/`remote_admin_down`; `resync` stays
+    /// `false` if either side was a real transition).
+    pub fn send(&self, change: BfdStateChange) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match pending.entry(change.peer) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let resync = slot.get().resync && change.resync;
+                let mut merged = change;
+                merged.resync = resync;
+                slot.insert(merged);
+                // No new wake token: one is already queued for this peer.
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let peer = change.peer;
+                slot.insert(change);
+                // Receiver gone (daemon shutting down): drop silently, like the
+                // old mpsc send.
+                let _ = self.wake.send(peer);
+            }
+        }
+    }
+}
+
+/// Receiving half of [`state_change_channel`].
+pub struct BfdStateChangeReceiver {
+    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, BfdStateChange>>>,
+    wake: tokio::sync::mpsc::UnboundedReceiver<IpAddr>,
+}
+
+impl BfdStateChangeReceiver {
+    /// Receive the next (coalesced) state change, or `None` once every sender
+    /// is dropped and the queue is drained — the same close semantics as
+    /// `mpsc::UnboundedReceiver::recv`.
+    pub async fn recv(&mut self) -> Option<BfdStateChange> {
+        loop {
+            let peer = self.wake.recv().await?;
+            let change = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&peer);
+            // The entry always exists (one wake token per pending entry), but
+            // loop rather than unwrap so an imbalance degrades to a skipped
+            // token instead of a panic.
+            if change.is_some() {
+                return change;
+            }
+        }
+    }
 }
 
 impl BfdRuntimeConfig {
@@ -183,9 +279,9 @@ pub use stub::{BfdRuntimeHandle, spawn};
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
-    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStateChange, BfdStatus};
+    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStateChangeSender, BfdStatus};
     use rustbgpd_telemetry::BgpMetrics;
-    use tokio::sync::{broadcast, mpsc, watch};
+    use tokio::sync::{broadcast, watch};
     use tokio_util::sync::CancellationToken;
 
     /// Non-Linux placeholder handle (BFD sockets are Linux-only).
@@ -203,7 +299,7 @@ mod stub {
         _metrics: BgpMetrics,
         _status_tx: watch::Sender<Vec<BfdStatus>>,
         _event_tx: broadcast::Sender<BfdRuntimeEvent>,
-        _state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
+        _state_change_tx: BfdStateChangeSender,
         _shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         None
@@ -254,19 +350,24 @@ mod linux {
     use socket2::{Domain, Protocol, Socket, Type};
     use tokio::io::unix::AsyncFd;
     use tokio::net::UdpSocket;
-    use tokio::sync::{broadcast, mpsc, watch};
+    use tokio::sync::{broadcast, watch};
     use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, info, warn};
 
     use super::{
-        BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStatus,
-        demux_target,
+        BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStateChangeSender,
+        BfdStatus, demux_target,
     };
 
     /// BFD single-hop control port (RFC 5881 §4).
     const BFD_CONTROL_PORT: u16 = 3784;
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+    /// Max datagrams pulled off one receive socket per actor turn. Bounds the
+    /// work a packet flood can pin the actor to before the `select!` loop gets
+    /// back to the shutdown / desired-set / timer arms; leftover datagrams keep
+    /// the socket ready, so the next turn resumes reading immediately.
+    const RECV_BUDGET: usize = 64;
 
     /// Join handle for daemon shutdown.
     pub struct BfdRuntimeHandle {
@@ -296,7 +397,7 @@ mod linux {
         metrics: BgpMetrics,
         status_tx: watch::Sender<Vec<BfdStatus>>,
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
-        state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
+        state_change_tx: BfdStateChangeSender,
         shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         if !desired_rx.borrow().enabled() {
@@ -389,9 +490,9 @@ mod linux {
         /// Broadcast sink for session state transitions (ADR-0067 step 3b) —
         /// lossy, feeds the operator event stream.
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
-        /// Lossless sink for session state changes consumed by `PeerManager`
-        /// (ADR-0067 step 4 — BGP coupling).
-        state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
+        /// Per-peer coalescing sink for session state changes consumed by
+        /// `PeerManager` (ADR-0067 step 4 — BGP coupling).
+        state_change_tx: BfdStateChangeSender,
         /// Simple deterministic PRNG for transmit jitter (RFC 5880 §6.8.7).
         jitter_state: u64,
     }
@@ -401,7 +502,7 @@ mod linux {
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
         event_tx: &broadcast::Sender<BfdRuntimeEvent>,
-        state_change_tx: &mpsc::UnboundedSender<BfdStateChange>,
+        state_change_tx: &BfdStateChangeSender,
         shutdown: &CancellationToken,
     ) -> std::io::Result<()> {
         let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
@@ -425,6 +526,14 @@ mod linux {
         actor.reconcile(&initial, metrics, status_tx).await;
         info!(sessions = actor.sessions.len(), "BFD actor started");
 
+        // `biased` + this arm order is the actor's starvation defense: shutdown
+        // and desired-set changes always win, due timers beat pending packets
+        // (a garbage flood must not delay detection timeouts), and each receive
+        // arm reads at most `RECV_BUDGET` datagrams before the loop re-selects
+        // (`clear_ready` is skipped when the budget ran out, so a still-loaded
+        // socket is picked up again on the very next turn).
+        // ponytail: a sustained v4 flood can delay v6 reads (biased arm order);
+        // alternate the two rx arms per turn if that ever matters.
         loop {
             let sleep = next_timer_sleep(&actor.timers);
             tokio::select! {
@@ -442,10 +551,15 @@ mod linux {
                     let desired = desired_rx.borrow_and_update().clone();
                     actor.reconcile(&desired, metrics, status_tx).await;
                 }
+                () = sleep => {
+                    actor.fire_due_timers(metrics, status_tx).await;
+                }
                 guard = rx_v4.readable() => {
                     if let Ok(mut g) = guard {
-                        let pkts = drain_socket(g.get_inner().as_raw_fd());
-                        g.clear_ready();
+                        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
+                        if drained {
+                            g.clear_ready();
+                        }
                         for (src, pkt) in pkts {
                             actor.on_packet(src, &pkt, metrics, status_tx).await;
                         }
@@ -453,15 +567,14 @@ mod linux {
                 }
                 guard = rx_v6.readable() => {
                     if let Ok(mut g) = guard {
-                        let pkts = drain_socket(g.get_inner().as_raw_fd());
-                        g.clear_ready();
+                        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
+                        if drained {
+                            g.clear_ready();
+                        }
                         for (src, pkt) in pkts {
                             actor.on_packet(src, &pkt, metrics, status_tx).await;
                         }
                     }
-                }
-                () = sleep => {
-                    actor.fire_due_timers(metrics, status_tx).await;
                 }
             }
         }
@@ -554,7 +667,7 @@ mod linux {
             self.publish_status(status_tx);
 
             // Re-confirm each running session's current state to PeerManager as
-            // an "ack" (resync=true), on the lossless coupling channel only (not
+            // an "ack" (resync=true), on the coupling channel only (not
             // the operator broadcast). This is what lets the strict BGP coupling
             // release a withhold across a coalesced disable→re-enable — where the
             // session may stay Up with no fresh transition — without ever
@@ -573,7 +686,7 @@ mod linux {
                 })
                 .collect();
             for ack in acks {
-                let _ = self.state_change_tx.send(ack);
+                self.state_change_tx.send(ack);
             }
         }
 
@@ -707,30 +820,41 @@ mod linux {
                         new,
                         diagnostic,
                     } => {
-                        info!(peer = %peer, ?old, ?new, ?diagnostic, "BFD state change");
                         let mut remote_admin_down = false;
                         if let Some(entry) = self.sessions.get_mut(&peer) {
                             entry.last_diagnostic = diagnostic;
                             remote_admin_down = entry.session.remote_admin_down();
                         }
-                        metrics.record_bfd_state(
-                            &peer.to_string(),
-                            new == SessionState::Up,
-                            old == SessionState::Up,
-                        );
-                        // Broadcast for the unified event stream (ADR-0067 step
-                        // 3b). `send` errors only when there are no subscribers
-                        // — expected and ignorable.
-                        let _ = self.event_tx.send(BfdRuntimeEvent {
-                            peer,
-                            old_state: old,
-                            new_state: new,
-                            diagnostic,
-                        });
-                        // Lossless notify for PeerManager BGP coupling (step 4).
-                        // A real transition (resync=false): the consumer may tear
-                        // BGP down on a genuine Down, not just release.
-                        let _ = self.state_change_tx.send(BfdStateChange {
+                        // `old == new` is a coupling-level re-report (the remote
+                        // flipped into/out of AdminDown while the local state
+                        // stayed put, RFC 5882 §4.1/§4.2): it goes only to the
+                        // coupling channel — the operator event stream and the
+                        // up/down metrics describe real transitions.
+                        if old == new {
+                            info!(peer = %peer, state = ?new, remote_admin_down,
+                                "BFD remote AdminDown flip without local transition");
+                        } else {
+                            info!(peer = %peer, ?old, ?new, ?diagnostic, "BFD state change");
+                            metrics.record_bfd_state(
+                                &peer.to_string(),
+                                new == SessionState::Up,
+                                old == SessionState::Up,
+                            );
+                            // Broadcast for the unified event stream (ADR-0067
+                            // step 3b). `send` errors only when there are no
+                            // subscribers — expected and ignorable.
+                            let _ = self.event_tx.send(BfdRuntimeEvent {
+                                peer,
+                                old_state: old,
+                                new_state: new,
+                                diagnostic,
+                            });
+                        }
+                        // Notify PeerManager for BGP coupling (step 4), on the
+                        // per-peer coalescing channel. A real change
+                        // (resync=false): the consumer may tear BGP down on a
+                        // genuine Down, not just release.
+                        self.state_change_tx.send(BfdStateChange {
                             peer,
                             state: new,
                             diagnostic,
@@ -821,19 +945,24 @@ mod linux {
         Done,
     }
 
-    /// Read all currently-available datagrams from a non-blocking RX socket,
-    /// validating the TTL/Hop-Limit-255 requirement (RFC 5881) via ancillary
-    /// data and decoding each into a `(source IP, ControlPacket)`.
-    fn drain_socket(fd: i32) -> Vec<(IpAddr, ControlPacket)> {
+    /// Read up to `budget` datagrams from a non-blocking RX socket, validating
+    /// the TTL/Hop-Limit-255 requirement (RFC 5881) via ancillary data and
+    /// decoding each into a `(source IP, ControlPacket)`. Every `recvmsg`
+    /// (including discarded datagrams) counts against the budget, so a garbage
+    /// flood is bounded exactly like a valid one. Returns the packets and
+    /// whether the socket was fully drained (`false` = budget exhausted with
+    /// data possibly still queued — the caller must keep the socket marked
+    /// ready and come back).
+    fn drain_socket(fd: i32, budget: usize) -> (Vec<(IpAddr, ControlPacket)>, bool) {
         let mut out = Vec::new();
-        loop {
+        for _ in 0..budget {
             match recv_one(fd) {
                 Recv::Packet(src, pkt) => out.push((src, pkt)),
                 Recv::Discard => {}
-                Recv::Done => break,
+                Recv::Done => return (out, true),
             }
         }
-        out
+        (out, false)
     }
 
     fn recv_one(fd: i32) -> Recv {
@@ -1015,6 +1144,128 @@ mod linux {
         fn kind_key_is_injective() {
             assert_ne!(kind_key(TimerKind::Tx), kind_key(TimerKind::Detect));
         }
+
+        #[test]
+        fn drain_socket_budget_bounds_receive_work() {
+            use std::os::fd::AsRawFd;
+            let rx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind rx");
+            rx.set_nonblocking(true).expect("nonblocking");
+            let tx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind tx");
+            let dst = rx.local_addr().expect("addr");
+            // Queue 10 garbage datagrams (loopback delivery is synchronous).
+            // Discards (no TTL-255 ancillary data here) must count against the
+            // budget too — a garbage flood costs the same receive work.
+            for _ in 0..10 {
+                tx.send_to(&[0u8; 24], dst).expect("send");
+            }
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 4);
+            assert!(pkts.is_empty(), "garbage never decodes into packets");
+            assert!(!drained, "budget exhausted with datagrams still queued");
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 64);
+            assert!(pkts.is_empty());
+            assert!(drained, "second turn drains the remainder");
+        }
+    }
+
+    /// LAN-285: the receive budget + biased `select!` must keep the shutdown
+    /// command serviceable under a sustained packet flood (binds the real BFD
+    /// port; the flood is garbage, so every datagram is receive work that is
+    /// discarded before demux).
+    #[cfg(test)]
+    mod flood {
+        use super::super::state_change_channel;
+        use super::{BfdRuntimeConfig, BfdSessionParams, spawn};
+        use prometheus::Registry;
+        use rustbgpd_telemetry::BgpMetrics;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tokio::sync::{broadcast, watch};
+        use tokio_util::sync::CancellationToken;
+
+        async fn wait_status(
+            rx: &mut watch::Receiver<Vec<super::super::BfdStatus>>,
+            want_empty: bool,
+            timeout: Duration,
+        ) -> bool {
+            tokio::time::timeout(timeout, async {
+                loop {
+                    if rx.borrow().is_empty() == want_empty {
+                        return;
+                    }
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        #[tokio::test]
+        async fn shutdown_is_serviced_under_packet_flood() {
+            let config = BfdRuntimeConfig {
+                sessions: vec![BfdSessionParams {
+                    peer: "127.0.0.9".parse().expect("ip"),
+                    desired_min_tx_us: 100_000,
+                    required_min_rx_us: 100_000,
+                    detect_mult: 3,
+                    strict: false,
+                    enabled: true,
+                }],
+            };
+            let (status_tx, mut status_rx) = watch::channel(Vec::new());
+            let (event_tx, _event_rx) = broadcast::channel(64);
+            let (_desired_tx, desired_rx) = watch::channel(config);
+            let (state_change_tx, _state_change_rx) = state_change_channel();
+            let shutdown = CancellationToken::new();
+            let metrics = BgpMetrics::with_registry(Registry::new());
+            let handle = spawn(
+                desired_rx,
+                metrics,
+                status_tx,
+                event_tx,
+                state_change_tx,
+                shutdown.clone(),
+            )
+            .expect("actor spawns with one session");
+            // The actor is up once it has published its session status.
+            assert!(
+                wait_status(&mut status_rx, false, Duration::from_secs(5)).await,
+                "actor never published its session status (is UDP 3784 usable?)"
+            );
+
+            // Blast garbage datagrams at the BFD port from blocking threads
+            // for the whole shutdown window.
+            let stop = Arc::new(AtomicBool::new(false));
+            let flooders: Vec<_> = (0..2)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || {
+                        let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind flooder");
+                        let buf = [0u8; 24];
+                        while !stop.load(Ordering::Relaxed) {
+                            let _ = s.send_to(&buf, "127.0.0.1:3784");
+                        }
+                    })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Demand shutdown mid-flood: the drain (which clears the status)
+            // must complete while packets are still pouring in.
+            shutdown.cancel();
+            let drained = wait_status(&mut status_rx, true, Duration::from_secs(3)).await;
+            stop.store(true, Ordering::Relaxed);
+            for f in flooders {
+                let _ = f.join();
+            }
+            assert!(
+                drained,
+                "BFD actor failed to service shutdown under a packet flood"
+            );
+            handle.shutdown().await;
+        }
     }
 }
 
@@ -1171,6 +1422,68 @@ remote_asn = 65002
         assert!(!rc.enabled());
     }
 
+    mod state_change_channel {
+        use super::super::{BfdStateChange, state_change_channel};
+        use crate::test_support::ip;
+        use rustbgpd_bfd::{Diagnostic, SessionState};
+
+        fn change(state: SessionState, resync: bool) -> BfdStateChange {
+            BfdStateChange {
+                peer: ip("10.0.0.2"),
+                state,
+                diagnostic: Diagnostic::None,
+                remote_admin_down: false,
+                resync,
+            }
+        }
+
+        #[tokio::test]
+        async fn burst_for_one_peer_coalesces_to_latest() {
+            let (tx, mut rx) = state_change_channel();
+            // A large burst for one peer must not grow the channel: it
+            // coalesces to a single pending change carrying the latest state.
+            for _ in 0..1000 {
+                tx.send(change(SessionState::Down, false));
+                tx.send(change(SessionState::Up, false));
+            }
+            let got = rx.recv().await.expect("one coalesced change");
+            assert_eq!(got.state, SessionState::Up, "latest state wins");
+            assert!(!got.resync);
+            // Exactly one delivery: with the senders dropped, the channel
+            // closes rather than yielding queued leftovers.
+            drop(tx);
+            assert!(rx.recv().await.is_none());
+        }
+
+        #[tokio::test]
+        async fn ack_does_not_mask_pending_real_transition() {
+            let (tx, mut rx) = state_change_channel();
+            // A real Down transition, then a reconcile ack for the same peer
+            // before the consumer drains: the merge must keep resync=false so
+            // the consumer still tears BGP down (an ack is release-only).
+            tx.send(change(SessionState::Down, false));
+            tx.send(change(SessionState::Down, true));
+            let got = rx.recv().await.expect("merged change");
+            assert_eq!(got.state, SessionState::Down);
+            assert!(!got.resync, "ack must not mask a pending real transition");
+        }
+
+        #[tokio::test]
+        async fn distinct_peers_are_not_coalesced_together() {
+            let (tx, mut rx) = state_change_channel();
+            let mut a = change(SessionState::Down, false);
+            let mut b = change(SessionState::Up, false);
+            a.peer = ip("10.0.0.2");
+            b.peer = ip("10.0.0.3");
+            tx.send(a);
+            tx.send(b);
+            let first = rx.recv().await.expect("first peer");
+            let second = rx.recv().await.expect("second peer");
+            assert_eq!(first.peer, ip("10.0.0.2"));
+            assert_eq!(second.peer, ip("10.0.0.3"));
+        }
+    }
+
     #[test]
     fn demux_prefers_your_discriminator_then_source() {
         use super::demux_target;
@@ -1223,7 +1536,7 @@ remote_asn = 65002
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU16, Ordering};
         use std::time::Duration;
-        use tokio::sync::{broadcast, mpsc, watch};
+        use tokio::sync::{broadcast, watch};
         use tokio_util::sync::CancellationToken;
 
         const PEER_DISC: u32 = 0x0A0B_0C0D;
@@ -1459,7 +1772,7 @@ remote_asn = 65002
             let (status_tx, status_rx) = watch::channel(Vec::new());
             let (event_tx, mut event_rx) = broadcast::channel(64);
             let (_desired_tx, desired_rx) = watch::channel(config);
-            let (state_change_tx, mut state_change_rx) = mpsc::unbounded_channel();
+            let (state_change_tx, mut state_change_rx) = super::super::state_change_channel();
             let shutdown = CancellationToken::new();
             let handle = spawn(
                 desired_rx,
@@ -1536,7 +1849,7 @@ remote_asn = 65002
             .expect("actor should broadcast a BFD Up event");
             assert_eq!(up_event.peer, peer_ip);
 
-            // The actor must also deliver a lossless state change to PeerManager
+            // The actor must also deliver a state change to PeerManager
             // (the BGP-coupling channel, ADR-0067 step 4).
             let up_change = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {

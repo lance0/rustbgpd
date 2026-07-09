@@ -8488,7 +8488,7 @@ fn coupled_mgr(
     insert_test_managed_peer(&mut mgr, peer, handle, false);
     let configured = std::collections::HashMap::from([(peer, bfd_params(peer, strict))]);
     let (desired_tx, desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
-    let (_state_tx, state_rx) = mpsc::unbounded_channel();
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
     let mgr = mgr.with_bfd_coupling(desired_tx, state_rx, configured);
     (mgr, desired_rx)
 }

@@ -209,6 +209,7 @@ impl Session {
         }
 
         let old = self.state;
+        let was_remote_admin_down = self.remote_admin_down;
         self.apply_fsm(pkt.state);
         if self.state != old {
             // Coming Up changes our transmit rate (slow→fast); RFC 5880 §6.8.3
@@ -216,6 +217,19 @@ impl Session {
             if self.state == SessionState::Up {
                 self.poll_in_progress = true;
             }
+            actions.push(Action::StateChanged {
+                old,
+                new: self.state,
+                diagnostic: self.local_diag,
+            });
+        } else if self.remote_admin_down != was_remote_admin_down {
+            // The local state did not move (e.g. already Down), but the
+            // *reason* changed: the remote flipped into or out of `AdminDown`.
+            // RFC 5882 §4.1/§4.2 treats "peer disabled BFD" and "genuine
+            // liveness failure" differently at the coupling layer, so this
+            // must be published even without a local state transition —
+            // otherwise a remote AdminDown while we are already Down is
+            // swallowed and BGP stays torn down (or vice versa).
             actions.push(Action::StateChanged {
                 old,
                 new: self.state,
@@ -686,6 +700,47 @@ mod tests {
             Action::StateChanged { diagnostic, .. } => Some(*diagnostic),
             _ => None,
         })
+    }
+
+    #[test]
+    fn remote_admin_down_flip_while_down_is_published() {
+        // Local goes Down via detection timeout: a genuine liveness failure.
+        let (mut s, _) = bring_up();
+        let _ = s.handle(Event::DetectTimerExpires);
+        assert_eq!(s.state(), SessionState::Down);
+        assert!(!s.remote_admin_down());
+
+        // The remote now signals AdminDown while we are already Down: no local
+        // state transition, but the coupling-level reason changed (RFC 5882
+        // §4.1: "peer disabled BFD" must let BGP back up), so a Down→Down
+        // StateChanged is emitted.
+        let a = s.handle(Event::PacketReceived(peer(
+            SessionState::AdminDown,
+            0x0000_00AA,
+        )));
+        assert!(s.remote_admin_down());
+        assert_eq!(
+            state_changes(&a),
+            vec![(SessionState::Down, SessionState::Down)]
+        );
+
+        // A repeat AdminDown does not change the reason again: no re-emit.
+        let a = s.handle(Event::PacketReceived(peer(
+            SessionState::AdminDown,
+            0x0000_00AA,
+        )));
+        assert!(state_changes(&a).is_empty());
+
+        // Flipping back out of AdminDown without a local transition (remote
+        // claims Up while we are Down — ignored by the FSM) is published too:
+        // BGP was allowed under §4.1 and must now be treated as down again.
+        let a = s.handle(Event::PacketReceived(peer(SessionState::Up, 0x0000_00AA)));
+        assert_eq!(s.state(), SessionState::Down);
+        assert!(!s.remote_admin_down());
+        assert_eq!(
+            state_changes(&a),
+            vec![(SessionState::Down, SessionState::Down)]
+        );
     }
 
     #[test]
