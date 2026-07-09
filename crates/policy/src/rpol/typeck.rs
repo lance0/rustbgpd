@@ -10,7 +10,7 @@
 //! strings (regexes, peer groups). Inference is trivial by design —
 //! every field has a known type and every operator a fixed signature.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::engine::AsPathRegex;
 
@@ -61,6 +61,27 @@ const PEER_FIELDS: &[(&str, Field)] = &[
     ("asn", Field::PeerAsn),
     ("group", Field::PeerGroup),
 ];
+
+/// Maximum `apply` composition depth (LAN-290). The DAG check rules
+/// out recursion, but a linear chain of applies still nests: lowering
+/// inlines each `apply` recursively, and every level embeds the
+/// applied policy's predicate at least twice (once positive, once
+/// negated for the default-permit arm), so inlined size doubles per
+/// level and useful compositions are intrinsically shallow — 8 already
+/// allows a 256× multiplier, generous for human-written policy stacks
+/// (typical depth 2–3). rpol files arrive via SIGHUP overlay at
+/// runtime, so an unbounded chain is a config-triggered stack overflow
+/// in the lowering recursion.
+const MAX_APPLY_DEPTH: u32 = 8;
+
+/// Maximum IR guard nodes one policy may expand to through `apply`
+/// inlining (LAN-290). `apply(p)` inlines `p`'s decision as a
+/// predicate at every use site (quadratic in `p`'s decision-term
+/// count — see `lower::accept_predicate`), so a wide apply DAG
+/// multiplies nodes exponentially even within the depth limit. Bounds
+/// compile-time work and compiled-chain memory; a typical
+/// human-written guard is under ten nodes.
+const MAX_APPLY_EXPANSION: u64 = 100_000;
 
 /// Enum members per enum-typed field, in language spelling.
 pub(super) const RPKI_MEMBERS: &[&str] = &["valid", "invalid", "not-found"];
@@ -113,6 +134,7 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
         checker.check_policy(policy);
     }
     checker.check_apply_dag();
+    checker.check_apply_bounds();
     checker.check_tests();
     checker.diags
 }
@@ -695,18 +717,7 @@ impl Checker<'_> {
     /// Policies referenced through `apply` must form a DAG. Reports one
     /// diagnostic per cycle, naming the full path.
     fn check_apply_dag(&mut self) {
-        let mut edges: HashMap<&str, Vec<(&str, Span)>> = HashMap::new();
-        for policy in &self.file.policies {
-            let mut targets = Vec::new();
-            for term in &policy.terms {
-                for stmt in &term.stmts {
-                    if let Stmt::If(if_stmt) = stmt {
-                        collect_applies(&if_stmt.cond, &mut targets);
-                    }
-                }
-            }
-            edges.insert(&policy.name.node, targets);
-        }
+        let edges = apply_edges(self.file);
         let mut done: HashSet<&str> = HashSet::new();
         for policy in &self.file.policies {
             let name = policy.name.node.as_str();
@@ -723,6 +734,70 @@ impl Checker<'_> {
                     )
                     .with_note("policy composition must form a DAG (no recursion)"),
                 );
+            }
+        }
+    }
+
+    /// Bound `apply` composition depth and worst-case inlined size
+    /// (LAN-290; [`MAX_APPLY_DEPTH`] / [`MAX_APPLY_EXPANSION`]).
+    /// Lowering inlines applies recursively and trusts the
+    /// typechecker, so both bounds are enforced here, before any
+    /// lowering runs. Costs are parameter-independent (arguments are
+    /// `u32` constants), so one analysis covers every monomorphization.
+    /// The walk is iterative (Kahn topological order) — the checker
+    /// itself cannot overflow on a deep chain — and policies on an
+    /// `apply` cycle (diagnosed by [`Self::check_apply_dag`]) never
+    /// become ready and are skipped. A policy over a limit gets one
+    /// diagnostic and poisons its dependents (their costs clamp to
+    /// trivial), so a single root cause does not cascade.
+    fn check_apply_bounds(&mut self) {
+        let file = self.file;
+        let edges = apply_edges(file);
+        // Kahn scaffolding: a policy is ready once every *known* apply
+        // target (unknown names are diagnosed elsewhere) is processed.
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut pending: HashMap<&str, usize> = HashMap::new();
+        let mut ready: VecDeque<&str> = VecDeque::new();
+        for policy in &file.policies {
+            let name = policy.name.node.as_str();
+            let known: Vec<&str> = edges[name]
+                .iter()
+                .map(|&(target, _)| target)
+                .filter(|target| edges.contains_key(target))
+                .collect();
+            if known.is_empty() {
+                ready.push_back(name);
+            } else {
+                pending.insert(name, known.len());
+                for target in known {
+                    dependents.entry(target).or_default().push(name);
+                }
+            }
+        }
+        let defs: HashMap<&str, &PolicyDef> = file
+            .policies
+            .iter()
+            .map(|p| (p.name.node.as_str(), p))
+            .collect();
+        let mut depth: HashMap<&str, u32> = HashMap::new();
+        let mut pred_cost: HashMap<&str, u64> = HashMap::new();
+        let mut poisoned: HashSet<&str> = HashSet::new();
+        while let Some(name) = ready.pop_front() {
+            if let Some(diag) = bound_policy(
+                defs[name],
+                &edges[name],
+                &mut depth,
+                &mut pred_cost,
+                &mut poisoned,
+            ) {
+                self.diags.push(diag);
+            }
+            for &dependent in dependents.get(name).into_iter().flatten() {
+                let left = pending.get_mut(dependent).expect("counted above");
+                *left -= 1;
+                if *left == 0 {
+                    ready.push_back(dependent);
+                }
             }
         }
     }
@@ -856,6 +931,141 @@ impl Checker<'_> {
                 );
             }
         }
+    }
+}
+
+/// `apply` edges per policy: name → (target, span of the apply), in
+/// source order, duplicates kept.
+fn apply_edges(file: &SourceFile) -> HashMap<&str, Vec<(&str, Span)>> {
+    let mut edges: HashMap<&str, Vec<(&str, Span)>> = HashMap::new();
+    for policy in &file.policies {
+        let mut targets = Vec::new();
+        for term in &policy.terms {
+            for stmt in &term.stmts {
+                if let Stmt::If(if_stmt) = stmt {
+                    collect_applies(&if_stmt.cond, &mut targets);
+                }
+            }
+        }
+        edges.insert(&policy.name.node, targets);
+    }
+    edges
+}
+
+/// One policy's LAN-290 bound check (see
+/// [`Checker::check_apply_bounds`]): update the `depth` / `pred_cost`
+/// memo tables (its apply targets are already present — Kahn order)
+/// and return the diagnostic if the policy breaks a limit. An
+/// over-limit or poisoned policy records trivial costs so dependents
+/// don't repeat the diagnosis.
+fn bound_policy<'a>(
+    def: &'a PolicyDef,
+    targets: &[(&'a str, Span)],
+    depth: &mut HashMap<&'a str, u32>,
+    pred_cost: &mut HashMap<&'a str, u64>,
+    poisoned: &mut HashSet<&'a str>,
+) -> Option<Diagnostic> {
+    let name = def.name.node.as_str();
+    if targets.iter().any(|(target, _)| poisoned.contains(target)) {
+        poisoned.insert(name);
+        depth.insert(name, 0);
+        pred_cost.insert(name, 1);
+        return None;
+    }
+    // Composition depth: one past the deepest apply target (unknown
+    // targets have no entry and are diagnosed elsewhere).
+    let deepest = targets
+        .iter()
+        .filter_map(|&(target, span)| depth.get(target).map(|&d| (d + 1, span)))
+        .max_by_key(|&(d, _)| d);
+    if let Some((d, span)) = deepest {
+        if d > MAX_APPLY_DEPTH {
+            poisoned.insert(name);
+            depth.insert(name, 0);
+            pred_cost.insert(name, 1);
+            return Some(
+                Diagnostic::new(
+                    span,
+                    format!("`apply` chain nests policies more than {MAX_APPLY_DEPTH} deep"),
+                    "this `apply` exceeds the composition depth limit",
+                )
+                .with_note(
+                    "every apply level inlines (and at least doubles) the applied policy's \
+                     predicate; flatten the composition",
+                ),
+            );
+        }
+        depth.insert(name, d);
+    } else {
+        depth.insert(name, 0);
+    }
+    // Expansion: per-arm guard costs in decision order (upper bound:
+    // every `if` decides; an `else` adds a negated arm; a bare action
+    // run lowers to one `True`-guarded term).
+    let mut arms: Vec<u64> = Vec::new();
+    for term in &def.terms {
+        for stmt in &term.stmts {
+            match stmt {
+                Stmt::If(if_stmt) => {
+                    let cost = guard_cost(&if_stmt.cond, pred_cost);
+                    arms.push(cost);
+                    if if_stmt.else_actions.is_some() {
+                        arms.push(cost.saturating_add(1));
+                    }
+                }
+                Stmt::Action(_) => arms.push(1),
+            }
+        }
+    }
+    let lowered: u64 = arms.iter().fold(0u64, |acc, &g| acc.saturating_add(g));
+    if lowered > MAX_APPLY_EXPANSION {
+        poisoned.insert(name);
+        depth.insert(name, 0);
+        pred_cost.insert(name, 1);
+        return Some(
+            Diagnostic::new(
+                def.name.span,
+                format!(
+                    "policy `{name}` expands past {MAX_APPLY_EXPANSION} IR nodes \
+                     through `apply` inlining"
+                ),
+                "compiled size limit exceeded",
+            )
+            .with_note(
+                "apply(p) inlines p's decision predicate at every use site; \
+                 split or flatten the composition",
+            ),
+        );
+    }
+    // Cost of applying this policy elsewhere: `accept_predicate` is
+    // first-match-faithful — arm i carries every prior decision arm's
+    // guard negated — so it is a quadratic prefix sum over arm costs
+    // (the trailing `prior` is the default-permit arm).
+    let mut prior: u64 = 0;
+    let mut total: u64 = 1; // the Or node
+    for &g in &arms {
+        total = total.saturating_add(prior).saturating_add(g);
+        prior = prior.saturating_add(g).saturating_add(1);
+    }
+    pred_cost.insert(name, total.saturating_add(prior));
+    None
+}
+
+/// Upper bound on the IR nodes `expr` lowers to, given the predicate
+/// costs of already-processed `apply` targets (a missing entry —
+/// unknown name or on a diagnosed cycle — counts as trivial; the file
+/// has errors and will never lower). Recursion depth is capped by the
+/// parser's `MAX_EXPR_DEPTH` (LAN-184).
+fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
+    match expr {
+        Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => 1u64
+            .saturating_add(guard_cost(lhs, pred_cost))
+            .saturating_add(guard_cost(rhs, pred_cost)),
+        Expr::Not(inner, _) => 1u64.saturating_add(guard_cost(inner, pred_cost)),
+        // `==`/`!=` on u32 fields lower widest: `Not(And(Ge, Le))`.
+        Expr::Cmp { .. } => 4,
+        Expr::Apply { policy, .. } => pred_cost.get(policy.node.as_str()).copied().unwrap_or(1),
+        _ => 1,
     }
 }
 

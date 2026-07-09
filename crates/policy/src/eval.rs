@@ -11,7 +11,9 @@
 //! The no-match / no-modification path allocates nothing: guard
 //! evaluation is all borrows, modifications are cloned only when a
 //! matched permit term actually carries some, and the attribution name
-//! is cloned only for a named terminal policy (exactly as before).
+//! is cloned only when the caller actually asked for attribution
+//! (the `ATTR` const generic) — the plain [`CompiledChain::evaluate`]
+//! path never touches it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,7 +94,7 @@ impl CompiledChain {
     /// without the attribution.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
-        self.evaluate_with_attribution(ctx).0
+        self.evaluate_attributed::<false, false>(ctx, None).0
     }
 
     /// Evaluate a route against this chain with attribution to the
@@ -104,7 +106,20 @@ impl CompiledChain {
         &self,
         ctx: &RouteContext<'_>,
     ) -> (PolicyResult, PolicyEvaluation) {
-        self.evaluate_attributed::<false>(ctx, None)
+        self.evaluate_attributed::<false, true>(ctx, None)
+    }
+
+    /// Evaluate with live hit counting but without attribution — the
+    /// non-attributed hot path (`PolicyChain::evaluate`). Skips the
+    /// terminal policy-name clone that attribution pays per call.
+    #[must_use]
+    pub fn evaluate_counting(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: &PolicyHitCounters,
+    ) -> PolicyResult {
+        hits.evals.fetch_add(1, Ordering::Relaxed);
+        self.evaluate_attributed::<true, false>(ctx, Some(hits)).0
     }
 
     /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
@@ -122,14 +137,18 @@ impl CompiledChain {
         hits: &PolicyHitCounters,
     ) -> (PolicyResult, PolicyEvaluation) {
         hits.evals.fetch_add(1, Ordering::Relaxed);
-        self.evaluate_attributed::<true>(ctx, Some(hits))
+        self.evaluate_attributed::<true, true>(ctx, Some(hits))
     }
 
     /// `COUNT` monomorphizes the walk: the non-counting instantiation
     /// compiles the counter plumbing away entirely, so the plain
     /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
-    /// path costs exactly what it did before counters existed.
-    fn evaluate_attributed<const COUNT: bool>(
+    /// path costs exactly what it did before counters existed. `ATTR`
+    /// does the same for attribution: the `false` instantiation never
+    /// clones a policy name, so [`evaluate`](Self::evaluate) and
+    /// [`evaluate_counting`](Self::evaluate_counting) allocate nothing
+    /// for the discarded `PolicyEvaluation`.
+    fn evaluate_attributed<const COUNT: bool, const ATTR: bool>(
         &self,
         ctx: &RouteContext<'_>,
         hits: Option<&PolicyHitCounters>,
@@ -153,7 +172,7 @@ impl CompiledChain {
                         PolicyResult::deny(),
                         PolicyEvaluation {
                             action: PolicyAction::Deny,
-                            matched_policy: policy.name.clone(),
+                            matched_policy: if ATTR { policy.name.clone() } else { None },
                         },
                     );
                 }
@@ -171,7 +190,11 @@ impl CompiledChain {
         // All policies permitted (including an empty chain). Attribute
         // to the last policy in the chain since chain evaluation
         // completes only after every policy permits.
-        let matched_policy = self.policies.last().and_then(|p| p.name.clone());
+        let matched_policy = if ATTR {
+            self.policies.last().and_then(|p| p.name.clone())
+        } else {
+            None
+        };
         (
             PolicyResult {
                 action: PolicyAction::Permit,
@@ -325,7 +348,12 @@ impl CompiledChain {
 
     /// Evaluate one guard node. Pure and allocation-free; set/regex
     /// ids index this chain's tables directly (out-of-range ids are a
-    /// compiler bug, not reachable from operator input).
+    /// compiler bug, not reachable from operator input). Evaluation is
+    /// flat: rpol `apply` is inlined into the guard tree at lower time
+    /// (never a runtime call into another policy), and the tree's depth
+    /// is capped by the frontend (`MAX_EXPR_DEPTH` at parse,
+    /// `MAX_APPLY_DEPTH`/`MAX_APPLY_EXPANSION` at typecheck — LAN-184 /
+    /// LAN-290), so this recursion is statically bounded.
     fn eval_expr(&self, expr: &MatchExpr, ctx: &RouteContext<'_>) -> bool {
         match expr {
             MatchExpr::True => true,
