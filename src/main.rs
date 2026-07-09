@@ -1597,8 +1597,7 @@ async fn run<T>(
     // BFD actor takes the matching receiver + sender when it spawns below.
     let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config);
     let (bfd_desired_tx, bfd_desired_rx) = tokio::sync::watch::channel(bfd_initial.clone());
-    let (bfd_state_change_tx, bfd_state_change_rx) =
-        tokio::sync::mpsc::unbounded_channel::<bfd_runtime::BfdStateChange>();
+    let (bfd_state_change_tx, bfd_state_change_rx) = bfd_runtime::state_change_channel();
 
     let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,

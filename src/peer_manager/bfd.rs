@@ -7,7 +7,7 @@
 //!
 //! The coupling is **level-triggered**, not edge-triggered: a strict peer is
 //! always added/enabled withheld (`bfd_should_withhold`), and the actor
-//! re-confirms each session's current state on reconcile (a lossless "ack",
+//! re-confirms each session's current state on reconcile (an "ack",
 //! [`BfdStateChange::resync`]). A withhold is released only when BFD is confirmed
 //! to permit BGP (Up, or a remote `AdminDown` per RFC 5882 §4.1) — via either a
 //! real transition or an ack. So `PeerManager` never trusts a cached BFD state:
@@ -20,12 +20,14 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 use rustbgpd_bfd::SessionState;
 
-use crate::bfd_runtime::{BfdRuntimeConfig, BfdSessionParams, BfdStateChange};
+use crate::bfd_runtime::{
+    BfdRuntimeConfig, BfdSessionParams, BfdStateChange, BfdStateChangeReceiver,
+};
 
 use super::{PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager};
 
@@ -33,9 +35,10 @@ use super::{PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager};
 pub(super) struct BfdCoupling {
     /// Publishes the desired session set to the actor (level-triggered).
     desired_tx: watch::Sender<BfdRuntimeConfig>,
-    /// Lossless session state changes from the actor. Taken into a `run`-local
-    /// at loop start so the `select!` arm doesn't borrow `self`.
-    state_change_rx: Option<mpsc::UnboundedReceiver<BfdStateChange>>,
+    /// Session state changes from the actor (per-peer coalescing, latest state
+    /// wins; a real transition is never masked by an ack). Taken into a
+    /// `run`-local at loop start so the `select!` arm doesn't borrow `self`.
+    state_change_rx: Option<BfdStateChangeReceiver>,
     /// Configured BFD params per peer, resolved from config at startup. BFD is
     /// restart-required, so this base set is fixed for the daemon's lifetime;
     /// the published desired set overlays live admin state onto it.
@@ -64,7 +67,7 @@ impl PeerManager {
     pub fn with_bfd_coupling(
         mut self,
         desired_tx: watch::Sender<BfdRuntimeConfig>,
-        state_change_rx: mpsc::UnboundedReceiver<BfdStateChange>,
+        state_change_rx: BfdStateChangeReceiver,
         configured: HashMap<IpAddr, BfdSessionParams>,
     ) -> Self {
         self.bfd_coupling = Some(BfdCoupling {
@@ -139,9 +142,7 @@ impl PeerManager {
 
     /// Take the BFD state-change receiver into a `run`-local (so the `select!`
     /// arm captures the local rather than `self`, mirroring the BMP interval).
-    pub(super) fn take_bfd_state_change_rx(
-        &mut self,
-    ) -> Option<mpsc::UnboundedReceiver<BfdStateChange>> {
+    pub(super) fn take_bfd_state_change_rx(&mut self) -> Option<BfdStateChangeReceiver> {
         self.bfd_coupling
             .as_mut()
             .and_then(|c| c.state_change_rx.take())

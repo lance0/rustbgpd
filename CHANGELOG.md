@@ -31,6 +31,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BFD actor bounds its receive work and publishes remote-AdminDown flips
+  while already Down.** A packet flood could pin the BFD socket actor in its
+  drain loop, starving timer ticks and the shutdown command; each actor turn
+  now reads at most a fixed budget of datagrams (garbage counts too), due
+  timers fire ahead of pending packets, and shutdown always preempts. The
+  BFD→BGP coupling channel no longer grows without bound under a state-change
+  burst: it coalesces per peer (latest state wins; a pending real transition
+  is never masked by a reconcile ack), bounding it by the session count. And a
+  remote `AdminDown` transition while the local session is already Down — the
+  reason for being down changing, without a local state transition — is now
+  published to the BGP coupling layer instead of being swallowed, so RFC 5882
+  §4.1 "peer disabled BFD" handling (and its reverse) applies even from the
+  Down state. (LAN-285)
 - **Commit-confirm recovery now fails safe through ambiguous transaction
   outcomes.** A confirmed config transaction whose apply failed after the
   point of no proof — the persistence acknowledgement was lost, post-persist

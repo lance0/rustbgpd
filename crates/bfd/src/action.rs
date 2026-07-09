@@ -35,6 +35,11 @@ pub enum Action {
     },
     /// The session state changed. `diagnostic` is the local diagnostic that
     /// accompanies the new state.
+    ///
+    /// `old == new` is possible: it is a coupling-level re-report emitted when
+    /// the local state did not move but the remote flipped into or out of
+    /// `AdminDown` (query [`crate::Session::remote_admin_down`]), which RFC
+    /// 5882 §4.1/§4.2 requires the BGP coupling to act on.
     StateChanged {
         /// Previous state.
         old: SessionState,
