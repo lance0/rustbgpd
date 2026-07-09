@@ -114,6 +114,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/rustbgpd /usr/local/bin/rustbgpd
 COPY --from=builder /out/rbgp /usr/local/bin/rbgp
+COPY LICENSE-MIT LICENSE-APACHE /
 
 USER rustbgpd
 

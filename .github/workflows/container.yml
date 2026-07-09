@@ -9,7 +9,40 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  verify-tag-version:
+    # Fail-closed publication gate: the pushed tag `vX.Y.Z` must equal
+    # the workspace `[workspace.package] version` (X.Y.Z). A mismatch
+    # means the tag points at a commit that was never version-bumped
+    # for this release — no image may be published from it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Assert tag matches workspace version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error file=Cargo.toml::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest_version}; refusing to publish"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches workspace version ${manifest_version}"
+
+  test:
+    # Fail-closed publication gate: `build-and-push` `needs:` this, so
+    # the image cannot ship from a tagged commit whose tests did not
+    # run and pass in this exact workflow run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-protobuf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
   build-and-push:
+    needs: [verify-tag-version, test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,6 +66,22 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build image for verification
+        # Build (without pushing) into the local image store so artifact
+        # content can be asserted before anything reaches the registry.
+        # The push step below reuses these layers.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:verify
+
+      - name: Assert license files present in image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/sh rustbgpd:verify -c \
+            'test -f /LICENSE-MIT && test -f /LICENSE-APACHE'
 
       - name: Build and push
         uses: docker/build-push-action@v7

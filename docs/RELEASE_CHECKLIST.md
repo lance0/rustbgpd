@@ -518,7 +518,14 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
    here): `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`
 7. Push: `git push origin main && git push origin vX.Y.Z`
 8. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
-   push, release.yml binary build + GitHub Release creation)
+   push, release.yml binary build + GitHub Release creation). Both
+   publication workflows are fail-closed: `release.yml` and
+   `container.yml` each gate publication on a `verify-tag-version` job
+   (tag `vX.Y.Z` must equal the workspace `[workspace.package]`
+   version) and a `test` job (`cargo test --workspace` on the tagged
+   commit). If you tagged a commit without the version bump, the tag
+   build fails and publishes nothing — fix the bump, delete the tag,
+   and re-tag.
 9. **Verify container image published to GHCR** via `docker/metadata-action`'s
    semver pattern:
    - `ghcr.io/lance0/rustbgpd:X.Y.Z` (exact, immutable)
@@ -532,6 +539,9 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
     `rustbgpd-linux-arm64.tar.gz` plus per-arch `checksums-<arch>.txt`.
+    Each tarball contains `rustbgpd`, `rbgp`, `LICENSE-MIT`, and
+    `LICENSE-APACHE` (license presence is asserted by the workflow;
+    the runtime image likewise ships both licenses at `/`).
     The version-less filenames are what powers the static
     `releases/latest/download/` URLs in `docs/deployment.md`; if the
     filenames drift, deployment.md silently breaks for new operators.
