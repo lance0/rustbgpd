@@ -160,3 +160,109 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         reason: String::new(),
     }
 }
+
+/// Reply behavior for [`ScriptedRib`], switchable mid-test so one
+/// phase can lose acknowledgements and the next can grant them
+/// (ADR-0102 acknowledgement-awareness tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RibReplyMode {
+    /// Acknowledge with `Ok(())`.
+    Ok,
+    /// Drop the reply sender (originator sees a dropped reply).
+    DropReply,
+    /// Reject with `RibCommandError::NotFound`.
+    NotFound,
+    /// Keep the reply sender alive without answering (originator sees
+    /// an ack timeout; requires a paused tokio clock).
+    HoldReply,
+}
+
+type HeldRibReplies = Arc<
+    std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<Result<(), rustbgpd_rib::RibCommandError>>>>,
+>;
+
+/// Minimal scripted RIB actor for EVPN inject/withdraw tests: records
+/// the keys it saw and answers per the current [`RibReplyMode`].
+/// `QueryEvpnRoutes` always gets an empty snapshot; the event
+/// subscription is ignored (poll-only mode).
+pub(crate) struct ScriptedRib {
+    pub(crate) rib_tx: tokio::sync::mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    mode: Arc<std::sync::Mutex<RibReplyMode>>,
+    injects: Arc<std::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
+    withdraws: Arc<std::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
+    // Keeps HoldReply senders alive so the originator sees a timeout
+    // (a dropped sender would resolve the reply immediately).
+    _held: HeldRibReplies,
+}
+
+impl ScriptedRib {
+    pub(crate) fn spawn(initial_mode: RibReplyMode) -> Self {
+        use rustbgpd_rib::{RibCommandError, RibUpdate};
+        use tokio::sync::oneshot;
+
+        let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel::<RibUpdate>(64);
+        let mode = Arc::new(std::sync::Mutex::new(initial_mode));
+        let injects = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let mode = Arc::clone(&mode);
+            let injects = Arc::clone(&injects);
+            let withdraws = Arc::clone(&withdraws);
+            let held = Arc::clone(&held);
+            tokio::spawn(async move {
+                fn respond(
+                    mode: RibReplyMode,
+                    reply: oneshot::Sender<Result<(), RibCommandError>>,
+                    held: &std::sync::Mutex<Vec<oneshot::Sender<Result<(), RibCommandError>>>>,
+                ) {
+                    match mode {
+                        RibReplyMode::Ok => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        RibReplyMode::DropReply => drop(reply),
+                        RibReplyMode::NotFound => {
+                            let _ = reply.send(Err(RibCommandError::not_found("scripted")));
+                        }
+                        RibReplyMode::HoldReply => held.lock().unwrap().push(reply),
+                    }
+                }
+                while let Some(update) = rib_rx.recv().await {
+                    match update {
+                        RibUpdate::QueryEvpnRoutes { reply } => {
+                            let _ = reply.send(vec![]);
+                        }
+                        RibUpdate::InjectEvpn { route, reply } => {
+                            injects.lock().unwrap().push(route.key());
+                            respond(*mode.lock().unwrap(), reply, &held);
+                        }
+                        RibUpdate::WithdrawEvpn { key, reply } => {
+                            withdraws.lock().unwrap().push(key);
+                            respond(*mode.lock().unwrap(), reply, &held);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        Self {
+            rib_tx,
+            mode,
+            injects,
+            withdraws,
+            _held: held,
+        }
+    }
+
+    pub(crate) fn set_mode(&self, mode: RibReplyMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    pub(crate) fn inject_count(&self) -> usize {
+        self.injects.lock().unwrap().len()
+    }
+
+    pub(crate) fn withdraw_count(&self) -> usize {
+        self.withdraws.lock().unwrap().len()
+    }
+}

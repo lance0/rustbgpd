@@ -31,6 +31,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **EVPN Type 1/2/4 origination is acknowledgement-aware.** The local Type 2
+  MAC/MAC+IP originator and the Ethernet Segment orchestrator's Type 1
+  EAD/Type 4 publication treated send-success as done: a dropped RIB reply,
+  an ack timeout, or a rejection was only logged, permanently diverging the
+  originator's state from the RIB (the Type 5 originator already gated its
+  state on acks; Types 1/2/4 now match). Every inject/withdraw is tracked as
+  pending under `(route identity, generation)` until the RIB acknowledges it;
+  unacknowledged operations retry with bounded exponential backoff (1 s
+  doubling to a 30 s cap), newer intent for the same route supersedes older
+  pending work, stale acknowledgements are ignored, and withdrawals are never
+  forgotten until acked (a `NotFound` rejection counts as done — the route is
+  already absent). Nothing is persisted: a restart rebuilds intent from
+  kernel/config observation and reconciles idempotently. The MAC+IP path's
+  unmatched pending-IP-binding buffer is now bounded (4096 MAC entries, 16
+  IPs per MAC). See ADR-0102. (LAN-293)
 - **BFD actor bounds its receive work and publishes remote-AdminDown flips
   while already Down.** A packet flood could pin the BFD socket actor in its
   drain loop, starving timer ticks and the shutdown command; each actor turn

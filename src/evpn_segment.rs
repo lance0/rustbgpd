@@ -62,6 +62,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::evpn_ack::{PendingRibOps, RibAckOutcome, send_and_ack};
 use crate::evpn_es_link_drain::EsLinkBindings;
 use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 
@@ -327,6 +328,10 @@ async fn segment_loop(
     mut es_link_bindings_rx: Option<watch::Receiver<EsLinkBindings>>,
 ) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+    // ADR-0102 acknowledgement tracker for Type 1/4 publication.
+    // In-memory only: a restart re-derives segment intent from config
+    // and re-originates idempotently.
+    let mut pending_rib_ops = PendingRibOps::new();
     // One allocator per spawn so two operators on different daemons
     // don't have to coordinate label space; the allocator survives
     // for the lifetime of the actor task and assignments stay
@@ -356,7 +361,7 @@ async fn segment_loop(
     }
 
     // Initial origination + election.
-    initial_startup(&runtime, &mut by_esi).await;
+    initial_startup(&runtime, &mut by_esi, &mut pending_rib_ops).await;
     publish_dataplane_snapshots(&runtime, &by_esi);
 
     // Periodic re-election timer — backstop in case we're in poll-only mode
@@ -368,7 +373,7 @@ async fn segment_loop(
         tokio::select! {
             biased;
             () = runtime.shutdown.cancelled() => {
-                drain(&runtime, &mut by_esi).await;
+                drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                 publish_empty_dataplane_snapshots(&runtime);
                 return;
             }
@@ -386,11 +391,12 @@ async fn segment_loop(
                         &mut by_esi,
                         &mut esi_label_allocator,
                         segments,
+                        &mut pending_rib_ops,
                     )
                     .await;
                 } else {
                     debug!("EVPN segment: runtime segment watch closed; draining");
-                    drain(&runtime, &mut by_esi).await;
+                    drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                     publish_empty_dataplane_snapshots(&runtime);
                     return;
                 }
@@ -404,7 +410,7 @@ async fn segment_loop(
                         &by_esi,
                     ) {
                         let segments = segments_rx.borrow().as_ref().clone();
-                        drain(&runtime, &mut by_esi).await;
+                        drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                         apply_runtime_instance_snapshot(&mut runtime, instances);
                         rebuild_segment_states(
                             &runtime,
@@ -412,14 +418,14 @@ async fn segment_loop(
                             &mut esi_label_allocator,
                             segments,
                         );
-                        initial_startup(&runtime, &mut by_esi).await;
+                        initial_startup(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                         publish_dataplane_snapshots(&runtime, &by_esi);
                     } else {
                         apply_runtime_instance_snapshot(&mut runtime, instances);
                     }
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
-                    drain(&runtime, &mut by_esi).await;
+                    drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                     publish_empty_dataplane_snapshots(&runtime);
                     return;
                 }
@@ -427,13 +433,13 @@ async fn segment_loop(
             changed = drained_esis_rx.changed() => {
                 if let Ok(()) = changed {
                     let drained = drained_esis_rx.borrow_and_update().clone();
-                    apply_drained_esi_snapshot(&mut runtime, &mut by_esi, drained).await;
+                    apply_drained_esi_snapshot(&mut runtime, &mut by_esi, drained, &mut pending_rib_ops).await;
                 } else {
                     // The drained-set sender lives on the same handle as the
                     // instance/segment senders, so a closed watch here means
                     // daemon teardown — same exit path as the other watches.
                     debug!("EVPN segment: runtime drained-ESI watch closed; draining");
-                    drain(&runtime, &mut by_esi).await;
+                    drain(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                     publish_empty_dataplane_snapshots(&runtime);
                     return;
                 }
@@ -460,22 +466,27 @@ async fn segment_loop(
             },
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
-                    handle_evpn_event(&runtime, &mut by_esi, &ev).await;
+                    handle_evpn_event(&runtime, &mut by_esi, &ev, &mut pending_rib_ops).await;
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!(
                         skipped,
                         "EVPN segment orchestrator: event broadcast lagged; running full re-election sweep"
                     );
-                    reelection_sweep(&runtime, &mut by_esi).await;
+                    reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     warn!("EVPN segment orchestrator: RIB event broadcast closed; reverting to poll-only");
                     evpn_event_rx = None;
                 }
             },
+            // ADR-0102: re-drive RIB operations whose acknowledgement
+            // was lost. Parks forever while nothing is pending.
+            () = crate::evpn_ack::retry_delay(pending_rib_ops.next_deadline()) => {
+                retry_pending_rib_ops(&runtime, &by_esi, &mut pending_rib_ops).await;
+            }
             _ = tick.tick() => {
-                reelection_sweep(&runtime, &mut by_esi).await;
+                reelection_sweep(&runtime, &mut by_esi, &mut pending_rib_ops).await;
             }
         }
     }
@@ -615,6 +626,7 @@ async fn apply_runtime_segment_snapshot(
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
     segments: Vec<EthernetSegment>,
+    pending: &mut PendingRibOps,
 ) {
     let changed = segments.len() != by_esi.len()
         || segments.iter().any(|seg| {
@@ -626,9 +638,9 @@ async fn apply_runtime_segment_snapshot(
         return;
     }
 
-    drain(runtime, by_esi).await;
+    drain(runtime, by_esi, pending).await;
     rebuild_segment_states(runtime, by_esi, esi_label_allocator, segments);
-    initial_startup(runtime, by_esi).await;
+    initial_startup(runtime, by_esi, pending).await;
     publish_dataplane_snapshots(runtime, by_esi);
 }
 
@@ -668,6 +680,7 @@ async fn bindings_changed(
 async fn initial_startup(
     runtime: &SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    pending: &mut PendingRibOps,
 ) {
     for state in by_esi.values_mut() {
         // ADR-0084: an operator-drained ESI stays withdrawn across
@@ -676,33 +689,38 @@ async fn initial_startup(
         if runtime.drained_esis.contains(&state.config.esi) {
             continue;
         }
-        startup_segment_state(runtime, state).await;
+        startup_segment_state(runtime, state, pending).await;
     }
 }
 
 /// Originate one ES's Type 4 + EAD-per-ES and run its DF election.
 /// Shared by startup and by an ADR-0084 undrain, which mirrors what
 /// segment-set application does for a new ES.
-async fn startup_segment_state(runtime: &SegmentRuntime, state: &mut SegmentState) {
+async fn startup_segment_state(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    pending: &mut PendingRibOps,
+) {
     // Type 4 ES first so peers see us as a candidate before any
     // EAD routes show up.
     let actions = state.es_origin.on_startup();
-    apply(runtime, state, actions).await;
+    apply(runtime, state, actions, pending).await;
 
     let actions = state.ead_per_es.on_startup();
-    apply(runtime, state, actions).await;
+    apply(runtime, state, actions, pending).await;
 
     // Initial election with self as sole candidate. Local PE is
     // DF for all member VNIs.
-    run_election_for(runtime, state).await;
+    run_election_for(runtime, state, pending).await;
 }
 
 async fn drain(
     runtime: &SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    pending: &mut PendingRibOps,
 ) {
     for state in by_esi.values_mut() {
-        drain_segment_state(runtime, state).await;
+        drain_segment_state(runtime, state, pending).await;
     }
 }
 
@@ -712,13 +730,17 @@ async fn drain(
 /// tracking so a later re-origination re-runs election from a clean
 /// slate (the EAD-per-EVI re-emit rides the role-transition diff) and
 /// the BUM enforcement table stops carrying rows for the ES.
-async fn drain_segment_state(runtime: &SegmentRuntime, state: &mut SegmentState) {
+async fn drain_segment_state(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    pending: &mut PendingRibOps,
+) {
     let actions = state.ead_per_evi.drain_to_withdraws();
-    apply(runtime, state, actions).await;
+    apply(runtime, state, actions, pending).await;
     let actions = state.ead_per_es.on_shutdown();
-    apply(runtime, state, actions).await;
+    apply(runtime, state, actions, pending).await;
     let actions = state.es_origin.on_shutdown();
-    apply(runtime, state, actions).await;
+    apply(runtime, state, actions, pending).await;
 
     let esi_str = format_esi(state.config.esi);
     for (vni, _) in std::mem::take(&mut state.last_roles) {
@@ -737,6 +759,7 @@ async fn apply_drained_esi_snapshot(
     runtime: &mut SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     drained: Arc<BTreeSet<EthernetSegmentIdentifier>>,
+    pending: &mut PendingRibOps,
 ) {
     let prior = std::mem::replace(&mut runtime.drained_esis, drained.clone());
     if *prior == *drained {
@@ -748,7 +771,7 @@ async fn apply_drained_esi_snapshot(
             continue;
         };
         info!(esi = %format_esi(*esi), "EVPN segment: draining Ethernet Segment (operator)");
-        drain_segment_state(runtime, state).await;
+        drain_segment_state(runtime, state, pending).await;
         changed = true;
     }
     for esi in prior.iter().filter(|esi| !drained.contains(*esi)) {
@@ -756,7 +779,7 @@ async fn apply_drained_esi_snapshot(
             continue;
         };
         info!(esi = %format_esi(*esi), "EVPN segment: undraining Ethernet Segment (operator)");
-        startup_segment_state(runtime, state).await;
+        startup_segment_state(runtime, state, pending).await;
         changed = true;
     }
     if changed {
@@ -768,6 +791,7 @@ async fn handle_evpn_event(
     runtime: &SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     event: &EvpnRouteEvent,
+    pending: &mut PendingRibOps,
 ) {
     // Only Type 4 events affect the candidate set.
     let EvpnRouteKey::Es { esi, .. } = event.key else {
@@ -785,13 +809,14 @@ async fn handle_evpn_event(
     let Some(state) = by_esi.get_mut(&esi) else {
         return;
     };
-    run_election_for(runtime, state).await;
+    run_election_for(runtime, state, pending).await;
     publish_dataplane_snapshots(runtime, by_esi);
 }
 
 async fn reelection_sweep(
     runtime: &SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    pending: &mut PendingRibOps,
 ) {
     let routes = match query_evpn_routes(&runtime.rib_tx).await {
         Ok(r) => r,
@@ -801,7 +826,7 @@ async fn reelection_sweep(
         }
     };
     for state in by_esi.values_mut() {
-        run_election_for_routes(runtime, state, &routes).await;
+        run_election_for_routes(runtime, state, &routes, pending).await;
     }
     publish_dataplane_snapshots(runtime, by_esi);
 }
@@ -809,7 +834,11 @@ async fn reelection_sweep(
 /// Re-gather candidates from the RIB and re-run election for one
 /// ESI. Diffs against the prior `last_roles` map; per-VNI flips
 /// trigger `on_vni_role_changed` plus telemetry updates.
-async fn run_election_for(runtime: &SegmentRuntime, state: &mut SegmentState) {
+async fn run_election_for(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    pending: &mut PendingRibOps,
+) {
     let candidates = match gather_candidates(state, &runtime.rib_tx).await {
         Ok(c) => c,
         Err(e) => {
@@ -817,22 +846,24 @@ async fn run_election_for(runtime: &SegmentRuntime, state: &mut SegmentState) {
             return;
         }
     };
-    run_election_with_candidates(runtime, state, candidates).await;
+    run_election_with_candidates(runtime, state, candidates, pending).await;
 }
 
 async fn run_election_for_routes(
     runtime: &SegmentRuntime,
     state: &mut SegmentState,
     routes: &[EvpnRibRoute],
+    pending: &mut PendingRibOps,
 ) {
     let candidates = gather_candidates_from_routes(state, routes);
-    run_election_with_candidates(runtime, state, candidates).await;
+    run_election_with_candidates(runtime, state, candidates, pending).await;
 }
 
 async fn run_election_with_candidates(
     runtime: &SegmentRuntime,
     state: &mut SegmentState,
     candidates: Vec<DfCandidate>,
+    pending: &mut PendingRibOps,
 ) {
     // ADR-0084: a drained ES has withdrawn its Type 4 and exited DF
     // election; role transitions must not re-emit EAD-per-EVI routes
@@ -893,6 +924,7 @@ async fn run_election_with_candidates(
             state.config.df_dont_preempt,
             state.config.redundancy_mode,
             actions,
+            pending,
         )
         .await;
         debug!(
@@ -1365,14 +1397,19 @@ enum RibQueryError {
     ReplyDropped,
 }
 
-async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<OriginationAction>) {
+async fn apply(
+    runtime: &SegmentRuntime,
+    state: &SegmentState,
+    actions: Vec<OriginationAction>,
+    pending: &mut PendingRibOps,
+) {
     let Some(inst) = runtime.instances.get(state.reference_instance_id).cloned() else {
         // The reference instance is gone — e.g. a tenant teardown removed the
         // member L2VNI before this drain runs. Inject actions can't be built
         // without the instance's path attributes, but Withdraw actions only
         // need the route key, so still emit those; otherwise teardown would
         // strand the segment's Type 1/4 routes in peers' RIBs.
-        apply_withdraws_only(runtime, actions).await;
+        apply_withdraws_only(runtime, state.reference_instance_id, actions, pending).await;
         return;
     };
     apply_with_instance(
@@ -1384,6 +1421,7 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
         state.config.df_dont_preempt,
         state.config.redundancy_mode,
         actions,
+        pending,
     )
     .await;
 }
@@ -1392,33 +1430,31 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
 /// can't be built without the now-removed reference instance). Used when the
 /// member L2VNI has already been torn down but the segment's routes still need
 /// to be withdrawn from the RIB.
-async fn apply_withdraws_only(runtime: &SegmentRuntime, actions: Vec<OriginationAction>) {
+async fn apply_withdraws_only(
+    runtime: &SegmentRuntime,
+    vni: EvpnInstanceId,
+    actions: Vec<OriginationAction>,
+    pending: &mut PendingRibOps,
+) {
     for action in actions {
-        let OriginationAction::Withdraw { key, .. } = action else {
+        let OriginationAction::Withdraw { key, .. } = &action else {
             continue;
         };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if runtime
-            .rib_tx
-            .send(RibUpdate::WithdrawEvpn {
-                key,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            warn!(?key, "EVPN segment: RIB channel closed; cannot withdraw");
-            return;
-        }
-        match reply_rx.await {
-            Ok(Ok(())) => debug!(
-                ?key,
-                "EVPN segment: withdrew (member instance already removed)"
-            ),
-            Ok(Err(e)) => debug!(?key, error = %e, "EVPN segment: RIB withdraw declined"),
-            Err(_) => warn!(?key, "EVPN segment: RIB withdraw reply dropped"),
-        }
+        let generation = pending.submit(*key, vni, action.clone());
+        attempt_es_action(runtime, pending, generation, &action, None).await;
     }
+}
+
+/// Per-ES route-build context an inject attempt needs. Rebuilt from
+/// the *current* `SegmentState` + instance table on every attempt so
+/// retries never re-inject under stale fields.
+struct EsRouteBuildCtx<'a> {
+    inst: &'a EvpnInstance,
+    esi_label: MplsLabel,
+    df_algorithm: DfAlgorithm,
+    df_preference: u32,
+    df_dont_preempt: bool,
+    redundancy_mode: RedundancyMode,
 }
 
 #[expect(
@@ -1434,57 +1470,158 @@ async fn apply_with_instance(
     df_dont_preempt: bool,
     redundancy_mode: RedundancyMode,
     actions: Vec<OriginationAction>,
+    pending: &mut PendingRibOps,
 ) {
+    let ctx = EsRouteBuildCtx {
+        inst,
+        esi_label,
+        df_algorithm,
+        df_preference,
+        df_dont_preempt,
+        redundancy_mode,
+    };
     for action in actions {
-        match action {
-            OriginationAction::Inject { key, .. } => {
-                let route = build_es_route(
-                    inst,
-                    &key,
-                    esi_label,
-                    df_algorithm,
-                    df_preference,
-                    df_dont_preempt,
-                    redundancy_mode,
+        let key = match &action {
+            OriginationAction::Inject { key, .. } | OriginationAction::Withdraw { key, .. } => *key,
+        };
+        let generation = pending.submit(key, inst.id, action.clone());
+        attempt_es_action(runtime, pending, generation, &action, Some(&ctx)).await;
+    }
+}
+
+/// One send-and-ack attempt for a registered pending Type 1/4
+/// operation (ADR-0102). Confirms on ack, defers on failure so the
+/// actor's retry arm re-drives it. An inject attempted without a build
+/// context (segment/instance no longer in the model) is dropped — the
+/// teardown that removed it already superseded the route's state with
+/// withdraws.
+async fn attempt_es_action(
+    runtime: &SegmentRuntime,
+    pending: &mut PendingRibOps,
+    generation: u64,
+    action: &OriginationAction,
+    ctx: Option<&EsRouteBuildCtx<'_>>,
+) {
+    let key = match action {
+        OriginationAction::Inject { key, .. } | OriginationAction::Withdraw { key, .. } => *key,
+    };
+    match action {
+        OriginationAction::Inject { .. } => {
+            let Some(ctx) = ctx else {
+                pending.forget(key, generation);
+                debug!(
+                    ?key,
+                    "EVPN segment: dropping pending inject — segment or instance left the model"
                 );
-                let (reply_tx, reply_rx) = oneshot::channel();
-                if runtime
-                    .rib_tx
-                    .send(RibUpdate::InjectEvpn {
-                        route,
-                        reply: reply_tx,
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!(?key, "EVPN segment: RIB channel closed; cannot inject");
-                    return;
+                return;
+            };
+            let route = build_es_route(
+                ctx.inst,
+                &key,
+                ctx.esi_label,
+                ctx.df_algorithm,
+                ctx.df_preference,
+                ctx.df_dont_preempt,
+                ctx.redundancy_mode,
+            );
+            match send_and_ack(&runtime.rib_tx, |reply| RibUpdate::InjectEvpn {
+                route,
+                reply,
+            })
+            .await
+            {
+                RibAckOutcome::Acked => {
+                    pending.confirm(key, generation);
+                    debug!(?key, "EVPN segment: originated");
                 }
-                match reply_rx.await {
-                    Ok(Ok(())) => debug!(?key, "EVPN segment: originated"),
-                    Ok(Err(e)) => warn!(?key, error = %e, "EVPN segment: RIB rejected inject"),
-                    Err(_) => warn!(?key, "EVPN segment: RIB inject reply dropped"),
+                RibAckOutcome::Rejected(e) => {
+                    pending.defer(key, generation);
+                    warn!(?key, error = %e, "EVPN segment: RIB rejected inject; will retry");
+                }
+                RibAckOutcome::NoAck(reason) => {
+                    pending.defer(key, generation);
+                    warn!(
+                        ?key,
+                        reason, "EVPN segment: inject unacknowledged; will retry"
+                    );
                 }
             }
-            OriginationAction::Withdraw { key, .. } => {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                if runtime
-                    .rib_tx
-                    .send(RibUpdate::WithdrawEvpn {
-                        key,
-                        reply: reply_tx,
+        }
+        OriginationAction::Withdraw { .. } => {
+            let outcome = send_and_ack(&runtime.rib_tx, |reply| RibUpdate::WithdrawEvpn {
+                key,
+                reply,
+            })
+            .await;
+            let not_found = outcome.is_not_found();
+            match outcome {
+                RibAckOutcome::Acked => {
+                    pending.confirm(key, generation);
+                    debug!(?key, "EVPN segment: withdrew");
+                }
+                // Already absent — e.g. the paired inject was lost
+                // before ever applying. Absence is the goal: confirm.
+                RibAckOutcome::Rejected(e) if not_found => {
+                    pending.confirm(key, generation);
+                    debug!(?key, error = %e, "EVPN segment: withdraw target absent — treating as complete");
+                }
+                RibAckOutcome::Rejected(e) => {
+                    pending.defer(key, generation);
+                    warn!(?key, error = %e, "EVPN segment: RIB rejected withdraw; will retry");
+                }
+                RibAckOutcome::NoAck(reason) => {
+                    pending.defer(key, generation);
+                    warn!(
+                        ?key,
+                        reason, "EVPN segment: withdraw unacknowledged; will retry"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The ESI carried by a Type 1/4 route key, used to relocate the
+/// owning `SegmentState` when a pending inject is retried.
+fn es_key_esi(key: &EvpnRouteKey) -> Option<EthernetSegmentIdentifier> {
+    match key {
+        EvpnRouteKey::Es { esi, .. }
+        | EvpnRouteKey::EadPerEs { esi, .. }
+        | EvpnRouteKey::EadPerEvi { esi, .. } => Some(*esi),
+        _ => None,
+    }
+}
+
+/// Re-drive every pending Type 1/4 operation whose backoff has
+/// elapsed (ADR-0102). Withdraws only need the key; injects rebuild
+/// their route from the current segment/instance model and are
+/// dropped when that model no longer contains them (the removal path
+/// already superseded the route's state with withdraws).
+async fn retry_pending_rib_ops(
+    runtime: &SegmentRuntime,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+    pending: &mut PendingRibOps,
+) {
+    for (key, op) in pending.due(tokio::time::Instant::now()) {
+        match &op.action {
+            OriginationAction::Withdraw { .. } => {
+                attempt_es_action(runtime, pending, op.generation, &op.action, None).await;
+            }
+            OriginationAction::Inject { .. } => {
+                let segment = es_key_esi(&key)
+                    .filter(|esi| !runtime.drained_esis.contains(esi))
+                    .and_then(|esi| by_esi.get(&esi));
+                let ctx = segment.and_then(|state| {
+                    runtime.instances.get(op.vni).map(|inst| EsRouteBuildCtx {
+                        inst,
+                        esi_label: state.esi_label,
+                        df_algorithm: state.config.df_algorithm,
+                        df_preference: state.config.df_preference,
+                        df_dont_preempt: state.config.df_dont_preempt,
+                        redundancy_mode: state.config.redundancy_mode,
                     })
-                    .await
-                    .is_err()
-                {
-                    warn!(?key, "EVPN segment: RIB channel closed; cannot withdraw");
-                    return;
-                }
-                match reply_rx.await {
-                    Ok(Ok(())) => debug!(?key, "EVPN segment: withdrew"),
-                    Ok(Err(e)) => debug!(?key, error = %e, "EVPN segment: RIB withdraw declined"),
-                    Err(_) => warn!(?key, "EVPN segment: RIB withdraw reply dropped"),
-                }
+                });
+                attempt_es_action(runtime, pending, op.generation, &op.action, ctx.as_ref()).await;
             }
         }
     }
@@ -1671,7 +1808,7 @@ mod tests {
     use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable};
     use rustbgpd_wire::{EthernetTagId, ExtendedCommunity};
 
-    use crate::test_support::{evpn_instance, ip as ipa, rd, vni};
+    use crate::test_support::{RibReplyMode, ScriptedRib, evpn_instance, ip as ipa, rd, vni};
 
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier::new([seed; 10])
@@ -3523,5 +3660,109 @@ mod tests {
         .await;
 
         handle.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0102: acknowledgement-aware Type 1/4 publication.
+    // -----------------------------------------------------------------
+
+    fn scripted_runtime(rib: &ScriptedRib) -> SegmentRuntime {
+        let mut table = EvpnInstanceTable::new();
+        table.insert(instance(100)).unwrap();
+        SegmentRuntime {
+            instances: Arc::new(table),
+            rib_tx: rib.rib_tx.clone(),
+            bum_enforcement_tx: None,
+            same_esi_bias_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+            drained_esis: Arc::new(BTreeSet::new()),
+            es_link_bindings: EsLinkBindings::default(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn es_dropped_replies_keep_type_1_4_ops_pending_and_retry_confirms() {
+        let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+        let runtime = scripted_runtime(&rib);
+        let mut pending = crate::evpn_ack::PendingRibOps::new();
+        let mut state = segment_state(esi(1));
+
+        // Startup publishes Type 4 ES + Type 1 EAD-per-ES, then the
+        // self-only election emits Type 1 EAD-per-EVI for the member
+        // VNI — all three replies are dropped.
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
+
+        assert_eq!(rib.inject_count(), 3, "ES + EAD-per-ES + EAD-per-EVI sent");
+        assert_eq!(
+            pending.len(),
+            3,
+            "unacknowledged Type 1/4 injects stay pending"
+        );
+
+        // The retry re-drives all three from the current model and the
+        // acks clear the tracker.
+        rib.set_mode(RibReplyMode::Ok);
+        tokio::time::advance(Duration::from_secs(35)).await;
+        let mut by_esi = HashMap::new();
+        by_esi.insert(state.config.esi, state);
+        retry_pending_rib_ops(&runtime, &by_esi, &mut pending).await;
+
+        assert_eq!(rib.inject_count(), 6, "all three injects retried");
+        assert!(pending.is_empty(), "acks confirmed every pending op");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn es_withdrawals_survive_dropped_replies_even_after_segment_removal() {
+        let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+        let runtime = scripted_runtime(&rib);
+        let mut pending = crate::evpn_ack::PendingRibOps::new();
+        let mut state = segment_state(esi(1));
+
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
+        assert!(pending.is_empty(), "startup acked cleanly");
+
+        // Teardown withdraws lose their replies...
+        rib.set_mode(RibReplyMode::DropReply);
+        drain_segment_state(&runtime, &mut state, &mut pending).await;
+        assert_eq!(rib.withdraw_count(), 3, "three withdraw attempts sent");
+        assert_eq!(
+            pending.len(),
+            3,
+            "unacknowledged withdrawals must not be forgotten"
+        );
+
+        // ...and the segment is gone entirely by the time the retry
+        // fires. Withdraws need only their key, so they still complete
+        // against an empty segment map.
+        rib.set_mode(RibReplyMode::Ok);
+        tokio::time::advance(Duration::from_secs(35)).await;
+        let by_esi = HashMap::new();
+        retry_pending_rib_ops(&runtime, &by_esi, &mut pending).await;
+
+        assert_eq!(rib.withdraw_count(), 6, "withdrawals retried to completion");
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn es_retry_drops_pending_inject_when_segment_left_the_model() {
+        let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+        let runtime = scripted_runtime(&rib);
+        let mut pending = crate::evpn_ack::PendingRibOps::new();
+        let mut state = segment_state(esi(1));
+
+        startup_segment_state(&runtime, &mut state, &mut pending).await;
+        assert_eq!(pending.len(), 3);
+
+        // The segment is removed before the retry fires: pending
+        // injects can no longer be rebuilt and are dropped (segment
+        // teardown already drains routes through the state machines).
+        rib.set_mode(RibReplyMode::Ok);
+        tokio::time::advance(Duration::from_secs(35)).await;
+        let by_esi = HashMap::new();
+        retry_pending_rib_ops(&runtime, &by_esi, &mut pending).await;
+
+        assert!(pending.is_empty(), "stale injects dropped");
+        assert_eq!(rib.inject_count(), 3, "no re-inject under stale fields");
     }
 }

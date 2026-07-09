@@ -8,6 +8,56 @@ use crate::evpn_originator::duplicate_mac::{
     outstanding_route_keys_for_mac, sticky_for, suppress_local_originations_for_mac,
 };
 use crate::evpn_originator::rib_write::apply_actions;
+use tracing::warn;
+
+/// ADR-0102: bound the unmatched pending-IP-binding buffer. The buffer
+/// exists only to absorb `AF_INET`/`AF_INET6` NEIGH racing ahead of
+/// `AF_BRIDGE` FDB during cold start — it is a reorder buffer, not a
+/// database. Caps keep a misbehaving feed (ARP/ND events for MACs the
+/// bridge never learns) from growing it without bound; a dropped
+/// binding self-heals on the next kernel neighbor event for the pair
+/// once the MAC has surfaced.
+pub(super) const MAX_PENDING_IP_BINDING_MACS: usize = 4096;
+pub(super) const MAX_PENDING_IPS_PER_MAC: usize = 16;
+
+/// Insert an unmatched `(VNI, MAC) → IP` binding, enforcing the
+/// ADR-0102 caps. Drops (with a warning) rather than evicts: the
+/// oldest parked bindings are as likely to be replayed as the newest,
+/// and eviction would just move the loss.
+fn park_pending_ip_binding(
+    state: &mut OriginatorState,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    ip: IpAddr,
+) {
+    if let Some(set) = state.pending_ip_bindings.get_mut(&(vni, mac)) {
+        if set.len() >= MAX_PENDING_IPS_PER_MAC {
+            warn!(
+                ?vni,
+                ?mac,
+                ?ip,
+                cap = MAX_PENDING_IPS_PER_MAC,
+                "pending IP-binding per-MAC cap reached — dropping binding"
+            );
+            return;
+        }
+        set.insert(ip);
+        return;
+    }
+    if state.pending_ip_bindings.len() >= MAX_PENDING_IP_BINDING_MACS {
+        warn!(
+            ?vni,
+            ?mac,
+            ?ip,
+            cap = MAX_PENDING_IP_BINDING_MACS,
+            "pending IP-binding MAC cap reached — dropping binding"
+        );
+        return;
+    }
+    state
+        .pending_ip_bindings
+        .insert((vni, mac), std::collections::BTreeSet::from([ip]));
+}
 
 /// Dispatch a single observation from the kernel observation feed.
 ///
@@ -210,11 +260,7 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
                     .or_default()
                     .insert(ip);
             } else {
-                state
-                    .pending_ip_bindings
-                    .entry((vni, mac))
-                    .or_default()
-                    .insert(ip);
+                park_pending_ip_binding(state, vni, mac, ip);
             }
         }
         LocalMacObservation::IpRemoved { vni, mac, ip } => {
@@ -367,6 +413,7 @@ pub(super) async fn handle_learned(
         };
         let mac_only_actions = mac_orig.on_local_aged(mac);
         apply_actions(
+            &mut state.pending_rib_ops,
             mac_only_actions,
             inst,
             rib_tx,
@@ -443,6 +490,7 @@ pub(super) async fn handle_aged(
     if let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
         let actions = mac_orig.on_local_aged(mac);
         apply_actions(
+            &mut state.pending_rib_ops,
             actions,
             inst,
             rib_tx,
@@ -455,6 +503,7 @@ pub(super) async fn handle_aged(
     if let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) {
         let actions = mac_ip_orig.on_local_mac_aged(mac);
         apply_actions(
+            &mut state.pending_rib_ops,
             actions,
             inst,
             rib_tx,
@@ -494,11 +543,7 @@ pub(super) async fn handle_ip_added(
             ?ip,
             "IpAdded for MAC not yet locally learned — parking in pending_ip_bindings"
         );
-        state
-            .pending_ip_bindings
-            .entry((vni, mac))
-            .or_default()
-            .insert(ip);
+        park_pending_ip_binding(state, vni, mac, ip);
         return;
     }
 
@@ -533,6 +578,7 @@ pub(super) async fn handle_ip_added(
     if was_mac_only && let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
         let actions = mac_orig.on_local_aged(mac);
         apply_actions(
+            &mut state.pending_rib_ops,
             actions,
             inst,
             rib_tx,
@@ -606,6 +652,7 @@ pub(super) async fn handle_ip_removed(
     };
     let actions = mac_ip_orig.on_local_ip_aged(mac, ip);
     apply_actions(
+        &mut state.pending_rib_ops,
         actions,
         inst,
         rib_tx,

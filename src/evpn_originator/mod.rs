@@ -64,6 +64,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::evpn_ack::PendingRibOps;
 use crate::evpn_originator::duplicate_mac::{handle_originator_command, recover_duplicate_macs};
 use crate::evpn_originator::lifecycle::apply_runtime_model;
 use crate::evpn_originator::observation::handle_observation;
@@ -71,7 +72,7 @@ use crate::evpn_originator::rib_polling::{
     handle_evpn_event_coalesced, recv_evpn_event, repoll_rib, subscribe_evpn_events,
 };
 use crate::evpn_originator::rib_write::{
-    drain_to_withdraws, extract_ip_from_key, next_hop_path_attribute,
+    drain_to_withdraws, extract_ip_from_key, next_hop_path_attribute, retry_pending_rib_ops,
 };
 use rustbgpd_evpn::{
     DuplicateMacAction, DuplicateMacDecision, DuplicateMacDetector, DuplicateMacKey, EvpnInstance,
@@ -552,6 +553,12 @@ struct OriginatorState {
     /// remote-FDB intent while leaving Loc-RIB/RR visibility intact.
     active_duplicate_mac_quarantines: BTreeSet<DuplicateMacKey>,
     duplicate_mac_quarantine_tx: watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
+    /// ADR-0102 acknowledgement tracker: every inject/withdraw sent to
+    /// the RIB stays pending here until the RIB acks it; the actor's
+    /// retry arm re-drives unacknowledged operations with bounded
+    /// backoff. In-memory only — a restart rebuilds intent from kernel
+    /// observation instead of replaying pending operations.
+    pending_rib_ops: PendingRibOps,
 }
 
 impl OriginatorState {
@@ -578,6 +585,7 @@ impl OriginatorState {
             known_duplicate_mac_keys: BTreeSet::new(),
             active_duplicate_mac_quarantines: BTreeSet::new(),
             duplicate_mac_quarantine_tx,
+            pending_rib_ops: PendingRibOps::new(),
         }
     }
 
@@ -721,6 +729,19 @@ async fn originator_loop(
                     evpn_event_rx = None;
                 }
             },
+            // ADR-0102: re-drive RIB operations whose acknowledgement
+            // was lost (dropped reply, timeout, backpressure). Parks
+            // forever while nothing is pending.
+            () = crate::evpn_ack::retry_delay(state.pending_rib_ops.next_deadline()) => {
+                retry_pending_rib_ops(
+                    &mut state,
+                    &runtime.instances,
+                    &runtime.rib_tx,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
+                ).await;
+            }
             _ = poll_tick.tick() => {
                 recover_duplicate_macs(
                     &mut state,

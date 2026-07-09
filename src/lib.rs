@@ -23,6 +23,8 @@ mod fib;
 // --all-features --lib` fails with E0433 on `crate::evpn_plan_decomposer`
 // (LAN-198).
 #[cfg(feature = "bench-internals")]
+mod evpn_ack;
+#[cfg(feature = "bench-internals")]
 mod evpn_dataplane;
 #[cfg(feature = "bench-internals")]
 mod evpn_es_drain;

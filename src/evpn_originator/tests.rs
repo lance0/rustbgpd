@@ -8,7 +8,9 @@ use rustbgpd_evpn::{
 use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
 use rustbgpd_wire::{EvpnImet, EvpnMacIp};
 
-use crate::test_support::{evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni};
+use crate::test_support::{
+    RibReplyMode, ScriptedRib, evpn_instance, gather_metrics_text, ip as ipa, mac, rd, vni,
+};
 
 fn assert_quarantine_metric(metrics: &BgpMetrics, v: u32, m: u8, value: u32) {
     let text = gather_metrics_text(metrics);
@@ -2061,7 +2063,10 @@ async fn rib_rejection_increments_evpn_local_origination_error_counter() {
 
     for _ in 0..50 {
         let text = gather_metrics_text(&metrics);
-        if text.contains("evpn_local_origination_errors_total{action=\"inject\"} 1") {
+        // ADR-0102: a rejected inject stays pending and retries with
+        // backoff, so the error counter may exceed 1 — assert presence,
+        // not an exact count.
+        if text.contains("evpn_local_origination_errors_total{action=\"inject\"}") {
             assert_eq!(counts.count(vni(100)), 0);
             h.shutdown().await;
             return;
@@ -4101,5 +4106,448 @@ async fn vxlan_port_observation_for_unclaimed_mac_is_ignored() {
             .get(&(vni(100), mac(0xBB)))
             .is_some_and(|ips| ips.contains(&ipa("192.0.2.20"))),
         "unclaimed VXLAN-port rows must not clear pending IP bindings"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0102: acknowledgement-aware origination (pending / confirmed / retry).
+// Decision-level tests: handlers and the retry driver are called directly
+// against a scripted RIB whose reply behavior is switchable per phase.
+// ---------------------------------------------------------------------------
+
+/// Advance past the backoff cap and re-drive pending operations.
+async fn retry_after_backoff(
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    rib: &ScriptedRib,
+    metrics: &BgpMetrics,
+    counts: &OriginatedLocalMacCounts,
+) {
+    tokio::time::advance(Duration::from_secs(35)).await;
+    retry_pending_rib_ops(
+        state,
+        instances,
+        &rib.rib_tx,
+        metrics,
+        counts,
+        &std::collections::BTreeMap::new(),
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_inject_reply_is_retried_until_confirmed() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert_eq!(rib.inject_count(), 1, "first attempt was sent");
+    assert_eq!(
+        counts.count(vni(100)),
+        0,
+        "unacknowledged inject must not be counted as confirmed"
+    );
+    assert_eq!(state.pending_rib_ops.len(), 1, "op stays pending");
+
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+
+    assert_eq!(rib.inject_count(), 2, "retry re-sent the inject");
+    assert_eq!(counts.count(vni(100)), 1, "ack confirms the origination");
+    assert!(state.pending_rib_ops.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn inject_ack_timeout_keeps_op_pending_and_retries() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    // HoldReply: the RIB keeps the reply sender alive but never
+    // answers — the originator's 5 s ack timeout must fire (the paused
+    // clock auto-advances through it).
+    let rib = ScriptedRib::spawn(RibReplyMode::HoldReply);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert_eq!(state.pending_rib_ops.len(), 1, "timed-out op stays pending");
+    assert_eq!(counts.count(vni(100)), 0);
+
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+
+    assert_eq!(rib.inject_count(), 2);
+    assert_eq!(counts.count(vni(100)), 1);
+    assert!(state.pending_rib_ops.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn withdrawal_survives_dropped_reply_and_completes() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(counts.count(vni(100)), 1);
+
+    rib.set_mode(RibReplyMode::DropReply);
+    observe_test(
+        LocalMacObservation::Aged {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert_eq!(rib.withdraw_count(), 1, "withdraw attempt was sent");
+    assert_eq!(
+        state.pending_rib_ops.len(),
+        1,
+        "unacknowledged withdraw must not be forgotten"
+    );
+    assert_eq!(
+        counts.count(vni(100)),
+        1,
+        "unconfirmed withdraw must not decrement the count"
+    );
+
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+
+    assert_eq!(rib.withdraw_count(), 2, "withdraw retried");
+    assert_eq!(counts.count(vni(100)), 0, "ack completes the withdrawal");
+    assert!(state.pending_rib_ops.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn withdraw_not_found_counts_as_confirmed() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    // The RIB reports the route absent (e.g. the inject was lost
+    // before ever applying): absence is the withdraw's goal, so the
+    // operation confirms instead of retrying forever.
+    rib.set_mode(RibReplyMode::NotFound);
+    observe_test(
+        LocalMacObservation::Aged {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert!(
+        state.pending_rib_ops.is_empty(),
+        "NotFound withdraw must confirm, not retry"
+    );
+    assert_eq!(counts.count(vni(100)), 0, "count stays honest");
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_intent_supersedes_pending_op_for_same_route() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+
+    // Inject attempt fails and stays pending...
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(state.pending_rib_ops.len(), 1);
+
+    // ...then the MAC ages: the withdrawal is new intent for the same
+    // route identity and must supersede the pending inject.
+    observe_test(
+        LocalMacObservation::Aged {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert_eq!(
+        state.pending_rib_ops.len(),
+        1,
+        "supersession keeps one op per route identity"
+    );
+    let (_, op) = state
+        .pending_rib_ops
+        .due(tokio::time::Instant::now() + Duration::from_mins(1))
+        .pop()
+        .expect("pending op present");
+    assert!(
+        matches!(op.action, OriginationAction::Withdraw { .. }),
+        "newest intent (withdraw) wins over the superseded inject"
+    );
+
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+    assert!(state.pending_rib_ops.is_empty());
+    assert_eq!(
+        rib.inject_count(),
+        1,
+        "the superseded inject must not be retried"
+    );
+    assert_eq!(rib.withdraw_count(), 2, "the withdraw completed on retry");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_drops_pending_inject_for_removed_vni() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(state.pending_rib_ops.len(), 1);
+
+    // The VNI leaves the model before the retry fires: the pending
+    // inject can no longer be rebuilt and must be dropped (the
+    // lifecycle drain that removes a VNI supersedes its routes with
+    // withdraws through the state machines).
+    let empty = EvpnInstanceTable::new();
+    rib.set_mode(RibReplyMode::Ok);
+    tokio::time::advance(Duration::from_secs(35)).await;
+    retry_pending_rib_ops(
+        &mut state,
+        &empty,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+        &std::collections::BTreeMap::new(),
+    )
+    .await;
+
+    assert!(state.pending_rib_ops.is_empty(), "stale inject dropped");
+    assert_eq!(rib.inject_count(), 1, "no re-inject under stale fields");
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_rebuilds_intent_from_observation_without_persisted_pending_state() {
+    let instances = instance_table(100);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+
+    // First life: the inject is lost and pending when the daemon dies.
+    let mut state = originator_state(&instances);
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(state.pending_rib_ops.len(), 1);
+    drop(state); // restart: pending state is deliberately NOT persisted
+
+    // Second life: fresh state, intent rebuilt purely from the kernel
+    // observation replay, reconciles idempotently against the RIB.
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    assert!(
+        state.pending_rib_ops.is_empty(),
+        "restart starts with no pending state"
+    );
+    rib.set_mode(RibReplyMode::Ok);
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 7,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    assert_eq!(counts.count(vni(100)), 1, "observation replay converges");
+    assert!(state.pending_rib_ops.is_empty());
+}
+
+#[tokio::test]
+async fn pending_ip_bindings_per_mac_cap_bounds_the_set() {
+    use crate::evpn_originator::observation::MAX_PENDING_IPS_PER_MAC;
+
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+
+    // IpAdded for a MAC the bridge never learned parks in the pending
+    // buffer — which must stay bounded.
+    for i in 0..(MAX_PENDING_IPS_PER_MAC + 8) {
+        observe_test(
+            LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa(&format!("10.0.1.{i}")),
+            },
+            &mut state,
+            &instances,
+            &rib.rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        state
+            .pending_ip_bindings
+            .get(&(vni(100), mac(0xAA)))
+            .map(std::collections::BTreeSet::len),
+        Some(MAX_PENDING_IPS_PER_MAC),
+        "per-MAC pending IP set is capped"
+    );
+}
+
+#[tokio::test]
+async fn pending_ip_bindings_mac_entry_cap_bounds_the_map() {
+    use crate::evpn_originator::observation::MAX_PENDING_IP_BINDING_MACS;
+
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+
+    for i in 0..(MAX_PENDING_IP_BINDING_MACS + 5) {
+        let mac = MacAddress::new([
+            0x02,
+            0,
+            0,
+            0,
+            u8::try_from(i >> 8).unwrap(),
+            u8::try_from(i & 0xFF).unwrap(),
+        ]);
+        observe_test(
+            LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac,
+                ip: ipa("10.0.2.1"),
+            },
+            &mut state,
+            &instances,
+            &rib.rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        state.pending_ip_bindings.len(),
+        MAX_PENDING_IP_BINDING_MACS,
+        "pending-binding MAC entries are capped"
     );
 }
