@@ -5032,3 +5032,319 @@ async fn shutdown_restores_ac_gate_even_without_owned_fdb_entries() {
         "shutdown drain must restore the gate-blocked AC port to forwarding"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// LAN-283 foreign-state ownership: preflight, relinquish, revalidate
+// ─────────────────────────────────────────────────────────────────
+
+/// A same-key foreign L2 FDB row (operator `bridge fdb add ...
+/// permanent` shape — no `extern_learn`).
+fn foreign_fdb_entry(m: MacAddress, dst: &str) -> KernelFdbEntry {
+    KernelFdbEntry {
+        mac: m,
+        vlan: None,
+        dst: Some(ipa(dst)),
+        nh_id: None,
+        protocol: None,
+        flags: KernelFdbFlags {
+            permanent: true,
+            master: true,
+            ..Default::default()
+        },
+    }
+}
+
+fn sum_foreign_counters(
+    reports: &[rustbgpd_evpn::DataplaneReport],
+) -> rustbgpd_evpn::ForeignStateCounters {
+    reports.iter().fold(
+        rustbgpd_evpn::ForeignStateCounters::default(),
+        |mut acc, r| {
+            acc.replaces_blocked += r.foreign_state_counters.replaces_blocked;
+            acc.deletes_skipped += r.foreign_state_counters.deletes_skipped;
+            acc.owned_relinquished += r.foreign_state_counters.owned_relinquished;
+            acc
+        },
+    )
+}
+
+// Rule 1: a pre-existing foreign row at the exact desired key blocks
+// the install — the kernel row keeps the foreign destination and the
+// report carries the blocked counter.
+#[tokio::test]
+async fn foreign_fdb_row_blocks_desired_install() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_fdb(vni(100), foreign_fdb_entry(mac(1), "10.9.9.9"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(
+            1,
+            one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+            macs.build(),
+        ))
+        .unwrap();
+
+    let mut reports = vec![wait_for_generation(&mut h, 1).await];
+    let snap = h.handle.kernel_snapshot();
+    let row = snap.find_fdb(vni(100), mac(1)).expect("row must survive");
+    assert_eq!(
+        row.dst,
+        Some(ipa("10.9.9.9")),
+        "foreign row must not be replaced"
+    );
+    assert!(row.flags.permanent, "foreign flags must be preserved");
+    reports.extend(h.shutdown().await);
+    let counters = sum_foreign_counters(&reports);
+    assert_eq!(counters.replaces_blocked, 1, "warn-once counter");
+}
+
+// Rule 2 + 3: a foreign writer replaces an owned row → ownership is
+// relinquished (no repair back over it), and a later withdrawal
+// leaves the foreign row in place.
+#[tokio::test]
+async fn foreign_takeover_relinquishes_ownership_and_withdrawal_spares_row() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let mut reports = vec![wait_for_generation(&mut h, 1).await];
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+
+    // Foreign takeover: operator replaces our row under the same key.
+    h.handle
+        .pre_load_fdb(vni(100), foreign_fdb_entry(mac(1), "10.9.9.9"));
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(2, inst.clone(), macs.build()))
+        .unwrap();
+    reports.push(wait_for_generation(&mut h, 2).await);
+
+    // No repair over the foreign row while it persists.
+    let snap = h.handle.kernel_snapshot();
+    assert_eq!(
+        snap.find_fdb(vni(100), mac(1)).and_then(|e| e.dst),
+        Some(ipa("10.9.9.9")),
+        "relinquished key must not be repaired back over the foreign row"
+    );
+
+    // Withdrawal: the foreign row must survive.
+    h.intent_tx
+        .send(intent(3, inst, RemoteMacTable::new()))
+        .unwrap();
+    reports.push(wait_for_generation(&mut h, 3).await);
+    let snap = h.handle.kernel_snapshot();
+    let row = snap
+        .find_fdb(vni(100), mac(1))
+        .expect("foreign row must survive withdrawal");
+    assert_eq!(row.dst, Some(ipa("10.9.9.9")));
+
+    reports.extend(h.shutdown().await);
+    let counters = sum_foreign_counters(&reports);
+    assert_eq!(counters.owned_relinquished, 1);
+}
+
+// Rule 3, NotReady variant: the instance drain must spare a same-key
+// foreign row.
+#[tokio::test]
+async fn not_ready_transition_spares_foreign_row() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.clone()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+
+    h.handle
+        .pre_load_fdb(vni(100), foreign_fdb_entry(mac(1), "10.9.9.9"));
+    h.handle.set_probe(
+        vni(100),
+        InstanceProbe::NotReady {
+            reason: "bridge gone".into(),
+        },
+    );
+    h.intent_tx.send(intent(2, inst, macs)).unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+
+    let snap = h.handle.kernel_snapshot();
+    assert_eq!(
+        snap.find_fdb(vni(100), mac(1)).and_then(|e| e.dst),
+        Some(ipa("10.9.9.9")),
+        "NotReady drain must spare the foreign row"
+    );
+    h.shutdown().await;
+}
+
+// Rule 3, shutdown variant: the drain revalidates against a fresh
+// snapshot and spares a foreign row that replaced an owned one.
+#[tokio::test]
+async fn shutdown_drain_spares_foreign_row() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(
+            1,
+            one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+            macs.build(),
+        ))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+
+    // Foreign takeover after the last reconcile pass; the drain's
+    // fresh dump is the only chance to notice.
+    h.handle
+        .pre_load_fdb(vni(100), foreign_fdb_entry(mac(1), "10.9.9.9"));
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    let snap = handle.kernel_snapshot();
+    let row = snap
+        .find_fdb(vni(100), mac(1))
+        .expect("foreign row must survive shutdown drain");
+    assert_eq!(row.dst, Some(ipa("10.9.9.9")));
+    assert!(row.flags.permanent);
+}
+
+// L3 rule 1: a foreign route at the exact (table, prefix) key blocks
+// the route install; the foreign row keeps its identity.
+#[tokio::test]
+async fn l3_foreign_route_blocks_install() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    // Operator/foreign route at the exact key (no ADR-0079 markers).
+    h.handle
+        .pre_load_l3_route(L3_TABLE_ID, l3_prefix(), L3_IFINDEX, ipa("10.9.9.9"), false);
+
+    let ip_vrfs = l3_ip_vrfs();
+    let prefixes = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(1, ip_vrfs, prefixes)).unwrap();
+    let mut reports = vec![wait_for_generation(&mut h, 1).await];
+
+    let route = h
+        .handle
+        .l3_routes()
+        .remove(&(L3_TABLE_ID, l3_prefix()))
+        .expect("foreign route must survive");
+    assert!(!route.marked, "foreign route must not be replaced");
+    assert_eq!(route.next_hop, ipa("10.9.9.9"));
+
+    reports.extend(h.shutdown().await);
+    let counters = sum_foreign_counters(&reports);
+    assert_eq!(counters.replaces_blocked, 1, "warn-once counter");
+}
+
+// L3 rules 2 + 3: foreign rows replace the owned route / neighbor /
+// L3VXLAN FDB triple → ownership relinquished, and withdrawal leaves
+// every foreign row in the kernel.
+#[tokio::test]
+async fn l3_foreign_takeover_relinquishes_and_withdrawal_spares_rows() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    let ip_vrfs = l3_ip_vrfs();
+    let prefixes = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx
+        .send(l3_intent(1, ip_vrfs.clone(), prefixes.clone()))
+        .unwrap();
+    let report = wait_for_generation(&mut h, 1).await;
+    assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+    assert!(h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()));
+
+    // Foreign takeover of all three kernel rows.
+    let foreign_mac = MacAddress::new([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]);
+    h.handle
+        .pre_load_l3_route(L3_TABLE_ID, l3_prefix(), L3_IFINDEX, ipa("10.9.9.9"), false);
+    h.handle
+        .pre_load_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"), foreign_mac, false);
+    h.handle
+        .pre_load_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac(), ipa("10.9.9.9"), false);
+
+    // Withdraw the prefix — every foreign row must survive.
+    h.intent_tx
+        .send(l3_intent(2, ip_vrfs, RemoteIpPrefixTable::new()))
+        .unwrap();
+    let mut reports = vec![wait_for_generation(&mut h, 2).await];
+
+    let route = h
+        .handle
+        .l3_routes()
+        .remove(&(L3_TABLE_ID, l3_prefix()))
+        .expect("foreign route must survive withdrawal");
+    assert!(!route.marked);
+    assert!(
+        h.handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")),
+        "foreign neighbor must survive withdrawal"
+    );
+    assert!(
+        h.handle
+            .kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac()),
+        "foreign L3VXLAN FDB row must survive withdrawal"
+    );
+
+    reports.extend(h.shutdown().await);
+    let counters = sum_foreign_counters(&reports);
+    assert_eq!(
+        counters.owned_relinquished, 3,
+        "route + neighbor + FDB takeover must each relinquish"
+    );
+}
+
+// L3 rule 3, shutdown variant: the drain revalidates against a fresh
+// ownership dump and spares the foreign triple.
+#[tokio::test]
+async fn shutdown_drain_spares_foreign_l3_rows() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    let ip_vrfs = l3_ip_vrfs();
+    let prefixes = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(1, ip_vrfs, prefixes)).unwrap();
+    let report = wait_for_generation(&mut h, 1).await;
+    assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+
+    // Takeover after the last pass; drain must notice via its dump.
+    let foreign_mac = MacAddress::new([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]);
+    h.handle
+        .pre_load_l3_route(L3_TABLE_ID, l3_prefix(), L3_IFINDEX, ipa("10.9.9.9"), false);
+    h.handle
+        .pre_load_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"), foreign_mac, false);
+    h.handle
+        .pre_load_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac(), ipa("10.9.9.9"), false);
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+
+    let route = handle
+        .l3_routes()
+        .remove(&(L3_TABLE_ID, l3_prefix()))
+        .expect("foreign route must survive shutdown drain");
+    assert!(!route.marked);
+    assert!(handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")));
+    assert!(handle.kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac()));
+}

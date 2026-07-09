@@ -24,7 +24,7 @@
 //! the re-install *is* the claim), and reaps whatever stays unclaimed
 //! after the deferral.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_evpn::{EvpnIpPrefixValue, IpVrfId, MacAddress};
@@ -86,11 +86,29 @@ pub struct L3AdoptionDump {
     pub neighbors: BTreeMap<(u32, IpAddr), IpVrfId>,
     /// `(l3vxlan_ifindex, router_mac)` → adopted FDB row identity.
     pub l3vxlan_fdb: BTreeMap<(u32, MacAddress), AdoptedL3VxlanFdb>,
+    /// LAN-283 foreign-state visibility: `(vrf_id, prefix)` keys in a
+    /// configured IP-VRF table whose route row does NOT carry our
+    /// marker pair — another writer's state. The reconcile actor
+    /// blocks replaces over these keys and never deletes them.
+    pub foreign_routes: BTreeSet<(IpVrfId, EvpnIpPrefixValue)>,
+    /// Foreign `(l3vxlan_ifindex, next_hop)` neighbor keys on managed
+    /// L3VXLAN devices: rows programmed by another agent (permanent /
+    /// noarp state without our markers, or a non-BGP `NDA_PROTOCOL`
+    /// stamp). Transient kernel-dynamic ARP/ND cache entries are NOT
+    /// classified foreign — our control-plane replace of a volatile
+    /// cache entry is normal operation.
+    pub foreign_neighbors: BTreeSet<(u32, IpAddr)>,
+    /// Foreign `(l3vxlan_ifindex, router_mac)` FDB keys on managed
+    /// L3VXLAN devices — any row that is not marker-matching (managed
+    /// L3VXLANs run `nolearning`, so every row was programmed by
+    /// someone).
+    pub foreign_fdb: BTreeSet<(u32, MacAddress)>,
 }
 
 impl L3AdoptionDump {
     /// True when no marker rows were observed in any of the three
-    /// kernel surfaces.
+    /// kernel surfaces (foreign rows do not count — they are never
+    /// adoption candidates).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty() && self.neighbors.is_empty() && self.l3vxlan_fdb.is_empty()

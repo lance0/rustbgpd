@@ -1030,12 +1030,15 @@ impl InMemoryDataplane {
 
         let mut out = L3AdoptionDump::default();
         for (&(table_id, prefix), row) in &state.l3_routes {
-            if !row.marked {
-                continue;
-            }
             let Some(vrf_id) = tables.get(&table_id).copied() else {
                 continue;
             };
+            if !row.marked {
+                // LAN-283: unmarked row in a configured table —
+                // foreign state the actor must fail closed on.
+                out.foreign_routes.insert((vrf_id, prefix));
+                continue;
+            }
             out.routes.insert(
                 (vrf_id, prefix),
                 AdoptedL3Route {
@@ -1050,21 +1053,23 @@ impl InMemoryDataplane {
             );
         }
         for (&(ifindex, next_hop), row) in &state.l3_neighbors {
-            if !row.marked {
-                continue;
-            }
             let Some(vrf_id) = managed.get(&ifindex).copied() else {
                 continue;
             };
+            if !row.marked {
+                out.foreign_neighbors.insert((ifindex, next_hop));
+                continue;
+            }
             out.neighbors.insert((ifindex, next_hop), vrf_id);
         }
         for (&(ifindex, router_mac), row) in &state.l3_vxlan_fdb {
-            if !row.marked {
-                continue;
-            }
             let Some(vrf_id) = managed.get(&ifindex).copied() else {
                 continue;
             };
+            if !row.marked {
+                out.foreign_fdb.insert((ifindex, router_mac));
+                continue;
+            }
             let target = match row.target {
                 InMemoryL3VxlanFdbTarget::SingleDst { .. } => AdoptedL3VxlanFdbTarget::SingleDst,
                 InMemoryL3VxlanFdbTarget::Nhg { nh_id } => {

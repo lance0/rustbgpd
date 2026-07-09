@@ -73,6 +73,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RTR transaction is bounded by a wall-clock deadline plus record and byte
   budgets so a broken or malicious cache cannot wedge or OOM the client.
   (LAN-281)
+- **EVPN Linux dataplane: foreign-state ownership preflight and revalidation.**
+  The reconciler could `replace` over — or delete — a same-key kernel row it
+  did not own: an operator/other-agent FDB row, VRF route, L3 neighbor, or
+  L3VXLAN FDB row that occupied (or took over) an exact key rustbgpd wanted.
+  Every L2/L3 write path now fails closed when a foreign row holds the key
+  (level-triggered: the install resumes once the foreign row goes away),
+  ownership is relinquished when a live snapshot shows a foreign writer
+  replaced an owned row (no "repair" back over it), and deletes during
+  withdrawal, `NotReady` drain, and shutdown are revalidated against a live
+  snapshot so foreign rows always survive rustbgpd's teardown. Observability:
+  warn-once transition logs plus new `evpn_foreign_replaces_blocked_total`,
+  `evpn_foreign_deletes_skipped_total`, and
+  `evpn_foreign_owned_relinquished_total` counters. (LAN-283)
+
 - **Outbound saturation teardown: Cease is the final frame, and cleanup runs
   from the run loop.** When a peer stopped draining and the bounded writer
   queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the

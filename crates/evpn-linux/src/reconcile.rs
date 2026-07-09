@@ -39,11 +39,11 @@ use std::time::Duration;
 use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
-    InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, ManagedBridgeNetdev,
-    ManagedL3VxlanNetdev, ManagedNetdevClass, ManagedNetdevState, ManagedNetdevStatus,
-    ManagedNetdevTable, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdev, ManagedVlanUpperNetdev,
-    ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable, SingleActiveCounters,
-    parse_ownership_stamp,
+    ForeignStateCounters, InstanceDataplaneStatus, InstanceState, L3AdoptionCounters,
+    ManagedBridgeNetdev, ManagedL3VxlanNetdev, ManagedNetdevClass, ManagedNetdevState,
+    ManagedNetdevStatus, ManagedNetdevTable, ManagedSvdVxlanBinding, ManagedSvdVxlanNetdev,
+    ManagedVlanUpperNetdev, ManagedVrfNetdev, ManagedVxlanNetdev, RemoteMacTable,
+    SingleActiveCounters, parse_ownership_stamp,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -315,6 +315,21 @@ struct ActorState {
     /// was withdrawn) are also pruned so a future re-entry produces
     /// a fresh warn.
     warned_ipv6_fallback: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// LAN-283: `(VNI, MAC)` keys currently withheld because a
+    /// foreign kernel FDB row occupies the exact key. Same warn-once
+    /// discipline as `warned_ipv6_fallback` — warn (and count) when a
+    /// key enters the blocked set, prune when it leaves so a later
+    /// re-block warns fresh.
+    warned_foreign_fdb: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// LAN-283: L3 op keys currently withheld because a foreign
+    /// kernel row occupies the exact key (route / neighbor / L3VXLAN
+    /// FDB). Same warn-once discipline as `warned_foreign_fdb`.
+    warned_foreign_l3: BTreeSet<L3OpKey>,
+    /// LAN-283 foreign-state deltas (replaces blocked, deletes
+    /// skipped, ownership relinquished) accumulated since the last
+    /// [`DataplaneReport`]. Same drain-into-Prometheus contract as
+    /// `fdb_nhg_drift_since_report`.
+    foreign_since_report: ForeignStateCounters,
     /// Managed-netdev rows we've already warned about for the current
     /// fail-closed condition. Pruned when the row becomes safe or
     /// disappears, so a later re-entry warns again.
@@ -508,6 +523,9 @@ impl ActorState {
             managed_permanent_failures: BTreeMap::new(),
             pending_deletes: BTreeSet::new(),
             warned_ipv6_fallback: BTreeSet::new(),
+            warned_foreign_fdb: BTreeSet::new(),
+            warned_foreign_l3: BTreeSet::new(),
+            foreign_since_report: ForeignStateCounters::default(),
             warned_managed_netdevs: BTreeSet::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
@@ -940,6 +958,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
 
+        // LAN-283 rule 2 (relinquish on foreign replacement): a key
+        // we own whose live kernel row is no longer extern_learned
+        // was replaced by another writer. Stop claiming it BEFORE the
+        // diff runs — the withdraw pass must not delete the foreign
+        // row, and the install pass must not "repair" ours back over
+        // it (the diff's own foreign gates then fail closed for the
+        // key while the foreign row persists).
+        self.relinquish_foreign_l2(&snapshot).await;
+
         let mut plan = compute_diff(
             intent.remote_macs.as_ref(),
             &snapshot,
@@ -949,6 +976,26 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             intent.instances.as_ref(),
         );
         self.prune_stale_fdb_permanent_failures(intent.remote_macs.as_ref());
+
+        // LAN-283 rule 1 observability: warn once per key entering
+        // the foreign-blocked set (same transition discipline as the
+        // IPv6-fallback warn below) and bump the counter; keys that
+        // left the set are pruned so a later re-block warns fresh.
+        for key in plan
+            .foreign_blocked_keys
+            .difference(&self.state.warned_foreign_fdb)
+        {
+            self.state.foreign_since_report.replaces_blocked += 1;
+            tracing::warn!(
+                vni = ?key.0,
+                mac = %key.1,
+                "foreign kernel FDB row at this (vni, mac); operation withheld until the \
+                 foreign row goes away (LAN-283 fail-closed)"
+            );
+        }
+        self.state
+            .warned_foreign_fdb
+            .clone_from(&plan.foreign_blocked_keys);
 
         // ADR-0059 mixed-family alias fallback warn: log only for
         // `(VNI, MAC)` keys that newly entered the fallback this pass.
@@ -1320,12 +1367,40 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // first pass that sees it. A failed dump leaves the latch
             // unset so the next pass retries; never sweep a partial
             // kernel view.
-            if self.state.l3_adoption_reap_after.is_none() && !intent.ip_vrfs.is_empty() {
-                match self
-                    .dataplane
+            // LAN-283 live ownership guard: one marker/foreign dump
+            // per pass scopes every L3 mutation below — foreign rows
+            // at exact keys block replaces (rule 1), takeovers of
+            // owned keys relinquish ownership (rule 2), and deletes
+            // are revalidated so foreign rows survive withdrawal /
+            // NotReady / config-removal teardown (rule 3). With an
+            // empty `[[evpn_ip_vrfs]]` table the markers are not
+            // recognizable (same reasoning as the reap's empty-config
+            // guard), so the drain-everything path proceeds unguarded.
+            // On a failed dump the entire L3 apply phase is skipped —
+            // fail closed, never mutate off an unknown ownership view.
+            // ponytail: this adds one netlink dump set per pass with
+            // L3 config; gate on non-empty plans if it ever shows up
+            // in profiles.
+            let l3_live: Option<crate::l3_adoption::L3AdoptionDump> = if intent.ip_vrfs.is_empty() {
+                None
+            } else {
+                self.dataplane
                     .dump_l3_adoption_candidates(intent.ip_vrfs.as_ref())
                     .await
-                {
+            };
+            let l3_guard_failed = !intent.ip_vrfs.is_empty() && l3_live.is_none();
+            if l3_guard_failed {
+                tracing::warn!(
+                    "L3 ownership guard dump failed; skipping all L3 kernel mutations this \
+                     pass (fail closed, LAN-283)"
+                );
+            }
+            if let Some(live) = &l3_live {
+                self.relinquish_foreign_l3(live);
+            }
+
+            if self.state.l3_adoption_reap_after.is_none() && !intent.ip_vrfs.is_empty() {
+                match &l3_live {
                     Some(dump) => {
                         self.state.l3_adoption_reap_after =
                             Some(Instant::now() + self.config.l3_adoption_reap_deferral);
@@ -1439,8 +1514,90 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // non-converged pass is the known traffic-gap failure
             // mode (same gate as the slice-2 FDB reap).
             let mut l3_pass_had_failures = false;
-            for op in &l3_plan.ops {
+            // LAN-283: L3 op keys blocked by a foreign row this pass,
+            // for the warn-once transition sync below.
+            let mut blocked_l3_now: BTreeSet<L3OpKey> = BTreeSet::new();
+            let l3_ops_to_apply: &[crate::dataplane::DataplaneOp] = if l3_guard_failed {
+                // Fail closed: an unknown ownership view must not be
+                // mutated. Marking the pass failed also blocks the
+                // ADR-0079 reap below.
+                l3_pass_had_failures = true;
+                &[]
+            } else {
+                &l3_plan.ops
+            };
+            for op in l3_ops_to_apply {
                 let l3_key = l3_op_key(op);
+                // LAN-283 foreign-state guard against the live
+                // ownership dump fetched above.
+                let mut spare_foreign_nhg_row = false;
+                if let Some(live) = &l3_live {
+                    match l3_foreign_disposition(op, live) {
+                        Some(L3ForeignDisposition::BlockReplace) => {
+                            // Rule 1: an exact-key foreign row means a
+                            // netlink replace would silently adopt-and-
+                            // overwrite another agent's state. Withheld;
+                            // dependent route adds in this pass are
+                            // fail-stopped through the prerequisite
+                            // sets, and the reap is blocked.
+                            if let Some(key) = l3_key.clone() {
+                                if !self.state.warned_foreign_l3.contains(&key) {
+                                    self.state.foreign_since_report.replaces_blocked += 1;
+                                    tracing::warn!(
+                                        ?op,
+                                        "foreign kernel row at this L3 key; install withheld \
+                                         until the foreign row goes away (LAN-283 fail-closed)"
+                                    );
+                                }
+                                blocked_l3_now.insert(key);
+                            }
+                            record_l3_prerequisite_failure(
+                                op,
+                                &mut failed_neighbor_keys,
+                                &mut failed_fdb_keys,
+                                &mut failed_l3_group_keys,
+                            );
+                            l3_pass_had_failures = true;
+                            continue;
+                        }
+                        Some(L3ForeignDisposition::SkipDelete) => {
+                            // Rule 3: the row under this key is now a
+                            // foreign writer's — it must survive our
+                            // withdrawal / NotReady / shutdown. Record
+                            // the op as logically complete so the owned
+                            // state drops the key (rule 2 relinquish
+                            // for the withdraw path).
+                            self.state.foreign_since_report.deletes_skipped += 1;
+                            tracing::warn!(
+                                ?op,
+                                "live row under this L3 key is foreign; delete skipped and \
+                                 ownership relinquished (LAN-283)"
+                            );
+                            crate::l3_diff::record_l3_success(
+                                &mut self.state.l3_owned,
+                                op,
+                                &ready_l3vxlan_ifindex,
+                                intent.ip_vrfs.as_ref(),
+                                intent.remote_ip_prefixes.as_ref(),
+                            );
+                            continue;
+                        }
+                        Some(L3ForeignDisposition::SpareNhgRow) => {
+                            // RemoveL3FdbNhg where the kernel row was
+                            // foreign-replaced: run the group refcount
+                            // teardown (the tagged NHID objects are
+                            // still ours) but never delete the row.
+                            self.state.foreign_since_report.deletes_skipped += 1;
+                            tracing::warn!(
+                                ?op,
+                                "L3VXLAN FDB row under this key is foreign; row delete \
+                                 skipped, group objects GC'd (LAN-283)"
+                            );
+                            spare_foreign_nhg_row = true;
+                        }
+                        None => {}
+                    }
+                }
                 if let Some(key) = l3_key.as_ref()
                     && check_permanent_suppression(
                         &mut self.state.l3_permanent_failures,
@@ -1511,7 +1668,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 let res = match op {
                     crate::dataplane::DataplaneOp::InstallL3FdbNhg { .. }
                     | crate::dataplane::DataplaneOp::RemoveL3FdbNhg { .. } => {
-                        apply_l3_nhg_op(&mut self.dataplane, &mut self.state, op).await
+                        apply_l3_nhg_op(
+                            &mut self.dataplane,
+                            &mut self.state,
+                            op,
+                            spare_foreign_nhg_row,
+                        )
+                        .await
                     }
                     _ => self.dataplane.apply(op).await,
                 };
@@ -1593,6 +1756,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         }
                     }
                 }
+            }
+
+            // LAN-283 warn-once sync: keys that left the blocked set
+            // are pruned so a later re-block warns fresh. Only when
+            // the guard actually ran — a failed / unscoped pass must
+            // not clear the record.
+            if !l3_guard_failed && l3_live.is_some() {
+                self.state.warned_foreign_l3 = blocked_l3_now;
             }
 
             // ADR-0079 L3 sweep: drop claimed keys from the adopted
@@ -2817,6 +2988,123 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// table are skipped (kept tracked, never removed): rows of
     /// unmanaged VNIs are out of scope, same rationale as the L3
     /// reap's empty-config guard.
+    /// LAN-283 rule 2 for the Gate 9 L3 surfaces: drop owned route /
+    /// neighbor / scalar-FDB keys whose live dump shows a FOREIGN row
+    /// under the key and no marker row of ours — another writer took
+    /// the slot. The foreign row is never touched; a still-desired
+    /// key re-emits an Add on the next diff, which the foreign guard
+    /// then fails closed until the foreign row goes away. L3 FDB-NHG
+    /// rows are guarded at op level instead (`SpareNhgRow`) — their
+    /// group bookkeeping lives in `l3_groups`, and the takeover
+    /// disposition runs the refcount teardown there.
+    fn relinquish_foreign_l3(&mut self, live: &crate::l3_adoption::L3AdoptionDump) {
+        let taken_routes: Vec<(IpVrfId, EvpnIpPrefixValue)> = self
+            .state
+            .l3_owned
+            .installs
+            .keys()
+            .filter(|key| live.foreign_routes.contains(key) && !live.routes.contains_key(key))
+            .copied()
+            .collect();
+        for key in taken_routes {
+            self.state.l3_owned.record_remove(&key);
+            self.state.foreign_since_report.owned_relinquished += 1;
+            tracing::warn!(
+                vrf_id = key.0.as_u32(),
+                prefix = ?key.1,
+                "owned VRF route was replaced by a foreign entry; relinquishing ownership \
+                 (foreign row preserved, LAN-283)"
+            );
+        }
+        let taken_neighbors: Vec<(u32, IpAddr)> = self
+            .state
+            .l3_owned
+            .kernel_neighbors
+            .keys()
+            .filter(|key| live.foreign_neighbors.contains(key) && !live.neighbors.contains_key(key))
+            .copied()
+            .collect();
+        for key in taken_neighbors {
+            self.state.l3_owned.kernel_neighbors.remove(&key);
+            self.state.foreign_since_report.owned_relinquished += 1;
+            tracing::warn!(
+                l3vxlan_ifindex = key.0,
+                next_hop = %key.1,
+                "owned L3 neighbor was replaced by a foreign entry; relinquishing ownership \
+                 (foreign row preserved, LAN-283)"
+            );
+        }
+        let taken_fdb: Vec<(u32, MacAddress)> = self
+            .state
+            .l3_owned
+            .kernel_fdb
+            .keys()
+            .filter(|key| live.foreign_fdb.contains(key) && !live.l3vxlan_fdb.contains_key(key))
+            .copied()
+            .collect();
+        for key in taken_fdb {
+            self.state.l3_owned.kernel_fdb.remove(&key);
+            self.state.foreign_since_report.owned_relinquished += 1;
+            tracing::warn!(
+                l3vxlan_ifindex = key.0,
+                router_mac = %key.1,
+                "owned L3VXLAN FDB row was replaced by a foreign entry; relinquishing \
+                 ownership (foreign row preserved, LAN-283)"
+            );
+        }
+    }
+
+    /// LAN-283 rule 2 for the L2 FDB surface: drop every owned
+    /// `(VNI, MAC)` whose live snapshot row exists but is not ours
+    /// (`extern_learn` missing, or a foreign `NDA_PROTOCOL` stamp) —
+    /// another writer replaced our row. The foreign row is never
+    /// touched; `FdbNhg` entries release their group reference so the
+    /// tagged kernel nexthop objects (still ours) are GC'd when this
+    /// MAC was the last referrer. A missing row is NOT a takeover
+    /// (interface flap self-heals through the normal diff).
+    async fn relinquish_foreign_l2(&mut self, snapshot: &KernelSnapshot) {
+        let takeovers: Vec<(EvpnInstanceId, MacAddress, Option<u16>, OwnedEntryKind)> = self
+            .state
+            .owned
+            .iter()
+            .filter(|entry| {
+                let (&(vni, mac), owned) = *entry;
+                snapshot
+                    .find_fdb_in_vlan(vni, mac, owned.vlan)
+                    .is_some_and(|k| !k.is_extern_learned())
+            })
+            .map(|(&(vni, mac), owned)| (vni, mac, owned.vlan, owned.kind.clone()))
+            .collect();
+        for (vni, mac, vlan, kind) in takeovers {
+            self.state.owned.record_withdrawn(vni, mac);
+            self.state.retry.record_success((vni, mac));
+            if let OwnedEntryKind::FdbNhg { group_key } = kind {
+                // Bookkeeping-only unref: the FDB row is foreign now,
+                // but the group / member NHIDs are still rustbgpd's
+                // tagged objects. GC failures land in
+                // `pending_deletes` via `try_del_and_release_alloc`
+                // and retry next pass, so the Err is already
+                // handled internally.
+                let _ = release_fdb_nhg_group_refs(
+                    &mut self.dataplane,
+                    &mut self.state,
+                    vni,
+                    mac,
+                    group_key,
+                )
+                .await;
+            }
+            self.state.foreign_since_report.owned_relinquished += 1;
+            tracing::warn!(
+                ?vni,
+                %mac,
+                ?vlan,
+                "owned FDB row was replaced by a foreign entry; relinquishing ownership \
+                 (foreign row preserved, LAN-283)"
+            );
+        }
+    }
+
     async fn reap_adopted_fdb(
         &mut self,
         snapshot: &KernelSnapshot,
@@ -3480,6 +3768,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let fdb_nhg_drift_counters = std::mem::take(&mut self.state.fdb_nhg_drift_since_report);
         let l3_adoption_counters = std::mem::take(&mut self.state.l3_adoption_since_report);
         let single_active_counters = std::mem::take(&mut self.state.single_active_since_report);
+        let foreign_state_counters = std::mem::take(&mut self.state.foreign_since_report);
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
             reconcile_generation: self.state.reconcile_generation,
@@ -3496,6 +3785,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             fdb_nhg_drift_counters,
             l3_adoption_counters,
             single_active_counters,
+            foreign_state_counters,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
@@ -3640,6 +3930,25 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
             }
 
+            // LAN-283 rule 3 (revalidate before delete): re-dump the
+            // kernel FDB so shutdown only deletes rows that are still
+            // ours — a foreign row that replaced ours after the last
+            // reconcile pass must survive the daemon's exit. On dump
+            // failure, fail closed: skip the FDB drain entirely (the
+            // rows carry our durable extern_learn marker, so the next
+            // startup's adoption sweep owns the cleanup).
+            let drain_snapshot = match self.dataplane.dump_snapshot().await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "shutdown snapshot dump failed; skipping owned-FDB drain (fail \
+                         closed, LAN-283) — next startup adopts the marker rows"
+                    );
+                    None
+                }
+            };
+
             // Snapshot the owned set with kind info — for FdbNhg
             // entries we route through `apply_nhg_op` (so the FDB
             // row → group → members teardown sequence runs and the
@@ -3648,13 +3957,36 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // `RemoveRemoteFdb` for FdbNhg-owned MACs — which
             // `Dataplane::apply` rejects with `InvalidArgument` and
             // the kernel group/members stay orphaned across restart.
-            let owned_drain: Vec<(EvpnInstanceId, MacAddress, Option<u16>, OwnedEntryKind)> = self
-                .state
-                .owned
-                .iter()
-                .map(|(&(vni, mac), entry)| (vni, mac, entry.vlan, entry.kind.clone()))
-                .collect();
+            let owned_drain: Vec<(EvpnInstanceId, MacAddress, Option<u16>, OwnedEntryKind)> =
+                if drain_snapshot.is_some() {
+                    self.state
+                        .owned
+                        .iter()
+                        .map(|(&(vni, mac), entry)| (vni, mac, entry.vlan, entry.kind.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             for (vni, mac, vlan, kind) in owned_drain {
+                if drain_snapshot.as_ref().is_some_and(|snap| {
+                    snap.find_fdb_in_vlan(vni, mac, vlan)
+                        .is_some_and(|k| !k.is_extern_learned())
+                }) {
+                    // A foreign writer replaced our row since the
+                    // last pass — spare it and relinquish. For FdbNhg
+                    // entries the tagged group objects stay for the
+                    // next startup's adoption sweep (drain is
+                    // time-bounded; no bookkeeping GC here).
+                    self.state.owned.record_withdrawn(vni, mac);
+                    self.state.foreign_since_report.deletes_skipped += 1;
+                    tracing::warn!(
+                        ?vni,
+                        %mac,
+                        "foreign FDB row under owned key at shutdown; drain skips it \
+                         (LAN-283)"
+                    );
+                    continue;
+                }
                 let op = match kind {
                     OwnedEntryKind::SingleDst { .. } => {
                         DataplaneOp::RemoveRemoteFdb { vni, mac, vlan }
@@ -3688,7 +4020,70 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // + tear down the kernel resolution rows. Failed ops are
             // best-effort like the L2 path; the next startup's diff
             // re-converges against whatever the kernel still has.
-            for op in &l3_drain_plan.ops {
+            // LAN-283 rule 3: revalidate against a live ownership
+            // dump first — a key whose row is now foreign is skipped
+            // (and dropped from owned state); on dump failure skip
+            // the whole L3 drain (fail closed — everything we wrote
+            // carries durable markers for the next startup). With no
+            // configured IP-VRFs the markers are unrecognizable, so
+            // that (config-removed) path drains unguarded, as before.
+            let l3_drain_live: Option<crate::l3_adoption::L3AdoptionDump> =
+                if l3_drain_plan.ops.is_empty() || l3_ip_vrfs.is_empty() {
+                    None
+                } else {
+                    self.dataplane
+                        .dump_l3_adoption_candidates(l3_ip_vrfs.as_ref())
+                        .await
+                };
+            let l3_drain_guard_failed =
+                !l3_drain_plan.ops.is_empty() && !l3_ip_vrfs.is_empty() && l3_drain_live.is_none();
+            if l3_drain_guard_failed {
+                tracing::warn!(
+                    "shutdown L3 ownership dump failed; skipping L3 drain (fail closed, \
+                     LAN-283) — next startup adopts the marker rows"
+                );
+            }
+            let l3_drain_ops: &[DataplaneOp] = if l3_drain_guard_failed {
+                &[]
+            } else {
+                &l3_drain_plan.ops
+            };
+            for op in l3_drain_ops {
+                if let Some(live) = &l3_drain_live
+                    && let Some(disposition) = l3_foreign_disposition(op, live)
+                {
+                    match disposition {
+                        L3ForeignDisposition::SkipDelete => {
+                            self.state.foreign_since_report.deletes_skipped += 1;
+                            tracing::warn!(
+                                ?op,
+                                "foreign row under owned L3 key at shutdown; drain skips \
+                                 it (LAN-283)"
+                            );
+                            crate::l3_diff::record_l3_success(
+                                &mut self.state.l3_owned,
+                                op,
+                                &ready_l3vxlan_empty,
+                                l3_ip_vrfs.as_ref(),
+                                l3_intent.as_ref(),
+                            );
+                            continue;
+                        }
+                        L3ForeignDisposition::SpareNhgRow | L3ForeignDisposition::BlockReplace => {
+                            // Drain plans are remove-only; the NHG-row
+                            // spare leaves the tagged nexthop objects
+                            // for the next startup's adoption sweep
+                            // (drain is time-bounded, no GC here).
+                            self.state.foreign_since_report.deletes_skipped += 1;
+                            tracing::warn!(
+                                ?op,
+                                "foreign row under owned L3 key at shutdown; drain skips \
+                                 it (LAN-283)"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 if let Err(e) = self.dataplane.apply(op).await {
                     tracing::debug!(error = %e, ?op, "L3 drain op failed");
                 } else {
@@ -5791,6 +6186,7 @@ async fn apply_l3_nhg_op<D>(
     dataplane: &mut D,
     state: &mut ActorState,
     op: &DataplaneOp,
+    spare_foreign_nhg_row: bool,
 ) -> Result<(), crate::error::DataplaneError>
 where
     D: crate::dataplane::NexthopOps,
@@ -5829,6 +6225,7 @@ where
                 *group_key,
                 *router_mac,
                 *l3vxlan_ifindex,
+                spare_foreign_nhg_row,
             )
             .await
         }
@@ -5943,6 +6340,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_remove_l3_fdb_nhg<D>(
     dataplane: &mut D,
     state: &mut ActorState,
@@ -5950,6 +6348,7 @@ async fn apply_remove_l3_fdb_nhg<D>(
     group_key: crate::group_state::L3NhgKey,
     router_mac: rustbgpd_evpn::MacAddress,
     l3vxlan_ifindex: u32,
+    spare_foreign_row: bool,
 ) -> Result<(), crate::error::DataplaneError>
 where
     D: crate::dataplane::NexthopOps,
@@ -5968,9 +6367,14 @@ where
         return Ok(());
     }
 
-    dataplane
-        .remove_l3_fdb_nhg_row(l3vxlan_ifindex, router_mac)
-        .await?;
+    if !spare_foreign_row {
+        // LAN-283: when a foreign writer replaced the kernel FDB row
+        // under this key, the row is not ours to delete — only the
+        // tagged nexthop objects below are.
+        dataplane
+            .remove_l3_fdb_nhg_row(l3vxlan_ifindex, router_mac)
+            .await?;
+    }
     dataplane.del_nexthop(group.id).await?;
     state.nh_id_alloc.release_l3(group.id);
     let delta = state
@@ -6345,10 +6749,29 @@ async fn apply_remove_fdb_nhg<D>(
 where
     D: crate::dataplane::NexthopOps,
 {
-    use crate::group_state::RefDelta;
-
     // FDB row first (ADR §5 invariant 2).
     dataplane.remove_fdb_nhg_row(vni, mac, vlan).await?;
+    release_fdb_nhg_group_refs(dataplane, state, vni, mac, group_key).await
+}
+
+/// Drop one MAC's reference on its FDB nexthop group and GC the
+/// group / member / standby kernel nexthop objects when it was the
+/// last referrer — WITHOUT touching the kernel FDB row. Shared by
+/// [`apply_remove_fdb_nhg`] (which deletes the row first) and the
+/// LAN-283 foreign-takeover relinquish path (where the row is no
+/// longer ours to delete but the tagged NHID objects still are).
+async fn release_fdb_nhg_group_refs<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    vni: rustbgpd_evpn::EvpnInstanceId,
+    mac: rustbgpd_evpn::MacAddress,
+    group_key: crate::group_state::AliasGroupKey,
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    use crate::group_state::RefDelta;
+
     match state.groups.record_mac_unref(group_key, vni, mac) {
         RefDelta::GroupStillReferenced => Ok(()),
         RefDelta::GroupShouldDelete {
@@ -6422,6 +6845,95 @@ fn check_permanent_suppression<K: Ord>(
         );
         map.remove(key);
         false
+    }
+}
+
+/// What the LAN-283 foreign-state guard decided for one L3 op against
+/// the pass's live ownership dump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum L3ForeignDisposition {
+    /// An exact-key foreign row exists — the install / replace must
+    /// not run (rule 1, fail closed).
+    BlockReplace,
+    /// The row under the key is foreign and no marker row of ours
+    /// remains — the delete must not run; record the op as logically
+    /// complete so the owned state drops the key (rules 2 + 3).
+    SkipDelete,
+    /// `RemoveL3FdbNhg` variant of [`Self::SkipDelete`]: run the group
+    /// refcount teardown (the tagged NHID objects are still ours) but
+    /// spare the foreign kernel FDB row. A foreign row that itself
+    /// references a rustbgpd NHID is LAN-290 (NHID authority)
+    /// territory, out of scope here.
+    SpareNhgRow,
+}
+
+/// Classify one L3 op against the live ownership dump. `None` means
+/// no foreign row is involved and the op proceeds normally.
+fn l3_foreign_disposition(
+    op: &DataplaneOp,
+    live: &crate::l3_adoption::L3AdoptionDump,
+) -> Option<L3ForeignDisposition> {
+    match op {
+        DataplaneOp::AddRemoteIpRoute { vrf_id, prefix, .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { vrf_id, prefix, .. } => live
+            .foreign_routes
+            .contains(&(*vrf_id, *prefix))
+            .then_some(L3ForeignDisposition::BlockReplace),
+        DataplaneOp::AddL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => live
+            .foreign_neighbors
+            .contains(&(*l3vxlan_ifindex, *next_hop))
+            .then_some(L3ForeignDisposition::BlockReplace),
+        DataplaneOp::AddL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        }
+        | DataplaneOp::InstallL3FdbNhg {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => live
+            .foreign_fdb
+            .contains(&(*l3vxlan_ifindex, *router_mac))
+            .then_some(L3ForeignDisposition::BlockReplace),
+        DataplaneOp::RemoveRemoteIpRoute { vrf_id, prefix, .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { vrf_id, prefix, .. } => {
+            let key = (*vrf_id, *prefix);
+            (live.foreign_routes.contains(&key) && !live.routes.contains_key(&key))
+                .then_some(L3ForeignDisposition::SkipDelete)
+        }
+        DataplaneOp::RemoveL3Neighbor {
+            l3vxlan_ifindex,
+            next_hop,
+            ..
+        } => {
+            let key = (*l3vxlan_ifindex, *next_hop);
+            (live.foreign_neighbors.contains(&key) && !live.neighbors.contains_key(&key))
+                .then_some(L3ForeignDisposition::SkipDelete)
+        }
+        DataplaneOp::RemoveL3VxlanFdb {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => {
+            let key = (*l3vxlan_ifindex, *router_mac);
+            (live.foreign_fdb.contains(&key) && !live.l3vxlan_fdb.contains_key(&key))
+                .then_some(L3ForeignDisposition::SkipDelete)
+        }
+        DataplaneOp::RemoveL3FdbNhg {
+            l3vxlan_ifindex,
+            router_mac,
+            ..
+        } => {
+            let key = (*l3vxlan_ifindex, *router_mac);
+            (live.foreign_fdb.contains(&key) && !live.l3vxlan_fdb.contains_key(&key))
+                .then_some(L3ForeignDisposition::SpareNhgRow)
+        }
+        _ => None,
     }
 }
 

@@ -204,6 +204,9 @@ pub struct BgpMetrics {
     evpn_single_active_backup_swaps: IntCounter,
     evpn_single_active_teardowns: IntCounter,
     evpn_single_active_backup_active: IntGauge,
+    evpn_foreign_replaces_blocked: IntCounter,
+    evpn_foreign_deletes_skipped: IntCounter,
+    evpn_foreign_owned_relinquished: IntCounter,
 
     // ── EVPN runtime apply (ADR-0063, #268 decomposition) ──────────
     evpn_runtime_decomposed_fail_stops: IntCounter,
@@ -1120,6 +1123,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_foreign_replaces_blocked = IntCounter::new(
+            "evpn_foreign_replaces_blocked_total",
+            "EVPN dataplane installs/replaces withheld because an exact-key foreign kernel row exists (LAN-283 fail-closed).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_foreign_deletes_skipped = IntCounter::new(
+            "evpn_foreign_deletes_skipped_total",
+            "EVPN dataplane deletes skipped during withdrawal/NotReady/shutdown because the live kernel row is no longer rustbgpd's (LAN-283).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_foreign_owned_relinquished = IntCounter::new(
+            "evpn_foreign_owned_relinquished_total",
+            "EVPN dataplane owned keys relinquished after a live snapshot showed a foreign writer replaced the row (LAN-283).",
+        )
+        .expect("valid metric definition");
+
         let evpn_single_active_backup_active = IntGauge::new(
             "evpn_single_active_backup_active",
             "Number of (ESI, EthernetTag) single-active groups currently retargeted at \
@@ -1538,6 +1559,15 @@ impl BgpMetrics {
             .register(Box::new(evpn_single_active_teardowns.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_foreign_replaces_blocked.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_foreign_deletes_skipped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_foreign_owned_relinquished.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_single_active_backup_active.clone()))
             .expect("metric not already registered");
         registry
@@ -1685,6 +1715,9 @@ impl BgpMetrics {
             evpn_single_active_backup_swaps,
             evpn_single_active_teardowns,
             evpn_single_active_backup_active,
+            evpn_foreign_replaces_blocked,
+            evpn_foreign_deletes_skipped,
+            evpn_foreign_owned_relinquished,
             evpn_runtime_decomposed_fail_stops,
             bmp_source_drops,
             bmp_collector_drops,
@@ -2782,6 +2815,30 @@ impl BgpMetrics {
         self.evpn_single_active_teardowns.inc_by(delta);
     }
 
+    /// Increment the LAN-283 foreign-blocked replace counter.
+    pub fn add_evpn_foreign_replaces_blocked(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_foreign_replaces_blocked.inc_by(delta);
+    }
+
+    /// Increment the LAN-283 foreign-spared delete counter.
+    pub fn add_evpn_foreign_deletes_skipped(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_foreign_deletes_skipped.inc_by(delta);
+    }
+
+    /// Increment the LAN-283 foreign-takeover relinquish counter.
+    pub fn add_evpn_foreign_owned_relinquished(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_foreign_owned_relinquished.inc_by(delta);
+    }
+
     /// Increment the #268 decomposed-apply fail-stop counter: a
     /// mid-sequence decomposed step pinned the coordinator
     /// (`mutation_state=Failed`), leaving earlier generations committed.
@@ -3735,6 +3792,23 @@ mod tests {
         assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
         assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
         assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
+    }
+
+    #[test]
+    fn evpn_foreign_state_counters_are_exported() {
+        let m = BgpMetrics::new();
+        m.add_evpn_foreign_replaces_blocked(1);
+        m.add_evpn_foreign_deletes_skipped(2);
+        m.add_evpn_foreign_owned_relinquished(3);
+
+        assert_eq!(m.evpn_foreign_replaces_blocked.get(), 1);
+        assert_eq!(m.evpn_foreign_deletes_skipped.get(), 2);
+        assert_eq!(m.evpn_foreign_owned_relinquished.get(), 3);
+
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_foreign_replaces_blocked_total 1"));
+        assert!(text.contains("evpn_foreign_deletes_skipped_total 2"));
+        assert!(text.contains("evpn_foreign_owned_relinquished_total 3"));
     }
 
     #[test]
