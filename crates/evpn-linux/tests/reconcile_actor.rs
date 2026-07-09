@@ -496,6 +496,153 @@ async fn managed_svd_vxlan_lifecycle_creates_and_reports_owned_safe() {
     h.shutdown().await;
 }
 
+// LAN-290 (1): a managed create that fails between link add and the
+// ownership stamp must leave the kernel exactly as if the create never
+// ran (the linux impl deletes its own unstamped link before surfacing
+// the error as transient — modeled here by the fake's atomic apply),
+// and the actor must retry the create from absent on the next backoff
+// tick instead of wedging on a foreign-present classification.
+#[tokio::test(start_paused = true)]
+async fn failed_managed_create_leaves_kernel_clean_and_retries() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let table = || {
+        ManagedNetdevTable::from_maps(
+            "leaf-1".to_string(),
+            BTreeMap::from([("br200".to_string(), true)]),
+            BTreeMap::new(),
+        )
+    };
+    h.handle.inject_failure_other(
+        Some(DataplaneOp::CreateManagedBridge {
+            name: "br200".to_string(),
+            vlan_filtering: true,
+            ownership_stamp: "rustbgpd:bridge:leaf-1:br200".to_string(),
+        }),
+        "managed bridge altname stamp failed; unstamped link rolled back",
+    );
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table()))
+        .unwrap();
+
+    let _ = h.try_drain_reports().await;
+    tokio::task::yield_now().await;
+    // The failed create must not strand an unstamped link.
+    let snapshot = h.handle.kernel_snapshot();
+    assert!(
+        !snapshot.links.contains_key("br200") && !snapshot.link_name_exists("br200"),
+        "failed managed create left link state behind"
+    );
+
+    // Past the max jittered first-failure backoff the retry timer
+    // re-fires the pass and the create converges.
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+
+    let snapshot = h.handle.kernel_snapshot();
+    let link = snapshot
+        .links
+        .get("br200")
+        .expect("failed managed create was not retried");
+    assert_eq!(link.altnames, vec!["rustbgpd:bridge:leaf-1:br200"]);
+    h.shutdown().await;
+}
+
+// LAN-290 (2): an SVD VXLAN that already carries exactly our stamp but
+// whose bridge VLAN/tunnel bindings never landed (creation failed after
+// the stamp step) is OUR incomplete state. The reconciler must re-emit
+// the convergent Create for it and retry the completion steps on
+// backoff — not classify it complete-by-existence and never touch it,
+// and not permanently suppress the retry.
+#[tokio::test(start_paused = true)]
+async fn stamped_incomplete_svd_bindings_are_completed_not_wedged() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let spec = rustbgpd_evpn::ManagedSvdVxlanNetdevSpec {
+        local_ip: Some(ipa("10.0.0.1")),
+        dstport: 4789,
+        bridge: "br100".to_string(),
+        bindings: vec![rustbgpd_evpn::ManagedSvdVxlanBinding {
+            bridge_vlan: 10,
+            vni: 100,
+        }],
+    };
+    // Operator bridge with no port/VLAN inventory + a stamped SVD link:
+    // the exact shape left behind when a create failed post-stamp.
+    h.handle.set_links(BTreeMap::from([(
+        "br100".to_string(),
+        managed_link("br100", 10, true, Vec::new()),
+    )]));
+    h.handle.set_vxlans(BTreeMap::from([(
+        "vxlan-svd".to_string(),
+        KernelVxlanLinkInfo {
+            ifindex: 20,
+            name: "vxlan-svd".to_string(),
+            altnames: vec!["rustbgpd:svd-vxlan:leaf-1:vxlan-svd".to_string()],
+            up: true,
+            vni: None,
+            local_ip: Some(ipa("10.0.0.1")),
+            dstport: Some(4789),
+            learning_disabled: Some(true),
+            collect_metadata: true,
+            vnifilter: true,
+            bridge: Some("br100".to_string()),
+            master: Some("br100".to_string()),
+            mac: None,
+        },
+    )]));
+    let table = ManagedNetdevTable::from_all_maps_with_svd(
+        "leaf-1".to_string(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::from([("vxlan-svd".to_string(), spec.clone())]),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    );
+    // First completion attempt fails; it must be retried on backoff,
+    // never permanently suppressed (post-stamp failures surface as
+    // transient from the linux impl).
+    h.handle.inject_failure_other(
+        Some(DataplaneOp::CreateManagedSvdVxlan {
+            name: "vxlan-svd".to_string(),
+            spec: spec.clone(),
+            ownership_stamp: "rustbgpd:svd-vxlan:leaf-1:vxlan-svd".to_string(),
+        }),
+        "managed SVD bridge VLAN add failed",
+    );
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table))
+        .unwrap();
+
+    let _ = h.try_drain_reports().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        h.handle.apply_count() >= 2,
+        "stamped-incomplete SVD completion was not retried; apply_count={}",
+        h.handle.apply_count()
+    );
+    let snapshot = h.handle.kernel_snapshot();
+    let bridge = snapshot.links.get("br100").expect("bridge present");
+    let port = bridge
+        .port_vlan_inventory
+        .iter()
+        .find(|port| port.name.as_deref() == Some("vxlan-svd"))
+        .expect("SVD bindings were never completed");
+    assert!(
+        port.vlan_tunnels
+            .iter()
+            .any(|row| row.vid == Some(10) && row.tunnel_id == Some(100)),
+        "SVD VLAN/tunnel mapping missing after retry: {port:?}"
+    );
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn managed_vxlan_lifecycle_reaps_only_safe_owner_orphans() {
     let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
@@ -1274,6 +1421,152 @@ async fn permanent_failure_suppression_is_pruned_after_desired_withdraw() {
     assert!(
         h.handle.kernel_has_fdb(vni(100), mac(1)),
         "same-shape re-add after desired withdraw did not program the FDB"
+    );
+
+    h.shutdown().await;
+}
+
+// LAN-290 (3a): managed-netdev permanent suppression must be pruned
+// once the managed intent is withdrawn — a later same-shape re-add is
+// retried instead of staying suppressed until restart. Counterpart of
+// the LAN-124 FDB/L3 pruning above for `managed_permanent_failures`.
+#[tokio::test]
+async fn managed_permanent_suppression_is_pruned_after_intent_withdraw() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let table = || {
+        ManagedNetdevTable::from_maps(
+            "leaf-1".to_string(),
+            BTreeMap::from([("br300".to_string(), true)]),
+            BTreeMap::new(),
+        )
+    };
+    h.handle
+        .inject_failure_kernel_too_old(Some(DataplaneOp::CreateManagedBridge {
+            name: "br300".to_string(),
+            vlan_filtering: true,
+            ownership_stamp: "rustbgpd:bridge:leaf-1:br300".to_string(),
+        }));
+
+    h.intent_tx
+        .send(intent_with_managed_netdevs(1, table()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    assert!(!h.handle.kernel_snapshot().links.contains_key("br300"));
+
+    // Withdraw the managed intent — prunes the stale suppression.
+    h.intent_tx
+        .send(intent_with_managed_netdevs(2, ManagedNetdevTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+
+    // Same-shape re-add must be attempted again.
+    h.intent_tx
+        .send(intent_with_managed_netdevs(3, table()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 3).await;
+    let snapshot = h.handle.kernel_snapshot();
+    let link = snapshot
+        .links
+        .get("br300")
+        .expect("same-shape managed re-add after withdraw stayed permanently suppressed");
+    assert_eq!(link.altnames, vec!["rustbgpd:bridge:leaf-1:br300"]);
+    h.shutdown().await;
+}
+
+// LAN-290 (3b): FDB-NHG group-op permanent suppression (keyed by
+// `AliasGroupKey`) must be pruned once the group's intent is withdrawn
+// and the group torn down. A stale record would suppress a later
+// same-shape `UpdateFdbNhgMembers` forever and keep the adoption
+// cleanup gate wedged (it blocks while the map is non-empty).
+#[tokio::test]
+async fn nhg_permanent_suppression_is_pruned_after_group_withdraw() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    // Phase 1: install the group with members {.2, .3}.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let r = wait_for_generation(&mut h, 1).await;
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+
+    // Phase 2: member change {.2, .4} fails permanently — the
+    // UpdateFdbNhgMembers op is recorded in the NHG suppression map.
+    // NHG ops route through the coordinator's NexthopOps calls, which
+    // only consume *untargeted* injected failures; the Update is the
+    // only op in this pass, so the injection lands on it.
+    h.handle.inject_failure_kernel_too_old(None);
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(
+            vni(100),
+            mac(1),
+            entry_multi_homed("10.0.0.2", &["10.0.0.4"], 7),
+        )
+        .unwrap();
+    h.intent_tx
+        .send(intent(2, inst.clone(), macs2.build()))
+        .unwrap();
+    let r = wait_for_generation(&mut h, 2).await;
+    assert!(
+        !r.failed.is_empty(),
+        "injected permanent Update failure never surfaced"
+    );
+
+    // Phase 3: withdraw the MAC — group refcount hits zero, teardown
+    // runs, and the stale NHG suppression is pruned in the same pass.
+    h.intent_tx
+        .send(intent(3, inst.clone(), RemoteMacTable::new()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 3).await;
+
+    // Phase 4: re-add with the original members {.2, .3}.
+    let mut macs4 = RemoteMacTable::builder();
+    macs4
+        .insert(
+            vni(100),
+            mac(1),
+            entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+        )
+        .unwrap();
+    h.intent_tx
+        .send(intent(4, inst.clone(), macs4.build()))
+        .unwrap();
+    let r = wait_for_generation(&mut h, 4).await;
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+
+    // Phase 5: the exact same member change {.2, .4} as the suppressed
+    // op. Pre-fix this stayed suppressed forever; it must apply now.
+    let mut macs5 = RemoteMacTable::builder();
+    macs5
+        .insert(
+            vni(100),
+            mac(1),
+            entry_multi_homed("10.0.0.2", &["10.0.0.4"], 7),
+        )
+        .unwrap();
+    h.intent_tx.send(intent(5, inst, macs5.build())).unwrap();
+    let r = wait_for_generation(&mut h, 5).await;
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!(r.fdb_nexthops.groups.len(), 1);
+    let mut gateways: Vec<IpAddr> = r.fdb_nexthops.groups[0]
+        .members
+        .iter()
+        .map(|m| m.gateway)
+        .collect();
+    gateways.sort();
+    assert_eq!(
+        gateways,
+        vec![ipa("10.0.0.2"), ipa("10.0.0.4")],
+        "same-shape UpdateFdbNhgMembers after withdraw + re-add stayed suppressed"
     );
 
     h.shutdown().await;
