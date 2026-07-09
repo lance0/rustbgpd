@@ -362,7 +362,11 @@ nexthop **group**, not a single-dst `dst <ip>` row.
 2. `ip nexthop show` — expect one group line `id <gid> group
    <mid>/<mid> ... fdb` and the corresponding member lines `id
    <mid> via <ip> fdb`. NHIDs are tagged: groups at
-   `0x4000_xxxx`, members at `0x3000_xxxx`.
+   `0x4000_xxxx`, members at `0x3000_xxxx` (L3VXLAN: `0x6000_xxxx` /
+   `0x5000_xxxx`). These ranges are reserved for rustbgpd — see the
+   single-writer contract in `docs/deployment.md`. A foreign object
+   parked in a range is quarantined (left untouched, never adopted or
+   deleted) and surfaces on `evpn_foreign_nhid_range_conflicts_total`.
 3. Confirm rustbgpd actually observed both alias VTEPs' Type 1
    EAD-per-EVI routes for the shared ESI — check
    `rbgp evpn instances` or the gRPC `ListEvpnInstances`,

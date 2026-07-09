@@ -787,4 +787,16 @@ pub enum KernelNexthopKind {
     Member { gateway: IpAddr },
     /// FDB nexthop group naming a set of per-VTEP member IDs.
     Group { member_ids: Vec<u32> },
+    /// LAN-290: the ID sits inside a rustbgpd-reserved NHID range but
+    /// the kernel object is not shaped like anything rustbgpd writes
+    /// (missing `NHA_FDB`, a group object under a member tag, a
+    /// member/gateway object under a group tag, or neither gateway
+    /// nor group). rustbgpd never produces this shape, so it is
+    /// evidence a co-resident netlink writer violated the reserved
+    /// NHID range contract (see `docs/deployment.md`). The reconcile
+    /// actor fails closed on these: the ID is reserved in the
+    /// allocator so it can never be handed out (and thus never
+    /// `NLM_F_REPLACE`-clobbered), and the object is excluded from
+    /// adoption and from every reap/delete path.
+    ShapeConflict,
 }

@@ -1420,6 +1420,8 @@ fn split_nexthop_ops(
         match &nh.kind {
             KernelNexthopKind::Member { .. } => members.push(nh.clone()),
             KernelNexthopKind::Group { .. } => groups.push(nh.clone()),
+            // LAN-290 quarantined foreign objects are neither.
+            KernelNexthopKind::ShapeConflict => {}
         }
     }
     (members, groups)
@@ -1468,6 +1470,100 @@ async fn fdb_nhg_multihomed_intent_installs_members_group_and_row() {
     );
 
     h.shutdown().await;
+}
+
+// 1a. LAN-290 reserved-NHID-range contract: a shape-conflicting
+//     foreign object inside a rustbgpd-owned range is quarantined at
+//     startup adoption — its allocator slot is reserved (so a fresh
+//     alloc can never land on it and NLM_F_REPLACE-clobber it), it is
+//     never adopted or reaped, it survives withdrawal + the shutdown
+//     drain, and the conflict is counted once per ID on
+//     `foreign_state_counters.nhid_range_conflicts`.
+#[tokio::test]
+async fn fdb_nhg_foreign_shape_in_range_is_quarantined_not_clobbered_or_reaped() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // A co-resident writer squatted on member-range slot 1 and
+    // group-range slot 2 with objects rustbgpd never writes.
+    let foreign_member_range = KernelNexthop {
+        id: 0x3000_0001,
+        kind: KernelNexthopKind::ShapeConflict,
+    };
+    let foreign_group_range = KernelNexthop {
+        id: 0x4000_0002,
+        kind: KernelNexthopKind::ShapeConflict,
+    };
+    h.handle.pre_load_nexthop_op(foreign_member_range.clone());
+    h.handle.pre_load_nexthop_op(foreign_group_range.clone());
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst.clone(), macs)).unwrap();
+
+    // Accumulate the per-report counter deltas while converging.
+    let mut conflicts = 0u64;
+    let mut last = h.next_report().await;
+    conflicts += last.foreign_state_counters.nhid_range_conflicts;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+        conflicts += last.foreign_state_counters.nhid_range_conflicts;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+    assert_eq!(conflicts, 2, "each conflicting ID counted exactly once");
+
+    // Fail closed: both foreign objects untouched (not clobbered, not
+    // adopted), and the allocator skipped their slots — every ID the
+    // actor installed has a bitmap portion above the quarantined
+    // slots 1 and 2.
+    let nhs = h.handle.nexthop_ops();
+    assert_eq!(
+        nhs.get(&0x3000_0001),
+        Some(&foreign_member_range),
+        "foreign in-range object must survive adoption untouched: {nhs:?}"
+    );
+    assert_eq!(nhs.get(&0x4000_0002), Some(&foreign_group_range));
+    let (members, groups) = split_nexthop_ops(&nhs);
+    assert_eq!(members.len(), 2, "expected 2 per-VTEP members: {nhs:?}");
+    assert_eq!(groups.len(), 1, "expected 1 group: {nhs:?}");
+    assert!(
+        members
+            .iter()
+            .chain(groups.iter())
+            .all(|nh| nh.id & 0x0FFF_FFFF > 2),
+        "allocator must not hand out the quarantined slots: {nhs:?}"
+    );
+
+    // Withdraw the MAC: group + member teardown must spare the
+    // quarantined objects.
+    h.intent_tx
+        .send(intent(2, inst, RemoteMacTable::builder().build()))
+        .unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+    let nhs = h.handle.nexthop_ops();
+    assert_eq!(
+        nhs.len(),
+        2,
+        "only the foreign objects should remain after withdrawal: {nhs:?}"
+    );
+
+    // Shutdown drain must spare them too.
+    let handle = h.handle.clone();
+    let _ = h.shutdown().await;
+    let nhs = handle.nexthop_ops();
+    assert!(
+        nhs.contains_key(&0x3000_0001) && nhs.contains_key(&0x4000_0002),
+        "foreign objects must survive the shutdown drain: {nhs:?}"
+    );
 }
 
 // 1b. The `DataplaneReport.fdb_nexthops` projection mirrors the
@@ -5063,6 +5159,7 @@ fn sum_foreign_counters(
             acc.replaces_blocked += r.foreign_state_counters.replaces_blocked;
             acc.deletes_skipped += r.foreign_state_counters.deletes_skipped;
             acc.owned_relinquished += r.foreign_state_counters.owned_relinquished;
+            acc.nhid_range_conflicts += r.foreign_state_counters.nhid_range_conflicts;
             acc
         },
     )

@@ -642,6 +642,7 @@ fn record_foreign_state_metrics(
     metrics.add_evpn_foreign_replaces_blocked(counters.replaces_blocked);
     metrics.add_evpn_foreign_deletes_skipped(counters.deletes_skipped);
     metrics.add_evpn_foreign_owned_relinquished(counters.owned_relinquished);
+    metrics.add_evpn_foreign_nhid_range_conflicts(counters.nhid_range_conflicts);
 }
 
 fn record_l3_adoption_metrics(metrics: &BgpMetrics, counters: L3AdoptionCounters) {

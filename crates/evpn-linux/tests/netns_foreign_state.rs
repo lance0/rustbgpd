@@ -349,6 +349,152 @@ async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// LAN-290: reserved NHID range single-writer contract
+// ─────────────────────────────────────────────────────────────────
+
+/// The exact ID the actor's allocator would otherwise hand out first
+/// for a per-VTEP member (`VTEP_NH_TAG | 1` = 0x3000_0001) — the
+/// strongest clobber proof: without quarantine, `add_nexthop_member`
+/// would `NLM_F_REPLACE` the foreign object at this ID.
+const FOREIGN_NHID: u32 = 0x3000_0001;
+
+fn l2_nhg_macs(desired: bool) -> RemoteMacTable {
+    let mut builder = RemoteMacTable::builder();
+    if desired {
+        builder
+            .insert(
+                EvpnInstanceId::new(L2_VNI).unwrap(),
+                l2_mac(),
+                RemoteMacEntry {
+                    remote_vtep_ip: "10.0.0.2".parse().unwrap(),
+                    mobility_sequence: None,
+                    alias_vtep_ips: vec!["10.0.0.3".parse().unwrap()],
+                    alias_group_key: Some((
+                        rustbgpd_evpn::EthernetSegmentIdentifier::new([7; 10]),
+                        rustbgpd_evpn::EthernetTagId(0),
+                    )),
+                    single_active_backup_vtep_ip: None,
+                    source: RemoteMacSource::EvpnRibBestPath,
+                },
+            )
+            .unwrap();
+    }
+    builder.build()
+}
+
+fn l2_nhg_intent(generation: u64, desired: bool) -> Arc<DataplaneIntent> {
+    Arc::new(DataplaneIntent {
+        generation,
+        instances: Arc::new(l2_instances()),
+        remote_macs: Arc::new(l2_nhg_macs(desired)),
+        bum_enforcement: Arc::new(BumEnforcementTable::new()),
+        ip_vrfs: Arc::new(IpVrfTable::new()),
+        remote_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
+        managed_netdevs: Arc::new(rustbgpd_evpn::ManagedNetdevTable::new()),
+    })
+}
+
+fn foreign_nhid_line() -> String {
+    // `ip nexthop show id <id>` prints one line for the object or
+    // nothing when it is absent.
+    shell("ip", &["nexthop", "show", "id", &FOREIGN_NHID.to_string()])
+}
+
+/// LAN-290: a co-resident netlink writer creates a shape-conflicting
+/// object (`ip nexthop add id 0x3000_0001 dev lo` — non-FDB, device
+/// nexthop) inside rustbgpd's reserved per-VTEP member range before
+/// the daemon starts. rustbgpd must fail closed: quarantine the ID
+/// (never hand it out — its own members/groups land on other IDs),
+/// never adopt it, never reap it, and spare it through withdrawal and
+/// the shutdown drain.
+#[tokio::test]
+async fn nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged foreign-state test");
+        return;
+    }
+    if !is_inner() {
+        let ns = NetnsFixture::create("nhid");
+        setup_l2_topology(&ns);
+        // Co-resident writer squats on the reserved range with a
+        // shape rustbgpd never writes (no NHA_FDB, has a device).
+        ns.exec(
+            "ip",
+            &[
+                "nexthop",
+                "add",
+                "id",
+                &FOREIGN_NHID.to_string(),
+                "dev",
+                "lo",
+            ],
+        );
+        run_inner(
+            &ns,
+            "nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped",
+        );
+        return;
+    }
+
+    // ── inner: actor runs inside the netns ──
+    let (intent_tx, mut report_rx, shutdown, actor_join) = spawn_reconcile_actor().await;
+    let mac = mac_str(l2_mac());
+
+    let before = foreign_nhid_line();
+    assert!(
+        before.contains("dev lo"),
+        "foreign in-range nexthop missing before start: {before}"
+    );
+
+    // 1. Install a multi-homed MAC (member NHs + FDB group + row)
+    //    through the normal reconcile path. Startup adoption sees the
+    //    foreign object and must quarantine, not adopt or delete.
+    intent_tx.send(l2_nhg_intent(1, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 1).await;
+    assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+    let fdb = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
+    assert!(
+        fdb.lines().any(|l| l.contains(&mac) && l.contains("nhid")),
+        "multi-homed MAC should land as an FDB-NHG row:\n{fdb}"
+    );
+
+    // Not clobbered: still a plain `dev lo` object, no gateway, not
+    // FDB — the actor's own member NHs landed on other IDs.
+    let line = foreign_nhid_line();
+    assert!(
+        line.contains("dev lo") && !line.contains("via") && !line.contains("fdb"),
+        "foreign in-range object must not be NLM_F_REPLACE-clobbered: {line}"
+    );
+
+    // 2. A second pass (post-adoption cleanup) must not reap it.
+    intent_tx.send(l2_nhg_intent(2, true)).unwrap();
+    let _ = wait_for_report_generation(&mut report_rx, 2).await;
+    let line = foreign_nhid_line();
+    assert!(
+        line.contains("dev lo"),
+        "foreign object must survive adoption cleanup: {line}"
+    );
+
+    // 3. Withdraw the MAC — group/member teardown must spare it.
+    intent_tx.send(l2_nhg_intent(3, false)).unwrap();
+    let _ = wait_for_report_generation(&mut report_rx, 3).await;
+    let line = foreign_nhid_line();
+    assert!(
+        line.contains("dev lo"),
+        "foreign object must survive withdrawal teardown: {line}"
+    );
+
+    // 4. Shutdown drain — must spare it too.
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), actor_join).await;
+    let line = foreign_nhid_line();
+    assert!(
+        line.contains("dev lo"),
+        "foreign object must survive the shutdown drain: {line}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // L3: VRF route + L3 neighbor + L3VXLAN FDB
 // ─────────────────────────────────────────────────────────────────
 

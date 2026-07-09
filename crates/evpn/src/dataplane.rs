@@ -581,6 +581,14 @@ pub struct ForeignStateCounters {
     /// Owned keys dropped from the in-memory owned state because a
     /// live snapshot showed a foreign row had replaced ours.
     pub owned_relinquished: u64,
+    /// LAN-290: kernel nexthop objects found inside a
+    /// rustbgpd-reserved NHID range whose shape does not match
+    /// anything rustbgpd writes — a co-resident netlink writer
+    /// violated the reserved-range contract. Each conflicting ID is
+    /// counted once (on first sight) and quarantined: reserved in the
+    /// allocator, excluded from adoption and from every reap/delete
+    /// path.
+    pub nhid_range_conflicts: u64,
 }
 
 /// Per-report deltas for ADR-0083 single-active backup-path failover

@@ -186,6 +186,47 @@ restart (ADR-0079). Co-residency with another daemon that claims
 `proto bgp` kernel state (e.g. FRR zebra) is unsupported for the
 same reason.
 
+#### Reserved nexthop-ID ranges (EVPN dataplane)
+
+When the EVPN VTEP/IRB dataplane is enabled, rustbgpd **exclusively
+owns** four kernel nexthop-ID ranges, distinguished by the ID's high
+nibble (deliberately offset from FRR's `0x1000`/`0x2000` tags so both
+daemons can't collide on `NLM_F_REPLACE`):
+
+| Range | Use |
+|---|---|
+| `0x3000_0000`–`0x3FFF_FFFF` | L2 per-VTEP FDB nexthop members (ADR-0059 aliasing ECMP) |
+| `0x4000_0000`–`0x4FFF_FFFF` | L2 FDB nexthop groups (ADR-0059) |
+| `0x5000_0000`–`0x5FFF_FFFF` | L3VXLAN per-VTEP nexthop members (all-active Type 5) |
+| `0x6000_0000`–`0x6FFF_FFFF` | L3VXLAN FDB nexthop groups (all-active Type 5) |
+
+This is a deployment contract: **no co-resident netlink writer may
+create nexthop objects with IDs in these ranges** (`ip nexthop add
+id …`, another routing daemon, orchestration tooling). rustbgpd
+adopts objects it finds there across restarts and garbage-collects
+the ones nothing references — an unrelated agent's object parked in
+the range would be treated as rustbgpd state.
+
+rustbgpd validates the shape of every in-range object it dumps at
+startup adoption and during drift recovery (FDB flag, member vs
+group structure matching the tag). An in-range object that does not
+look like anything rustbgpd writes fails closed per ID: the object is
+left untouched, excluded from adoption and from every reap/delete
+path, its ID is quarantined so the allocator can never hand it out
+(and thus never `NLM_F_REPLACE` over it), and the violation is
+logged once and counted on the
+`evpn_foreign_nhid_range_conflicts_total` Prometheus counter. A
+nonzero counter means a co-resident writer is violating this
+contract — find and remove that writer; the quarantined IDs are not
+reclaimed until a daemon restart after the foreign objects are gone.
+
+Note this shape check cannot distinguish a foreign object that is
+byte-for-byte identical to what rustbgpd writes; stamping
+`nh_protocol` on owned nexthop objects as a provenance marker is a
+possible future defense-in-depth, not a substitute for this
+contract (any netlink writer can set the same protocol value — it is
+provenance, not kernel-enforced exclusivity).
+
 ### Operational checks
 
 ```sh
