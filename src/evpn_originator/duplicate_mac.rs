@@ -222,6 +222,7 @@ pub(super) async fn apply_actions_with_duplicate_policy(
         return;
     }
     apply_actions(
+        &mut state.pending_rib_ops,
         actions,
         inst,
         rib_tx,
@@ -261,6 +262,7 @@ pub(super) async fn suppress_local_originations_for_mac(
         return;
     }
     apply_actions(
+        &mut state.pending_rib_ops,
         actions,
         inst,
         rib_tx,
@@ -416,6 +418,7 @@ pub(super) async fn replay_local_mac_after_recovery(
         let view = state.remote_mac_view.get(&(vni, mac));
         let actions = orig.on_local_learned(mac, ifindex, sticky, view);
         apply_actions(
+            &mut state.pending_rib_ops,
             actions,
             inst,
             rib_tx,
@@ -433,6 +436,7 @@ pub(super) async fn replay_local_mac_after_recovery(
         let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
         let actions = orig.on_local_ip_learned(mac, ip, sticky, view);
         apply_actions(
+            &mut state.pending_rib_ops,
             actions,
             inst,
             rib_tx,

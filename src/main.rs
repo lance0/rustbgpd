@@ -23,6 +23,7 @@ mod config;
 mod config_persister;
 mod config_transaction_control;
 mod confirm_journal;
+mod evpn_ack;
 mod evpn_dataplane;
 mod evpn_es_drain;
 mod evpn_es_link_drain;
