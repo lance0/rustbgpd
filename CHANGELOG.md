@@ -29,6 +29,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `LICENSE-MIT` and `LICENSE-APACHE`, with workflow assertions that
   fail the build if either file is missing from an artifact. (LAN-278)
 
+### Fixed
+
+- **Proof-harness assertions fail closed on missing/errored inputs.** The M37
+  local-origination harnesses no longer treat a failed/errored FRR query
+  (unreachable vtysh, docker exec error) as evidence of route absence, and
+  the churn soak records `nan` instead of `0` when the consumer query fails;
+  the Gate 8b analyzer's DF-counter monotonicity gate now requires numeric
+  samples to be present (all-missing/non-numeric columns fail with a clear
+  message instead of passing vacuously); the M33 soak analyzer rejects a
+  samples CSV whose expected columns are missing instead of silently gating
+  on all-zero deltas.
+
 ## [0.50.0] — 2026-07-05
 
 ### Added

@@ -193,8 +193,15 @@ rb_local_fdb_count() {
 }
 
 frr_type2_count() {
-    frr_vtysh "show bgp l2vpn evpn route type macip" \
-        | grep -ci '02:37:' || true
+    # A failed/errored FRR query is not "zero routes" — record nan (the
+    # missing-sample convention used for the prom columns) so a postmortem
+    # cannot read an unreachable consumer as a valid route-absence sample.
+    local out
+    if ! out=$(docker exec "$CONSUMER" vtysh -c "show bgp l2vpn evpn route type macip" 2>/dev/null); then
+        echo nan
+        return 0
+    fi
+    printf '%s\n' "$out" | grep -ci '02:37:' || true
 }
 
 write_run_json() {

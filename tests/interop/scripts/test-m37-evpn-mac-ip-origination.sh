@@ -49,6 +49,12 @@ frr_vtysh() {
     docker exec "$CONSUMER" vtysh -c "$1" 2>/dev/null || true
 }
 
+# Strict variant: propagates docker/vtysh failure so absence checks can
+# tell "query errored" apart from "table validly empty".
+frr_vtysh_strict() {
+    docker exec "$CONSUMER" vtysh -c "$1" 2>/dev/null
+}
+
 # Returns 0 if FRR sees a Type 2 for `$mac` with a "no IP" NLRI
 # (MAC-only). FRR 10.3.1 prints macip routes as
 # `[2]:[EthTag]:[MAClen]:[MAC]` for MAC-only and
@@ -68,6 +74,26 @@ frr_has_mac_ip() {
     local mac=${1:?}
     local ip=${2:?}
     frr_vtysh "show bgp l2vpn evpn route type macip" \
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\]:\[(32|128)\]:\[$ip\]"
+}
+
+# Absence checks succeed only when the FRR query itself succeeded AND the
+# route is missing. An errored/unreachable query is never evidence of
+# absence — that would let the withdraw proofs pass vacuously.
+frr_mac_only_absent() {
+    local mac=${1:?}
+    local out
+    out=$(frr_vtysh_strict "show bgp l2vpn evpn route type macip") || return 1
+    ! echo "$out" \
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\][[:space:]]*$"
+}
+
+frr_mac_ip_absent() {
+    local mac=${1:?}
+    local ip=${2:?}
+    local out
+    out=$(frr_vtysh_strict "show bgp l2vpn evpn route type macip") || return 1
+    ! echo "$out" \
         | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\]:\[(32|128)\]:\[$ip\]"
 }
 
@@ -150,15 +176,15 @@ wait_until "MAC+IP Type 2 surfaces on FRR" \
 assert "MAC+IP Type 2 originated after IpAdded" \
     "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\""
 assert "MAC-only Type 2 withdrawn under replace model" \
-    "! frr_has_mac_only \"$TEST_MAC\""
+    "frr_mac_only_absent \"$TEST_MAC\""
 
 # 3. Delete bridge neighbour → MAC+IP withdrawn, MAC-only re-emitted.
 echo "Removing bridge neighbour $TEST_IP..."
 rb_neigh_del "$TEST_IP"
 wait_until "MAC+IP withdrawn after IpRemoved" \
-    "! frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\"" 15 || true
+    "frr_mac_ip_absent \"$TEST_MAC\" \"$TEST_IP\"" 15 || true
 assert "MAC+IP Type 2 withdrawn on IpRemoved" \
-    "! frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\""
+    "frr_mac_ip_absent \"$TEST_MAC\" \"$TEST_IP\""
 wait_until "MAC-only re-emitted on downgrade" \
     "frr_has_mac_only \"$TEST_MAC\"" 30 || true
 assert "MAC-only Type 2 re-emitted after last IP removed" \
@@ -168,9 +194,9 @@ assert "MAC-only Type 2 re-emitted after last IP removed" \
 echo "Removing static FDB entry $TEST_MAC..."
 rb_fdb_del "$TEST_MAC"
 wait_until "MAC-only Type 2 withdrawn on Aged" \
-    "! frr_has_mac_only \"$TEST_MAC\"" 15 || true
+    "frr_mac_only_absent \"$TEST_MAC\"" 15 || true
 assert "MAC-only Type 2 withdrawn on FDB del" \
-    "! frr_has_mac_only \"$TEST_MAC\""
+    "frr_mac_only_absent \"$TEST_MAC\""
 
 # ---------------------------------------------------------------------------
 # Summary
