@@ -1083,8 +1083,8 @@ impl RibManager {
                     // Route Monitoring announce of the new best (BGP
                     // implicit withdraw covers replacement); a best that
                     // disappeared is an explicit withdraw. Timestamp = the
-                    // Loc-RIB install time, i.e. now. Best-unchanged
-                    // prefixes never reach this branch.
+                    // Loc-RIB install time as stored by the recompute.
+                    // Best-unchanged prefixes never reach this branch.
                     if self.bmp_tx.is_some() {
                         let (pdu, path_status) = match self.loc_rib.get(prefix) {
                             Some(best) => {
@@ -1113,7 +1113,16 @@ impl RibManager {
                             }
                             None => (crate::bmp_sync::synthesize_unicast_withdraw(*prefix), None),
                         };
-                        self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
+                        // Announce timestamp = the stored Loc-RIB
+                        // install time, so a later BMP table dump
+                        // reports the exact same stamp for this route
+                        // (LAN-193). Withdraws have no stored entry —
+                        // event time is the honest stamp.
+                        let timestamp = self
+                            .loc_rib
+                            .install_time(prefix)
+                            .unwrap_or_else(std::time::SystemTime::now);
+                        self.emit_bmp_loc_rib(pdu, path_status, timestamp);
                     }
                 }
                 did_change

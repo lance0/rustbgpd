@@ -9,6 +9,8 @@
 //! most once per version actually in use.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use rustbgpd_telemetry::BgpMetrics;
@@ -25,6 +27,32 @@ use crate::types::{
 /// a collector that stalls longer than this aborts the dump (the next
 /// reconnect triggers a fresh one).
 const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bound on live Loc-RIB messages held back per collector while its
+/// initial table dump streams. Overflow drops the newest message
+/// (counted on `bmp_collector_drops_total`) — the same lossy posture as
+/// a full collector channel; the collector's next reconnect resyncs.
+const LOC_RIB_DUMP_LIVE_BUFFER_CAP: usize = 8192;
+
+/// One in-flight Loc-RIB dump for a collector connection generation.
+struct ActiveDump {
+    /// Connection generation the dump was started for.
+    generation: u64,
+    /// The forwarder task, aborted when the connection is superseded.
+    task: tokio::task::JoinHandle<()>,
+    /// Live Loc-RIB messages held back while the dump streams, flushed
+    /// in arrival order after the dump's End-of-RIB so the collector
+    /// sees a strict dump rows → `EoR` → live deltas order — an older
+    /// dump row can never follow a newer live withdrawal for a key.
+    buffered: Vec<Bytes>,
+}
+
+/// Sent by a dump forwarder when it finishes (complete or aborted) so
+/// the manager flushes the held-back live messages and stops buffering.
+struct DumpDone {
+    collector_id: usize,
+    generation: u64,
+}
 
 /// BMP manager that fans out encoded messages to all collectors.
 pub struct BmpManager {
@@ -55,6 +83,19 @@ pub struct BmpManager {
     /// RFC 9069 RM without a preceding Loc-RIB `PeerUp`. Cleared when a
     /// later reconnect's [`Self::start_loc_rib_sync`] lands the `PeerUp`.
     loc_rib_suppressed: std::collections::HashSet<usize>,
+    /// Per-collector connection generation, parallel to `collectors`.
+    /// Bumped on every connect and disconnect; a dump forwarder
+    /// snapshots the value at spawn and fences every send against the
+    /// current one, so a dump started for a previous connection can
+    /// never emit into a newer connection's stream (LAN-289).
+    generations: Vec<Arc<AtomicU64>>,
+    /// In-flight Loc-RIB dump (plus its held-back live messages) per
+    /// collector index. Present from dump spawn until its [`DumpDone`].
+    active_dumps: std::collections::HashMap<usize, ActiveDump>,
+    /// Cloned into each spawned dump forwarder; completions come back
+    /// on `dump_done_rx` in the manager loop.
+    dump_done_tx: mpsc::Sender<DumpDone>,
+    dump_done_rx: mpsc::Receiver<DumpDone>,
     metrics: BgpMetrics,
 }
 
@@ -72,6 +113,13 @@ impl BmpManager {
         )>,
         metrics: BgpMetrics,
     ) -> Self {
+        // At most one in-flight dump (and thus one pending completion)
+        // per collector.
+        let (dump_done_tx, dump_done_rx) = mpsc::channel(collectors.len().max(1));
+        let generations = collectors
+            .iter()
+            .map(|_| Arc::new(AtomicU64::new(0)))
+            .collect();
         Self {
             event_rx,
             control_rx,
@@ -80,6 +128,10 @@ impl BmpManager {
             loc_rib: None,
             dump_tx: None,
             loc_rib_suppressed: std::collections::HashSet::new(),
+            generations,
+            active_dumps: std::collections::HashMap::new(),
+            dump_done_tx,
+            dump_done_rx,
             metrics,
         }
     }
@@ -123,6 +175,12 @@ impl BmpManager {
                     } else {
                         control_open = false;
                         debug!("BMP control channel closed");
+                    }
+                }
+                maybe_done = self.dump_done_rx.recv() => {
+                    // Never `None`: the manager holds a `dump_done_tx`.
+                    if let Some(done) = maybe_done {
+                        self.handle_dump_done(&done);
                     }
                 }
             }
@@ -197,7 +255,13 @@ impl BmpManager {
     /// Encode and fan out an RFC 9069 Loc-RIB event to `loc_rib`
     /// collectors. Dropped silently when Loc-RIB monitoring is not
     /// configured (no collector monitors the view).
-    fn handle_loc_rib_event(&self, event: &BmpEvent) {
+    ///
+    /// A collector with an in-flight initial dump does not receive the
+    /// message directly: it is held back in the dump's buffer and
+    /// flushed after the dump's End-of-RIB ([`Self::handle_dump_done`]),
+    /// so the collector-facing order is always dump rows (point-in-time
+    /// snapshot) → `EoR` → live deltas from that point.
+    fn handle_loc_rib_event(&mut self, event: &BmpEvent) {
         let Some(ref cfg) = self.loc_rib else {
             return;
         };
@@ -208,48 +272,76 @@ impl BmpManager {
             return;
         }
         let now = std::time::SystemTime::now();
-        self.fan_out_filtered(
+        let encode = |version: BmpVersion| match event {
+            BmpEvent::LocRibRouteMonitoring {
+                update_pdu,
+                timestamp,
+                path_status,
+            } => codec::encode_route_monitoring(
+                &cfg.peer_info(*timestamp),
+                update_pdu,
+                *path_status,
+                version,
+            ),
+            BmpEvent::LocRibStats { per_family } => {
+                // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
+                // type 10 = its per-AFI/SAFI breakdown.
+                let counters = vec![codec::StatCounter {
+                    stat_type: 8,
+                    value: per_family.iter().map(|(_, _, count)| count).sum(),
+                }];
+                let afi_counters: Vec<codec::AfiStatCounter> = per_family
+                    .iter()
+                    .map(|&(afi, safi, value)| codec::AfiStatCounter {
+                        stat_type: 10,
+                        afi,
+                        safi,
+                        value,
+                    })
+                    .collect();
+                codec::encode_stats_report(&cfg.peer_info(now), &counters, &afi_counters, version)
+            }
+            _ => unreachable!("guarded above"),
+        };
+        let mut memo: [Option<Bytes>; 2] = [None, None];
+        for (idx, (addr, tx, filter, version)) in self.collectors.iter().enumerate() {
             // Suppress live RM for any collector whose connect-time
             // Loc-RIB PeerUp was dropped (LAN-200) — RFC 9069 RM must
             // never precede the Loc-RIB PeerUp on the wire.
-            |idx, f| f.loc_rib && !self.loc_rib_suppressed.contains(&idx),
-            |version| match event {
-                BmpEvent::LocRibRouteMonitoring {
-                    update_pdu,
-                    timestamp,
-                    path_status,
-                } => codec::encode_route_monitoring(
-                    &cfg.peer_info(*timestamp),
-                    update_pdu,
-                    *path_status,
-                    version,
-                ),
-                BmpEvent::LocRibStats { per_family } => {
-                    // RFC 9069 stat type 8 = Loc-RIB total (64-bit gauge),
-                    // type 10 = its per-AFI/SAFI breakdown.
-                    let counters = vec![codec::StatCounter {
-                        stat_type: 8,
-                        value: per_family.iter().map(|(_, _, count)| count).sum(),
-                    }];
-                    let afi_counters: Vec<codec::AfiStatCounter> = per_family
-                        .iter()
-                        .map(|&(afi, safi, value)| codec::AfiStatCounter {
-                            stat_type: 10,
-                            afi,
-                            safi,
-                            value,
-                        })
-                        .collect();
-                    codec::encode_stats_report(
-                        &cfg.peer_info(now),
-                        &counters,
-                        &afi_counters,
-                        version,
-                    )
+            if !filter.loc_rib || self.loc_rib_suppressed.contains(&idx) {
+                continue;
+            }
+            let msg = memo[version.idx()]
+                .get_or_insert_with(|| encode(*version))
+                .clone();
+            if let Some(dump) = self.active_dumps.get_mut(&idx) {
+                if dump.buffered.len() < LOC_RIB_DUMP_LIVE_BUFFER_CAP {
+                    dump.buffered.push(msg);
+                } else {
+                    self.metrics.record_bmp_collector_drop(
+                        &addr.to_string(),
+                        "loc_rib_dump",
+                        "live_buffer_full",
+                        1,
+                    );
+                    warn!(
+                        collector = %addr,
+                        "live Loc-RIB buffer full during initial dump, dropping message"
+                    );
                 }
-                _ => unreachable!("guarded above"),
-            },
-        );
+                continue;
+            }
+            if let Err(e) = tx.try_send(msg) {
+                let reason = trysend_reason(&e);
+                self.metrics
+                    .record_bmp_collector_drop(&addr.to_string(), "fan_out", reason, 1);
+                warn!(
+                    collector = %addr,
+                    error = %e,
+                    "BMP collector channel full or closed, dropping message"
+                );
+            }
+        }
     }
 
     fn handle_event(&mut self, event: &BmpEvent) {
@@ -306,6 +398,7 @@ impl BmpManager {
                     peer_count = self.peer_up_cache.len(),
                     "BMP collector connected, replaying current PeerUp state"
                 );
+                self.bump_generation_and_cancel_dump(collector_id);
                 self.replay_peer_up_to_collector(collector_id);
                 self.start_loc_rib_sync(collector_id);
                 false
@@ -319,10 +412,14 @@ impl BmpManager {
                     collector = %collector_addr,
                     "BMP collector disconnected"
                 );
+                self.bump_generation_and_cancel_dump(collector_id);
                 false
             }
             BmpControlEvent::Shutdown => {
                 info!("BMP manager received shutdown request");
+                for (_, dump) in self.active_dumps.drain() {
+                    dump.task.abort();
+                }
                 // RFC 9069 §5.3: the Loc-RIB instance peer goes down with
                 // reason 6 + the VRF/Table Name TLV when monitoring stops.
                 if let Some(ref cfg) = self.loc_rib {
@@ -333,6 +430,67 @@ impl BmpManager {
                     );
                 }
                 true
+            }
+        }
+    }
+
+    /// Advance the collector's connection generation and cancel any
+    /// in-flight Loc-RIB dump from the previous generation (LAN-289).
+    /// The abort covers a forwarder parked in a blocked send; the
+    /// forwarder's own generation fence covers the abort/send race —
+    /// it re-checks the generation before every send, and the bump
+    /// here happens before anything for the new connection is
+    /// enqueued, so a racing stale row can only land ahead of the new
+    /// generation's Loc-RIB `PeerUp` (which resets collector state).
+    fn bump_generation_and_cancel_dump(&mut self, collector_id: usize) {
+        if let Some(generation) = self.generations.get(collector_id) {
+            generation.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(dump) = self.active_dumps.remove(&collector_id) {
+            dump.task.abort();
+            debug!(
+                collector_id,
+                "cancelled stale Loc-RIB dump from superseded collector connection"
+            );
+        }
+    }
+
+    /// A dump forwarder finished (complete or aborted): flush the live
+    /// Loc-RIB messages held back for it — preserving the dump rows →
+    /// `EoR` → live deltas order — and resume direct live fan-out.
+    /// A completion from a superseded generation is ignored: its state
+    /// was already discarded by [`Self::bump_generation_and_cancel_dump`].
+    fn handle_dump_done(&mut self, done: &DumpDone) {
+        match self.active_dumps.get(&done.collector_id) {
+            Some(dump) if dump.generation == done.generation => {}
+            _ => return,
+        }
+        let Some(dump) = self.active_dumps.remove(&done.collector_id) else {
+            return;
+        };
+        let Some((addr, tx, _, _)) = self.collectors.get(done.collector_id) else {
+            return;
+        };
+        let addr_label = addr.to_string();
+        let total = dump.buffered.len();
+        for (idx, msg) in dump.buffered.into_iter().enumerate() {
+            if let Err(e) = tx.try_send(msg) {
+                let reason = trysend_reason(&e);
+                let remaining = u64::try_from(total - idx).unwrap_or(u64::MAX);
+                self.metrics.record_bmp_collector_drop(
+                    &addr_label,
+                    "loc_rib_dump",
+                    reason,
+                    remaining,
+                );
+                warn!(
+                    collector = %addr,
+                    error = %e,
+                    skipped = remaining,
+                    "BMP collector channel full or closed flushing post-dump live \
+                     Loc-RIB messages; remaining messages dropped"
+                );
+                break;
             }
         }
     }
@@ -382,9 +540,12 @@ impl BmpManager {
     /// End-of-RIB markers — to this collector only.
     ///
     /// The forwarder runs as its own task so the manager loop never
-    /// blocks on a slow collector; live Loc-RIB events keep fanning out
-    /// concurrently and may overlap the dump (the standard BMP
-    /// dump-vs-live race — collectors reconcile by prefix).
+    /// blocks on a slow collector. While it runs, live Loc-RIB events
+    /// for this collector are held back and flushed after the dump's
+    /// End-of-RIB ([`Self::handle_loc_rib_event`]), and the task is
+    /// fenced by the collector's connection generation so a reconnect
+    /// mid-dump can never leak stale dump rows into the new
+    /// connection's stream (LAN-289).
     fn start_loc_rib_sync(&mut self, collector_id: usize) {
         let Some(ref cfg) = self.loc_rib else {
             return;
@@ -426,15 +587,33 @@ impl BmpManager {
         let Some(ref dump_tx) = self.dump_tx else {
             return;
         };
+        let Some(generation) = self.generations.get(collector_id) else {
+            return;
+        };
+        let dump_generation = generation.load(Ordering::SeqCst);
         let metrics = self.metrics.clone();
-        tokio::spawn(forward_loc_rib_dump(
-            dump_tx.clone(),
-            collector_tx,
-            cfg,
-            version,
-            metrics,
-            addr_label,
+        let task = tokio::spawn(forward_loc_rib_dump(
+            DumpForwarder {
+                dump_tx: dump_tx.clone(),
+                collector_tx,
+                cfg,
+                version,
+                metrics,
+                addr_label,
+                generation: Arc::clone(generation),
+                dump_generation,
+            },
+            self.dump_done_tx.clone(),
+            collector_id,
         ));
+        self.active_dumps.insert(
+            collector_id,
+            ActiveDump {
+                generation: dump_generation,
+                task,
+                buffered: Vec::new(),
+            },
+        );
     }
 
     fn fan_out(&self, encode: impl Fn(BmpVersion) -> Bytes) {
@@ -471,69 +650,120 @@ impl BmpManager {
     }
 }
 
-/// Forward one Loc-RIB dump to a single collector as Route Monitoring
-/// messages, driving the resumable chunk loop against the RIB manager:
-/// request one bounded chunk, forward it, then request the next from
-/// the returned cursor. The RIB manager synthesizes at most one chunk
-/// per request, so live route processing interleaves between chunks
-/// and no full-table dump vector ever materializes.
-///
-/// The bounded collector channel plus a per-message send timeout pace
-/// the dump at the collector's drain rate; a timeout or closed channel
-/// aborts the dump (a fresh one runs on the next reconnect).
-async fn forward_loc_rib_dump(
+/// Everything one Loc-RIB dump forwarder task needs, bundled so the
+/// spawn site stays readable.
+struct DumpForwarder {
     dump_tx: mpsc::Sender<BmpDumpRequest>,
     collector_tx: mpsc::Sender<Bytes>,
     cfg: BmpLocRibConfig,
     version: BmpVersion,
     metrics: BgpMetrics,
     addr_label: String,
+    /// Live connection generation of the collector (shared with the
+    /// manager, which bumps it on every connect/disconnect).
+    generation: Arc<AtomicU64>,
+    /// The generation this dump was started for; the forwarder aborts
+    /// as soon as the live value moves past it.
+    dump_generation: u64,
+}
+
+impl DumpForwarder {
+    /// LAN-289 generation fence: `true` when the collector connection
+    /// this dump was started for has been superseded. Checked before
+    /// every send — a stale dump row must never enter a newer
+    /// connection's stream (an older announce after a newer withdrawal
+    /// would leave the collector with a route that no longer exists).
+    fn superseded(&self) -> bool {
+        self.generation.load(Ordering::SeqCst) != self.dump_generation
+    }
+}
+
+/// Forward one Loc-RIB dump to a single collector as Route Monitoring
+/// messages, driving the resumable chunk loop against the RIB manager
+/// (see [`stream_loc_rib_dump`]), then report completion — success or
+/// abort — so the manager flushes the live messages it held back.
+async fn forward_loc_rib_dump(
+    forwarder: DumpForwarder,
+    done_tx: mpsc::Sender<DumpDone>,
+    collector_id: usize,
 ) {
+    let generation = forwarder.dump_generation;
+    stream_loc_rib_dump(forwarder).await;
+    let _ = done_tx
+        .send(DumpDone {
+            collector_id,
+            generation,
+        })
+        .await;
+}
+
+/// The dump chunk loop: request one bounded chunk from the RIB
+/// manager, forward it, then request the next from the returned
+/// cursor. The RIB manager synthesizes at most one chunk per request,
+/// so live route processing interleaves between chunks and no
+/// full-table dump vector ever materializes.
+///
+/// The bounded collector channel plus a per-message send timeout pace
+/// the dump at the collector's drain rate; a timeout or closed channel
+/// aborts the dump (a fresh one runs on the next reconnect), and the
+/// connection-generation fence aborts it the moment the collector
+/// reconnects or drops (LAN-289).
+async fn stream_loc_rib_dump(f: DumpForwarder) {
     let mut cursor = None;
     let mut sent: u64 = 0;
     loop {
+        if f.superseded() {
+            debug!(collector = %f.addr_label, "collector connection superseded, aborting stale Loc-RIB dump");
+            return;
+        }
         let (reply, chunk_rx) = tokio::sync::oneshot::channel();
-        if dump_tx
+        if f.dump_tx
             .send(BmpDumpRequest { cursor, reply })
             .await
             .is_err()
         {
-            metrics.record_bmp_collector_drop(&addr_label, "loc_rib_dump", "channel_closed", 1);
-            warn!(collector = %addr_label, "Loc-RIB dump request channel closed, aborting dump");
+            f.metrics
+                .record_bmp_collector_drop(&f.addr_label, "loc_rib_dump", "channel_closed", 1);
+            warn!(collector = %f.addr_label, "Loc-RIB dump request channel closed, aborting dump");
             return;
         }
         let Ok(chunk) = chunk_rx.await else {
-            metrics.record_bmp_collector_drop(&addr_label, "loc_rib_dump", "channel_closed", 1);
-            warn!(collector = %addr_label, "RIB manager dropped Loc-RIB dump chunk reply, aborting dump");
+            f.metrics
+                .record_bmp_collector_drop(&f.addr_label, "loc_rib_dump", "channel_closed", 1);
+            warn!(collector = %f.addr_label, "RIB manager dropped Loc-RIB dump chunk reply, aborting dump");
             return;
         };
         for (pdu, timestamp, path_status) in chunk.messages {
+            if f.superseded() {
+                debug!(collector = %f.addr_label, "collector connection superseded, aborting stale Loc-RIB dump");
+                return;
+            }
             let msg = codec::encode_route_monitoring(
-                &cfg.peer_info(timestamp),
+                &f.cfg.peer_info(timestamp),
                 &pdu,
                 path_status,
-                version,
+                f.version,
             );
-            match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, collector_tx.send(msg)).await {
+            match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, f.collector_tx.send(msg)).await {
                 Ok(Ok(())) => sent += 1,
                 Ok(Err(_)) => {
-                    metrics.record_bmp_collector_drop(
-                        &addr_label,
+                    f.metrics.record_bmp_collector_drop(
+                        &f.addr_label,
                         "loc_rib_dump",
                         "channel_closed",
                         1,
                     );
-                    warn!(collector = %addr_label, "collector channel closed mid Loc-RIB dump, aborting");
+                    warn!(collector = %f.addr_label, "collector channel closed mid Loc-RIB dump, aborting");
                     return;
                 }
                 Err(_) => {
-                    metrics.record_bmp_collector_drop(
-                        &addr_label,
+                    f.metrics.record_bmp_collector_drop(
+                        &f.addr_label,
                         "loc_rib_dump",
                         "send_timeout",
                         1,
                     );
-                    warn!(collector = %addr_label, "collector stalled during Loc-RIB dump, aborting");
+                    warn!(collector = %f.addr_label, "collector stalled during Loc-RIB dump, aborting");
                     return;
                 }
             }
@@ -543,7 +773,7 @@ async fn forward_loc_rib_dump(
             None => break,
         }
     }
-    debug!(collector = %addr_label, messages = sent, "Loc-RIB dump forwarded");
+    debug!(collector = %f.addr_label, messages = sent, "Loc-RIB dump forwarded");
 }
 
 /// Classify a `tokio::sync::mpsc::error::TrySendError` into the
@@ -1538,6 +1768,203 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// LAN-289 generation fence: a Loc-RIB dump task started for a
+    /// previous collector connection stops on reconnect — nothing from
+    /// the stale dump may interleave after the new generation's stream
+    /// (`PeerUp` + fresh dump) starts.
+    #[tokio::test]
+    async fn reconnect_fences_stale_loc_rib_dump_task() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, mut c_rx) = mpsc::channel(64);
+        let (dump_tx, mut dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx, loc_rib_filter(), BmpVersion::V3)],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        let install = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        let chunk = |octet: u8, next| crate::types::BmpDumpChunk {
+            messages: vec![(
+                Bytes::from_static(match octet {
+                    0xA1 => &[0xA1; 23],
+                    0xBB => &[0xBB; 23],
+                    _ => &[0xC1; 23],
+                }),
+                install,
+                None,
+            )],
+            next,
+        };
+
+        // Generation 1: connect → PeerUp, opening dump request.
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+        let peer_up = c_rx.recv().await.unwrap();
+        assert_eq!(peer_up[5], 3, "gen-1 Loc-RIB PeerUp");
+        let req1 = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("gen-1 dump requested")
+            .expect("dump channel open");
+        assert!(req1.cursor.is_none());
+        let resume = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 1, 0, 0),
+            16,
+        ));
+        req1.reply
+            .send(chunk(
+                0xA1,
+                Some(crate::types::BmpDumpCursor::Unicast(resume)),
+            ))
+            .unwrap();
+        let row = c_rx.recv().await.unwrap();
+        assert_eq!(row[48], 0xA1, "gen-1 dump row before the reconnect flows");
+        // The gen-1 task asks for its next chunk; hold the reply.
+        let stale_req = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("gen-1 follow-up requested")
+            .expect("dump channel open");
+        assert!(stale_req.cursor.is_some(), "gen-1 resume cursor");
+
+        // Reconnect → generation 2: the manager cancels the gen-1 task
+        // and starts a fresh dump (cursor-less request).
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+        let peer_up2 = c_rx.recv().await.unwrap();
+        assert_eq!(peer_up2[5], 3, "gen-2 Loc-RIB PeerUp");
+        let req2 = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("gen-2 dump requested")
+            .expect("dump channel open");
+        assert!(req2.cursor.is_none(), "fresh dump for the new generation");
+
+        // Answer the STALE gen-1 request — its rows must never reach
+        // the collector (task aborted and generation-fenced).
+        let _ = stale_req.reply.send(chunk(0xBB, None));
+        // Complete the gen-2 dump.
+        req2.reply.send(chunk(0xC1, None)).unwrap();
+
+        let row = c_rx.recv().await.unwrap();
+        assert_eq!(
+            row[48], 0xC1,
+            "only the new generation's dump rows reach the collector"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), c_rx.recv())
+                .await
+                .is_err(),
+            "stale gen-1 dump row must never interleave into the gen-2 stream"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Dump-vs-live serialization (LAN-289/LAN-193): a live Loc-RIB
+    /// event arriving while the initial dump streams is held back and
+    /// delivered after the dump's final chunk, so a collector never
+    /// sees an older dump announcement after a newer live withdrawal
+    /// for the same key — the wire order is dump rows → `EoR` → live
+    /// deltas.
+    #[tokio::test]
+    async fn live_loc_rib_events_flush_after_dump_completes() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, mut c_rx) = mpsc::channel(16);
+        let (dump_tx, mut dump_rx) = mpsc::channel(4);
+
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx, loc_rib_filter(), BmpVersion::V3)],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+        let peer_up = c_rx.recv().await.unwrap();
+        assert_eq!(peer_up[5], 3);
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("dump requested on connect")
+            .expect("dump channel open");
+
+        // A live withdrawal for a key the in-flight dump also carries
+        // lands while the dump is mid-stream.
+        event_tx
+            .send(BmpEvent::LocRibRouteMonitoring {
+                update_pdu: Bytes::from_static(&[0xEE; 23]),
+                timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+                path_status: None,
+            })
+            .await
+            .unwrap();
+        // Held back: nothing may reach the collector before the dump.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), c_rx.recv())
+                .await
+                .is_err(),
+            "live Loc-RIB RM must be held back while the dump streams"
+        );
+
+        // The dump completes: its (older) announcement for the key,
+        // then EoR, in the final chunk.
+        let install = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        request
+            .reply
+            .send(crate::types::BmpDumpChunk {
+                messages: vec![(Bytes::from_static(&[0xD1; 23]), install, None)],
+                next: None,
+            })
+            .unwrap();
+
+        // Wire order: dump row first, THEN the buffered live
+        // withdrawal — the collector ends without the route.
+        let first = c_rx.recv().await.unwrap();
+        assert_eq!(first[48], 0xD1, "dump row precedes the held-back delta");
+        let second = c_rx.recv().await.unwrap();
+        assert_eq!(second[48], 0xEE, "live withdrawal flushes after the dump");
+
+        // Post-dump live events flow directly again.
+        event_tx
+            .send(BmpEvent::LocRibRouteMonitoring {
+                update_pdu: Bytes::from_static(&[0xF7; 23]),
+                timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_111),
+                path_status: None,
+            })
+            .await
+            .unwrap();
+        let third = c_rx.recv().await.unwrap();
+        assert_eq!(third[48], 0xF7);
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
     /// Mixed v3/v4 collectors, one marked Loc-RIB RM event: the v3
     /// collector's message carries no TLV bytes at all (bare PDU after
     /// the per-peer header) while the v4 collector gets the BGP
@@ -1658,14 +2085,15 @@ mod tests {
     /// Loc-RIB `PeerUp`. A later reconnect (channel drained) heals it.
     #[tokio::test]
     async fn dropped_loc_rib_peer_up_suppresses_live_route_monitoring() {
-        let (_event_tx, event_rx) = mpsc::channel(16);
-        let (_control_tx, control_rx) = mpsc::channel(16);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
         // Capacity-1 collector channel so a single backlog message fills
         // it and the connect-time Loc-RIB PeerUp cannot enqueue.
         let (c_tx, mut c_rx) = mpsc::channel(1);
-        let (dump_tx, _dump_rx) = mpsc::channel(4);
+        let (dump_tx, mut dump_rx) = mpsc::channel(4);
 
-        let mut mgr = BmpManager::new(
+        let metrics = BgpMetrics::new();
+        let mgr = BmpManager::new(
             event_rx,
             control_rx,
             vec![(
@@ -1674,47 +2102,90 @@ mod tests {
                 loc_rib_filter(),
                 BmpVersion::V3,
             )],
-            BgpMetrics::new(),
+            metrics.clone(),
         )
         .with_loc_rib(loc_rib_config(), dump_tx);
+        let handle = tokio::spawn(mgr.run());
 
-        let live_rm = BmpEvent::LocRibRouteMonitoring {
+        let live_rm = || BmpEvent::LocRibRouteMonitoring {
             update_pdu: Bytes::from_static(&[0xCC; 23]),
             timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
             path_status: None,
         };
 
         // Saturate the channel, then connect: the PeerUp try_send hits
-        // Full and is dropped → this collector is suppressed.
+        // Full and is dropped → this collector is suppressed. The drop
+        // counter is the observable signal that the connect (and the
+        // failed PeerUp) was processed — only then is it safe to drain
+        // the backlog without the PeerUp sneaking into the freed slot.
         c_tx.try_send(Bytes::from_static(b"backlog")).unwrap();
-        mgr.handle_control(BmpControlEvent::CollectorConnected {
-            collector_id: 0,
-            collector_addr: collector_addr(0),
-        });
-        mgr.handle_event(&live_rm);
-
-        // Only the pre-existing backlog is queued — no PeerUp, no RM.
-        assert_eq!(c_rx.try_recv().unwrap(), Bytes::from_static(b"backlog"));
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+        for _ in 0..40 {
+            if metric_family_sum(&metrics, "bmp_collector_drops_total") >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
-            c_rx.try_recv().is_err(),
+            metric_family_sum(&metrics, "bmp_collector_drops_total") >= 1,
+            "connect-time Loc-RIB PeerUp drop must be counted"
+        );
+        event_tx.send(live_rm()).await.unwrap();
+
+        // Only the pre-existing backlog is queued — no PeerUp, no RM,
+        // and no dump was requested for the failed sync.
+        let msg = c_rx.recv().await.unwrap();
+        assert_eq!(msg, Bytes::from_static(b"backlog"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), c_rx.recv())
+                .await
+                .is_err(),
             "suppressed: no live Loc-RIB RM without a preceding PeerUp"
         );
+        assert!(
+            dump_rx.try_recv().is_err(),
+            "no dump for a collector whose Loc-RIB PeerUp was dropped"
+        );
 
-        // Reconnect with the channel drained heals it: PeerUp lands, then
-        // live RM flows again.
-        mgr.handle_control(BmpControlEvent::CollectorConnected {
-            collector_id: 0,
-            collector_addr: collector_addr(0),
-        });
-        let peer_up = c_rx.try_recv().unwrap();
+        // Reconnect with the channel drained heals it: PeerUp lands, the
+        // dump runs (empty table here), then live RM flows again.
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+            })
+            .await
+            .unwrap();
+        let peer_up = c_rx.recv().await.unwrap();
         assert_eq!(
             peer_up[6], 3,
             "Loc-RIB PeerUp (peer type 3) delivered on reconnect"
         );
-        mgr.handle_event(&live_rm);
-        let rm = c_rx.try_recv().unwrap();
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), dump_rx.recv())
+            .await
+            .expect("dump requested on the healing reconnect")
+            .expect("dump channel open");
+        request
+            .reply
+            .send(crate::types::BmpDumpChunk {
+                messages: vec![],
+                next: None,
+            })
+            .unwrap();
+        event_tx.send(live_rm()).await.unwrap();
+        let rm = c_rx.recv().await.unwrap();
         assert_eq!(rm[5], 0, "route monitoring type");
         assert_eq!(rm[6], 3, "live Loc-RIB RM resumes after the PeerUp");
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
     }
 
     /// Shutdown sends the Loc-RIB Peer Down (reason 6 + table-name TLV)

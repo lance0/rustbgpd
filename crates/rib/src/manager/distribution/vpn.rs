@@ -699,7 +699,16 @@ impl RibManager {
                             None,
                         ),
                     };
-                    self.emit_bmp_loc_rib(pdu, path_status, std::time::SystemTime::now());
+                    // Announce timestamp = the stored Loc-RIB install
+                    // time, so a later BMP table dump reports the exact
+                    // same stamp for this route (LAN-193). Withdraws
+                    // have no stored entry — event time is the honest
+                    // stamp.
+                    let timestamp = self
+                        .loc_rib
+                        .vpn_install_time(key)
+                        .unwrap_or_else(std::time::SystemTime::now);
+                    self.emit_bmp_loc_rib(pdu, path_status, timestamp);
                 }
             }
         }

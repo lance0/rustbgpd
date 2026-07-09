@@ -167,6 +167,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shutdown flips the availability gate first: readiness goes red, persisted
   config mutations are rejected, and new inbound BGP connections are dropped
   before any teardown begins, instead of admitting work into it. (LAN-286)
+- **BMP Loc-RIB dumps are fenced per collector connection and serialized
+  against the live stream.** On a collector reconnect, the previous
+  connection's in-flight table dump kept running and could interleave with
+  the new connection's stream — an older dump announcement could follow a
+  newer live withdrawal, leaving the collector with a route that no longer
+  exists. Each collector connection now carries a generation: reconnect (and
+  disconnect) cancels the stale dump task, which additionally re-checks its
+  generation before every send. Live Loc-RIB messages for a collector are
+  held back while its initial dump streams and flushed after the dump's
+  End-of-RIB, so the wire order is always dump rows (point-in-time snapshot)
+  → EoR → live deltas from that point. (LAN-289)
+- **BMP Loc-RIB dump timestamps are the stored install time, not a
+  reconstruction.** Dump entries used to recover the RFC 9069 per-peer
+  header timestamp from the monotonic receive instant (`now − elapsed`),
+  which skews after an NTP step between install and dump. The Loc-RIB now
+  records the wall-clock install time when a best changes, and both the live
+  tap and the table dump report that exact stamp — the same route carries an
+  identical timestamp in both views. The fabricated Loc-RIB OPEN's
+  infallible encoding is now backed by an explicit bounded-size test on the
+  declared family set instead of an unproven `expect`. (LAN-193)
 
 ## [0.50.0] — 2026-07-05
 

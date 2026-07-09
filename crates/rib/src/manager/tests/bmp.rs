@@ -427,6 +427,69 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
     handle.await.unwrap();
 }
 
+/// LAN-193: dump timestamps are the STORED wall-clock Loc-RIB install
+/// time — byte-identical to the live tap's emission timestamp for the
+/// same install — not a reconstruction from the monotonic clock at
+/// dump time (which skews if NTP steps the wall clock between install
+/// and dump).
+#[tokio::test]
+async fn dump_timestamps_equal_stored_install_time() {
+    let (tx, rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(64);
+    let manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_bmp_tx(bmp_tx);
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_route_with_lp(prefix, peer, 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (_, unicast_live_ts, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (_, vpn_live_ts, _) = recv_loc_rib_rm(&mut bmp_rx).await;
+
+    // Let wall time move on so an "== now at dump time" implementation
+    // could not accidentally pass.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (messages, _) = drive_loc_rib_dump_from(&tx, None).await;
+    let (route_msgs, _) = messages.split_at(2);
+    for (pdu, timestamp, _) in route_msgs {
+        let parsed = decode_pdu(pdu);
+        let is_vpn = parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::MpReachNlri(mp) if !mp.vpn_announced.is_empty()));
+        let expected = if is_vpn { vpn_live_ts } else { unicast_live_ts };
+        assert_eq!(
+            *timestamp, expected,
+            "dump timestamp must be the exact stored install stamp the live \
+             emission carried, not a monotonic-clock reconstruction"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// A table larger than one chunk streams to completion across multiple
 /// bounded chunk requests: every route present exactly once, no chunk
 /// above the per-request allocation bound (asserted in the drive
