@@ -70,12 +70,13 @@ use crate::peer_manager::PeerManager;
 use crate::reload::{
     apply_reload_outcome, reload_config, run_config_bridge, runtime_config_snapshot,
 };
+use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
 };
 use rustbgpd_api::server::{
-    AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
-    ServeConfig,
+    AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
+    ListenerEndpoint, ServeConfig,
 };
 
 const GR_RESTART_MARKER_VERSION: u8 = 1;
@@ -2395,7 +2396,24 @@ async fn run<T>(
             },
             metrics.clone(),
         );
-    let config_mutation_gate = config_transaction_controller.mutation_gate_fn();
+    // Process-wide availability gate (LAN-286): BGP-listener bind failure
+    // turns readiness red; coordinated shutdown turns readiness red AND
+    // stops admitting persisted config mutations and inbound BGP sessions.
+    let daemon_gate = DaemonGate::new();
+    let config_mutation_gate: ConfigMutationGateFn = {
+        let inner = config_transaction_controller.mutation_gate_fn();
+        let gate = daemon_gate.clone();
+        Arc::new(move |operation| {
+            let inner = inner.clone();
+            let gate = gate.clone();
+            Box::pin(async move {
+                if gate.is_shutting_down() {
+                    return Err(format!("{operation} rejected: daemon is shutting down"));
+                }
+                inner(operation).await
+            })
+        })
+    };
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -2630,8 +2648,18 @@ async fn run<T>(
     match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
         Ok(listener) => {
             let listener_peer_mgr_tx = peer_mgr_tx.clone();
+            let listener_gate = daemon_gate.clone();
             tokio::spawn(async move {
                 while let Some(conn) = accept_rx.recv().await {
+                    // Coordinated shutdown has begun: drop (close) the
+                    // socket instead of admitting a session into teardown.
+                    if listener_gate.is_shutting_down() {
+                        info!(
+                            peer = %conn.peer_addr,
+                            "rejecting inbound BGP connection: daemon is shutting down"
+                        );
+                        continue;
+                    }
                     if let Err(e) = listener_peer_mgr_tx
                         .send(PeerManagerCommand::AcceptInbound {
                             stream: conn.stream,
@@ -2654,7 +2682,16 @@ async fn run<T>(
                 );
                 process::exit(1);
             }
-            warn!(%listen_addr, error = %e, "failed to bind BGP listener");
+            // The daemon can still open outbound sessions, but it is
+            // unreachable for inbound peers — surface that on /readyz
+            // instead of running silently unreachable.
+            error!(
+                %listen_addr,
+                error = %e,
+                "failed to bind BGP listener; inbound BGP sessions cannot be accepted — \
+                 readiness reports not-ready until the daemon is restarted"
+            );
+            daemon_gate.mark_not_ready("BGP listener failed to bind");
         }
     }
 
@@ -2729,7 +2766,8 @@ async fn run<T>(
         let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
             peer_mgr_tx.clone(),
             rib_tx.clone(),
-        );
+        )
+        .with_gate(daemon_gate.clone());
         tokio::spawn(async move {
             metrics_server::serve_metrics(prometheus_addr, metrics_clone, readiness_probe).await;
         });
@@ -2885,7 +2923,11 @@ async fn run<T>(
     drop(profiler);
 
     // Coordinated shutdown:
+    // 0. Flip the availability gate FIRST: readiness goes red, persisted
+    //    config mutations are rejected, and new inbound BGP sessions are
+    //    dropped — nothing new is admitted into the teardown below.
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
+    daemon_gate.begin_shutdown();
     info!("initiating coordinated shutdown");
     if let Some(restart_time_secs) = max_gr_restart_time_secs(&config) {
         let expires_at = SystemTime::now() + Duration::from_secs(restart_time_secs);

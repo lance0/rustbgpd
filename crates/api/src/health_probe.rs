@@ -1,6 +1,8 @@
 //! Shared control-plane health/readiness probes.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -11,6 +13,61 @@ use rustbgpd_rib::RibUpdate;
 
 /// Total deadline for the core actor readiness probe.
 pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
+
+/// Process-wide daemon availability gate.
+///
+/// Two one-way transitions, both set from `main.rs` and observed by the
+/// readiness surface:
+///
+/// - **not-ready**: a fatal availability fault (BGP listener failed to
+///   bind, coordinated shutdown started). `/readyz` reports 503 with the
+///   first recorded reason until the process restarts.
+/// - **shutting-down**: coordinated shutdown has begun; admission paths
+///   (inbound BGP connections, persisted config mutations) reject new
+///   work instead of racing the teardown.
+#[derive(Clone, Debug, Default)]
+pub struct DaemonGate {
+    inner: Arc<DaemonGateInner>,
+}
+
+#[derive(Debug, Default)]
+struct DaemonGateInner {
+    not_ready: OnceLock<&'static str>,
+    shutting_down: AtomicBool,
+}
+
+impl DaemonGate {
+    /// Create a gate in the ready, not-shutting-down state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a fatal availability fault. First reason wins; later calls
+    /// are no-ops so the root cause stays visible.
+    pub fn mark_not_ready(&self, reason: &'static str) {
+        let _ = self.inner.not_ready.set(reason);
+    }
+
+    /// Enter coordinated shutdown: readiness goes red and admission
+    /// paths stop accepting new work.
+    pub fn begin_shutdown(&self) {
+        self.inner.shutting_down.store(true, Ordering::Relaxed);
+        self.mark_not_ready("daemon is shutting down");
+    }
+
+    /// The not-ready reason, if any fault has been recorded.
+    #[must_use]
+    pub fn not_ready_reason(&self) -> Option<&'static str> {
+        self.inner.not_ready.get().copied()
+    }
+
+    /// Whether coordinated shutdown has begun.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::Relaxed)
+    }
+}
 
 /// Snapshot returned by a successful core actor probe.
 #[derive(Debug)]
@@ -26,6 +83,7 @@ pub struct CoreHealthSnapshot {
 pub struct CoreReadinessProbe {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    gate: Option<DaemonGate>,
 }
 
 impl CoreReadinessProbe {
@@ -38,7 +96,17 @@ impl CoreReadinessProbe {
         Self {
             peer_mgr_tx,
             rib_tx,
+            gate: None,
         }
+    }
+
+    /// Attach the process-wide [`DaemonGate`]: a recorded fault (bind
+    /// failure, shutdown) makes the probe fail before touching the
+    /// core actors.
+    #[must_use]
+    pub fn with_gate(mut self, gate: DaemonGate) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Probe `PeerManager` and RIB responsiveness.
@@ -63,6 +131,9 @@ impl CoreReadinessProbe {
     /// drops its reply channel, or does not respond before the readiness
     /// deadline.
     pub async fn snapshot(&self) -> Result<CoreHealthSnapshot, CoreReadinessError> {
+        if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
+            return Err(CoreReadinessError::DaemonUnavailable(reason));
+        }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
         let peers = self.query_peer_manager(deadline).await?;
         let total_routes = self.query_rib(deadline).await?;
@@ -136,6 +207,9 @@ pub enum CoreReadinessError {
     RibTimedOut,
     /// RIB dropped the reply channel.
     RibDroppedReply,
+    /// The daemon recorded a fatal availability fault ([`DaemonGate`]):
+    /// BGP listener bind failure or coordinated shutdown in progress.
+    DaemonUnavailable(&'static str),
 }
 
 impl fmt::Display for CoreReadinessError {
@@ -152,6 +226,7 @@ impl fmt::Display for CoreReadinessError {
                 write!(f, "RIB manager probe timed out ({deadline_ms}ms deadline)")
             }
             Self::RibDroppedReply => f.write_str("RIB manager dropped reply"),
+            Self::DaemonUnavailable(reason) => f.write_str(reason),
         }
     }
 }
@@ -336,6 +411,78 @@ mod tests {
             result.expect_err("dropped RIB reply should fail"),
             CoreReadinessError::RibDroppedReply
         );
+    }
+
+    #[tokio::test]
+    async fn gated_probe_fails_without_touching_core_actors() {
+        // BGP-listener bind failure: readiness must go red even though
+        // both core actors would answer (nothing replies here and the
+        // probe must not need them to).
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let gate = DaemonGate::new();
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
+
+        gate.mark_not_ready("BGP listener failed to bind");
+
+        let err = probe
+            .check()
+            .await
+            .expect_err("tripped gate must fail readiness");
+        assert_eq!(
+            err,
+            CoreReadinessError::DaemonUnavailable("BGP listener failed to bind")
+        );
+        assert_eq!(err.to_string(), "BGP listener failed to bind");
+        assert!(
+            !gate.is_shutting_down(),
+            "a bind fault must not flip the shutdown admission gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_shutdown_turns_readiness_red_and_stops_admission() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let gate = DaemonGate::new();
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
+
+        assert!(!gate.is_shutting_down());
+        gate.begin_shutdown();
+
+        assert!(gate.is_shutting_down());
+        assert_eq!(
+            probe.check().await,
+            Err(CoreReadinessError::DaemonUnavailable(
+                "daemon is shutting down"
+            ))
+        );
+    }
+
+    #[test]
+    fn first_not_ready_reason_wins() {
+        let gate = DaemonGate::new();
+        gate.mark_not_ready("BGP listener failed to bind");
+        gate.begin_shutdown();
+        assert_eq!(
+            gate.not_ready_reason(),
+            Some("BGP listener failed to bind"),
+            "the root-cause fault must stay visible across later transitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn ungated_probe_still_probes_core_actors() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(DaemonGate::new());
+
+        let (result, ()) = tokio::join!(
+            probe.check(),
+            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 0)
+        );
+
+        result.expect("untripped gate must not affect readiness");
     }
 
     #[tokio::test]

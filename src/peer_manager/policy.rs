@@ -647,10 +647,17 @@ impl PeerManager {
                 .await;
             let rib_outcome: Result<(), String> = match send_outcome {
                 Err(_) => Err("RIB manager unavailable".to_string()),
-                Ok(()) => match reply_rx.await {
-                    Err(_) => Err("RIB manager dropped reply".to_string()),
-                    Ok(Err(e)) => Err(format!("failed to update export policy: {e}")),
-                    Ok(Ok(())) => Ok(()),
+                // Bounded: a wedged RIB task must not park the
+                // peer-manager actor (and the SIGHUP reload / gRPC
+                // apply driving this policy change) forever.
+                Ok(()) => match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+                    Err(_) => Err(format!(
+                        "RIB manager did not reply within {:?} while updating export policy",
+                        super::RIB_REPLY_TIMEOUT
+                    )),
+                    Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
+                    Ok(Ok(Err(e))) => Err(format!("failed to update export policy: {e}")),
+                    Ok(Ok(Ok(()))) => Ok(()),
                 },
             };
             if let Err(error) = rib_outcome {

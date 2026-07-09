@@ -150,6 +150,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RFC 7432 §7.7 lowest-VTEP-IP tiebreak becomes the standing resolution —
   the MAX-vs-MAX tie stays quiet instead of re-emitting the same sequence on
   every remote event. (LAN-287)
+- **Reload classification and listener/shutdown truth.** Four daemon-truth
+  fixes: (1) `[security.grpc]`, `[event_history]`, and `[managed_netdevs]`
+  edits are now classified restart-required — SIGHUP/apply pins the runtime
+  snapshot back to the live startup values with an explicit restart-required
+  error (the operator's edit survives in the on-disk config), and the first
+  two now appear in the `--diff` / transaction-plan restart-required buckets
+  alongside `[managed_netdevs]` instead of silently drifting the in-memory
+  snapshot. (2) The two peer-manager→RIB reply awaits on the reload/apply
+  path (per-peer outbound refresh after a graceful-shutdown toggle,
+  export-policy swap) are now bounded by a 5 s deadline that surfaces a clear
+  error instead of hanging the reload forever behind a wedged RIB task.
+  (3) A BGP listener bind failure at startup now turns `/readyz` red with
+  `BGP listener failed to bind` (previously the daemon ran silently
+  unreachable for inbound sessions behind a lone warning). (4) Coordinated
+  shutdown flips the availability gate first: readiness goes red, persisted
+  config mutations are rejected, and new inbound BGP connections are dropped
+  before any teardown begins, instead of admitting work into it. (LAN-286)
 
 ## [0.50.0] — 2026-07-05
 

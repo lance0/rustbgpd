@@ -593,6 +593,38 @@ pub(crate) async fn reload_config(
         );
         new_config.apply_bum_enforcement = current.apply_bum_enforcement;
     }
+    // Restart-required sections resolved once at startup: without an
+    // explicit pin, a SIGHUP would silently advance the in-memory
+    // snapshot to the new declared state while the running subsystem
+    // keeps the startup values — the next reload then stops warning
+    // even though nothing was applied. Pin each back to the live
+    // startup snapshot (the operator's edit survives in the desired
+    // on-disk config for the next restart).
+    if new_config.security != current.security {
+        error!(
+            "[security.grpc] changed — gRPC authorization enforcement and roles \
+             are resolved once at startup when listeners are built. Restart \
+             rustbgpd to apply; the live listeners keep their startup \
+             authorization until then."
+        );
+        new_config.security = current.security.clone();
+    }
+    if new_config.event_history != current.event_history {
+        error!(
+            "[event_history] changed — the ADR-0072 durable event outbox is \
+             configured once at startup. Restart rustbgpd to apply; the running \
+             outbox keeps its startup configuration until then."
+        );
+        new_config.event_history = current.event_history.clone();
+    }
+    if new_config.managed_netdevs != current.managed_netdevs {
+        error!(
+            "[managed_netdevs] changed — the ADR-0091 managed-netdev lifecycle \
+             reads this table once at startup. Restart rustbgpd to apply; the \
+             dataplane keeps reconciling the startup netdev set until then."
+        );
+        new_config.managed_netdevs = current.managed_netdevs.clone();
+    }
     // `[[fib_tables]]` is hot-applied to the running FIB reconciler below
     // (after the honor knobs), ack-gated on the actor accepting the new set —
     // see the FIB hot-apply step.
@@ -4169,6 +4201,91 @@ hold_time = 90
             returned.desired.neighbors[0].bfd.as_ref().unwrap().profile,
             "fast",
             "desired TOML must preserve the operator's BFD edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_security_grpc_edits_to_startup_snapshot() {
+        // LAN-286: [security.grpc] is resolved once at startup when the
+        // gRPC listeners are built. A SIGHUP must pin the runtime
+        // snapshot back to the startup authorization config — but keep
+        // the operator's edit in the desired TOML for the next restart.
+        let initial = baseline_toml();
+        let new_toml = format!(
+            "{}\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n",
+            baseline_toml()
+        );
+
+        let (returned, tags) = drive_reload(initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "security-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert!(
+            returned.security.grpc.roles.is_empty(),
+            "runtime snapshot must keep the startup gRPC authorization config"
+        );
+        assert_eq!(
+            returned.desired.security.grpc.roles.len(),
+            1,
+            "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_event_history_edits_to_startup_snapshot() {
+        // LAN-286: every [event_history] field is restart-required (the
+        // ADR-0072 outbox is configured once at startup). A SIGHUP must
+        // pin the runtime snapshot back to the startup outbox config —
+        // but keep the operator's edit in the desired TOML.
+        let initial = baseline_toml();
+        let new_toml = format!("{}\n[event_history]\nenabled = true\n", baseline_toml());
+
+        let (returned, tags) = drive_reload(initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "event-history-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert!(
+            !returned.event_history.enabled,
+            "runtime snapshot must keep the startup (disabled) outbox config"
+        );
+        assert!(
+            returned.desired.event_history.enabled,
+            "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_managed_netdevs_edits_to_startup_snapshot() {
+        // LAN-286: [managed_netdevs] is read once at startup by the
+        // ADR-0091 lifecycle. A SIGHUP must pin the runtime snapshot
+        // back to the startup netdev table — but keep the operator's
+        // edit in the desired TOML for the next restart.
+        let initial = baseline_toml();
+        let new_toml = format!(
+            "{}\n[managed_netdevs]\nowner_token = \"leaf-1\"\n",
+            baseline_toml()
+        );
+
+        let (returned, tags) = drive_reload(initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "managed-netdev-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert!(
+            returned.managed_netdevs.owner_token.is_empty(),
+            "runtime snapshot must keep the startup managed-netdev table"
+        );
+        assert_eq!(
+            returned.desired.managed_netdevs.owner_token, "leaf-1",
+            "desired TOML must preserve the operator's edit for restart"
         );
     }
 

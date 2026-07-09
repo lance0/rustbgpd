@@ -284,6 +284,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_readyz_returns_503_when_daemon_gate_is_tripped() {
+        // LAN-286: bind failure / coordinated shutdown trips the daemon
+        // gate — /readyz must go red without consulting the core actors.
+        use rustbgpd_api::health_probe::DaemonGate;
+
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let gate = DaemonGate::new();
+        let addr =
+            start_server(CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone())).await;
+
+        gate.begin_shutdown();
+
+        let response = request(addr, "/readyz").await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.ends_with("not ready: daemon is shutting down\n"));
+    }
+
+    #[tokio::test]
     async fn slow_client_times_out() {
         let addr = start_server(unused_probe()).await;
         let stream = TcpStream::connect(addr).await.unwrap();
