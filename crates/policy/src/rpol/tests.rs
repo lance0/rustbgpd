@@ -676,6 +676,78 @@ fn reasonable_nesting_stays_clean() {
     assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
 }
 
+// ── LAN-290: apply-DAG expansion/depth bounds ───────────────────────
+
+/// `p0` plus `levels` policies each guarding on `apply` of the
+/// previous one, `applies_per_level` times (`||`-joined).
+fn apply_chain(levels: u32, applies_per_level: u32) -> String {
+    use std::fmt::Write;
+
+    let mut src = String::from("policy p0 { term t { if route.med == 0 { accept } } }\n");
+    for i in 1..=levels {
+        let guard = (0..applies_per_level)
+            .map(|_| format!("apply(p{})", i - 1))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        writeln!(
+            src,
+            "policy p{i} {{ term t {{ if {guard} {{ accept }} }} }}"
+        )
+        .expect("string io");
+    }
+    src
+}
+
+#[test]
+fn exponential_apply_dag_is_a_diagnostic_not_an_explosion() {
+    // p_{i+1} applies p_i four times: unbounded lowering would
+    // multiply the inlined predicate ~8× per level (each apply inlines
+    // the target's predicate, which itself embeds each guard twice).
+    let report = check_on_small_stack(apply_chain(40, 4));
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("expands past"),
+        "want an expansion diagnostic, got: {rendered:.300}"
+    );
+    // Poisoning: one root-cause diagnostic, not one per dependent.
+    assert_eq!(report.diagnostics.0.len(), 1, "{rendered:.500}");
+}
+
+#[test]
+fn deep_apply_chain_is_a_depth_diagnostic() {
+    // A linear apply chain past MAX_APPLY_DEPTH: a legal DAG, but the
+    // lowering recursion (and the inlined guard tree) would nest one
+    // more level per policy.
+    let report = check_on_small_stack(apply_chain(10, 1));
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("nests policies more than"),
+        "want a depth diagnostic, got: {rendered:.300}"
+    );
+    assert_eq!(report.diagnostics.0.len(), 1, "{rendered:.500}");
+}
+
+#[test]
+fn reasonable_apply_composition_stays_clean_and_evaluates_flat() {
+    // A max-depth-legal linear chain compiles and evaluates on a small
+    // stack: `apply` is inlined at lower time (no runtime recursion
+    // into applied policies), so evaluation walks a statically bounded
+    // guard tree.
+    let src = apply_chain(8, 1);
+    let report = check_on_small_stack(src.clone());
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            let mut store = SetStore::new();
+            let chain = compile_rpol(&src, &mut store).expect("within bounds");
+            assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Permit);
+        })
+        .expect("spawn")
+        .join()
+        .expect("bounded compile + flat evaluation must not overflow");
+}
+
 // ── RFC 8097 origin-validation-state well-known names (OV_*) ──────
 
 #[test]

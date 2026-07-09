@@ -1074,10 +1074,14 @@ impl PolicyChain {
         self.compiled().requires_peer_context()
     }
 
-    /// Evaluate a route against this chain of policies.
+    /// Evaluate a route against this chain of policies. Hit counters
+    /// still bump; unlike
+    /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
+    /// this never clones a policy name — attribution is telemetry-only
+    /// and this is the per-route hot path.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
-        self.evaluate_with_attribution(ctx).0
+        self.compiled().evaluate_counting(ctx, self.hit_counters())
     }
 
     /// Evaluate plus attribution — for telemetry / explain surfaces

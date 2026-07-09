@@ -42,7 +42,10 @@
 //! `Or(over permit-terms i: guard_i && !guard_1..i-1) || (default
 //! Permit && no guard matched)`; `Continue` terms don't decide and are
 //! skipped. Quadratic in the applied policy's term count — fine for
-//! human-written policies, and the DAG check bounds the depth.
+//! human-written policies; the typechecker bounds the composition
+//! (apply DAG plus `MAX_APPLY_DEPTH` / `MAX_APPLY_EXPANSION`,
+//! LAN-290), so the recursive inlining below is statically bounded in
+//! both stack depth and total nodes before lowering ever runs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -336,6 +339,11 @@ impl<'a> Lowerer<'a> {
                 MatchExpr::AsPathMatches(self.intern_regex(&format!("_{asn}_"), store))
             }
             Expr::Apply { policy, args, .. } => {
+                // Recursion bounded at typecheck (LAN-290): the apply
+                // graph is a DAG no deeper than MAX_APPLY_DEPTH and the
+                // inlined predicate no larger than MAX_APPLY_EXPANSION
+                // nodes, so this cannot overflow or explode (lowering
+                // only ever sees typechecked ASTs).
                 let args: Vec<u32> = args.iter().map(|arg| resolve_u32(arg, env)).collect();
                 let def = self
                     .file

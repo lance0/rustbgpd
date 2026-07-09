@@ -199,6 +199,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   truncate at 100 rows; they now paginate transparently until the listing
   completes. Canceled on-demand MRT dump requests are likewise skipped
   before the RIB snapshot, encode, and file write. (LAN-288)
+- **rpol `apply` composition is bounded before lowering, and the
+  non-attributed evaluation path no longer clones policy names.** LAN-184
+  bounded parser recursion; `apply` inlining was the remaining unbounded
+  surface — a legal apply DAG (no cycles) can still multiply the inlined
+  predicate exponentially, so a SIGHUP-supplied file could pin the compiler
+  or overflow the lowering stack. The typechecker now rejects compositions
+  deeper than 8 `apply` levels or expanding past 100k IR nodes, with one
+  root-cause diagnostic per offending policy (dependents don't cascade);
+  evaluation stays flat — `apply` is compile-time inlining, never a runtime
+  call. Separately, every chain evaluation cloned the terminal policy's
+  name for attribution even on the hot per-route path that discards it; the
+  non-attributed path now skips that allocation entirely. (LAN-290)
 
 ## [0.50.0] — 2026-07-05
 
