@@ -29,8 +29,10 @@ impl AspaTable {
     /// Build a table from a list of ASPA records.
     ///
     /// If multiple records exist for the same customer ASN, their provider
-    /// sets are merged (union). This matches RTR cache behavior where
-    /// multiple CAs may issue ASPAs for the same customer.
+    /// sets are merged (union). Within one cache, 8210bis replacement
+    /// semantics are applied upstream in the VRP manager (one record per
+    /// customer ASN per cache); the union here merges records for the same
+    /// customer from *different* configured caches.
     #[must_use]
     pub fn new(records: Vec<AspaRecord>) -> Self {
         let mut map: HashMap<u32, Vec<u32>> = HashMap::new();

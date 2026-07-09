@@ -43,8 +43,8 @@ those.
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
-| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR reconnect/version/session/transaction corrections queued |
-| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics queued |
+| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; multi-cache interop proof queued |
+| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; interop proof queued |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
 | BFD single-hop async + RFC 5882 coupling | Partial | M51 base receipt; receive-work budgeting and remote-AdminDown coupling correction queued |
@@ -134,7 +134,7 @@ and the research-shaped queue below.
   make Cease the final frame, close without draining queued UPDATEs, and drive
   `TcpConnectionFails`/RIB/session cleanup from the real run loop. Add an
   end-to-end regression that does not manually inject the FSM event.
-- [ ] **RTR/RPKI transaction state.** Model `(protocol version, session ID,
+- [x] **RTR/RPKI transaction state.** Model `(protocol version, session ID,
   serial)` as one per-cache epoch; retain usable cache data through reconnect
   until expiry/full replacement; validate Cache Response/EoD identity; correct
   ASPA replacement and empty-provider withdrawal semantics; bound each RTR

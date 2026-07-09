@@ -565,8 +565,17 @@ implemented per ADR-0040.
 
 - VRP table with sorted-Vec binary search for prefix containment.
 - `Arc<VrpTable>` snapshot pattern for lock-free reads.
-- RTR codec: RFC 8210 v1 only. Serial/Reset queries, Serial Notify,
-  expire enforcement.
+- RTR codec: RFC 8210 v1 plus the 8210bis v2 ASPA PDU. Serial/Reset
+  queries, Serial Notify, expire enforcement. Router Key PDUs (BGPsec)
+  and RTR transport security (TLS/SSH) are not implemented.
+- Cache state is one per-cache epoch `(version, session ID, serial)`,
+  advanced only at a validated End of Data. Identity mismatches (session
+  ID, RFC 1982 serial regression) force a Reset Query resync — never a
+  splice. Validated data is retained through reconnect/Cache Reset until
+  replaced or expired. Transactions are bounded by deadline and
+  record/byte budgets.
+- ASPA over RTR v2 uses 8210bis replacement semantics: announce replaces
+  the customer's provider set; withdraw removes the customer ASN.
 - Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
   and LOCAL_PREF).
 - `match_rpki_validation` in policy.

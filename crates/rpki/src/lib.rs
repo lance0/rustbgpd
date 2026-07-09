@@ -14,6 +14,35 @@
 //! - [`rtr_codec`] — encode/decode RTR protocol PDUs
 //! - [`rtr_client`] — async per-cache-server connection manager
 //! - [`vrp_manager`] — multi-cache merge and snapshot distribution
+//!
+//! # RTR protocol support
+//!
+//! The RTR client implements a deliberately scoped subset of RFC 8210 and
+//! draft-ietf-sidrops-8210bis:
+//!
+//! - **Versions** — v2 (8210bis) is preferred for ASPA support, with
+//!   automatic fallback to v1 (RFC 8210) on explicit rejection (error
+//!   code 4) or pre-session disconnect. Every PDU in a session must carry
+//!   the negotiated version; a mismatch ends the session.
+//! - **Epoch model** — `(protocol version, session ID, serial)` is
+//!   tracked as ONE per-cache epoch, advanced only as a unit at a
+//!   validated End of Data. Incremental data is applied only when the
+//!   response identity (Cache Response and End of Data session IDs, RFC
+//!   1982 serial progression) matches the held epoch; any mismatch forces
+//!   a full resynchronization via Reset Query — never a splice.
+//! - **Data retention** — validated VRPs and ASPAs are retained through
+//!   disconnect, reconnect, version fallback, and Cache Reset. They are
+//!   dropped only when a full replacement completes or the expire
+//!   interval passes without a fresh End of Data.
+//! - **ASPA (v2)** — 8210bis replacement semantics: an announce replaces
+//!   the customer ASN's entire provider set; a withdraw (empty provider
+//!   set on the wire) removes the customer ASN.
+//! - **Transaction bounds** — each transaction is bounded by a wall-clock
+//!   deadline and record/byte budgets, so a broken or malicious cache
+//!   cannot wedge the client or exhaust memory.
+//! - **Not implemented** — Router Key PDUs (`BGPsec`, type 9) are rejected
+//!   as unknown and end the session; transport security (RTR over
+//!   TLS/SSH) — connections are plain TCP.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
