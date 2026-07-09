@@ -136,13 +136,13 @@ service ControlService {
 
 ### RIB Query Model
 
-**Paginated unary (default).** `ListRoutesRequest` includes a `page_size` (max results per page, capped server-side) and an opaque `page_token` (cursor). The RIB snapshots at the start of the first page request; subsequent pages iterate the same snapshot for consistency. No lock held on the RIB task — the snapshot is a read-only copy.
+**Paginated unary (default).** `ListRoutesRequest` includes a `page_size` (max results per page, capped server-side) and an opaque `page_token` (cursor). Each page is a bounded, resumable query on the RIB task: the cursor is the identity key of the last row on the previous page, and a page returns the next `page_size` rows strictly greater than it in key order — the same mutation-robust cursor step as the BMP Loc-RIB dump. A row that survives the walk is returned exactly once; rows inserted behind the cursor between pages are picked up by the next listing (or the watch stream). Per-page allocation is bounded; the full table is never materialized for a listing.
 
 ```protobuf
 message ListRoutesRequest {
   string neighbor_address = 1;      // filter by peer (empty = all)
   AddressFamily afi_safi = 2;       // address family filter
-  uint32 page_size = 3;             // max results (server-capped at 10000)
+  uint32 page_size = 3;             // max results (server-capped at 1000)
   string page_token = 4;            // opaque cursor for next page
 }
 

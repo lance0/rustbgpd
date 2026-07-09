@@ -60,6 +60,14 @@ impl MrtManager {
                 }
                 maybe_reply = self.trigger_rx.recv() => {
                     if let Some(reply) = maybe_reply {
+                        // The reply channel doubles as the cancel token: a
+                        // request whose caller is gone (e.g. a canceled gRPC
+                        // dump request queued behind a slow dump) is skipped
+                        // before the RIB snapshot, encode, and file write.
+                        if reply.is_closed() {
+                            debug!("MRT on-demand dump canceled before start; skipping");
+                            continue;
+                        }
                         debug!("MRT on-demand dump triggered");
                         let result = self.do_dump().await;
                         let _ = reply.send(result);
@@ -190,5 +198,58 @@ mod tests {
         rib_handler.await.unwrap();
         drop(trigger_tx);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_trigger_skips_dump_before_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = MrtWriterConfig {
+            output_dir: dir.path().to_path_buf(),
+            dump_interval: 86400,
+            compress: false,
+            file_prefix: "rib".to_string(),
+        };
+
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (trigger_tx, trigger_rx) = mpsc::channel(16);
+
+        let mgr = MrtManager::new(config, rib_tx, trigger_rx, Ipv4Addr::new(1, 2, 3, 4));
+        let handle = tokio::spawn(mgr.run());
+
+        // Count RIB snapshot queries: the canceled trigger must never
+        // reach the RIB (skip happens before snapshot/encode/write).
+        let rib_handler = tokio::spawn(async move {
+            let mut snapshots = 0usize;
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::QueryMrtSnapshot { reply } = update {
+                    snapshots += 1;
+                    let _ = reply.send(MrtSnapshotData {
+                        peers: vec![],
+                        routes: vec![],
+                        evpn_routes: vec![],
+                    });
+                }
+            }
+            snapshots
+        });
+
+        // Canceled request: receiver dropped before the manager sees it.
+        let (canceled_tx, canceled_rx) = oneshot::channel();
+        drop(canceled_rx);
+        trigger_tx.send(canceled_tx).await.unwrap();
+
+        // Live request queued behind it still completes.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("timeout waiting for MRT dump reply")
+            .expect("reply channel closed")
+            .expect("live MRT dump should succeed");
+
+        drop(trigger_tx);
+        handle.await.unwrap();
+        let snapshots = rib_handler.await.unwrap();
+        assert_eq!(snapshots, 1, "canceled dump must not query the RIB");
     }
 }

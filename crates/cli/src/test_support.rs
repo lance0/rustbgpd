@@ -53,6 +53,11 @@ pub(crate) struct MockState {
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
+    // Canned pages served in order by the unicast route-listing RPCs
+    // (received/best/advertised) — drives the CLI pagination loop.
+    // Empty = every call returns an empty final page.
+    pub(crate) list_route_pages: Mutex<Vec<server_proto::ListRoutesResponse>>,
+    pub(crate) list_route_requests: Mutex<Vec<server_proto::ListRoutesRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -718,6 +723,27 @@ struct MockRibService {
     state: Arc<MockState>,
 }
 
+impl MockRibService {
+    /// Record the request and serve the next canned route page (an
+    /// empty final page when none are queued).
+    async fn next_route_page(
+        &self,
+        request: server_proto::ListRoutesRequest,
+    ) -> server_proto::ListRoutesResponse {
+        self.state.list_route_requests.lock().await.push(request);
+        let mut pages = self.state.list_route_pages.lock().await;
+        if pages.is_empty() {
+            server_proto::ListRoutesResponse {
+                routes: vec![],
+                next_page_token: String::new(),
+                total_count: 0,
+            }
+        } else {
+            pages.remove(0)
+        }
+    }
+}
+
 struct MockEvpnService;
 
 #[tonic::async_trait]
@@ -986,35 +1012,29 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn list_received_routes(
         &self,
-        _request: Request<server_proto::ListRoutesRequest>,
+        request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
-        Ok(Response::new(server_proto::ListRoutesResponse {
-            routes: vec![],
-            next_page_token: String::new(),
-            total_count: 0,
-        }))
+        Ok(Response::new(
+            self.next_route_page(request.into_inner()).await,
+        ))
     }
 
     async fn list_best_routes(
         &self,
-        _request: Request<server_proto::ListRoutesRequest>,
+        request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
-        Ok(Response::new(server_proto::ListRoutesResponse {
-            routes: vec![],
-            next_page_token: String::new(),
-            total_count: 0,
-        }))
+        Ok(Response::new(
+            self.next_route_page(request.into_inner()).await,
+        ))
     }
 
     async fn list_advertised_routes(
         &self,
-        _request: Request<server_proto::ListRoutesRequest>,
+        request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
-        Ok(Response::new(server_proto::ListRoutesResponse {
-            routes: vec![],
-            next_page_token: String::new(),
-            total_count: 0,
-        }))
+        Ok(Response::new(
+            self.next_route_page(request.into_inner()).await,
+        ))
     }
 
     async fn explain_best_path(

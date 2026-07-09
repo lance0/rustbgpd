@@ -929,6 +929,7 @@ mod llgr_families;
 mod multipath_fib;
 mod orf;
 mod orr;
+mod paged_query;
 mod per_client_best;
 mod policy;
 mod refresh;

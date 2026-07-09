@@ -64,6 +64,49 @@ fn make_route_request(
     })
 }
 
+type RibClient = RibServiceClient<
+    tonic::service::interceptor::InterceptedService<
+        tonic::transport::Channel,
+        crate::connection::AuthInterceptor,
+    >,
+>;
+
+/// Which unicast route-listing RPC [`fetch_all_route_pages`] drives.
+enum RouteListRpc {
+    Best,
+    Received,
+    Advertised,
+}
+
+/// Requested page size for transparent pagination — matches the
+/// server's per-page cap so the loop takes the fewest round trips.
+const ROUTE_PAGE_SIZE: u32 = 1000;
+
+/// Fetch every page of a route listing. The server bounds each page;
+/// the CLI follows `next_page_token` until the listing completes, so
+/// output is never silently truncated.
+async fn fetch_all_route_pages(
+    client: &mut RibClient,
+    rpc: &RouteListRpc,
+    mut req: ListRoutesRequest,
+) -> Result<Vec<Route>, CliError> {
+    req.page_size = ROUTE_PAGE_SIZE;
+    let mut routes = Vec::new();
+    loop {
+        let resp = match rpc {
+            RouteListRpc::Best => client.list_best_routes(req.clone()).await?,
+            RouteListRpc::Received => client.list_received_routes(req.clone()).await?,
+            RouteListRpc::Advertised => client.list_advertised_routes(req.clone()).await?,
+        }
+        .into_inner();
+        routes.extend(resp.routes);
+        if resp.next_page_token.is_empty() {
+            return Ok(routes);
+        }
+        req.page_token = resp.next_page_token;
+    }
+}
+
 fn parse_fib_state(s: &str) -> Result<i32, CliError> {
     match s {
         "installed" => Ok(FibRouteState::Installed as i32),
@@ -1456,11 +1499,13 @@ pub async fn best(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_best_routes(make_route_request(None, family, filters)?)
-        .await?
-        .into_inner();
-    print_routes(&resp.routes, json)
+    let routes = fetch_all_route_pages(
+        &mut client,
+        &RouteListRpc::Best,
+        make_route_request(None, family, filters)?,
+    )
+    .await?;
+    print_routes(&routes, json)
 }
 
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -1554,11 +1599,13 @@ pub async fn received(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_received_routes(make_route_request(Some(address), family, filters)?)
-        .await?
-        .into_inner();
-    print_routes(&resp.routes, json)
+    let routes = fetch_all_route_pages(
+        &mut client,
+        &RouteListRpc::Received,
+        make_route_request(Some(address), family, filters)?,
+    )
+    .await?;
+    print_routes(&routes, json)
 }
 
 pub async fn advertised(
@@ -1570,11 +1617,13 @@ pub async fn advertised(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_advertised_routes(make_route_request(Some(address), family, filters)?)
-        .await?
-        .into_inner();
-    print_routes(&resp.routes, json)
+    let routes = fetch_all_route_pages(
+        &mut client,
+        &RouteListRpc::Advertised,
+        make_route_request(Some(address), family, filters)?,
+    )
+    .await?;
+    print_routes(&routes, json)
 }
 
 pub async fn explain_advertised(
@@ -2600,5 +2649,72 @@ mod tests {
         assert_eq!(v["best_reason_detail"], "local_pref 200 > 100");
         assert_eq!(v["candidates"][0]["vs_best_detail"], "local_pref 100 < 200");
         assert_eq!(v["candidates"][0]["multipath"], "relax_only");
+    }
+
+    fn no_route_filters() -> RouteFilterOpts {
+        RouteFilterOpts {
+            prefix: None,
+            longer: false,
+            origin_asn: None,
+            community: vec![],
+            large_community: vec![],
+        }
+    }
+
+    fn mock_route_page(
+        prefix: &str,
+        next_page_token: &str,
+    ) -> rustbgpd_api::proto::ListRoutesResponse {
+        rustbgpd_api::proto::ListRoutesResponse {
+            routes: vec![rustbgpd_api::proto::Route {
+                prefix: prefix.to_string(),
+                prefix_length: 24,
+                ..Default::default()
+            }],
+            next_page_token: next_page_token.to_string(),
+            total_count: 2,
+        }
+    }
+
+    /// `rbgp rib received` follows `next_page_token` until the listing
+    /// completes — no silent truncation at the server's page size.
+    #[tokio::test]
+    async fn received_paginates_transparently() {
+        let server = spawn_mock_server(None).await;
+        {
+            let mut pages = server.state.list_route_pages.lock().await;
+            pages.push(mock_route_page("10.0.0.0", "10.0.0.0/24|192.0.2.1|0"));
+            pages.push(mock_route_page("10.0.1.0", ""));
+        }
+
+        let connection = connect(&server.addr, None).await.unwrap();
+        received(connection, "192.0.2.1", None, &no_route_filters(), false)
+            .await
+            .unwrap();
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 2, "one RPC per page");
+        assert!(requests[0].page_token.is_empty());
+        assert!(requests[0].page_size > 0, "CLI requests bounded pages");
+        assert_eq!(requests[1].page_token, "10.0.0.0/24|192.0.2.1|0");
+    }
+
+    /// `rbgp best` stops after a single page when the server reports
+    /// the listing complete (empty `next_page_token`).
+    #[tokio::test]
+    async fn best_stops_on_final_page() {
+        let server = spawn_mock_server(None).await;
+        {
+            let mut pages = server.state.list_route_pages.lock().await;
+            pages.push(mock_route_page("10.0.0.0", ""));
+        }
+
+        let connection = connect(&server.addr, None).await.unwrap();
+        best(connection, None, &no_route_filters(), false)
+            .await
+            .unwrap();
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 1);
     }
 }
