@@ -9,22 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Outbound saturation teardown: Cease is the final frame, and cleanup runs
-  from the run loop.** When a peer stopped draining and the bounded writer
-  queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
-  entire queued UPDATE backlog *after* the NOTIFICATION — delaying the close
-  for as long as the peer stayed slow, and sending frames a peer must never
-  see after a NOTIFICATION — and then exited cleanly, so `TcpConnectionFails`
-  was never driven: the FSM stayed Established with no TCP connection and the
-  RIB kept the dead peer registered. The writer now discards the backlog
-  outright, flushes the Cease best-effort within a short bound (racing any
-  wedged in-flight write without ever splicing a frame), hard-closes, and
-  exits with a distinct status that the session run loop maps to
-  `TcpConnectionFails` → FSM `SessionDown` → RIB `PeerDown`/deregistration,
-  exactly like a real TCP failure.
-
 ### Added
 
 - **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
@@ -47,6 +31,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Outbound saturation teardown: Cease is the final frame, and cleanup runs
+  from the run loop.** When a peer stopped draining and the bounded writer
+  queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
+  entire queued UPDATE backlog *after* the NOTIFICATION — delaying the close
+  for as long as the peer stayed slow, and sending frames a peer must never
+  see after a NOTIFICATION — and then exited cleanly, so `TcpConnectionFails`
+  was never driven: the FSM stayed Established with no TCP connection and the
+  RIB kept the dead peer registered. The writer now discards the backlog
+  outright, flushes the Cease best-effort within a short bound (racing any
+  wedged in-flight write without ever splicing a frame), hard-closes, and
+  exits with a distinct status that the session run loop maps to
+  `TcpConnectionFails` → FSM `SessionDown` → RIB `PeerDown`/deregistration,
+  exactly like a real TCP failure.
 - **Proof-harness assertions fail closed on missing/errored inputs.** The M37
   local-origination harnesses no longer treat a failed/errored FRR query
   (unreachable vtysh, docker exec error) as evidence of route absence, and
