@@ -9,22 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Commit-confirm recovery now fails safe through ambiguous transaction
-  outcomes.** A confirmed config transaction whose apply failed after the
-  point of no proof — the persistence acknowledgement was lost, post-persist
-  finalization failed, or a compound rollback failed — used to delete the
-  boot-revert journal and reopen the config mutation fence as if nothing had
-  committed, losing the only path back to the pre-transaction config. The
-  journal is now retained and all further config mutations are rejected until
-  a daemon restart boot-reverts (or the operator clears the journal). A failed
-  abort or timeout auto-revert likewise no longer clears the fence: the
-  transaction stays pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED`
-  status, and the operator resolves it by retrying the abort, confirming the
-  candidate, or restarting. Previously a second mutation accepted after such a
-  failure could be silently clobbered by the retained journal's boot revert.
-
 ### Added
 
 - **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
@@ -47,6 +31,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Commit-confirm recovery now fails safe through ambiguous transaction
+  outcomes.** A confirmed config transaction whose apply failed after the
+  point of no proof — the persistence acknowledgement was lost, post-persist
+  finalization failed, or a compound rollback failed — used to delete the
+  boot-revert journal and reopen the config mutation fence as if nothing had
+  committed, losing the only path back to the pre-transaction config. The
+  journal is now retained and all further config mutations are rejected until
+  a daemon restart boot-reverts (or the operator clears the journal). A failed
+  abort or timeout auto-revert likewise no longer clears the fence: the
+  transaction stays pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED`
+  status, and the operator resolves it by retrying the abort, confirming the
+  candidate, or restarting. Previously a second mutation accepted after such a
+  failure could be silently clobbered by the retained journal's boot revert.
 - **Outbound saturation teardown: Cease is the final frame, and cleanup runs
   from the run loop.** When a peer stopped draining and the bounded writer
   queue filled (`Cease/8` Out-of-Resources teardown), the writer drained the
