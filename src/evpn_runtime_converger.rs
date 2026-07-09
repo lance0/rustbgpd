@@ -10597,6 +10597,7 @@ local_vtep_ip = "10.0.0.1"
             fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
             l3_adoption_counters: rustbgpd_evpn::L3AdoptionCounters::default(),
             single_active_counters: rustbgpd_evpn::SingleActiveCounters::default(),
+            foreign_state_counters: rustbgpd_evpn::ForeignStateCounters::default(),
         }
     }
 

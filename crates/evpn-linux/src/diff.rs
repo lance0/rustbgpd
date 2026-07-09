@@ -66,6 +66,17 @@ pub struct Plan {
     /// set against the previous pass to suppress steady-state spam.
     /// Empty when no entries fall back.
     pub ipv6_alias_fallback_keys: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// `(VNI, MAC)` keys whose operation was withheld this pass
+    /// because a same-key FOREIGN kernel row (not `extern_learn` /
+    /// not ours) occupies the slot — a netlink `replace` would
+    /// silently adopt-and-overwrite another agent's state, and a
+    /// delete would tear down a row we no longer own. Fail closed:
+    /// nothing is emitted for these keys; the reconcile actor logs a
+    /// warning on the transition into blocked, bumps the
+    /// foreign-state counters, and relinquishes stale ownership.
+    /// Level-triggered: once the foreign row goes away the next pass
+    /// emits normally.
+    pub foreign_blocked_keys: BTreeSet<(EvpnInstanceId, MacAddress)>,
 }
 
 impl Plan {
@@ -140,6 +151,10 @@ pub fn compute_diff(
     // back.
     let mut ipv6_alias_fallback_keys: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
+    // LAN-283: keys withheld because a foreign kernel row occupies
+    // the exact slot. See `Plan::foreign_blocked_keys`.
+    let mut foreign_blocked: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
+
     // Pass 1 + 1b — creates / updates. Scoped to Ready instances;
     // entries for NotReady / Unbound instances contribute zero ops.
     for (&(vni, mac), entry) in desired.iter() {
@@ -191,6 +206,7 @@ pub fn compute_diff(
                     &mut creates,
                     &mut updates,
                     &mut conversions,
+                    &mut foreign_blocked,
                 );
             }
             (Some(_), false, true) => {
@@ -223,6 +239,7 @@ pub fn compute_diff(
                     &mut creates,
                     &mut updates,
                     &mut conversions,
+                    &mut foreign_blocked,
                 );
             }
             _ => {
@@ -250,6 +267,7 @@ pub fn compute_diff(
                     &mut creates,
                     &mut updates,
                     &mut conversions,
+                    &mut foreign_blocked,
                 );
             }
         }
@@ -270,30 +288,45 @@ pub fn compute_diff(
             OwnedEntryKind::SingleDst { .. } => {
                 // Existing single-dst delete: check kernel snapshot,
                 // emit RemoveRemoteFdb only if the kernel still has
-                // it. Interface flap / manual `bridge fdb del` is a
-                // no-op for this pass — the actor's OwnedSet drift
-                // self-heals on the next successful reconcile.
-                if snapshot.find_fdb_in_vlan(vni, mac, owned.vlan).is_some() {
-                    deletes.push(DataplaneOp::RemoveRemoteFdb {
-                        vni,
-                        mac,
-                        vlan: owned.vlan,
-                    });
+                // *our* row. Interface flap / manual `bridge fdb del`
+                // is a no-op for this pass — the actor's OwnedSet
+                // drift self-heals on the next successful reconcile.
+                // A same-key row that is NOT extern_learned means a
+                // foreign writer replaced ours (LAN-283): never emit
+                // the delete — the foreign row must survive our
+                // withdrawal / NotReady drain.
+                match snapshot.find_fdb_in_vlan(vni, mac, owned.vlan) {
+                    Some(kernel) if kernel.is_extern_learned() => {
+                        deletes.push(DataplaneOp::RemoveRemoteFdb {
+                            vni,
+                            mac,
+                            vlan: owned.vlan,
+                        });
+                    }
+                    Some(_) => {
+                        foreign_blocked.insert((vni, mac));
+                    }
+                    None => {}
                 }
             }
             OwnedEntryKind::FdbNhg { group_key } => {
-                // FDB-NHG delete: always emit. The coordinator is
-                // idempotent (slice 3a `apply_remove_fdb_nhg_row`
-                // uses `classify_remove_apply_error` → ENOENT-as-ACK).
-                // We don't gate on kernel snapshot because nhid-row
-                // drift detection from RTNLGRP_NEIGH is incomplete
-                // per research §8.
-                deletes.push(DataplaneOp::RemoveFdbNhg {
-                    vni,
-                    mac,
-                    vlan: owned.vlan,
-                    group_key,
-                });
+                // FDB-NHG delete: emit even when the snapshot has no
+                // row (the coordinator is idempotent — slice 3a
+                // `apply_remove_fdb_nhg_row` uses
+                // `classify_remove_apply_error` → ENOENT-as-ACK, and
+                // nhid-row drift detection from RTNLGRP_NEIGH is
+                // incomplete per research §8) — but never when the
+                // row present at the key is foreign (LAN-283).
+                if foreign_row_at(snapshot, vni, mac, owned.vlan) {
+                    foreign_blocked.insert((vni, mac));
+                } else {
+                    deletes.push(DataplaneOp::RemoveFdbNhg {
+                        vni,
+                        mac,
+                        vlan: owned.vlan,
+                        group_key,
+                    });
+                }
             }
         }
     }
@@ -340,7 +373,23 @@ pub fn compute_diff(
     Plan {
         ops,
         ipv6_alias_fallback_keys,
+        foreign_blocked_keys: foreign_blocked,
     }
+}
+
+/// `true` when the kernel snapshot holds a row at `(vni, vlan, mac)`
+/// that is provably not ours (no `extern_learn` marker, or a foreign
+/// `NDA_PROTOCOL` stamp). LAN-283 fail-closed predicate: no create /
+/// update / conversion / delete may target such a key.
+fn foreign_row_at(
+    snapshot: &KernelSnapshot,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    vlan: Option<u16>,
+) -> bool {
+    snapshot
+        .find_fdb_in_vlan(vni, mac, vlan)
+        .is_some_and(|k| !k.is_extern_learned())
 }
 
 /// `true` when `entry.remote_vtep_ip` and every `alias_vtep_ips`
@@ -379,10 +428,21 @@ fn emit_single_dst_pass(
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
+    foreign_blocked: &mut BTreeSet<(EvpnInstanceId, MacAddress)>,
 ) {
     if let Some(owned) = last_applied.get(vni, mac)
         && owned.vlan != vlan
     {
+        // LAN-283: the conversion pair below deletes the row at the
+        // owned VLAN and adds at the desired VLAN without consulting
+        // the snapshot. If a foreign row sits at either key, emitting
+        // would clobber it — fail closed for this MAC instead.
+        if foreign_row_at(snapshot, vni, mac, owned.vlan)
+            || foreign_row_at(snapshot, vni, mac, vlan)
+        {
+            foreign_blocked.insert((vni, mac));
+            return;
+        }
         match owned.kind {
             OwnedEntryKind::SingleDst { .. } => conversions.push(DataplaneOp::RemoveRemoteFdb {
                 vni,
@@ -420,6 +480,13 @@ fn emit_single_dst_pass(
     if let Some(owned) = last_applied.get(vni, mac)
         && let OwnedEntryKind::FdbNhg { group_key } = owned.kind
     {
+        // LAN-283: the Remove half of this conversion pair deletes
+        // whatever row sits at the key — never emit it over a
+        // foreign row.
+        if foreign_row_at(snapshot, vni, mac, vlan) {
+            foreign_blocked.insert((vni, mac));
+            return;
+        }
         conversions.push(DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
@@ -454,6 +521,7 @@ fn emit_single_dst_pass(
                 last_applied,
                 updates,
                 conversions,
+                foreign_blocked,
             );
         }
     }
@@ -478,7 +546,35 @@ fn emit_fdb_nhg_pass(
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
+    foreign_blocked: &mut BTreeSet<(EvpnInstanceId, MacAddress)>,
 ) {
+    // LAN-283 fail-closed gate: a foreign row at the desired key (or
+    // at the previously-owned VLAN key for the conversion arm) blocks
+    // every per-MAC emission below — Install with `convert_from_dst`,
+    // the group-key-drift Remove→Install pair, and the drift-repair
+    // re-Install would all replace or delete another agent's row.
+    // Foreign-entry preservation for the fresh-install arm used to
+    // live in a local `fdb_nhg_install_safe` check; this gate
+    // subsumes it and extends it to the owned arms. Group-level
+    // `UpdateFdbNhgMembers` is not gated — it targets our kernel
+    // nexthop objects, not the FDB row.
+    if foreign_row_at(snapshot, vni, mac, vlan) {
+        foreign_blocked.insert((vni, mac));
+        tracing::trace!(
+            ?vni,
+            mac = %mac,
+            "FDB-NHG emission skipped: foreign kernel row at this (vni, mac)"
+        );
+        return;
+    }
+    if let Some(owned) = last_applied.get(vni, mac)
+        && owned.vlan != vlan
+        && foreign_row_at(snapshot, vni, mac, owned.vlan)
+    {
+        foreign_blocked.insert((vni, mac));
+        return;
+    }
+
     let canonical = group_members(entry);
     let standby = entry.single_active_backup_vtep_ip;
 
@@ -523,26 +619,20 @@ fn emit_fdb_nhg_pass(
             //     rides `convert_from_dst` because the in-place
             //     REPLACE would be rejected with -EOPNOTSUPP and end
             //     up permanently suppressed.
-            // Operator-static / kernel-learned rows are skipped here
-            // the same way `handle_existing_kernel_entry` does for the
-            // single-dst path.
-            if fdb_nhg_install_safe(snapshot, vni, mac, vlan) {
-                creates.push(DataplaneOp::InstallFdbNhg {
-                    vni,
-                    mac,
-                    vlan,
-                    group_key: linux_key,
-                    members: canonical,
-                    standby,
-                    convert_from_dst: kernel_dst_row,
-                });
-            } else {
-                tracing::trace!(
-                    ?vni,
-                    mac = %mac,
-                    "FDB-NHG install skipped: foreign kernel row at this (vni, mac)"
-                );
-            }
+            // Operator-static / kernel-learned rows are skipped by
+            // the LAN-283 foreign gate at the top of this function,
+            // the same way `handle_existing_kernel_entry` does for
+            // the single-dst path — so any row still present here is
+            // ours (restart marker) or absent.
+            creates.push(DataplaneOp::InstallFdbNhg {
+                vni,
+                mac,
+                vlan,
+                group_key: linux_key,
+                members: canonical,
+                standby,
+                convert_from_dst: kernel_dst_row,
+            });
         }
         Some(OwnedEntryKind::SingleDst { .. }) => {
             // Single-dst → FDB-NHG transition. The old dst row must
@@ -684,18 +774,6 @@ fn emit_fdb_nhg_vlan_conversion(
     true
 }
 
-fn fdb_nhg_install_safe(
-    snapshot: &KernelSnapshot,
-    vni: EvpnInstanceId,
-    mac: MacAddress,
-    vlan: Option<u16>,
-) -> bool {
-    match snapshot.find_fdb_in_vlan(vni, mac, vlan) {
-        None => true,
-        Some(k) => k.is_extern_learned(),
-    }
-}
-
 /// Decide what to do when `desired` wants `(vni, mac) -> dst` and the
 /// kernel already has *some* entry there. Splits the six interesting
 /// cases:
@@ -735,6 +813,7 @@ fn handle_existing_kernel_entry(
     last_applied: &OwnedSet,
     updates: &mut Vec<DataplaneOp>,
     conversions: &mut Vec<DataplaneOp>,
+    foreign_blocked: &mut BTreeSet<(EvpnInstanceId, MacAddress)>,
 ) {
     if kernel_entry.is_extern_learned() {
         // Case 4: nhid-shaped marker row, dst-shaped desire. The
@@ -803,8 +882,13 @@ fn handle_existing_kernel_entry(
         return;
     }
 
-    // Operator-static / `self` / non-extern_learn entry. Skip silently;
-    // the operator owns this entry.
+    // Operator-static / `self` / non-extern_learn entry. Skip and
+    // record the key as foreign-blocked (LAN-283: the actor logs the
+    // transition + bumps the foreign-state counter); the operator
+    // owns this entry. The kernel-learned-local case above stays out
+    // of the blocked set — that's the expected RFC 7432 §15 mobility
+    // race, resolved at the domain layer, not a foreign takeover.
+    foreign_blocked.insert((vni, mac));
     tracing::trace!(
         ?vni,
         mac = %mac,
@@ -1227,6 +1311,137 @@ mod tests {
             "should not overwrite foreign static, got {:?}",
             plan.ops
         );
+        assert!(
+            plan.foreign_blocked_keys.contains(&(vni(100), mac(1))),
+            "blocked key must be reported for observability (LAN-283)"
+        );
+    }
+
+    // LAN-283 rule 3: an owned single-dst key that is no longer
+    // desired, whose kernel row was REPLACED by a foreign permanent
+    // entry, must NOT get a RemoveRemoteFdb — the foreign row has to
+    // survive our withdrawal.
+    #[test]
+    fn withdraw_spares_foreign_replaced_single_dst_row() {
+        let desired = RemoteMacTable::new();
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                vlan: None,
+                dst: Some(ip("10.9.9.9")),
+                nh_id: None,
+                protocol: None,
+                flags: KernelFdbFlags {
+                    permanent: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+        let probes = ready_probes(&[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert!(
+            plan.is_noop(),
+            "withdrawal must spare the foreign row, got {:?}",
+            plan.ops
+        );
+        assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(1))));
+    }
+
+    // LAN-283 rule 3, NotReady variant: the instance-drain path is
+    // the same Pass 2 — a foreign same-key row survives it too.
+    #[test]
+    fn not_ready_drain_spares_foreign_replaced_row() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                vlan: None,
+                dst: Some(ip("10.9.9.9")),
+                nh_id: None,
+                protocol: None,
+                flags: KernelFdbFlags {
+                    permanent: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+        let mut probes = InstanceProbes::new();
+        probes.insert(
+            vni(100),
+            InstanceProbe::NotReady {
+                reason: "bridge gone".into(),
+            },
+        );
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert!(
+            plan.is_noop(),
+            "NotReady drain must spare the foreign row, got {:?}",
+            plan.ops
+        );
+        assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(1))));
+    }
+
+    // LAN-283 rule 3, FDB-NHG variant: the "always emit RemoveFdbNhg"
+    // bookkeeping rule must not fire when the row at the key is
+    // foreign.
+    #[test]
+    fn withdraw_spares_foreign_replaced_fdb_nhg_row() {
+        let desired = RemoteMacTable::new();
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                vlan: None,
+                dst: Some(ip("10.9.9.9")),
+                nh_id: None,
+                protocol: None,
+                flags: KernelFdbFlags {
+                    permanent: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 0x11)));
+        let probes = ready_probes(&[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert!(
+            plan.is_noop(),
+            "FDB-NHG withdrawal must spare the foreign row, got {:?}",
+            plan.ops
+        );
+        assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(1))));
     }
 
     #[test]
@@ -1610,6 +1825,51 @@ mod tests {
 
     fn linux_key(v: u32, seg: u8) -> AliasGroupKey {
         AliasGroupKey::new(vni(v), esi(seg), EthernetTagId(0))
+    }
+
+    // LAN-283 rule 1, FDB-NHG drift-repair variant: an owned FdbNhg
+    // key whose kernel row was replaced by a foreign permanent dst
+    // row must NOT re-Install (`convert_from_dst` would delete→add
+    // over the foreign row — a silent adopt-and-overwrite).
+    #[test]
+    fn foreign_takeover_blocks_fdb_nhg_reinstall() {
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                vlan: None,
+                dst: Some(ip("10.9.9.9")),
+                nh_id: None,
+                protocol: None,
+                flags: KernelFdbFlags {
+                    permanent: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &ready_probes(&[vni(100)]),
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert!(
+            plan.is_noop(),
+            "foreign row must block the FDB-NHG re-install, got {:?}",
+            plan.ops
+        );
+        assert!(plan.foreign_blocked_keys.contains(&(vni(100), mac(1))));
     }
 
     #[test]

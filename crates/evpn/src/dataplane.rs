@@ -502,6 +502,13 @@ pub struct DataplaneReport {
     /// failover events (group swaps + ordered teardowns). Same
     /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
     pub single_active_counters: SingleActiveCounters,
+    /// Per-report deltas for foreign-state ownership protection:
+    /// replaces blocked because a foreign row holds the exact key,
+    /// deletes skipped because the live row is no longer ours, and
+    /// owned keys relinquished after a foreign writer took them over.
+    /// Same drain-into-Prometheus contract as
+    /// `fdb_nhg_drift_counters`.
+    pub foreign_state_counters: ForeignStateCounters,
     /// ADR-0091 managed-netdev desired/observed status rows. Rows are
     /// produced only when `[managed_netdevs]` is configured (a desired
     /// bridge row, or an owner token under which observed rustbgpd
@@ -554,6 +561,26 @@ pub struct L3AdoptionCounters {
     pub l3vxlan_fdb_adopted: u64,
     /// Adopted L3VXLAN FDB rows reaped after the deferral.
     pub l3vxlan_fdb_reaped: u64,
+}
+
+/// Per-report deltas for foreign-state ownership protection on the
+/// L2 FDB and Gate 9 L3 write paths (routes / neighbors / L3VXLAN
+/// FDB): the reconciler must never `replace` over — or delete — a
+/// same-key kernel row it does not own, and must stop claiming a key
+/// another writer took over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForeignStateCounters {
+    /// Install / replace operations withheld because an exact-key
+    /// foreign kernel row exists (fail closed; retried level-triggered
+    /// once the foreign row goes away).
+    pub replaces_blocked: u64,
+    /// Delete operations skipped during withdrawal / `NotReady` drain /
+    /// shutdown because the live kernel row under the key is no
+    /// longer ours (a foreign row must survive our teardown).
+    pub deletes_skipped: u64,
+    /// Owned keys dropped from the in-memory owned state because a
+    /// live snapshot showed a foreign row had replaced ours.
+    pub owned_relinquished: u64,
 }
 
 /// Per-report deltas for ADR-0083 single-active backup-path failover

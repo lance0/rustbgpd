@@ -69,6 +69,10 @@ use super::routes::{
 /// constant in `super::l3` (the write side); both halves of the
 /// marker must read the same bit.
 const NUD_PERMANENT: u16 = 0x80;
+/// `NUD_NOARP` — programmed pseudo-state, never subject to
+/// reachability probing. Read alongside `NUD_PERMANENT` by the
+/// LAN-283 foreign-neighbor classifier.
+const NUD_NOARP: u16 = 0x40;
 /// `NDA_NH_ID` (kind = 13). `netlink-packet-route 0.30` exposes it
 /// through `NeighbourAttribute::Other(DefaultNla)`.
 const NDA_NH_ID: u16 = 13;
@@ -171,6 +175,30 @@ fn extract_route_targets(msg: &RouteMessage) -> Option<(Vec<IpAddr>, u32)> {
     Some((out, ifindex?))
 }
 
+/// LAN-283 foreign-route classifier: a row in a *configured* IP-VRF
+/// table that fails the ADR-0079 marker pair (`RTPROT_BGP` + onlink)
+/// is another writer's state at a key we could be asked to program —
+/// surface its `(vrf_id, prefix)` so the reconcile actor can fail
+/// closed instead of `RTM_NEWROUTE`-replacing or deleting it.
+/// Marker-matching rows (including `MarkedButUnusable`) are never
+/// foreign; rows without a parseable destination cannot be keyed and
+/// are skipped.
+#[must_use]
+pub(crate) fn classify_foreign_route(
+    msg: &RouteMessage,
+    tables: &HashMap<u32, IpVrfId>,
+) -> Option<(IpVrfId, EvpnIpPrefixValue)> {
+    let table_id = extract_table_id(msg);
+    let vrf_id = tables.get(&table_id).copied()?;
+    if msg.header.protocol == netlink_packet_route::route::RouteProtocol::Bgp
+        && msg.header.flags.contains(RouteFlags::Onlink)
+    {
+        return None; // marker pair — ours (or marked-but-unusable)
+    }
+    let prefix = extract_prefix(msg)?;
+    Some((vrf_id, prefix))
+}
+
 /// Pure L3-neighbor classifier: keep rows on a managed L3VXLAN
 /// ifindex whose state carries `NUD_PERMANENT` and whose flags carry
 /// `NTF_EXT_LEARNED` — exactly what `super::l3::apply_add_l3_neighbor`
@@ -209,6 +237,65 @@ pub(crate) fn classify_adoption_neighbor(
         _ => None,
     })?;
     Some(((ifindex, next_hop), vrf_id))
+}
+
+/// LAN-283 foreign-neighbor classifier: a row on a managed L3VXLAN
+/// ifindex that is *programmed state* (permanent / noarp) or carries
+/// a non-BGP `NDA_PROTOCOL` stamp, but is not marker-matching ours —
+/// another agent's entry at a key our `AddL3Neighbor` replace would
+/// clobber. Transient kernel-dynamic cache entries (REACHABLE /
+/// STALE / ...) are not foreign: replacing a volatile ARP/ND cache
+/// row with control-plane state is normal operation, and blocking on
+/// it would flap.
+///
+/// Call only for rows [`classify_adoption_neighbor`] rejected — this
+/// function does not re-check ours-ness beyond the marker halves.
+#[must_use]
+pub(crate) fn classify_foreign_neighbor(
+    msg: &NeighbourMessage,
+    managed_l3vxlan: &HashMap<u32, IpVrfId>,
+) -> Option<(u32, IpAddr)> {
+    let ifindex = msg.header.ifindex;
+    managed_l3vxlan.get(&ifindex)?;
+    let programmed = state_has_permanent(msg.header.state) || state_has_noarp(msg.header.state);
+    let foreign_stamp = extract_protocol(msg).is_some_and(|p| p != RouteProtocol::Bgp);
+    if !programmed && !foreign_stamp {
+        return None;
+    }
+    let next_hop = msg.attributes.iter().find_map(|attr| match attr {
+        NeighbourAttribute::Destination(NeighbourAddress::Inet(v4)) => Some(IpAddr::V4(*v4)),
+        NeighbourAttribute::Destination(NeighbourAddress::Inet6(v6)) => Some(IpAddr::V6(*v6)),
+        _ => None,
+    })?;
+    Some((ifindex, next_hop))
+}
+
+/// LAN-283 foreign L3VXLAN-FDB classifier: any `AF_BRIDGE` row on a
+/// managed L3VXLAN ifindex that [`classify_adoption_l3vxlan_fdb`]
+/// rejected. Managed L3VXLANs run `nolearning`, so every row in
+/// their FDB was programmed by someone — a non-marker row is another
+/// agent's state at a key our FDB replace / delete would clobber.
+///
+/// Call only for rows [`classify_adoption_l3vxlan_fdb`] rejected.
+#[must_use]
+pub(crate) fn classify_foreign_l3vxlan_fdb(
+    msg: &NeighbourMessage,
+    managed_l3vxlan: &HashMap<u32, IpVrfId>,
+) -> Option<(u32, MacAddress)> {
+    if msg.header.family != AddressFamily::Bridge {
+        return None;
+    }
+    let ifindex = msg.header.ifindex;
+    managed_l3vxlan.get(&ifindex)?;
+    let router_mac = msg.attributes.iter().find_map(|attr| match attr {
+        NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
+            let mut arr = [0u8; 6];
+            arr.copy_from_slice(bytes);
+            Some(MacAddress::new(arr))
+        }
+        _ => None,
+    })?;
+    Some((ifindex, router_mac))
 }
 
 /// Pure L3VXLAN-FDB classifier: keep `AF_BRIDGE` rows on a managed
@@ -296,6 +383,18 @@ fn state_has_permanent(state: NeighbourState) -> bool {
     match state {
         NeighbourState::Permanent => true,
         NeighbourState::Other(bits) => bits & NUD_PERMANENT != 0,
+        _ => false,
+    }
+}
+
+/// `true` when the `ndm_state` bitmask includes `NUD_NOARP` — the
+/// other "programmed, never aged" state bit (`ip neigh add ...
+/// nud noarp`, and half of the combined `NUD_NOARP | NUD_PERMANENT`
+/// FDB shape).
+fn state_has_noarp(state: NeighbourState) -> bool {
+    match state {
+        NeighbourState::Noarp => true,
+        NeighbourState::Other(bits) => bits & NUD_NOARP != 0,
         _ => false,
     }
 }
@@ -394,7 +493,14 @@ async fn dump_routes_one_family(
                     "L3 adoption: marker route missing gateway/oif/dst; skipping"
                 );
             }
-            RouteAdoptionVerdict::NotOurs => {}
+            RouteAdoptionVerdict::NotOurs => {
+                // LAN-283: surface foreign same-table route keys so
+                // the reconcile actor can fail closed on exact-key
+                // collisions instead of replacing / deleting them.
+                if let Some(key) = classify_foreign_route(&route_msg, tables) {
+                    out.foreign_routes.insert(key);
+                }
+            }
         }
     }
     Ok(())
@@ -414,6 +520,8 @@ async fn dump_neighbors_one_family(
     })? {
         if let Some((key, vrf_id)) = classify_adoption_neighbor(&msg, managed_l3vxlan) {
             out.neighbors.insert(key, vrf_id);
+        } else if let Some(key) = classify_foreign_neighbor(&msg, managed_l3vxlan) {
+            out.foreign_neighbors.insert(key);
         }
     }
     Ok(())
@@ -434,6 +542,8 @@ async fn dump_l3vxlan_fdb(
     {
         if let Some((key, row)) = classify_adoption_l3vxlan_fdb(&msg, managed_l3vxlan) {
             out.l3vxlan_fdb.insert(key, row);
+        } else if let Some(key) = classify_foreign_l3vxlan_fdb(&msg, managed_l3vxlan) {
+            out.foreign_fdb.insert(key);
         }
     }
     Ok(())
@@ -648,6 +758,155 @@ mod tests {
         assert_eq!(
             classify_adoption_route(&not_bgp, &tables(&[(201, 101)])),
             RouteAdoptionVerdict::NotOurs,
+        );
+    }
+
+    // ── LAN-283 foreign classifiers ──
+
+    #[test]
+    fn foreign_route_in_configured_table_is_keyed() {
+        let msg = route_msg(
+            201,
+            RouteProtocol::Static,
+            false,
+            Some(Ipv4Addr::new(203, 0, 113, 0)),
+            Some(Ipv4Addr::new(10, 0, 0, 99)),
+            Some(42),
+        );
+        assert_eq!(
+            classify_foreign_route(&msg, &tables(&[(201, 101)])),
+            Some((
+                vrf_id(101),
+                EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            )),
+        );
+    }
+
+    #[test]
+    fn marker_route_is_never_foreign() {
+        let msg = route_msg(
+            201,
+            RouteProtocol::Bgp,
+            true,
+            Some(Ipv4Addr::new(198, 51, 100, 0)),
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            Some(42),
+        );
+        assert_eq!(classify_foreign_route(&msg, &tables(&[(201, 101)])), None);
+    }
+
+    #[test]
+    fn foreign_route_outside_configured_tables_is_skipped() {
+        let msg = route_msg(
+            999,
+            RouteProtocol::Static,
+            false,
+            Some(Ipv4Addr::new(203, 0, 113, 0)),
+            Some(Ipv4Addr::new(10, 0, 0, 99)),
+            Some(42),
+        );
+        assert_eq!(classify_foreign_route(&msg, &tables(&[(201, 101)])), None);
+    }
+
+    #[test]
+    fn foreign_neighbor_permanent_without_our_markers_is_keyed() {
+        // Operator `ip neigh add ... nud permanent` — no extern_learn.
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            42,
+            NeighbourState::Permanent,
+            NeighbourFlags::empty(),
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        );
+        assert_eq!(
+            classify_foreign_neighbor(&msg, &managed(&[(42, 101)])),
+            Some((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))),
+        );
+    }
+
+    #[test]
+    fn foreign_neighbor_with_zebra_stamp_is_keyed() {
+        let msg = with_protocol(
+            neigh_msg(
+                AddressFamily::Inet,
+                42,
+                NeighbourState::Reachable,
+                NeighbourFlags::empty(),
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+            ),
+            RouteProtocol::Zebra,
+        );
+        assert_eq!(
+            classify_foreign_neighbor(&msg, &managed(&[(42, 101)])),
+            Some((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))),
+        );
+    }
+
+    #[test]
+    fn dynamic_kernel_neighbor_is_not_foreign() {
+        // A volatile kernel ARP/ND cache row must not block installs.
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            42,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        );
+        assert_eq!(
+            classify_foreign_neighbor(&msg, &managed(&[(42, 101)])),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_neighbor_on_unmanaged_ifindex_is_skipped() {
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            7,
+            NeighbourState::Permanent,
+            NeighbourFlags::empty(),
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        );
+        assert_eq!(
+            classify_foreign_neighbor(&msg, &managed(&[(42, 101)])),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_l3vxlan_fdb_row_is_keyed() {
+        // `bridge fdb add ... self permanent` without extern_learn.
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            42,
+            NeighbourState::Permanent,
+            NeighbourFlags::empty(),
+            Some(Ipv4Addr::new(10, 0, 0, 99)),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+        );
+        assert_eq!(
+            classify_foreign_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            Some((42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]))),
+        );
+    }
+
+    #[test]
+    fn foreign_l3vxlan_fdb_on_unmanaged_ifindex_is_skipped() {
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            7,
+            NeighbourState::Permanent,
+            NeighbourFlags::empty(),
+            Some(Ipv4Addr::new(10, 0, 0, 99)),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+        );
+        assert_eq!(
+            classify_foreign_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            None,
         );
     }
 

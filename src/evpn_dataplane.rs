@@ -551,6 +551,7 @@ where
                 record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
                 record_l3_adoption_metrics(&metrics, report.l3_adoption_counters);
                 record_single_active_metrics(&metrics, report.single_active_counters);
+                record_foreign_state_metrics(&metrics, report.foreign_state_counters);
                 record_remote_prefix_install_drop_metrics(
                     &metrics,
                     &mut last_ip_prefix_install_drop_counts,
@@ -632,6 +633,15 @@ fn record_single_active_metrics(
 ) {
     metrics.add_evpn_single_active_backup_swaps(counters.backup_swaps);
     metrics.add_evpn_single_active_teardowns(counters.teardowns);
+}
+
+fn record_foreign_state_metrics(
+    metrics: &BgpMetrics,
+    counters: rustbgpd_evpn::ForeignStateCounters,
+) {
+    metrics.add_evpn_foreign_replaces_blocked(counters.replaces_blocked);
+    metrics.add_evpn_foreign_deletes_skipped(counters.deletes_skipped);
+    metrics.add_evpn_foreign_owned_relinquished(counters.owned_relinquished);
 }
 
 fn record_l3_adoption_metrics(metrics: &BgpMetrics, counters: L3AdoptionCounters) {
