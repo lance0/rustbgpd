@@ -31,7 +31,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-<<<<<<< HEAD
 - **Commit-confirm recovery now fails safe through ambiguous transaction
   outcomes.** A confirmed config transaction whose apply failed after the
   point of no proof — the persistence acknowledgement was lost, post-persist
