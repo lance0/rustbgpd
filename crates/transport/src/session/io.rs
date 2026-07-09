@@ -124,7 +124,7 @@ impl PeerSession {
     /// session has no active TCP connection — same effect as today's
     /// "no stream" branch, just at a different layer.
     pub(super) fn enqueue_priority(&mut self, msg: &Message) -> Result<(), TransportError> {
-        let max_len = self.max_message_len();
+        let max_len = self.outbound_max_message_len();
         let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
         let Some(tx) = self.writer_priority_tx.as_ref() else {
             debug!(
@@ -145,7 +145,7 @@ impl PeerSession {
     /// rather than just logging and continuing. `WriterClosed` if there
     /// is no active TCP connection.
     pub(super) fn enqueue_bulk(&mut self, msg: &Message) -> Result<(), TransportError> {
-        let max_len = self.max_message_len();
+        let max_len = self.outbound_max_message_len();
         let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
         // Clone the sender so the caller's mutable borrow of self is
         // free for the saturation handler if try_send returns Full.

@@ -7586,3 +7586,103 @@ async fn send_hold_expiry_tears_down_without_notification() {
         &trailing[..n]
     );
 }
+/// RFC 8654 §2 directionality, inbound: OUR advertised Extended Message
+/// capability governs what we accept. The peer here did NOT advertise the
+/// capability (see `establish_test_session`'s OPEN), yet a >4096-byte
+/// UPDATE from it must be accepted because we always advertise it.
+#[tokio::test]
+async fn inbound_extended_message_accepted_from_peer_without_capability() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert!(
+        !session.negotiated.as_ref().unwrap().peer_extended_message,
+        "test premise: the peer did not advertise Extended Messages"
+    );
+    // ~1100 /24 prefixes at 4 bytes of NLRI each pushes the UPDATE past 4096.
+    let entries: Vec<Ipv4NlriEntry> = (0..1100_u32)
+        .map(|i| Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(
+                Ipv4Addr::new(
+                    10,
+                    u8::try_from(i / 256).unwrap(),
+                    u8::try_from(i % 256).unwrap(),
+                    0,
+                ),
+                24,
+            ),
+        })
+        .collect();
+    let update = rustbgpd_wire::UpdateMessage::build(
+        &entries,
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    let encoded = rustbgpd_wire::encode_message_with_limit(
+        &Message::Update(update),
+        rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN,
+    )
+    .unwrap();
+    assert!(
+        encoded.len() > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+        "test premise: the UPDATE exceeds 4096 bytes (got {})",
+        encoded.len()
+    );
+    session.read_buf.buf.extend_from_slice(&encoded);
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "an extended inbound message must not tear the session down"
+    );
+    // Establishment emits its own RibUpdate first; skip to the routes.
+    loop {
+        if let RibUpdate::RoutesReceived { announced, .. } =
+            rib_rx.recv().await.expect("routes delivered")
+        {
+            assert_eq!(announced.len(), 1100);
+            break;
+        }
+    }
+}
+/// RFC 8654 §2 directionality, outbound: the PEER's advertised Extended
+/// Message capability governs what we may send. Without it, an oversized
+/// message must fail to encode; with it, the extended limit applies.
+#[tokio::test]
+async fn outbound_extended_message_gated_on_peer_capability() {
+    let mut session = make_test_session(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    assert_eq!(
+        session.outbound_max_message_len(),
+        rustbgpd_wire::MAX_MESSAGE_LEN
+    );
+    let big = Message::Notification(rustbgpd_wire::NotificationMessage::new(
+        rustbgpd_wire::NotificationCode::Cease,
+        2,
+        Bytes::from(vec![0_u8; 5000]),
+    ));
+    assert!(
+        session.enqueue_priority(&big).is_err(),
+        "oversized NOTIFICATION must not encode toward a peer without the capability"
+    );
+    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    assert_eq!(
+        session.outbound_max_message_len(),
+        rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN
+    );
+    assert!(
+        session.enqueue_priority(&big).is_ok(),
+        "the peer advertised Extended Messages — the extended limit applies"
+    );
+}

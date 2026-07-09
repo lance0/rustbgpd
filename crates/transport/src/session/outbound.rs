@@ -928,7 +928,7 @@ impl PeerSession {
                 .iter()
                 .map(|key| evpn_route_from_key(*key))
                 .collect();
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             if !self.send_evpn_unreach_chunked(&routes, four_octet_as, max_len) {
                 return;
             }
@@ -959,7 +959,7 @@ impl PeerSession {
                     _ => {}
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             if !base_routes.is_empty()
                 && !self.send_bgpls_unreach_chunked(
                     Safi::BgpLs,
@@ -1007,7 +1007,7 @@ impl PeerSession {
                     Afi::L2Vpn | Afi::BgpLs => {}
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for (afi, routes, add_path) in [
                 (Afi::Ipv4, v4_routes, add_path_vpnv4_send),
                 (Afi::Ipv6, v6_routes, add_path_vpnv6_send),
@@ -1051,7 +1051,7 @@ impl PeerSession {
                     Afi::L2Vpn | Afi::BgpLs => {}
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for (afi, routes, add_path) in [
                 (Afi::Ipv4, v4_routes, add_path_labeled_v4_send),
                 (Afi::Ipv6, v6_routes, add_path_labeled_v6_send),
@@ -1079,7 +1079,7 @@ impl PeerSession {
         {
             let routes: Vec<rustbgpd_wire::RtcNlri> =
                 update.rtc_withdraw.iter().map(|key| key.nlri).collect();
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             if !self.send_rtc_unreach_chunked(&routes, four_octet_as, max_len) {
                 return;
             }
@@ -1107,7 +1107,7 @@ impl PeerSession {
                     evpn_groups.push((nh, attrs, vec![evpn_route.route.clone()]));
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for (next_hop, attrs, routes) in evpn_groups {
                 if !self.send_evpn_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len)
                 {
@@ -1148,7 +1148,7 @@ impl PeerSession {
                     ));
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for (family, next_hop, attrs, routes) in bgpls_groups {
                 if !self.send_bgpls_reach_chunked(
                     family.to_afi_safi().1,
@@ -1205,7 +1205,7 @@ impl PeerSession {
                     vpn_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in vpn_groups {
                 let add_path = match afi {
                     Afi::Ipv4 => add_path_vpnv4_send,
@@ -1268,7 +1268,7 @@ impl PeerSession {
                     labeled_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in labeled_groups {
                 let add_path = match afi {
                     Afi::Ipv4 => add_path_labeled_v4_send,
@@ -1316,7 +1316,7 @@ impl PeerSession {
                     rtc_groups.push((nh, attrs, vec![rtc_route.nlri]));
                 }
             }
-            let max_len = usize::from(self.max_message_len());
+            let max_len = usize::from(self.outbound_max_message_len());
             for (next_hop, attrs, routes) in rtc_groups {
                 if !self.send_rtc_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len) {
                     return;

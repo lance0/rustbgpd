@@ -19,7 +19,14 @@ jobs:
       - name: Fuzz wire decoders (2 minutes per target)
         run: |
           cd crates/wire
-          for t in $(cargo +nightly fuzz list); do
+          # `$(cargo fuzz list)` inline would let an errored or empty
+          # enumeration silently run zero targets — fail loudly instead.
+          targets=$(cargo +nightly fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          for t in $targets; do
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
@@ -28,7 +35,14 @@ jobs:
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |
           cd crates/policy
-          for t in $(cargo +nightly fuzz list); do
+          # `$(cargo fuzz list)` inline would let an errored or empty
+          # enumeration silently run zero targets — fail loudly instead.
+          targets=$(cargo +nightly fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          for t in $targets; do
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"

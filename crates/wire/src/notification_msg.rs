@@ -63,15 +63,32 @@ impl NotificationMessage {
         buf.put_slice(&self.data);
     }
 
-    /// Encode a complete NOTIFICATION message (header + body).
+    /// Encode a complete NOTIFICATION message (header + body) using the
+    /// standard 4096-byte limit.
     ///
     /// # Errors
     ///
     /// Returns [`EncodeError::MessageTooLong`] if the encoded message exceeds
     /// the maximum BGP message size.
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
+        self.encode_with_limit(buf, crate::constants::MAX_MESSAGE_LEN)
+    }
+
+    /// Encode with a custom maximum message length. RFC 8654 §3: Extended
+    /// Messages apply to every message type except OPEN and KEEPALIVE, so a
+    /// NOTIFICATION may use the extended 65535-byte limit when negotiated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::MessageTooLong`] if the encoded message exceeds
+    /// `max_message_len`.
+    pub fn encode_with_limit(
+        &self,
+        buf: &mut impl BufMut,
+        max_message_len: u16,
+    ) -> Result<(), EncodeError> {
         let total_len = HEADER_LEN + 2 + self.data.len();
-        if total_len > usize::from(crate::constants::MAX_MESSAGE_LEN) {
+        if total_len > usize::from(max_message_len) {
             return Err(EncodeError::MessageTooLong { size: total_len });
         }
 

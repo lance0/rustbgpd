@@ -379,12 +379,14 @@ impl PeerSession {
                     if unnumbered_ipv4_without_enhe {
                         sendable_families.retain(|family| *family != (Afi::Ipv4, Safi::Unicast));
                     }
-                    // If Extended Messages was negotiated, increase the
-                    // framing buffer limit from 4096 to 65535 (RFC 8654).
-                    if neg.peer_extended_message {
-                        self.read_buf
-                            .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
-                    }
+                    // RFC 8654 §2: OUR advertised Extended Message capability
+                    // governs what we accept INBOUND; the peer's capability
+                    // (neg.peer_extended_message) only governs what we may
+                    // SEND (see outbound_max_message_len). FsmConfig::
+                    // capabilities() always advertises Extended Message, so
+                    // raise the framing limit to 65535 unconditionally.
+                    self.read_buf
+                        .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
 
                     // Compute the families for which we may send Add-Path.
                     // The wire layer handles Add-Path per family; the RIB
