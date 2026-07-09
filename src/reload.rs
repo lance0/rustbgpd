@@ -803,11 +803,6 @@ pub(crate) async fn reload_config(
     // materially changed ones, so an rpol-content-only reload is fully
     // applied by this single step.
     if policy_diff.rpol_changed {
-        working_config
-            .policy
-            .rpol_files
-            .clone_from(&new_config.policy.rpol_files);
-        working_config.policy.rpol = new_config.policy.rpol.clone();
         let (ack_tx, ack_rx) = oneshot::channel();
         let send_failed = peer_mgr_tx
             .send(PeerManagerCommand::SyncRpolPolicies {
@@ -827,7 +822,24 @@ pub(crate) async fn reload_config(
             }
         };
         match result {
-            Ok(()) => info!("reload: rpol policy registry synced"),
+            // LAN-284: adopt the candidate registry into the runtime
+            // snapshot ONLY after the peer manager committed it. The
+            // manager's own sync is two-phase (a rejected sync leaves
+            // its `current_config` and every live chain on the old
+            // registry), so absorbing the candidate before the ack
+            // would ship the REJECTED registry to the runtime snapshot
+            // via halt_partial → ReplaceConfigSnapshot — new sessions
+            // would then resolve against a registry no live session
+            // runs. On failure the candidate survives only as on-disk
+            // `.rpol` intent; the next successful reload adopts it.
+            Ok(()) => {
+                working_config
+                    .policy
+                    .rpol_files
+                    .clone_from(&new_config.policy.rpol_files);
+                working_config.policy.rpol = new_config.policy.rpol.clone();
+                info!("reload: rpol policy registry synced");
+            }
             Err(error) => {
                 return halt_partial(
                     working_config,
@@ -3910,6 +3922,138 @@ hold_time = 90
         };
         let result = chain.evaluate(&ctx);
         assert_eq!(result.modifications.set_local_pref, Some(250));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&rpol_path).ok();
+    }
+
+    /// LAN-284: a REJECTED rpol sync must not publish the candidate
+    /// registry to the runtime snapshot. Sessions created after the
+    /// failed reload resolve chains from that snapshot, so it has to
+    /// keep evaluating the OLD policy decision; the candidate survives
+    /// only as on-disk intent and a subsequent successful reload adopts
+    /// it. Asserted at decision level (evaluated local-pref), not
+    /// registry-pointer level.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario drives two full reload rounds (rejected, then adopted) end to end"
+    )]
+    #[tokio::test]
+    async fn reload_rpol_sync_failure_keeps_old_registry_until_a_successful_retry() {
+        let rpol_path = unique_temp_path("reload-rpol-fail-file");
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 150; accept } }",
+        )
+        .unwrap();
+        let toml = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\nimport_chain = [\"edge-in\"]\n",
+            baseline_toml(),
+            rpol_path.to_str().unwrap(),
+        );
+        let path = unique_temp_path("reload-rpol-fail-config");
+        std::fs::write(&path, &toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        // Operator edits ONLY the .rpol file; the TOML is unchanged.
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 250; accept } }",
+        )
+        .unwrap();
+
+        let ctx = rustbgpd_policy::RouteContext {
+            prefix: None,
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str: "",
+            as_path_len: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        };
+
+        // Reload 1: the peer manager REJECTS the sync (its own two-phase
+        // apply rolled back, so live sessions keep the old chains).
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock = tokio::spawn(async move {
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
+                    let _ = reply.send(Err(CatalogMutationError::internal(
+                        "mid-apply chain resolution failed",
+                    )));
+                }
+            }
+        });
+        let rejected = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("halted reload still returns the honest partial snapshot");
+        drop(peer_mgr_tx);
+        mock.await.unwrap();
+
+        // The runtime snapshot — what a session created after the failed
+        // reload resolves against — still evaluates the OLD decision.
+        let chain = rejected
+            .import_chain()
+            .expect("chain resolves")
+            .expect("chain configured");
+        assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(150));
+
+        // Reload 2 (operator retries; peer manager now accepts): the
+        // diff re-detects the on-disk candidate against the reverted
+        // runtime snapshot and adopts it for everyone.
+        let current: Config = (*rejected).clone();
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock = tokio::spawn(async move {
+            let mut synced = 0_u32;
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
+                    synced += 1;
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            synced
+        });
+        let adopted = reload_config(
+            path.to_str().unwrap(),
+            &current,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("retry reload completes");
+        drop(peer_mgr_tx);
+        assert_eq!(
+            mock.await.unwrap(),
+            1,
+            "retry must re-detect the rpol change and sync it"
+        );
+        let chain = adopted
+            .import_chain()
+            .expect("chain resolves")
+            .expect("chain configured");
+        assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(250));
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&rpol_path).ok();
