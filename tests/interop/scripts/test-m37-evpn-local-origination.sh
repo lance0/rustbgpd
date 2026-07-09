@@ -46,6 +46,12 @@ frr_vtysh() {
     docker exec "$CONSUMER" vtysh -c "$1" 2>/dev/null || true
 }
 
+# Strict variant: propagates docker/vtysh failure so absence checks can
+# tell "query errored" apart from "table validly empty".
+frr_vtysh_strict() {
+    docker exec "$CONSUMER" vtysh -c "$1" 2>/dev/null
+}
+
 # Does FRR list a Type 2 macip route for the given MAC originating
 # from rustbgpd?
 #
@@ -71,6 +77,22 @@ frr_has_type2() {
 frr_has_type3() {
     frr_vtysh "show bgp l2vpn evpn route type multicast" \
         | grep -qF "$RUSTBGPD_IP"
+}
+
+# Absence checks succeed only when the FRR query itself succeeded AND the
+# route is missing. An errored/unreachable query is never evidence of
+# absence — that would let the withdraw proofs pass vacuously.
+frr_type2_absent() {
+    local mac=${1:?}
+    local out
+    out=$(frr_vtysh_strict "show bgp l2vpn evpn route type macip") || return 1
+    ! echo "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
+}
+
+frr_type3_absent() {
+    local out
+    out=$(frr_vtysh_strict "show bgp l2vpn evpn route type multicast") || return 1
+    ! echo "$out" | grep -qF "$RUSTBGPD_IP"
 }
 
 # Inject a static MAC on the rustbgpd container's non-VXLAN bridge
@@ -139,11 +161,11 @@ echo "Removing local MAC $TEST_MAC..."
 rb_fdb_del "$TEST_MAC"
 echo "Waiting up to 15s for Type 2 withdraw..."
 for _ in $(seq 1 15); do
-    if ! frr_has_type2 "$TEST_MAC"; then break; fi
+    if frr_type2_absent "$TEST_MAC"; then break; fi
     sleep 1
 done
 assert "Type 2 withdraw on bridge fdb del" \
-    '! frr_has_type2 "$TEST_MAC"'
+    'frr_type2_absent "$TEST_MAC"'
 
 # 4. Stop rustbgpd; expect IMET to drain within ~15s (graceful
 #    shutdown emits the Withdraw).
@@ -151,11 +173,11 @@ echo "Stopping rustbgpd to validate IMET drain..."
 docker stop -t 5 "$RUSTBGPD" >/dev/null
 echo "Waiting up to 15s for Type 3 IMET withdraw..."
 for _ in $(seq 1 15); do
-    if ! frr_has_type3; then break; fi
+    if frr_type3_absent; then break; fi
     sleep 1
 done
 assert "Type 3 IMET withdraw on shutdown drain" \
-    '! frr_has_type3'
+    'frr_type3_absent'
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -68,11 +68,26 @@ format_mac() {
         $((n & 255))
 }
 
+frr_macip_table() {
+    # Propagates docker/vtysh failure so callers can tell "query errored"
+    # apart from "table validly empty".
+    docker exec "$CONSUMER" vtysh -c "show bgp l2vpn evpn route type macip" 2>/dev/null
+}
+
 frr_has_type2() {
     local mac=${1:?}
-    docker exec "$CONSUMER" vtysh -c "show bgp l2vpn evpn route type macip" 2>/dev/null \
+    frr_macip_table \
         | grep -A1 -iF "$mac" \
         | grep -qF "$RUSTBGPD_IP"
+}
+
+frr_type2_absent() {
+    # Succeeds only when the FRR query itself succeeded AND the route is
+    # missing. An errored/empty query is never evidence of absence.
+    local mac=${1:?}
+    local out
+    out=$(frr_macip_table) || return 1
+    ! printf '%s\n' "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
 }
 
 rb_fdb_replace() {
@@ -101,7 +116,7 @@ sample_check_absent() {
     local sample
     sample=$(format_mac 1)
     for _ in $(seq 1 15); do
-        if ! frr_has_type2 "$sample"; then
+        if frr_type2_absent "$sample"; then
             return 0
         fi
         sleep 1

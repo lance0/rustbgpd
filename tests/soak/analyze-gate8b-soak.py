@@ -117,20 +117,33 @@ def main():
     pe2_peak = peak(enumerate(rows), "pe2_rss_mb")
 
     # DF transition counter monotonicity. A reset implies daemon
-    # restart inside the run window — that's a fail.
-    def is_monotone(key):
+    # restart inside the run window — that's a fail. The claim is only
+    # meaningful over actual numeric samples: a run whose counter column
+    # is entirely missing/non-numeric (NaN, "unreachable", empty) proves
+    # nothing and must fail, not pass vacuously.
+    def monotone_gate(key):
         prev = None
+        numeric = 0
         for r in rows:
             v = safe_float(r[key])
             if v is None:
                 continue
+            numeric += 1
             if prev is not None and v < prev:
-                return False
+                return False, f"counter reset detected in {key} (daemon restart)"
             prev = v
-        return True
+        if numeric < 2:
+            return False, (
+                f"only {numeric} numeric sample(s) in {key} — samples "
+                "missing/non-numeric, cannot claim monotonicity"
+            )
+        return True, (
+            f"monotone over {numeric} numeric samples "
+            "(no counter reset = no daemon restart)"
+        )
 
-    pe1_mono = is_monotone("pe1_df_changes")
-    pe2_mono = is_monotone("pe2_df_changes")
+    pe1_mono, pe1_mono_detail = monotone_gate("pe1_df_changes")
+    pe2_mono, pe2_mono_detail = monotone_gate("pe2_df_changes")
     pe1_total_changes = next(
         (safe_float(r["pe1_df_changes"]) for r in reversed(rows)
          if safe_float(r["pe1_df_changes"]) is not None),
@@ -163,10 +176,8 @@ def main():
     gate("pe2_peak_memory",
          not math.isnan(pe2_peak) and pe2_peak < args.mem_peak_fail,
          f"{pe2_peak:.1f} MB vs cap {args.mem_peak_fail}")
-    gate("pe1_df_changes_monotone", pe1_mono,
-         "no counter reset = no daemon restart")
-    gate("pe2_df_changes_monotone", pe2_mono,
-         "no counter reset = no daemon restart")
+    gate("pe1_df_changes_monotone", pe1_mono, pe1_mono_detail)
+    gate("pe2_df_changes_monotone", pe2_mono, pe2_mono_detail)
     gate("ran_through_at_least_one_full_flip_cycle",
          pe2_running_samples > 0 and pe2_stopped_samples > 0,
          f"pe2 running={pe2_running_samples} stopped={pe2_stopped_samples}")

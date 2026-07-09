@@ -150,9 +150,31 @@ def main() -> int:
 
     try:
         with open(args.csv, newline="") as fh:
-            rows = list(csv.DictReader(fh))
+            reader = csv.DictReader(fh)
+            fieldnames = reader.fieldnames or []
+            rows = list(reader)
     except FileNotFoundError:
         print(f"ERROR: CSV not found: {args.csv}", file=sys.stderr)
+        return 2
+
+    # Every column the gates read must be present in the header. A missing
+    # column would otherwise read as None everywhere and let the gates pass
+    # vacuously (deltas of 0, zero gRPC failures, no restart).
+    expected_columns = (
+        "uptime_sec",
+        "mem_mb",
+        "grpc_ok",
+        "session_flaps_total",
+        "outbound_drops_total",
+        "msgs_sent_total",
+        "msgs_recv_total",
+    )
+    missing = [c for c in expected_columns if c not in fieldnames]
+    if missing:
+        print(
+            f"ERROR: CSV is missing expected column(s): {', '.join(missing)}",
+            file=sys.stderr,
+        )
         return 2
 
     if not rows:
