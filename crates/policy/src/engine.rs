@@ -246,6 +246,103 @@ pub enum NextHopAction {
     Specific(IpAddr),
 }
 
+/// Computed `AS_PATH` prepend operand (LAN-296): `.rpol`
+/// `prepend as self|peer|origin <count>`.
+///
+/// # Decision note — direction-aware computed prepend operands
+///
+/// **Operand definitions.** `self` is the local speaker's ASN — the
+/// daemon's configured `[global] asn`, carried on the compiled chain
+/// ([`CompiledChain::local_asn`](crate::ir::CompiledChain)) because it
+/// is attach-time constant, not per-route data (rustbgpd has no
+/// per-session local-as override today; if one ever lands, `self`
+/// moves to the per-evaluation context and follows the session's
+/// effective local AS). `peer` is the evaluation peer's ASN
+/// (`RouteContext::peer_asn`). `origin` is the route's origin AS —
+/// the last ASN of the rightmost non-empty `AS_SEQUENCE`
+/// (`AsPath::origin_asn`, already carried as
+/// `RouteContext::origin_asn` since LAN-249; never recomputed here).
+///
+/// **Direction legality.** `self` and `origin` are legal on import
+/// and export. `peer` is **import-only**: on export it would prepend
+/// the *receiving* peer's own ASN, which the receiver rejects as an
+/// own-AS loop (RFC 4271 §9.1.2) unless it runs allowas-in — there is
+/// no documented legitimate use. This mirrors FRR, whose
+/// `set as-path prepend last-as N` (prepend the neighbor's AS) is the
+/// inbound traffic-engineering idiom; BIRD's `bgp_path.prepend()`
+/// takes only explicit ASN values and has no peer-derived operand at
+/// all. Enforcement is at **attachment time** (config chain resolve —
+/// `resolve_chain` in `src/config/parse.rs` — which every install
+/// path routes through: initial load, SIGHUP reload, rpol overlay,
+/// config transactions), via
+/// [`CompiledChain::peer_prepend_action`](crate::ir::CompiledChain):
+/// a chain using `prepend as peer` is rejected when bound as an
+/// export chain, never discovered per-route at runtime.
+///
+/// **Update-group eligibility.** `PeerAs` reads peer identity, so it
+/// counts toward
+/// [`CompiledChain::requires_peer_context`](crate::ir::CompiledChain::requires_peer_context)
+/// (defense in depth behind the attach-time rejection); `LocalAs` and
+/// `OriginAs` are route/chain-context-only and never disqualify a
+/// peer from update-group sharing.
+///
+/// **Failure semantics.** A computed operand resolves during
+/// evaluation, when the owning term's action executes. An
+/// unresolvable operand — absent origin (empty or `AS_SET`-only
+/// path), unknown peer ASN, a chain without `local_asn`, or a zero
+/// context value (AS 0 is prohibited on the wire, RFC 7607) — fails
+/// the route **closed**: the chain evaluates to `Deny`, staged
+/// modifications are discarded, and ASN 0 is never prepended. This
+/// follows ADR-0103 Decision 4's uniform-Deny error disposition; when
+/// the LAN-299 evaluation-error rails land (error counters, trace
+/// error events), this failure migrates onto them. Explain traces
+/// render the failing operand and reason in the deciding term's line.
+///
+/// **Source compatibility.** The fixed-AS form
+/// (`prepend as 65001 3`, including parameter references) is
+/// untouched and still lowers to the literal
+/// [`RouteModifications::as_path_prepend`]; a policy parameter named
+/// `origin` keeps its parameter meaning (the operand reading applies
+/// only where no such parameter is in scope).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrependAs {
+    /// `prepend as self` — the local speaker's ASN (from the compiled
+    /// chain's attach-time `local_asn`).
+    LocalAs,
+    /// `prepend as peer` — the evaluation peer's ASN. Import-only;
+    /// peer-dependent for update-group fingerprinting.
+    PeerAs,
+    /// `prepend as origin` — the route's origin AS
+    /// (`RouteContext::origin_asn`).
+    OriginAs,
+}
+
+impl PrependAs {
+    /// The `.rpol` source spelling (also the explain rendering).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrependAs::LocalAs => "self",
+            PrependAs::PeerAs => "peer",
+            PrependAs::OriginAs => "origin",
+        }
+    }
+
+    /// Resolve the operand to a concrete ASN, or `None` when the
+    /// needed context value is unknown (the fail-closed case). A zero
+    /// value counts as unknown — ASN 0 must never reach the wire
+    /// (RFC 7607).
+    #[must_use]
+    pub fn resolve(self, local_asn: Option<u32>, ctx: &RouteContext<'_>) -> Option<u32> {
+        match self {
+            PrependAs::LocalAs => local_asn,
+            PrependAs::PeerAs => ctx.peer_asn,
+            PrependAs::OriginAs => ctx.origin_asn,
+        }
+        .filter(|&asn| asn != 0)
+    }
+}
+
 /// Route attribute modifications to apply after a policy match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteModifications {
@@ -269,6 +366,18 @@ pub struct RouteModifications {
     pub large_communities_remove: Vec<LargeCommunity>,
     /// `(ASN, count)` — prepend `count` copies of `ASN` to the `AS_PATH`.
     pub as_path_prepend: Option<(u32, u8)>,
+    /// Computed prepend operand (LAN-296, `.rpol`
+    /// `prepend as self|peer|origin <count>`) — see [`PrependAs`] for
+    /// the full decision note. Shares one logical "prepend" slot with
+    /// [`as_path_prepend`](Self::as_path_prepend): at most one of the
+    /// pair is `Some` in frontend-produced modifications, and merges
+    /// treat them as a single scalar (a later prepend of either form
+    /// replaces an earlier one of either form). The evaluator resolves
+    /// this into a concrete `as_path_prepend` at term execution (or
+    /// fails the route closed), so **evaluation results and everything
+    /// downstream of them — [`apply_modifications`], the export memo,
+    /// API explain surfaces — only ever see the literal field.**
+    pub as_path_prepend_computed: Option<(PrependAs, u8)>,
 }
 
 impl RouteModifications {
@@ -279,6 +388,7 @@ impl RouteModifications {
             && self.set_med.is_none()
             && self.set_next_hop.is_none()
             && self.as_path_prepend.is_none()
+            && self.as_path_prepend_computed.is_none()
             && self.communities_add.is_empty()
             && self.communities_remove.is_empty()
             && self.extended_communities_add.is_empty()
@@ -304,8 +414,13 @@ impl RouteModifications {
         if other.set_next_hop.is_some() {
             self.set_next_hop = other.set_next_hop;
         }
-        if other.as_path_prepend.is_some() {
+        // Literal and computed prepends share one logical slot: a
+        // later prepend of either form replaces an earlier one of
+        // either form (scalar last-writer-wins, like the other
+        // scalars).
+        if other.as_path_prepend.is_some() || other.as_path_prepend_computed.is_some() {
             self.as_path_prepend = other.as_path_prepend;
+            self.as_path_prepend_computed = other.as_path_prepend_computed;
         }
         merge_exact_list(
             &mut self.communities_add,
@@ -1376,6 +1491,14 @@ pub fn apply_modifications(
     );
 
     // 6. AS_PATH prepend
+    // Computed operands (LAN-296) are resolved into the literal field
+    // by the evaluator (or fail the route closed) before modifications
+    // ever reach an apply site; there is no context here to resolve
+    // one against, and silently skipping it would fail open.
+    debug_assert!(
+        mods.as_path_prepend_computed.is_none(),
+        "computed prepend operand reached apply_modifications unresolved"
+    );
     if let Some((asn, count)) = mods.as_path_prepend {
         apply_as_path_prepend(attrs, asn, count);
     }

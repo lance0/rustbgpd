@@ -241,14 +241,22 @@ impl CompiledChain {
             let mut continued: Option<RouteModifications> = None;
             // `Some(None)` = permit with no deciding-term mods;
             // `None` after the loop = fell through to default_action.
-            let mut permit_mods: Option<Option<&RouteModifications>> = None;
+            let mut permit_mods: Option<Option<RouteModifications>> = None;
             let mut denied = false;
             for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
                 if self.eval_expr(&term.guard, ctx) {
                     *hit += 1;
                     match &term.action {
                         TermAction::Permit(mods) => {
-                            permit_mods = Some(Some(mods));
+                            match self.resolve_computed_prepend(mods, ctx) {
+                                Ok(resolved) => {
+                                    permit_mods =
+                                        Some(Some(resolved.unwrap_or_else(|| mods.clone())));
+                                }
+                                // Unresolvable computed prepend operand:
+                                // fail closed (same rule as the live walk).
+                                Err(()) => denied = true,
+                            }
                             break;
                         }
                         TermAction::Deny => {
@@ -256,9 +264,14 @@ impl CompiledChain {
                             break;
                         }
                         TermAction::Continue(mods) => {
-                            continued
-                                .get_or_insert_with(RouteModifications::default)
-                                .merge_from(mods.clone());
+                            if let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) {
+                                continued
+                                    .get_or_insert_with(RouteModifications::default)
+                                    .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                            } else {
+                                denied = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -274,7 +287,7 @@ impl CompiledChain {
             }
             let mut merged = continued.unwrap_or_default();
             if let Some(Some(mods)) = permit_mods {
-                merged.merge_from(mods.clone());
+                merged.merge_from(mods);
             }
             if !merged.is_empty() {
                 accumulated.merge_from(merged);
@@ -313,19 +326,32 @@ impl CompiledChain {
                 }
                 match &term.action {
                     TermAction::Permit(mods) => {
-                        return match continued {
-                            Some(mut acc) => {
-                                acc.merge_from(mods.clone());
+                        // LAN-296: fold a computed prepend operand into
+                        // the literal field before the modifications
+                        // leave the evaluator; an unresolvable operand
+                        // fails the route closed.
+                        let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) else {
+                            return PolicyDecision::Deny;
+                        };
+                        return match (continued, resolved) {
+                            (Some(mut acc), resolved) => {
+                                acc.merge_from(resolved.unwrap_or_else(|| mods.clone()));
                                 PolicyDecision::PermitOwned(acc)
                             }
-                            None => PolicyDecision::Permit(Some(mods)),
+                            (None, Some(owned)) => PolicyDecision::PermitOwned(owned),
+                            // The hot path: no Continue terms, nothing
+                            // computed — borrow as before.
+                            (None, None) => PolicyDecision::Permit(Some(mods)),
                         };
                     }
                     TermAction::Deny => return PolicyDecision::Deny,
                     TermAction::Continue(mods) => {
+                        let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) else {
+                            return PolicyDecision::Deny;
+                        };
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_from(mods.clone());
+                            .merge_from(resolved.unwrap_or_else(|| mods.clone()));
                     }
                 }
             }
@@ -335,6 +361,36 @@ impl CompiledChain {
             (PolicyAction::Permit, None) => PolicyDecision::Permit(None),
             (PolicyAction::Deny, _) => PolicyDecision::Deny,
         }
+    }
+
+    /// Resolve a matched term's computed prepend operand (LAN-296)
+    /// against the evaluation context, at action-execution time.
+    ///
+    /// - `Ok(None)` — no computed operand (the hot path; no clone).
+    /// - `Ok(Some(owned))` — a clone with the operand folded into the
+    ///   literal `as_path_prepend`, so downstream consumers (merge,
+    ///   apply, memoization, API surfaces) only ever see concrete ASNs.
+    /// - `Err(())` — the operand's context value is unknown (absent
+    ///   origin / unknown peer ASN / chain without `local_asn`, or a
+    ///   zero value): the caller fails the route **closed** (uniform
+    ///   Deny, the ADR-0103 Decision 4 disposition; this migrates onto
+    ///   the LAN-299 evaluation-error rails — counter + trace error
+    ///   events — when they land). ASN 0 is never prepended.
+    pub(crate) fn resolve_computed_prepend(
+        &self,
+        mods: &RouteModifications,
+        ctx: &RouteContext<'_>,
+    ) -> Result<Option<RouteModifications>, ()> {
+        let Some((operand, count)) = mods.as_path_prepend_computed else {
+            return Ok(None);
+        };
+        let Some(asn) = operand.resolve(self.local_asn, ctx) else {
+            return Err(());
+        };
+        let mut resolved = mods.clone();
+        resolved.as_path_prepend = Some((asn, count));
+        resolved.as_path_prepend_computed = None;
+        Ok(Some(resolved))
     }
 
     /// Evaluate a single guard against this chain's set tables — the

@@ -39,8 +39,14 @@ use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain {
     let mut sets = ChainSets::default();
     let mut policies = Vec::with_capacity(chain.policies.len());
+    // `prepend as self` operand value (LAN-296): every rpol member of
+    // one chain is stamped by the same config resolve with the same
+    // `[global] asn`, so propagating the first `Some` into the spliced
+    // chain is exact.
+    let mut local_asn = None;
     for named in &chain.policies {
         if let Some(rpol) = named.rpol.as_deref() {
+            local_asn = local_asn.or(rpol.local_asn);
             for policy in &rpol.policies {
                 let mut spliced = splice_policy(policy, rpol, &mut sets);
                 // Attribute to the configured chain-reference name
@@ -72,6 +78,7 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
         prefix_set_names: sets.prefix_set_names,
         community_set_names: sets.community_set_names,
         asn_set_names: sets.asn_set_names,
+        local_asn,
     }
 }
 

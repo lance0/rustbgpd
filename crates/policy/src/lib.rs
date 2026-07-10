@@ -20,8 +20,8 @@ mod eval;
 pub use engine::explain::{ChainStatementTrace, StatementAttribution, explain_chain_statements};
 pub use engine::{
     AsPathRegex, CommunityMatch, NamedPolicy, NeighborSetMatch, NextHopAction, Policy,
-    PolicyAction, PolicyChain, PolicyEvaluation, PolicyResult, PolicyStatement, RouteContext,
-    RouteFamily, RouteModifications, RouteType, TermHitRow, apply_modifications, evaluate_chain,
-    evaluate_chain_with_attribution, evaluate_policy, parse_community_match,
+    PolicyAction, PolicyChain, PolicyEvaluation, PolicyResult, PolicyStatement, PrependAs,
+    RouteContext, RouteFamily, RouteModifications, RouteType, TermHitRow, apply_modifications,
+    evaluate_chain, evaluate_chain_with_attribution, evaluate_policy, parse_community_match,
 };
 pub use eval::PolicyHitCounters;

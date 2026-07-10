@@ -159,7 +159,7 @@ pub fn explain_chain_statements(
                 // clauses, so a denying statement must not claim
                 // modifications in the trace either.
                 let modifications = if entry.action == PolicyAction::Permit {
-                    render_modifications(&entry.modifications, ctx)
+                    render_modifications(&entry.modifications, ctx, None)
                 } else {
                     Vec::new()
                 };
@@ -325,7 +325,11 @@ fn render_matched_conditions(entry: &PolicyStatement, ctx: &RouteContext<'_>) ->
 /// values use the same implicit defaults the match engine uses
 /// (`LOCAL_PREF` 100 / `MED` 0, RFC 4271) so the rendered transition is
 /// consistent with what `local_pref >= N` matching saw.
-fn render_modifications(mods: &RouteModifications, ctx: &RouteContext<'_>) -> Vec<String> {
+fn render_modifications(
+    mods: &RouteModifications,
+    ctx: &RouteContext<'_>,
+    tables: Option<&CompiledChain>,
+) -> Vec<String> {
     let mut out = Vec::new();
 
     if let Some(lp) = mods.set_local_pref {
@@ -368,6 +372,24 @@ fn render_modifications(mods: &RouteModifications, ctx: &RouteContext<'_>) -> Ve
     if let Some((asn, count)) = mods.as_path_prepend {
         out.push(format!("as_path prepend {asn} x{count}"));
     }
+    // LAN-296: a computed operand renders with its source spelling plus
+    // the value it resolves to for this route (`tables` carries the
+    // chain's attach-time `local_asn` for `self`). The unresolvable
+    // case never reaches here — the trace walk denies at the failing
+    // term first — but renders honestly if it ever did.
+    if let Some((operand, count)) = mods.as_path_prepend_computed {
+        let resolved = tables.and_then(|chain| operand.resolve(chain.local_asn, ctx));
+        match resolved {
+            Some(asn) => out.push(format!(
+                "as_path prepend {}={asn} x{count}",
+                operand.as_str()
+            )),
+            None => out.push(format!(
+                "as_path prepend {} x{count} (unresolvable)",
+                operand.as_str()
+            )),
+        }
+    }
     out
 }
 
@@ -391,6 +413,11 @@ fn trace_rpol_policy(
     let mut term_traces = Vec::new();
     let mut continued: Option<RouteModifications> = None;
     let mut decided: Option<(usize, &Term)> = None;
+    // LAN-296: set when a matched term's computed prepend operand
+    // cannot resolve — the live evaluator fails the route closed at
+    // that term, and the trace must agree (pinned by the agreement
+    // matrix in `statement_trace.rs`).
+    let mut prepend_failed = false;
     for (index, term) in policy.terms.iter().enumerate() {
         let matched = tables.guard_matches(&term.guard, ctx);
         term_traces.push(format!(
@@ -402,6 +429,29 @@ fn trace_rpol_policy(
         ));
         if !matched {
             continue;
+        }
+        // Mirror the live walk's action-execution resolution: an
+        // unresolvable computed operand on the matched term (Permit or
+        // Continue) decides the route as a fail-closed reject here.
+        let action_mods = match &term.action {
+            TermAction::Permit(mods) | TermAction::Continue(mods) => Some(mods),
+            TermAction::Deny => None,
+        };
+        if let Some(mods) = action_mods
+            && tables.resolve_computed_prepend(mods, ctx).is_err()
+        {
+            let (operand, _) = mods
+                .as_path_prepend_computed
+                .expect("resolution only fails on a computed operand");
+            term_traces.push(format!(
+                "term {}: prepend as {} unresolvable ({}) — fail closed => reject",
+                term.name.as_deref().unwrap_or("<unnamed>"),
+                operand.as_str(),
+                missing_operand_reason(operand),
+            ));
+            prepend_failed = true;
+            decided = Some((index, term));
+            break;
         }
         match &term.action {
             TermAction::Continue(mods) => {
@@ -417,12 +467,17 @@ fn trace_rpol_policy(
     }
     if let Some((index, term)) = decided {
         // Live-path parity: a deny discards accumulated Continue
-        // modifications and contributes none of its own.
+        // modifications and contributes none of its own; a fail-closed
+        // computed-prepend failure denies regardless of the term's own
+        // action.
         let (action, modifications) = match &term.action {
-            TermAction::Permit(mods) => {
+            TermAction::Permit(mods) if !prepend_failed => {
                 let mut merged = continued.unwrap_or_default();
                 merged.merge_from(mods.clone());
-                (PolicyAction::Permit, render_modifications(&merged, ctx))
+                (
+                    PolicyAction::Permit,
+                    render_modifications(&merged, ctx, Some(tables)),
+                )
             }
             _ => (PolicyAction::Deny, Vec::new()),
         };
@@ -440,7 +495,7 @@ fn trace_rpol_policy(
         // Fallthrough to the policy default; a permitting default
         // keeps accumulated Continue modifications (live parity).
         let modifications = match (policy.default_action, continued) {
-            (PolicyAction::Permit, Some(mods)) => render_modifications(&mods, ctx),
+            (PolicyAction::Permit, Some(mods)) => render_modifications(&mods, ctx, Some(tables)),
             _ => Vec::new(),
         };
         StatementAttribution {
@@ -469,6 +524,17 @@ fn render_term_action(action: &TermAction) -> String {
     let mut parts = mods.map_or_else(Vec::new, render_action_stmts);
     parts.push(verdict.to_string());
     parts.join("; ")
+}
+
+/// Why a computed prepend operand could not resolve for this route —
+/// the explain-side rendering of the fail-closed reasons in
+/// `PrependAs::resolve` (zero values count as unknown: RFC 7607).
+fn missing_operand_reason(operand: crate::engine::PrependAs) -> &'static str {
+    match operand {
+        crate::engine::PrependAs::LocalAs => "the chain carries no local ASN",
+        crate::engine::PrependAs::PeerAs => "the peer ASN is unknown",
+        crate::engine::PrependAs::OriginAs => "the route has no origin AS",
+    }
 }
 
 /// Modifications as `.rpol` action statements (static description of
@@ -515,6 +581,10 @@ fn render_action_stmts(mods: &RouteModifications) -> Vec<String> {
     }
     if let Some((asn, count)) = mods.as_path_prepend {
         out.push(format!("prepend {asn} {count}"));
+    }
+    // LAN-296 computed operands render in their source form.
+    if let Some((operand, count)) = mods.as_path_prepend_computed {
+        out.push(format!("prepend as {} {count}", operand.as_str()));
     }
     out
 }

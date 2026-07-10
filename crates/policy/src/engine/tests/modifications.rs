@@ -423,3 +423,127 @@ fn apply_noop_default() {
     assert!(nh.is_none());
     assert_eq!(attrs, orig);
 }
+
+/// LAN-296 wire-boundary pins for the prepend mutation site: the
+/// leading `AS_SEQUENCE` length field is a u8 (RFC 4271 §4.3), so a
+/// prepend that would push it past 255 must open a new segment —
+/// exactly at the boundary, not just far past it.
+#[test]
+fn apply_as_path_prepend_segment_boundary_254_plus_3() {
+    let long_seq: Vec<u32> = (0..254).map(|i| 64000 + i).collect();
+    let mut attrs = vec![PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(long_seq.clone())],
+    })];
+    let mods = RouteModifications {
+        as_path_prepend: Some((65001, 3)),
+        ..Default::default()
+    };
+    apply_modifications(&mut attrs, &mods);
+    let path = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    // 254 + 3 = 257 > 255: a fresh leading segment of exactly the
+    // prepended ASNs, original segment untouched.
+    assert_eq!(path.segments.len(), 2);
+    assert_eq!(
+        path.segments[0],
+        AsPathSegment::AsSequence(vec![65001, 65001, 65001])
+    );
+    assert_eq!(path.segments[1], AsPathSegment::AsSequence(long_seq));
+}
+
+#[test]
+fn apply_as_path_prepend_segment_boundary_255_plus_1() {
+    let full_seq: Vec<u32> = (0..255).map(|i| 64000 + i).collect();
+    let mut attrs = vec![PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(full_seq.clone())],
+    })];
+    let mods = RouteModifications {
+        as_path_prepend: Some((65001, 1)),
+        ..Default::default()
+    };
+    apply_modifications(&mut attrs, &mods);
+    let path = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(path.segments.len(), 2);
+    assert_eq!(path.segments[0], AsPathSegment::AsSequence(vec![65001]));
+    assert_eq!(path.segments[1], AsPathSegment::AsSequence(full_seq));
+}
+
+/// 254 + 1 = 255 still fits: no new segment.
+#[test]
+fn apply_as_path_prepend_segment_boundary_254_plus_1_fits() {
+    let long_seq: Vec<u32> = (0..254).map(|i| 64000 + i).collect();
+    let mut attrs = vec![PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(long_seq)],
+    })];
+    let mods = RouteModifications {
+        as_path_prepend: Some((65001, 1)),
+        ..Default::default()
+    };
+    apply_modifications(&mut attrs, &mods);
+    let path = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(path.segments.len(), 1);
+    match &path.segments[0] {
+        AsPathSegment::AsSequence(seq) => {
+            assert_eq!(seq.len(), 255);
+            assert_eq!(seq[0], 65001);
+        }
+        AsPathSegment::AsSet(_) => panic!("expected AS_SEQUENCE"),
+    }
+}
+
+/// LAN-296: literal and computed prepends occupy one logical merge
+/// slot — a later prepend of either form replaces an earlier one of
+/// either form, exactly like the other scalar modifications.
+#[test]
+fn merge_prepend_slot_shared_between_literal_and_computed() {
+    use crate::engine::PrependAs;
+
+    // computed then literal → literal wins, computed cleared.
+    let mut mods = RouteModifications {
+        as_path_prepend_computed: Some((PrependAs::OriginAs, 2)),
+        ..Default::default()
+    };
+    mods.merge_from(RouteModifications {
+        as_path_prepend: Some((65001, 1)),
+        ..Default::default()
+    });
+    assert_eq!(mods.as_path_prepend, Some((65001, 1)));
+    assert_eq!(mods.as_path_prepend_computed, None);
+
+    // literal then computed → computed wins, literal cleared.
+    let mut mods = RouteModifications {
+        as_path_prepend: Some((65001, 1)),
+        ..Default::default()
+    };
+    mods.merge_from(RouteModifications {
+        as_path_prepend_computed: Some((PrependAs::PeerAs, 3)),
+        ..Default::default()
+    });
+    assert_eq!(mods.as_path_prepend, None);
+    assert_eq!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, 3)));
+
+    // a merge with neither leaves the slot alone.
+    let mut mods = RouteModifications {
+        as_path_prepend_computed: Some((PrependAs::LocalAs, 2)),
+        ..Default::default()
+    };
+    mods.merge_from(RouteModifications::default());
+    assert_eq!(mods.as_path_prepend_computed, Some((PrependAs::LocalAs, 2)));
+}

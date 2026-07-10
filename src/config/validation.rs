@@ -3,7 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use super::parse::{
-    parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
+    ChainDirection, parse_families, parse_named_policy, parse_neighbor_set, parse_policy,
+    resolve_chain,
 };
 use super::schema::{
     ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
@@ -231,6 +232,7 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                self.global.asn,
             )?;
         }
 
@@ -246,6 +248,8 @@ impl Config {
             &self.policy.rpol,
             &self.policy.neighbor_sets,
             &self.peer_groups,
+            ChainDirection::Import,
+            self.global.asn,
         )?;
         resolve_chain(
             &self.policy.export_chain,
@@ -253,6 +257,8 @@ impl Config {
             &self.policy.rpol,
             &self.policy.neighbor_sets,
             &self.peer_groups,
+            ChainDirection::Export,
+            self.global.asn,
         )?;
 
         // Validate neighbor address/interface identity. Numbered peers remain
@@ -698,6 +704,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Import,
+                self.global.asn,
             )?;
             resolve_chain(
                 &neighbor.export_policy_chain,
@@ -705,6 +713,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Export,
+                self.global.asn,
             )?;
         }
 
@@ -1757,6 +1767,7 @@ fn validate_peer_group(
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
     neighbor_sets: &std::collections::HashMap<String, super::NeighborSetConfig>,
     peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
+    local_asn: u32,
 ) -> Result<(), ConfigError> {
     let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
     if hold_time != 0 && hold_time < 3 {
@@ -1874,6 +1885,8 @@ fn validate_peer_group(
         rpol,
         neighbor_sets,
         peer_groups,
+        ChainDirection::Import,
+        local_asn,
     )?;
     resolve_chain(
         &group.export_policy_chain,
@@ -1881,6 +1894,8 @@ fn validate_peer_group(
         rpol,
         neighbor_sets,
         peer_groups,
+        ChainDirection::Export,
+        local_asn,
     )?;
 
     Ok(())

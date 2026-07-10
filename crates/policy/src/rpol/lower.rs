@@ -61,7 +61,8 @@ use crate::ir::{
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityLit, Expr, NextHopArg, PolicyDef, Rhs, SourceFile, Stmt, U32Arg,
+    ActionStmt, CmpOp, CommunityLit, Expr, NextHopArg, PolicyDef, PrependAsArg, Rhs, SourceFile,
+    Stmt, U32Arg,
 };
 use super::typeck::{Field, resolve_field};
 
@@ -192,6 +193,7 @@ impl<'a> Lowerer<'a> {
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
             asn_set_names: self.asn_set_names.clone(),
+            local_asn: None,
         }
     }
 
@@ -219,6 +221,7 @@ impl<'a> Lowerer<'a> {
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
             asn_set_names: self.asn_set_names.clone(),
+            local_asn: None,
         }
     }
 
@@ -622,11 +625,21 @@ fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMa
             }
         },
         ActionStmt::Prepend { asn, count, .. } => {
-            let count = resolve_u32(count, env);
-            mods.as_path_prepend = Some((
-                resolve_u32(asn, env),
-                u8::try_from(count).expect("typechecked: count is a 1-255 literal"),
-            ));
+            let count = u8::try_from(resolve_u32(count, env))
+                .expect("typechecked: count is a 1-255 literal");
+            // LAN-296: computed operands lower to the staged
+            // `as_path_prepend_computed` slot (resolved per route by
+            // the evaluator); the literal/parameter form keeps its
+            // existing lowering. The operand decision is shared with
+            // the typechecker (`PrependAsArg::operand`).
+            if let Some(operand) = asn.operand(|name| env.contains_key(name)) {
+                mods.as_path_prepend_computed = Some((operand, count));
+            } else {
+                let PrependAsArg::Value(arg) = asn else {
+                    unreachable!("non-Value prepend args always denote an operand")
+                };
+                mods.as_path_prepend = Some((resolve_u32(arg, env), count));
+            }
         }
     }
 }

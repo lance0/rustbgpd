@@ -71,6 +71,9 @@ struct Fixture {
     evpn_route_type: Option<u8>,
     peer_address: Option<IpAddr>,
     peer_asn: Option<u32>,
+    /// Backs `prepend as self` (LAN-296); stamped onto the chain under
+    /// test, mirroring how the config resolver stamps `[global] asn`.
+    local_asn: Option<u32>,
     peer_group: Option<String>,
 }
 
@@ -163,6 +166,7 @@ impl Fixture {
             match field {
                 PeerField::Address(addr) => fixture.peer_address = Some(*addr),
                 PeerField::Asn(asn) => fixture.peer_asn = Some(*asn),
+                PeerField::LocalAs(asn) => fixture.local_asn = Some(*asn),
                 PeerField::Group(group) => fixture.peer_group = Some(group.node.clone()),
             }
         }
@@ -231,7 +235,10 @@ pub(super) fn run_tests(
         let mut problems: Vec<String> = Vec::new();
         for expect in &test.expects {
             let args: Vec<u32> = expect.args.iter().map(|arg| arg.node).collect();
-            let chain = lowerer.instantiate_chain(&expect.policy.node, &args, store);
+            let mut chain = lowerer.instantiate_chain(&expect.policy.node, &args, store);
+            // The fixture's `peer { local-as N }` plays the config
+            // resolver's role for `prepend as self` (LAN-296).
+            chain.local_asn = fixture.local_asn;
             let result = chain.evaluate(&ctx);
             let call = render_call(&expect.policy.node, &args);
             let accepted = result.action == PolicyAction::Permit;

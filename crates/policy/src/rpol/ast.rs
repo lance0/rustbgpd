@@ -207,6 +207,45 @@ impl U32Arg {
     }
 }
 
+/// The `prepend as <operand>` argument (LAN-296): a literal/parameter
+/// ASN or a computed operand.
+#[derive(Debug)]
+pub enum PrependAsArg {
+    /// Literal ASN or parameter reference (`prepend as 65001 3`,
+    /// `prepend as n 3`). A bare identifier `origin` that is **not** a
+    /// declared parameter of the enclosing policy also arrives here
+    /// and denotes the origin operand (see [`Self::operand`]) — the
+    /// grammar-evolution rules (ADR-0103 Decision 2) forbid reserving
+    /// `origin`, so a parameter of that name keeps its existing
+    /// meaning.
+    Value(U32Arg),
+    /// `prepend as self <count>` — the local speaker's ASN.
+    SelfAs,
+    /// `prepend as peer <count>` — the evaluation peer's ASN
+    /// (import-only; rejected on export attachment).
+    Peer,
+}
+
+impl PrependAsArg {
+    /// The computed operand this argument denotes, or `None` for the
+    /// literal/parameter form. `is_param` answers whether a name is a
+    /// declared parameter of the enclosing policy — the single
+    /// decision point shared by the typechecker and the lowerer, so
+    /// the two passes cannot disagree about an `origin` identifier.
+    pub fn operand(&self, is_param: impl Fn(&str) -> bool) -> Option<crate::engine::PrependAs> {
+        match self {
+            PrependAsArg::SelfAs => Some(crate::engine::PrependAs::LocalAs),
+            PrependAsArg::Peer => Some(crate::engine::PrependAs::PeerAs),
+            PrependAsArg::Value(U32Arg::Param(name))
+                if name.node == "origin" && !is_param(&name.node) =>
+            {
+                Some(crate::engine::PrependAs::OriginAs)
+            }
+            PrependAsArg::Value(_) => None,
+        }
+    }
+}
+
 /// An action statement inside a term or `if` body.
 #[derive(Debug)]
 pub enum ActionStmt {
@@ -231,10 +270,11 @@ pub enum ActionStmt {
         /// Whole-statement span.
         span: Span,
     },
-    /// `prepend as <asn> <count>`.
+    /// `prepend as <asn|self|peer|origin> <count>`.
     Prepend {
-        /// ASN to prepend.
-        asn: U32Arg,
+        /// ASN to prepend: literal/parameter, or a computed operand
+        /// (LAN-296).
+        asn: PrependAsArg,
         /// Number of copies (1–255, checked by the typechecker).
         count: U32Arg,
         /// Whole-statement span.
@@ -495,6 +535,11 @@ pub enum PeerField {
     Address(IpAddr),
     /// `asn 65001`.
     Asn(u32),
+    /// `local-as 64512` — the session's local speaker ASN, backing the
+    /// `prepend as self` operand (LAN-296). In the daemon this comes
+    /// from `[global] asn` at chain attach; a test fixture states it
+    /// explicitly (omitted ⇒ `prepend as self` fails closed).
+    LocalAs(u32),
     /// `group "leaf"`.
     Group(Spanned<String>),
 }
