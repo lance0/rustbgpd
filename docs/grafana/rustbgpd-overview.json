@@ -766,6 +766,74 @@
       ]
     },
     {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Graceful restart (RFC 4724 / LLGR)",
+      "description": "Gauges bgp_gr_active_peers / bgp_gr_stale_routes (peers in a graceful-restart window and stale routes retained for them) plus bgp_gr_timer_expired_total as a rate. Empty unless a GR/LLGR window is active.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(bgp_gr_active_peers{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "peers in GR",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(bgp_gr_stale_routes{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "stale routes retained",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (peer) (rate(bgp_gr_timer_expired_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
+          "legendFormat": "timer expired {{peer}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
       "id": 13,
       "type": "row",
       "title": "RIB scale",
@@ -774,7 +842,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 29
       },
       "panels": []
     },
@@ -791,7 +859,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "fieldConfig": {
         "defaults": {
@@ -841,7 +909,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 30
       },
       "fieldConfig": {
         "defaults": {
@@ -891,7 +959,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -941,7 +1009,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 38
       },
       "fieldConfig": {
         "defaults": {
@@ -979,6 +1047,56 @@
       ]
     },
     {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Attribute intern table size (per peer)",
+      "description": "bgp_rib_attr_intern_size: interned path-attribute entries per peer's Adj-RIB-In. Updated on growth and reclaim; a monotonically climbing series under steady churn indicates an intern leak.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (peer) (bgp_rib_attr_intern_size{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 18,
       "type": "row",
       "title": "Churn and distribution",
@@ -987,7 +1105,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 54
       },
       "panels": []
     },
@@ -1004,7 +1122,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 55
       },
       "fieldConfig": {
         "defaults": {
@@ -1063,7 +1181,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 55
       },
       "fieldConfig": {
         "defaults": {
@@ -1122,7 +1240,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 47
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1181,7 +1299,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 47
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1231,7 +1349,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 47
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1299,7 +1417,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 47
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1355,6 +1473,74 @@
       ]
     },
     {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Update-group index internals",
+      "description": "ADR-0098 update-group index gauges: distinct group keys, interned attribute chains, and residue entries awaiting prune (bgp_update_group_keys / bgp_update_group_interned_chains / bgp_update_group_residue_entries).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_keys{instance=~\"$instance\"}",
+          "legendFormat": "group keys",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_interned_chains{instance=~\"$instance\"}",
+          "legendFormat": "interned chains",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_residue_entries{instance=~\"$instance\"}",
+          "legendFormat": "residue entries",
+          "refId": "C"
+        }
+      ]
+    },
+    {
       "id": 24,
       "type": "row",
       "title": "Policy",
@@ -1363,7 +1549,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 79
       },
       "panels": []
     },
@@ -1380,7 +1566,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 56
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -1430,7 +1616,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 56
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -1480,7 +1666,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 56
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -1554,6 +1740,65 @@
       ]
     },
     {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Policy engine errors",
+      "description": "bgp_policy_eval_errors_total by direction/kind and bgp_policy_dataset_refresh_errors_total by dataset, as rates. Any non-zero rate means routes are taking the configured error-fallback action.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 88
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (direction, kind) (rate(bgp_policy_eval_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "eval {{direction}}/{{kind}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (dataset) (rate(bgp_policy_dataset_refresh_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "dataset refresh {{dataset}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
       "id": 28,
       "type": "row",
       "title": "BMP and event streaming",
@@ -1562,7 +1807,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 96
       },
       "panels": []
     },
@@ -1579,7 +1824,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 65
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -1647,7 +1892,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 65
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -1697,7 +1942,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 65
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -1761,7 +2006,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 105
       },
       "panels": []
     },
@@ -1778,7 +2023,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 74
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -1828,7 +2073,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 74
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -1878,7 +2123,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 74
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -1912,6 +2157,196 @@
           "expr": "sum by (dependency, outcome) (rate(bgp_validation_import_refreshes_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{dependency}} {{outcome}}",
           "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "row",
+      "title": "Operations",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 114
+      },
+      "panels": []
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Config transactions",
+      "description": "bgp_config_transaction_lifecycle_total by operation/outcome as a rate: prepare/commit/confirm/rollback activity from gRPC and gNMI config sessions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (operation, outcome) (rate(bgp_config_transaction_lifecycle_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{operation}}/{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Event stream subscribers / lag",
+      "description": "bgp_event_stream_subscribers gauge and bgp_event_stream_lagged_total rate by service/source. Lag events mean a slow subscriber missed broadcast events.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (service, source) (bgp_event_stream_subscribers{instance=~\"$instance\"})",
+          "legendFormat": "{{service}}/{{source}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (service, source) (rate(bgp_event_stream_lagged_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "lagged {{service}}/{{source}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Memory (jemalloc)",
+      "description": "jemalloc allocator gauges (release/container builds only; absent without the jemalloc feature): allocated = live application bytes, active = pages in use, resident = physical memory held.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "jemalloc_allocated_bytes{instance=~\"$instance\"}",
+          "legendFormat": "allocated",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "jemalloc_active_bytes{instance=~\"$instance\"}",
+          "legendFormat": "active",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "jemalloc_resident_bytes{instance=~\"$instance\"}",
+          "legendFormat": "resident",
+          "refId": "C"
         }
       ]
     }

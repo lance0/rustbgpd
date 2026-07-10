@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grafana dashboard aligned with the shipped metric set.** New panels
+  on `docs/grafana/rustbgpd-overview.json`: graceful restart, per-peer
+  attribute-intern size, update-group index internals, policy engine
+  errors, and an Operations row (config transactions, event-stream
+  subscribers/lag, jemalloc memory). All existing panel series verified
+  against a live `/metrics` scrape. (LAN-246)
 - **JSON Schema for the TOML config.** Every config struct/enum in the
   deserialization graph now derives `schemars::JsonSchema`, with field
   doc comments carried through as descriptions, serde defaults as
