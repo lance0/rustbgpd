@@ -136,7 +136,7 @@ pub enum RtrEncodeError {
 
 // ── PDU type codes ───────────────────────────────────────────────
 
-const PDU_SERIAL_NOTIFY: u8 = 0;
+pub(crate) const PDU_SERIAL_NOTIFY: u8 = 0;
 const PDU_SERIAL_QUERY: u8 = 1;
 const PDU_RESET_QUERY: u8 = 2;
 const PDU_CACHE_RESPONSE: u8 = 3;

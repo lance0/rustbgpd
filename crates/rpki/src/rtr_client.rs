@@ -172,6 +172,13 @@ pub struct RtrClient {
     /// Protocol version used for the current connection attempt
     /// (2 = ASPA capable, 1 = VRP only).
     negotiated_version: u8,
+    /// Whether §7 version negotiation has completed for the current
+    /// transport session: flips when the cache's first response PDU at
+    /// the attempted version is accepted (normally the Cache Response
+    /// that "opens" the session), and resets on every new connection.
+    /// Until then, Serial Notify PDUs are ignored regardless of their
+    /// version field (§5.2/§7).
+    negotiation_complete: bool,
     /// Per-transaction budgets (consts in production; shrunk in tests).
     transaction_deadline: Duration,
     max_transaction_records: usize,
@@ -192,6 +199,7 @@ impl RtrClient {
             config,
             epoch: None,
             negotiated_version: crate::rtr_codec::RTR_VERSION_2,
+            negotiation_complete: false,
             transaction_deadline: TRANSACTION_DEADLINE,
             max_transaction_records: MAX_TRANSACTION_RECORDS,
             max_transaction_bytes: MAX_TRANSACTION_BYTES,
@@ -397,26 +405,62 @@ impl RtrClient {
     /// Pop the next complete PDU off `parse_buf`, enforcing that its
     /// version byte matches the negotiated connection version so records
     /// from different protocol versions can never mix in one session.
-    fn next_pdu(&self, parse_buf: &mut Vec<u8>) -> Result<Option<RtrPdu>, RtrError> {
-        if parse_buf.len() < 8 {
-            return Ok(None);
+    ///
+    /// The version guard only applies once §7 negotiation has completed:
+    /// until then, Serial Notify frames are discarded before it runs.
+    fn next_pdu(&mut self, parse_buf: &mut Vec<u8>) -> Result<Option<RtrPdu>, RtrError> {
+        loop {
+            if parse_buf.len() < 8 {
+                return Ok(None);
+            }
+            let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
+                return Ok(None);
+            };
+            let pdu_len = pdu_len as usize;
+            if parse_buf.len() < pdu_len {
+                return Ok(None);
+            }
+            // 8210bis §5.2/§7: a cache MAY send a Serial Notify at any
+            // time, including between the router's first query and the
+            // response that completes version negotiation, and during
+            // that window the router "MUST ignore any Serial Notify
+            // PDUs ... regardless of the Protocol Version field" (§7).
+            // It must neither fail the session nor influence
+            // negotiation: acting on it would only re-issue the query
+            // already outstanding, so even a correct-version notify is
+            // a no-op here. In particular, on a v1-pinned reconnect
+            // (held-epoch version pinning), a v0/v2 Serial Notify in
+            // this window is NOT an upgrade/downgrade hint — the pinned
+            // version stands until the cache's actual response.
+            // The `pdu_len >= 8` guard keeps a frame with a corrupt
+            // length field on the normal error path below.
+            if !self.negotiation_complete
+                && pdu_len >= 8
+                && parse_buf[1] == crate::rtr_codec::PDU_SERIAL_NOTIFY
+            {
+                debug!(
+                    server = %self.config.server_addr,
+                    version = parse_buf[0],
+                    "RTR Serial Notify before negotiation completed (ignored)"
+                );
+                parse_buf.drain(..pdu_len);
+                continue;
+            }
+            let got = parse_buf[0];
+            if got != self.negotiated_version {
+                return Err(RtrError::VersionMismatch {
+                    expected: self.negotiated_version,
+                    got,
+                });
+            }
+            let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
+            parse_buf.drain(..consumed);
+            // §7: the cache's first (non-Notify) PDU at the attempted
+            // version — normally the Cache Response that opens the
+            // session — completes negotiation.
+            self.negotiation_complete = true;
+            return Ok(Some(pdu));
         }
-        let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
-            return Ok(None);
-        };
-        if parse_buf.len() < pdu_len as usize {
-            return Ok(None);
-        }
-        let got = parse_buf[0];
-        if got != self.negotiated_version {
-            return Err(RtrError::VersionMismatch {
-                expected: self.negotiated_version,
-                got,
-            });
-        }
-        let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
-        parse_buf.drain(..consumed);
-        Ok(Some(pdu))
     }
 
     async fn send_query(&self, stream: &mut TcpStream, query: QueryKind) -> Result<bool, RtrError> {
@@ -429,6 +473,8 @@ impl RtrClient {
     }
 
     async fn run_session(&mut self, stream: &mut TcpStream) -> Result<(), RtrError> {
+        // Every transport connection restarts §7 version negotiation.
+        self.negotiation_complete = false;
         let mut read_buf = vec![0u8; 8192];
         let mut parse_buf = Vec::new();
         let mut next_query = self.current_query_kind();
@@ -1671,6 +1717,144 @@ mod tests {
         let _ = client_handle.await;
     }
 
+    /// 8210bis §5.2/§7: a Serial Notify arriving between the router's
+    /// first query and the negotiation-completing Cache Response MUST
+    /// be ignored "regardless of the Protocol Version field" — it must
+    /// not fail the session or influence negotiation. Here v0 and v1
+    /// notifies precede the v2 response and negotiation completes
+    /// normally with data loaded.
+    #[tokio::test]
+    async fn wrong_version_serial_notify_during_negotiation_is_ignored() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+
+        // One buffer, mixed versions: v0 and v1 Serial Notifies ahead
+        // of the v2 response that completes negotiation.
+        let mut buf = Vec::new();
+        RtrPdu::SerialNotify {
+            session_id: 3,
+            serial: 9,
+        }
+        .encode_with_version(&mut buf, 0)
+        .unwrap();
+        RtrPdu::SerialNotify {
+            session_id: 3,
+            serial: 9,
+        }
+        .encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION)
+        .unwrap();
+        for pdu in [
+            RtrPdu::CacheResponse { session_id: 7 },
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        ] {
+            pdu.encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION_2)
+                .unwrap();
+        }
+        stream.write_all(&buf).await.unwrap();
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 65001)],
+                aspa_records: vec![],
+            }
+        );
+        // No Error Report, no reconnect: the session stays up idle.
+        assert!(
+            timeout(Duration::from_millis(100), read_pdu(&mut stream))
+                .await
+                .is_err()
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §7: even a CORRECT-version Serial Notify received before
+    /// negotiation completes is ignored — "the only effect that
+    /// processing the notification would have would be to trigger
+    /// exactly the same Reset Query or Serial Query that the router has
+    /// already sent", so it is a no-op, never a second query.
+    #[tokio::test]
+    async fn correct_version_serial_notify_during_negotiation_is_not_acted_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::SerialNotify {
+                    session_id: 7,
+                    serial: 101,
+                },
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(update, VrpUpdate::FullTable { .. }));
+        // The pre-negotiation notify triggers no follow-up query: the
+        // client sits idle until its refresh interval.
+        assert!(
+            timeout(Duration::from_millis(100), read_pdu(&mut stream))
+                .await
+                .is_err()
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
     /// Establish an epoch (session 7, serial 100) on `stream` with one
     /// IPv4 prefix and consume the resulting `FullTable` update.
     async fn establish_epoch(stream: &mut TcpStream, vrp_rx: &mut mpsc::Receiver<VrpUpdate>) {
@@ -2264,6 +2448,82 @@ mod tests {
                 server: addr,
                 entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
                 aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// A v1-pinned reconnect (held-epoch version pinning) whose cache
+    /// emits a v2 Serial Notify before answering the query: the notify
+    /// is ignored per §5.2/§7 — NOT treated as an upgrade hint — and
+    /// the v1 session re-lands on the same epoch with an incremental
+    /// update.
+    #[tokio::test(start_paused = true)]
+    async fn v1_pinned_reconnect_ignores_v2_serial_notify_during_negotiation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let stream_v1 = establish_v1_epoch(&listener, &mut vrp_rx, 3600).await;
+        drop(stream_v1);
+
+        // The client reconnects pinned at the held epoch's version.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+        assert_eq!(
+            pdu,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        // One buffer: a v2 Serial Notify ahead of the v1 response.
+        let mut buf = Vec::new();
+        RtrPdu::SerialNotify {
+            session_id: 7,
+            serial: 101,
+        }
+        .encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION_2)
+        .unwrap();
+        for pdu in [
+            RtrPdu::CacheResponse { session_id: 7 },
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 114, 0),
+                asn: 65002,
+            },
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 101,
+                refresh: 60,
+                retry: 5,
+                expire: 3600,
+            },
+        ] {
+            pdu.encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION)
+                .unwrap();
+        }
+        stream.write_all(&buf).await.unwrap();
+
+        // The v1 session re-lands on the same epoch: an incremental
+        // update, no flush, no version flap.
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::IncrementalUpdate {
+                server: addr,
+                announced: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                withdrawn: vec![],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
             }
         );
 
