@@ -111,7 +111,24 @@ pub async fn apply(
     } else {
         print_apply_human(&resp);
     }
+    if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
+        crate::output::print_next_step(json, &footer);
+    }
     Ok(())
+}
+
+/// "What next" footer for an apply that opened a confirmed-commit window:
+/// the change auto-reverts unless the operator confirms in time.
+fn confirm_window_footer(confirmation: Option<&ConfigTransactionConfirmation>) -> Option<String> {
+    let confirmation = confirmation?;
+    let pending = ConfigTransactionConfirmationStatus::Pending as i32;
+    if confirmation.status != pending || confirmation.confirm_id.is_empty() {
+        return None;
+    }
+    let id = &confirmation.confirm_id;
+    Some(format!(
+        "confirm within the window or the change auto-reverts: rbgp config confirm {id} (roll back now: rbgp config abort {id})"
+    ))
 }
 
 pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Result<(), CliError> {
@@ -134,6 +151,10 @@ pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Re
         print!("{}", resp.human_text);
         print_confirmation(resp.confirmation.as_ref());
     }
+    crate::output::print_next_step(
+        json,
+        "the transaction is confirmed and permanent — verify with: rbgp config status",
+    );
     Ok(())
 }
 
@@ -161,6 +182,10 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
         }
         print_confirmation(resp.confirmation.as_ref());
     }
+    crate::output::print_next_step(
+        json,
+        "the transaction was rolled back — re-plan against the new runtime_snapshot_token (rbgp config plan)",
+    );
     Ok(())
 }
 
@@ -772,6 +797,27 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(server.state.config_status_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn confirm_window_footer_only_for_pending_confirmations() {
+        let pending = ConfigTransactionConfirmation {
+            status: ConfigTransactionConfirmationStatus::Pending as i32,
+            confirm_id: "deploy-1".to_string(),
+            timeout_seconds: 120,
+            deadline_unix_seconds: 0,
+            committed_sections: Vec::new(),
+            runtime_snapshot_token: String::new(),
+            human_text: String::new(),
+        };
+        let footer = confirm_window_footer(Some(&pending)).unwrap();
+        assert!(footer.contains("rbgp config confirm deploy-1"), "{footer}");
+        assert!(footer.contains("rbgp config abort deploy-1"), "{footer}");
+
+        let mut confirmed = pending.clone();
+        confirmed.status = ConfigTransactionConfirmationStatus::Confirmed as i32;
+        assert!(confirm_window_footer(Some(&confirmed)).is_none());
+        assert!(confirm_window_footer(None).is_none());
     }
 
     #[test]

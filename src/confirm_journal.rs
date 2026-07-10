@@ -348,7 +348,20 @@ fn refuse_after_revert_message(
 
 /// Write temp file + fsync + rename + fsync dir. Shared with the config
 /// persister so every durable config write goes through the same primitive.
+///
+/// Failures name the destination path: a bare io error ("No such file or
+/// directory (os error 2)") is useless to an operator who doesn't know
+/// which file the daemon was writing.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_inner(path, bytes).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to write {}: {error}", path.display()),
+        )
+    })
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = parent_dir(path)?;
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
@@ -554,6 +567,22 @@ log_format = "json"
         // Fail closed: config untouched, journal preserved.
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "candidate");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn write_atomic_failure_names_the_destination_path() {
+        // LAN-317: a persistence io failure must carry the destination path;
+        // a bare "No such file or directory (os error 2)" is unactionable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-dir").join("config.toml");
+
+        let error = write_atomic(&path, b"x").unwrap_err();
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!("failed to write {}", path.display())),
+            "{rendered}"
+        );
     }
 
     #[test]
