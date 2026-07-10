@@ -22,8 +22,6 @@
 #   - prefix-limit "approaching" (>=80%): the daemon exports only the
 #     breach counter `bgp_max_prefix_exceeded_total`, no
 #     current/configured-limit gauge pair.
-#   - policy evaluation errors: no `bgp_policy_eval_errors`-style
-#     counter is exported.
 #
 # Unit tests: rustbgpd-alerts_test.yml (`promtool test rules`).
 
@@ -160,3 +158,24 @@ groups:
             bgp_update_group_residue_entries on {{ $labels.instance }}
             has grown continuously for over an hour. A dirty update-group
             member appears wedged; its resync is not draining residue.
+
+      - alert: BgpPolicyEvalErrors
+        # An evaluation error makes the policy engine treat the
+        # affected route as Deny (uniform eval-error rails), so every
+        # increment is a route silently dropped by a broken policy —
+        # fix the policy (`rbgp policy check`), don't silence the
+        # alert.
+        expr: increase(bgp_policy_eval_errors_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Policy evaluation errors ({{ $labels.direction }},
+            {{ $labels.kind }})
+          description: >-
+            bgp_policy_eval_errors_total{direction="{{ $labels.direction
+            }}", kind="{{ $labels.kind }}"} on {{ $labels.instance }}
+            increased by {{ $value | printf "%.0f" }} in the last 15
+            minutes. Routes hitting the failing statement are being
+            denied.
