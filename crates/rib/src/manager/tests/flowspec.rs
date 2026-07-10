@@ -330,6 +330,160 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     handle.await.unwrap();
 }
 
+/// A legal `FlowSpec` route with no destination-prefix component
+/// (IP-protocol match only), for the given address family.
+fn make_destless_flowspec_route(afi: Afi, peer: Ipv4Addr, protocol: u8) -> FlowSpecRoute {
+    let mut route = make_flowspec_route(peer);
+    route.afi = afi;
+    route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::IpProtocol(vec![
+        rustbgpd_wire::NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: u64::from(protocol),
+        },
+    ])];
+    route
+}
+
+/// LAN-291: a destination-less `FlowSpec` rule must be `prefix = None` in
+/// the export policy context — a fabricated `0.0.0.0/0` would spuriously
+/// match prefix-based deny terms and suppress the rule.
+#[tokio::test]
+async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(deny_prefixes_chain(&[
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+            Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0)),
+        ])),
+        sendable_families: vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let v4_route = make_destless_flowspec_route(Afi::Ipv4, Ipv4Addr::new(10, 0, 0, 1), 6);
+    let v6_route = make_destless_flowspec_route(Afi::Ipv6, Ipv4Addr::new(10, 0, 0, 1), 17);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![v4_route.clone(), v6_route.clone()],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    let announced: BTreeSet<_> = update
+        .flowspec_announce
+        .iter()
+        .map(|r| r.rule.clone())
+        .collect();
+    assert_eq!(
+        announced,
+        BTreeSet::from([v4_route.rule, v6_route.rule]),
+        "destination-less FlowSpec rules are prefixless and must not match \
+         default-prefix deny terms"
+    );
+    assert!(update.flowspec_withdraw.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-291 companion: a `FlowSpec` rule that DOES carry a destination
+/// prefix still evaluates it against prefix-based export terms.
+#[tokio::test]
+async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        // Denies the fixture rule's real destination prefix.
+        export_policy: Some(deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(192, 0, 2, 0),
+            24,
+        ))])),
+        sendable_families: ipv4_flowspec_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    // Destination 192.0.2.0/24 — must be denied by the export term.
+    let denied = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+    // Destination-less — must pass through to the default Permit.
+    let permitted = make_destless_flowspec_route(Afi::Ipv4, Ipv4Addr::new(10, 0, 0, 1), 6);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![denied, permitted.clone()],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(
+        update.flowspec_announce.len(),
+        1,
+        "the rule whose real destination prefix matches the deny term must \
+         be suppressed"
+    );
+    assert_eq!(update.flowspec_announce[0].rule, permitted.rule);
+    assert!(update.flowspec_withdraw.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// A `FlowSpec` rule distinct from the shared `make_flowspec_route` fixture
 /// rule, so one source peer can hold two Adj-RIB-In entries.
 fn make_flowspec_route_alt(peer: Ipv4Addr) -> FlowSpecRoute {

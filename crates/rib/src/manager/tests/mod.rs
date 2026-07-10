@@ -28,31 +28,39 @@ fn bgpls_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::BgpLs, Safi::BgpLs)]
 }
 
-fn deny_default_prefix_chain() -> rustbgpd_policy::PolicyChain {
+/// A chain with one exact-match Deny statement per prefix, default Permit.
+fn deny_prefixes_chain(prefixes: &[Prefix]) -> rustbgpd_policy::PolicyChain {
     rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
-        entries: vec![rustbgpd_policy::PolicyStatement {
-            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
-            ge: None,
-            le: None,
-            action: rustbgpd_policy::PolicyAction::Deny,
-            match_community: vec![],
-            match_as_path: None,
-            match_neighbor_set: None,
-            match_route_type: None,
-            match_evpn_route_type: None,
-            match_rpki_validation: None,
-            match_aspa_validation: None,
-            match_as_path_length_ge: None,
-            match_as_path_length_le: None,
-            match_local_pref_ge: None,
-            match_local_pref_le: None,
-            match_med_ge: None,
-            match_med_le: None,
-            match_next_hop: None,
-            modifications: rustbgpd_policy::RouteModifications::default(),
-        }],
+        entries: prefixes
+            .iter()
+            .map(|prefix| rustbgpd_policy::PolicyStatement {
+                prefix: Some(*prefix),
+                ge: None,
+                le: None,
+                action: rustbgpd_policy::PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: rustbgpd_policy::RouteModifications::default(),
+            })
+            .collect(),
         default_action: rustbgpd_policy::PolicyAction::Permit,
     }])
+}
+
+fn deny_default_prefix_chain() -> rustbgpd_policy::PolicyChain {
+    deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))])
 }
 
 fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {

@@ -7,8 +7,8 @@ use rustbgpd_policy::{
 };
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
-    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, MplsLabelEntry, OrfAction,
-    OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute,
+    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, MplsLabelEntry, NumericMatch,
+    OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute,
     RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
     bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
 };
@@ -4527,6 +4527,152 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         all_announced.len()
     );
     assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
+}
+
+/// LAN-291: a `FlowSpec` rule without a destination-prefix component is
+/// `prefix = None` in the import policy context — prefix-based deny terms
+/// (including exact-default ones) must not match it, while a rule with a
+/// real destination prefix still evaluates that prefix. Covers IPv4 and
+/// IPv6 `FlowSpec`.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "covers destination-less v4 + v6 rules and a real-prefix deny in one session scenario"
+)]
+async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
+    use rustbgpd_wire::attribute::MpReachNlri;
+
+    let destless_rule = |protocol: u8| FlowSpecRule {
+        components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: u64::from(protocol),
+        }])],
+    };
+    let deny = |prefix: Prefix| PolicyStatement {
+        prefix: Some(prefix),
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![
+            deny(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+            deny(Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0))),
+            deny(Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, 0),
+                24,
+            ))),
+        ],
+        default_action: PolicyAction::Permit,
+    }])));
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+
+    let destless_v4 = destless_rule(6);
+    let destless_v6 = destless_rule(17);
+    let with_denied_prefix = FlowSpecRule {
+        components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        ))],
+    };
+
+    let attrs_for = |mp: MpReachNlri| {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(mp),
+        ]
+    };
+    let v4_update = rustbgpd_wire::UpdateMessage::build(
+        &[],
+        &[],
+        &attrs_for(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::FlowSpec,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![destless_v4.clone(), with_denied_prefix.clone()],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    session.process_update(v4_update).await;
+    let v6_update = rustbgpd_wire::UpdateMessage::build(
+        &[],
+        &[],
+        &attrs_for(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::FlowSpec,
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![destless_v6.clone()],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    session.process_update(v6_update).await;
+
+    assert_eq!(
+        session.import_policy_routes_permitted, 2,
+        "both destination-less rules must pass through to the default Permit"
+    );
+    assert_eq!(
+        session.import_policy_routes_denied, 1,
+        "the rule with a real destination prefix must match the deny term"
+    );
+
+    let mut announced = vec![];
+    while let Ok(msg) = rib_rx.try_recv() {
+        if let RibUpdate::RoutesReceived {
+            flowspec_announced, ..
+        } = msg
+        {
+            announced.extend(flowspec_announced);
+        }
+    }
+    let rules: Vec<_> = announced.iter().map(|r| r.rule.clone()).collect();
+    assert_eq!(rules, vec![destless_v4, destless_v6]);
+    assert_eq!(
+        announced.iter().map(|r| r.afi).collect::<Vec<_>>(),
+        vec![Afi::Ipv4, Afi::Ipv6]
+    );
 }
 /// ADR-0073 end-to-end pins 1 + 2: after `process_update`, the
 /// per-session import-decision cache holds an explainable `Deny` entry
