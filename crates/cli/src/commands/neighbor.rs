@@ -59,7 +59,7 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
 /// Friendly empty state: what happened, plus the one command that
 /// changes it.
 const EMPTY_NEIGHBOR_LIST: &str =
-    "no neighbors configured — add one: rbgp neighbor <addr> add --asn <asn>";
+    "no neighbors configured — add one: rbgp neighbor <addr> add --remote-asn <asn>";
 
 pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
@@ -484,7 +484,7 @@ mod tests {
     fn empty_state_names_the_add_command_and_json_stays_pure() {
         assert_eq!(
             EMPTY_NEIGHBOR_LIST,
-            "no neighbors configured — add one: rbgp neighbor <addr> add --asn <asn>"
+            "no neighbors configured — add one: rbgp neighbor <addr> add --remote-asn <asn>"
         );
         let json = serde_json::to_string_pretty(&Vec::<crate::output::JsonNeighbor>::new())
             .expect("serialize");

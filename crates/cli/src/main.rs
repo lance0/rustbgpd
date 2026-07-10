@@ -23,8 +23,55 @@ use std::path::PathBuf;
 
 const BINARY_NAME: &str = "rbgp";
 
+// ======================= CLI conventions =======================
+// New commands and flags must follow these rules (LAN-329):
+//
+// - Neighbor noun: the canonical flag for selecting a BGP peer is
+//   `--neighbor` (the proto and product language). Always add
+//   `visible_alias = "peer"` so both spellings work; commands that
+//   take the address as a positional (`rbgp neighbor <ADDRESS>`)
+//   keep it positional.
+// - ASNs: a remote AS flag is `--remote-asn` (visible alias
+//   `--asn`); an unqualified "ASN" in output means the local AS.
+// - File arguments are positional (`policy check FILE`, `policy fmt
+//   FILE...`, `config diff [CANDIDATE]`), never new `--from-file`
+//   flags. Existing `--from-file` spellings stay as hidden
+//   compatibility aliases and must never be removed.
+// - `-j`/`--json` purity: JSON goes to stdout and carries the
+//   complete result. A command where `-j` provably has no effect
+//   (`metrics`, `top`) warns once on stderr instead of silently
+//   ignoring it.
+// - Empty results: JSON list output prints `[]` (or `{}` for
+//   objects), never nothing; human list output prints a one-line
+//   empty state ("No ... recorded/configured").
+// - Exit codes: 0 success / 1 error everywhere, with detailed
+//   contracts only where documented. Any new detailed contract must
+//   be added to EXIT_CODES_HELP and the subcommand's after_help.
+// - Help text: list entries (`about`) are one terse line; details go
+//   in `long_about` (the doc-comment paragraph after a blank line).
+// ===============================================================
+
+/// The one authoritative exit-code list: rendered in `rbgp --help`
+/// and in the EXTRA section of `rbgp man`.
+const EXIT_CODES_HELP: &str = "Exit codes:\n  \
+    0  success\n  \
+    1  error (argument, connection, daemon, or runtime failure)\n\n\
+    Detailed contracts (also in each subcommand's --help):\n  \
+    diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
+    diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
+    config diff, plan    0 no changes / 1 error / 2 changes present\n  \
+    policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below --coverage-min\n  \
+    policy test          0 ran / 1 compile diagnostics\n  \
+    policy fmt           0 clean or formatted / 1 needs formatting (--check) or error";
+
 #[derive(Parser)]
-#[command(name = "rbgp", bin_name = "rbgp", about = "CLI for rustbgpd", version)]
+#[command(
+    name = "rbgp",
+    bin_name = "rbgp",
+    about = "CLI for rustbgpd",
+    version,
+    after_long_help = EXIT_CODES_HELP
+)]
 struct Cli {
     /// gRPC server address or unix:///path/to/socket
     #[arg(
@@ -165,8 +212,8 @@ enum Command {
         #[arg(long)]
         route_type: Option<u32>,
 
-        /// Peer IP address filter (list mode only)
-        #[arg(long)]
+        /// Neighbor IP address filter (list mode only)
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
 
         /// Route Distinguisher filter (list mode only), e.g. "65000:100"
@@ -230,13 +277,15 @@ enum Command {
     MrtDump,
 
     /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates
-    /// for one peer (`--peer X`) or every currently-managed peer (omit
-    /// `--peer`). Receivers that honor RFC 8326 will set local_pref = 0
-    /// on tagged paths, draining traffic ahead of planned maintenance.
+    ///
+    /// Applies to one neighbor (`--neighbor X`) or every
+    /// currently-managed peer (omit `--neighbor`). Receivers that honor
+    /// RFC 8326 will set local_pref = 0 on tagged paths, draining
+    /// traffic ahead of planned maintenance.
     Gshut {
-        /// Peer address; omit to toggle for all peers.
-        #[arg(long)]
-        peer: Option<String>,
+        /// Neighbor address; omit to toggle for all peers.
+        #[arg(long = "neighbor", visible_alias = "peer")]
+        neighbor: Option<String>,
 
         /// Clear instead of enabling.
         #[arg(long)]
@@ -250,35 +299,45 @@ enum Command {
         interval: u64,
     },
 
-    /// Manage named `[[policy_definitions]]` entries and the global /
+    /// Manage policy definitions and import/export chains
+    ///
+    /// Manages named `[[policy_definitions]]` entries and the global /
     /// per-neighbor import/export chains. Backed by PolicyService.
     Policy {
         #[command(subcommand)]
         action: PolicyAction,
     },
 
-    /// Manage named `[[neighbor_sets]]` entries used by policy
+    /// Manage named neighbor sets used by policy
+    ///
+    /// Manages named `[[neighbor_sets]]` entries used by policy
     /// `match_neighbor_set`. Backed by PolicyService.
     NeighborSet {
         #[command(subcommand)]
         action: NeighborSetAction,
     },
 
-    /// Manage named `[[peer_groups]]` entries and bind/unbind neighbors
-    /// to them. Backed by PeerGroupService.
+    /// Manage peer groups and neighbor membership
+    ///
+    /// Manages named `[[peer_groups]]` entries and binds/unbinds
+    /// neighbors to them. Backed by PeerGroupService.
     PeerGroup {
         #[command(subcommand)]
         action: PeerGroupAction,
     },
 
-    /// Manage `[[dynamic_neighbors]]` prefix ranges that auto-accept inbound
-    /// peers into a peer group. Backed by NeighborService.
+    /// Manage dynamic-neighbor prefix ranges
+    ///
+    /// Manages `[[dynamic_neighbors]]` prefix ranges that auto-accept
+    /// inbound peers into a peer group. Backed by NeighborService.
     DynamicNeighbor {
         #[command(subcommand)]
         action: DynamicNeighborAction,
     },
 
-    /// Manage `[[fib_tables]]` (ADR-0061 general unicast FIB export) at runtime.
+    /// Manage general unicast FIB export tables at runtime
+    ///
+    /// Manages `[[fib_tables]]` (ADR-0061 general unicast FIB export).
     /// Hot-applies through the FIB reconciler and persists to the config.
     FibTable {
         #[command(subcommand)]
@@ -313,8 +372,12 @@ enum ConfigAction {
         2  changes present")]
     Diff {
         /// Candidate TOML file to validate and compare
-        #[arg(long, value_name = "PATH")]
-        from_file: String,
+        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
+        candidate: Option<String>,
+
+        /// Hidden compatibility alias for the positional `CANDIDATE`
+        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
+        from_file: Option<String>,
     },
 
     /// Validate and classify a candidate transaction without mutation
@@ -327,8 +390,12 @@ enum ConfigAction {
         2  changes present (plan is committable or rejected)")]
     Plan {
         /// Candidate TOML file to validate and classify
-        #[arg(long, value_name = "PATH")]
-        from_file: String,
+        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
+        candidate: Option<String>,
+
+        /// Hidden compatibility alias for the positional `CANDIDATE`
+        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
+        from_file: Option<String>,
 
         /// Optional runtime snapshot token to check while planning
         #[arg(long, value_name = "TOKEN")]
@@ -338,8 +405,12 @@ enum ConfigAction {
     /// Commit a previously planned candidate transaction
     Apply {
         /// Candidate TOML file to validate and commit
-        #[arg(long, value_name = "PATH")]
-        from_file: String,
+        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
+        candidate: Option<String>,
+
+        /// Hidden compatibility alias for the positional `CANDIDATE`
+        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
+        from_file: Option<String>,
 
         /// Runtime snapshot token returned by config plan
         #[arg(long, value_name = "TOKEN")]
@@ -398,10 +469,12 @@ enum ConfigAction {
 enum PolicyAction {
     /// List configured policies (names + statement counts)
     List,
-    /// Check an `.rpol` policy file locally: resolve its `import`
-    /// graph, parse, typecheck, and run its in-language `test` blocks
-    /// (from every module). No daemon connection. Exit codes: 0 clean,
-    /// 1 diagnostics, 2 test failures, 3 coverage below --coverage-min.
+    /// Check an `.rpol` policy file locally (parse, typecheck, tests)
+    ///
+    /// Resolves the file's `import` graph, parses, typechecks, and runs
+    /// its in-language `test` blocks (from every module). No daemon
+    /// connection. Exit codes: 0 clean, 1 diagnostics, 2 test failures,
+    /// 3 coverage below --coverage-min.
     Check {
         /// Path to the main `.rpol` file
         file: String,
@@ -429,7 +502,8 @@ enum PolicyAction {
         #[arg(long, value_name = "PCT")]
         coverage_min: Option<f64>,
     },
-    /// Format `.rpol` files in the one canonical style (LAN-323).
+    /// Format `.rpol` files in the one canonical style
+    ///
     /// Rewrites each file in place (atomic write). Formatting never
     /// adds, removes, or reorders tokens — comments and semicolons
     /// are preserved, and the output is verified to lex identically
@@ -447,11 +521,12 @@ enum PolicyAction {
         #[arg(long)]
         check: bool,
     },
-    /// Dry-run a candidate `.rpol` policy against the daemon's live
-    /// RIB (ADR-0096): the file compiles server-side and evaluates
-    /// read-only over a route snapshot — counts, per-term hit
-    /// counters, and before/after attribute diffs. No route state or
-    /// session is touched. Exit codes: 0 ran, 1 compile diagnostics.
+    /// Dry-run a candidate `.rpol` policy against the live RIB
+    ///
+    /// The file compiles server-side and evaluates read-only over a
+    /// route snapshot (ADR-0096) — counts, per-term hit counters, and
+    /// before/after attribute diffs. No route state or session is
+    /// touched. Exit codes: 0 ran, 1 compile diagnostics.
     Test {
         /// Path to the `.rpol` file
         file: String,
@@ -463,10 +538,10 @@ enum PolicyAction {
         /// (Loc-RIB best routes)
         #[arg(long)]
         direction: String,
-        /// Peer address: restricts the import snapshot to one peer's
-        /// Adj-RIB-In, or sets the export evaluation target peer
-        #[arg(long)]
-        peer: Option<String>,
+        /// Neighbor address: restricts the import snapshot to one
+        /// peer's Adj-RIB-In, or sets the export evaluation target
+        #[arg(long = "neighbor", visible_alias = "peer")]
+        neighbor: Option<String>,
         /// Address family filter (ipv4_unicast, ipv6_unicast)
         #[arg(short = 'a', long)]
         family: Option<String>,
@@ -500,29 +575,32 @@ enum PolicyAction {
         #[command(subcommand)]
         action: PolicyChainAction,
     },
-    /// Show live per-term policy hit counters (ADR-0096): how many
-    /// routes matched each term of the installed import/export chains
-    /// since chain install. Counters reset when a chain is replaced
-    /// (policy reload / hot-apply); import chains report their install
-    /// generation so a replacement is visible.
+    /// Show live per-term policy hit counters
+    ///
+    /// Reports how many routes matched each term of the installed
+    /// import/export chains since chain install (ADR-0096). Counters
+    /// reset when a chain is replaced (policy reload / hot-apply);
+    /// import chains report their install generation so a replacement
+    /// is visible.
     #[command(visible_alias = "counters")]
     Stats {
-        /// Restrict to one peer's installed chain
-        #[arg(long)]
-        peer: Option<String>,
+        /// Restrict to one neighbor's installed chain
+        #[arg(long = "neighbor", visible_alias = "peer")]
+        neighbor: Option<String>,
         /// Direction: export (default), import, or both
         #[arg(long, default_value = "export", value_parser = ["import", "export", "both"])]
         direction: String,
     },
     /// Explain the import-policy decision for a prefix on a neighbor
-    /// (ADR-0073): why it was permitted / denied / withdrawn, or
-    /// not-seen / evicted / stale. Reads the per-session decision
-    /// cache; requires `[policy.explain].enabled` on the daemon
-    /// (errors distinctly when the cache is disabled or the neighbor
-    /// has no live session — those are not `not_seen`).
+    ///
+    /// Explains why a prefix was permitted / denied / withdrawn, or
+    /// not-seen / evicted / stale (ADR-0073). Reads the per-session
+    /// decision cache; requires `[policy.explain].enabled` on the
+    /// daemon (errors distinctly when the cache is disabled or the
+    /// neighbor has no live session — those are not `not_seen`).
     Explain {
         /// Neighbor (peer) address whose import-decision cache to read
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: String,
         /// Prefix in CIDR form, e.g. `192.0.2.0/24` or `2001:db8::/32`
         #[arg(long)]
@@ -535,36 +613,40 @@ enum PolicyAction {
 
 #[derive(Subcommand)]
 enum PolicyChainAction {
-    /// Show the global chains, or the per-neighbor chains when
+    /// Show the global or per-neighbor chains
+    ///
+    /// Shows the global chains, or the per-neighbor chains when
     /// `--neighbor` is given.
     Show {
         /// Neighbor address (omit for the global chains)
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: Option<String>,
     },
-    /// Replace the import chain. Empty list is rejected — use
-    /// `clear-import` instead. Apply globally by omitting `--neighbor`.
+    /// Replace the import chain
+    ///
+    /// An empty list is rejected — use `clear-import` instead. Apply
+    /// globally by omitting `--neighbor`.
     SetImport {
         /// Neighbor address (omit for global)
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: Option<String>,
         /// Ordered policy names that compose the chain
         policies: Vec<String>,
     },
     /// Replace the export chain.
     SetExport {
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: Option<String>,
         policies: Vec<String>,
     },
     /// Clear the import chain entirely.
     ClearImport {
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: Option<String>,
     },
     /// Clear the export chain entirely.
     ClearExport {
-        #[arg(long)]
+        #[arg(long, visible_alias = "peer")]
         neighbor: Option<String>,
     },
 }
@@ -626,7 +708,7 @@ enum DynamicNeighborAction {
         #[arg(long)]
         peer_group: String,
         /// Expected remote ASN (0 = accept any ASN from OPEN)
-        #[arg(long, default_value_t = 0)]
+        #[arg(long = "remote-asn", visible_alias = "asn", default_value_t = 0)]
         asn: u32,
         /// Optional description
         #[arg(long)]
@@ -687,8 +769,8 @@ enum FibTableAction {
 enum NeighborAction {
     /// Add a new neighbor
     Add {
-        /// Remote AS number
-        #[arg(long)]
+        /// Remote AS number of the peer (the local AS is `rbgp global`)
+        #[arg(long = "remote-asn", visible_alias = "asn")]
         asn: u32,
         /// Description
         #[arg(long)]
@@ -768,9 +850,9 @@ enum DiffAction {
         2  incomplete, malformed, stale, mixed-generation, unsupported, or \
         over-limit input, or an operational error (equality never asserted)")]
     Advertised {
-        /// Peer address to compare; may be repeated. Omit to compare every
-        /// peer present in the snapshot.
-        #[arg(long)]
+        /// Neighbor address to compare; may be repeated. Omit to compare
+        /// every peer present in the snapshot.
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Vec<String>,
 
         /// Path to the incumbent `rbgp-ribsnap/1` NDJSON snapshot
@@ -957,8 +1039,8 @@ enum RibAction {
         /// Exact prefix filter, e.g. 203.0.113.0/24
         #[arg(long)]
         prefix: Option<String>,
-        /// Source peer-address filter
-        #[arg(long)]
+        /// Source neighbor-address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
         /// Maximum FIB status rows to return; omitted returns the full snapshot
         #[arg(long)]
@@ -974,8 +1056,8 @@ enum RibAction {
         /// linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)
         #[arg(short = 'a', long)]
         family: Option<String>,
-        /// Peer IP address filter
-        #[arg(long)]
+        /// Neighbor IP address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
         /// NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)
         #[arg(long)]
@@ -988,8 +1070,8 @@ enum RibAction {
         /// l3vpn_ipv6_unicast (alias vpnv6)
         #[arg(short = 'a', long)]
         family: Option<String>,
-        /// Peer IP address filter
-        #[arg(long)]
+        /// Neighbor IP address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
     },
     /// Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)
@@ -999,15 +1081,15 @@ enum RibAction {
         /// ipv6_labeled_unicast (alias labeled-v6)
         #[arg(short = 'a', long)]
         family: Option<String>,
-        /// Peer IP address filter
-        #[arg(long)]
+        /// Neighbor IP address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
     },
     /// Show RT-Constrain routes (RFC 4684, single IPv4 family)
     #[command(name = "rtc")]
     Rtc {
-        /// Peer IP address filter
-        #[arg(long)]
+        /// Neighbor IP address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
     },
     /// Inject a route
@@ -1189,7 +1271,8 @@ enum EvpnAction {
     List {
         #[arg(long)]
         route_type: Option<u32>,
-        #[arg(long)]
+        /// Neighbor IP address filter
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
         #[arg(long)]
         rd: Option<String>,
@@ -1315,15 +1398,19 @@ enum EvpnAction {
     },
     /// Show the committed ADR-0063 EVPN runtime generation.
     Runtime,
-    /// List local EVPN instances configured on this VTEP. Empty when
-    /// the daemon is acting purely as an EVPN route reflector.
+    /// List local EVPN instances configured on this VTEP
+    ///
+    /// Empty when the daemon is acting purely as an EVPN route
+    /// reflector.
     Instances,
     /// List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP).
     Nexthops,
     /// List managed EVPN netdev ownership/status rows (ADR-0091).
     ManagedNetdevs,
-    /// List configured IP-VRFs (Gate 9, ADR-0058) and their
-    /// readiness verdict from the most recent reconcile pass.
+    /// List configured IP-VRFs and their readiness verdict
+    ///
+    /// Lists IP-VRFs (Gate 9, ADR-0058) with the readiness verdict
+    /// from the most recent reconcile pass.
     Vrfs {
         /// Operator-facing IP-VRF name. When provided, fetch just
         /// this one VRF with detailed not-ready reasons; otherwise
@@ -1336,23 +1423,28 @@ enum EvpnAction {
 
 #[derive(Subcommand)]
 enum EsAction {
-    /// List configured Ethernet Segments joined with live drain,
-    /// DF/AC-gate, same-ESI bias, and FDB-NHG state.
+    /// List configured Ethernet Segments
+    ///
+    /// Joins configuration with live drain, DF/AC-gate, same-ESI
+    /// bias, and FDB-NHG state.
     List {
         /// Optional ESI filter as 10 colon-separated hex octets.
         esi: Option<String>,
     },
-    /// Drain an Ethernet Segment before access-circuit maintenance:
-    /// withdraw its Type 4 + EAD routes (exiting DF election) and the
-    /// member VNIs' local Type 2 routes, and suppress new local-MAC
+    /// Drain an Ethernet Segment before access-circuit maintenance
+    ///
+    /// Withdraws its Type 4 + EAD routes (exiting DF election) and the
+    /// member VNIs' local Type 2 routes, and suppresses new local-MAC
     /// origination. In-memory only — a daemon restart clears the drain.
     Drain {
         /// ESI as 10 colon-separated hex octets,
         /// e.g. "00:11:22:33:44:55:66:77:88:99".
         esi: String,
     },
-    /// Undrain an Ethernet Segment: re-originate its Type 4 + EAD
-    /// routes, re-run DF election, and replay cached local MAC state.
+    /// Undrain an Ethernet Segment
+    ///
+    /// Re-originates its Type 4 + EAD routes, re-runs DF election, and
+    /// replays cached local MAC state.
     Undrain {
         /// ESI as 10 colon-separated hex octets,
         /// e.g. "00:11:22:33:44:55:66:77:88:99".
@@ -1507,6 +1599,9 @@ fn generate_man(binary_name: &'static str, output: &mut dyn std::io::Write) -> s
     man.render_synopsis_section(output)?;
     man.render_description_section(output)?;
     man.render_options_section(output)?;
+    // The top-level EXIT CODES list (after_long_help) renders as the
+    // EXTRA section.
+    man.render_extra_section(output)?;
 
     // Hand-rolled index instead of Man::render_subcommands_section:
     // that section cross-references `rbgp-<sub>(1)` pages that do not
@@ -1550,6 +1645,16 @@ fn render_subcommand_sections(
         render_subcommand_sections(&sub, &path, global_args, output)?;
     }
     Ok(())
+}
+
+/// Resolve the `config diff|plan|apply` candidate path from either the
+/// positional CANDIDATE or the hidden `--from-file` compatibility
+/// alias. Clap guarantees exactly one is present
+/// (`required_unless_present` + `conflicts_with`).
+fn candidate_file(candidate: Option<String>, from_file: Option<String>) -> String {
+    candidate
+        .or(from_file)
+        .expect("clap requires CANDIDATE or --from-file")
 }
 
 /// Terminate with the `config diff` / `config plan` detailed exit code:
@@ -1709,14 +1814,20 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         },
 
         Command::Config { action } => match action {
-            ConfigAction::Diff { from_file } => {
+            ConfigAction::Diff {
+                candidate,
+                from_file,
+            } => {
+                let from_file = candidate_file(candidate, from_file);
                 let has_changes = commands::config::diff(connection, &from_file, json).await?;
                 exit_with_change_status(has_changes);
             }
             ConfigAction::Plan {
+                candidate,
                 from_file,
                 expected_runtime_snapshot_token,
             } => {
+                let from_file = candidate_file(candidate, from_file);
                 let has_changes = commands::config::plan(
                     connection,
                     &from_file,
@@ -1727,6 +1838,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 exit_with_change_status(has_changes);
             }
             ConfigAction::Apply {
+                candidate,
                 from_file,
                 expected_runtime_snapshot_token,
                 client_request_id,
@@ -1734,6 +1846,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 confirm_id,
                 confirm_timeout_seconds,
             } => {
+                let from_file = candidate_file(candidate, from_file);
                 commands::config::apply(
                     connection,
                     commands::config::ApplyOptions {
@@ -2443,13 +2556,23 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             )
             .await
         }
-        Command::Metrics => commands::control::metrics(connection).await,
+        Command::Metrics => {
+            if json {
+                eprintln!(
+                    "warning: --json has no effect on `metrics`; output is always Prometheus text"
+                );
+            }
+            commands::control::metrics(connection).await
+        }
         Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
-        Command::Gshut { peer, clear } => {
-            commands::neighbor::set_graceful_shutdown(connection, peer, !clear, json).await
+        Command::Gshut { neighbor, clear } => {
+            commands::neighbor::set_graceful_shutdown(connection, neighbor, !clear, json).await
         }
         Command::Top { interval } => {
+            if json {
+                eprintln!("warning: --json has no effect on `top`; it is an interactive TUI");
+            }
             if !(1..=60).contains(&interval) {
                 return Err(CliError::Argument(
                     "interval must be between 1 and 60 seconds".into(),
@@ -2465,7 +2588,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 file,
                 policy,
                 direction,
-                peer,
+                neighbor,
                 family,
                 limit,
                 show_changes,
@@ -2476,7 +2599,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         file: &file,
                         policy: &policy,
                         direction: &direction,
-                        peer: peer.as_deref(),
+                        peer: neighbor.as_deref(),
                         family: family.as_deref(),
                         limit,
                         show_changes,
@@ -2493,9 +2616,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             PolicyAction::Delete { name } => {
                 commands::policy::delete(connection, &name, json).await
             }
-            PolicyAction::Stats { peer, direction } => {
-                commands::policy::stats(connection, peer.as_deref(), &direction, json).await
-            }
+            PolicyAction::Stats {
+                neighbor,
+                direction,
+            } => commands::policy::stats(connection, neighbor.as_deref(), &direction, json).await,
             PolicyAction::Explain {
                 neighbor,
                 prefix,
@@ -3945,6 +4069,243 @@ mod tests {
         } else {
             panic!("expected NeighborSet Get");
         }
+    }
+
+    /// LAN-329 golden help guard: every subcommand list entry (`about`)
+    /// at every nesting level stays one terse line; paragraphs belong
+    /// in `long_about` (doc-comment text after a blank line).
+    #[test]
+    fn help_list_entries_are_terse_one_liners() {
+        fn assert_terse(cmd: &clap::Command, path: &str) {
+            for sub in cmd.get_subcommands() {
+                let sub_path = format!("{path} {}", sub.get_name());
+                if let Some(about) = sub.get_about() {
+                    let about = about.to_string();
+                    assert!(
+                        !about.contains('\n'),
+                        "`{sub_path}` about must be a single line, got:\n{about}"
+                    );
+                }
+                assert_terse(sub, &sub_path);
+            }
+        }
+        let mut cmd = cli_command(BINARY_NAME);
+        cmd.build();
+        assert_terse(&cmd, BINARY_NAME);
+    }
+
+    #[test]
+    fn top_level_long_help_documents_exit_codes() {
+        let mut command = cli_command(BINARY_NAME);
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("Exit codes:"), "help was: {help}");
+        assert!(help.contains("config diff, plan"), "help was: {help}");
+        assert!(help.contains("policy fmt"), "help was: {help}");
+    }
+
+    #[test]
+    fn man_page_renders_exit_codes() {
+        let mut output = Vec::new();
+        generate_man(BINARY_NAME, &mut output).unwrap();
+        let man = String::from_utf8(output).unwrap();
+        assert!(
+            man.contains("Exit codes:"),
+            "man page must carry the exit-code list"
+        );
+    }
+
+    /// LAN-329 noun standardization: `--neighbor` is canonical,
+    /// `--peer` stays as a visible compatibility alias (and vice versa
+    /// on args that were already `--neighbor`).
+    #[test]
+    fn neighbor_and_peer_flags_are_interchangeable() {
+        for flag in ["--neighbor", "--peer"] {
+            let cli = Cli::try_parse_from(["rbgp", "gshut", flag, "10.0.0.1"]).unwrap();
+            let Command::Gshut { neighbor, .. } = cli.command else {
+                panic!("expected Gshut");
+            };
+            assert_eq!(neighbor.as_deref(), Some("10.0.0.1"), "gshut {flag}");
+
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "diff",
+                "advertised",
+                flag,
+                "10.0.0.1",
+                "--against",
+                "snap.ndjson",
+            ])
+            .unwrap();
+            let Command::Diff {
+                action: DiffAction::Advertised { peer, .. },
+            } = cli.command
+            else {
+                panic!("expected Diff Advertised");
+            };
+            assert_eq!(peer, vec!["10.0.0.1"], "diff advertised {flag}");
+
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "policy",
+                "explain",
+                flag,
+                "10.0.0.1",
+                "--prefix",
+                "10.0.0.0/24",
+            ])
+            .unwrap();
+            let Command::Policy {
+                action: PolicyAction::Explain { neighbor, .. },
+            } = cli.command
+            else {
+                panic!("expected Policy Explain");
+            };
+            assert_eq!(neighbor, "10.0.0.1", "policy explain {flag}");
+
+            let cli = Cli::try_parse_from(["rbgp", "policy", "stats", flag, "10.0.0.1"]).unwrap();
+            let Command::Policy {
+                action: PolicyAction::Stats { neighbor, .. },
+            } = cli.command
+            else {
+                panic!("expected Policy Stats");
+            };
+            assert_eq!(neighbor.as_deref(), Some("10.0.0.1"), "policy stats {flag}");
+
+            let cli = Cli::try_parse_from(["rbgp", "rib", "vpn", flag, "10.0.0.1"]).unwrap();
+            let Command::Rib {
+                action: Some(RibAction::Vpn { peer, .. }),
+                ..
+            } = cli.command
+            else {
+                panic!("expected Rib Vpn");
+            };
+            assert_eq!(peer.as_deref(), Some("10.0.0.1"), "rib vpn {flag}");
+
+            let cli = Cli::try_parse_from(["rbgp", "evpn", flag, "10.0.0.1"]).unwrap();
+            let Command::Evpn { peer, .. } = cli.command else {
+                panic!("expected Evpn");
+            };
+            assert_eq!(peer.as_deref(), Some("10.0.0.1"), "evpn {flag}");
+        }
+    }
+
+    /// LAN-329: `--remote-asn` is canonical, `--asn` stays as a
+    /// visible compatibility alias.
+    #[test]
+    fn remote_asn_and_asn_flags_are_interchangeable() {
+        for flag in ["--remote-asn", "--asn"] {
+            let cli = Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.1", "add", flag, "65001"])
+                .unwrap();
+            let Command::Neighbor {
+                action: Some(NeighborAction::Add { asn, .. }),
+                ..
+            } = cli.command
+            else {
+                panic!("expected Neighbor Add");
+            };
+            assert_eq!(asn, 65001, "neighbor add {flag}");
+
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "dynamic-neighbor",
+                "add",
+                "10.0.0.0/24",
+                "--peer-group",
+                "edge",
+                flag,
+                "65001",
+            ])
+            .unwrap();
+            let Command::DynamicNeighbor {
+                action: DynamicNeighborAction::Add { asn, .. },
+            } = cli.command
+            else {
+                panic!("expected DynamicNeighbor Add");
+            };
+            assert_eq!(asn, 65001, "dynamic-neighbor add {flag}");
+        }
+    }
+
+    /// LAN-329 file-arg convention: the candidate is positional;
+    /// `--from-file` still parses as a hidden compatibility alias, and
+    /// giving both is rejected.
+    #[test]
+    fn config_candidate_is_positional_with_from_file_alias() {
+        let cli = Cli::try_parse_from(["rbgp", "config", "diff", "candidate.toml"]).unwrap();
+        let Command::Config {
+            action:
+                ConfigAction::Diff {
+                    candidate,
+                    from_file,
+                },
+        } = cli.command
+        else {
+            panic!("expected Config Diff");
+        };
+        assert_eq!(candidate.as_deref(), Some("candidate.toml"));
+        assert!(from_file.is_none());
+
+        let cli = Cli::try_parse_from(["rbgp", "config", "diff", "--from-file", "candidate.toml"])
+            .unwrap();
+        let Command::Config {
+            action:
+                ConfigAction::Diff {
+                    candidate,
+                    from_file,
+                },
+        } = cli.command
+        else {
+            panic!("expected Config Diff");
+        };
+        assert!(candidate.is_none());
+        assert_eq!(
+            candidate_file(candidate, from_file),
+            "candidate.toml".to_string()
+        );
+
+        // Neither → missing required argument; both → conflict.
+        assert!(Cli::try_parse_from(["rbgp", "config", "diff"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "config",
+                "diff",
+                "candidate.toml",
+                "--from-file",
+                "other.toml"
+            ])
+            .is_err()
+        );
+
+        // `plan` and `apply` share the same shape.
+        let cli = Cli::try_parse_from(["rbgp", "config", "plan", "candidate.toml"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Plan {
+                    candidate: Some(_),
+                    ..
+                }
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "config",
+            "apply",
+            "candidate.toml",
+            "--expected-runtime-snapshot-token",
+            "kv1:old:1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Apply {
+                    candidate: Some(_),
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]

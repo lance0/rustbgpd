@@ -475,6 +475,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the identical document. (LAN-325)
 
 ### Changed
+- **CLI consistency sweep (LAN-329).** One noun, one file-arg style, one
+  empty-state shape across `rbgp`; every old spelling keeps working as
+  an alias, so existing scripts are unaffected.
+  - `--neighbor` is now the canonical peer-selector flag everywhere
+    (`gshut`, `diff advertised`, `policy stats|test`, `rib
+    fib|bgpls|vpn|labeled|rtc`, `evpn [list]`); `--peer` remains a
+    visible alias, and the existing `--neighbor` flags (`policy
+    explain`, `policy chain ...`) gained `--peer` as an alias.
+    Positional address forms (`rbgp neighbor <ADDRESS>`) are unchanged.
+  - `neighbor add` and `dynamic-neighbor add` take `--remote-asn`
+    (canonical) with `--asn` as a visible alias, disambiguating the
+    remote AS from the local "ASN" shown by `rbgp global`.
+  - `config diff|plan|apply` take the candidate TOML as a positional
+    `[CANDIDATE]` (matching `policy check|fmt|test FILE`);
+    `--from-file` still parses as a hidden compatibility alias.
+  - `rbgp events [sessions|policy|evpn]` with no matching events now
+    prints `[]` under `--json` (previously nothing, which broke JSON
+    consumers) and a one-line "No ... events recorded" empty state in
+    human output.
+  - `rbgp metrics --json` and `rbgp top --json` now warn on stderr
+    that `--json` has no effect (Prometheus text / interactive TUI);
+    stdout is unchanged.
+  - `rbgp --help` documents the exit-code contracts (general 0/1 plus
+    the detailed `diff`, `config diff|plan`, `policy check|test|fmt`
+    codes) in one authoritative list, also rendered by `rbgp man`;
+    top-level and nested help lists are now terse one-liners with
+    details moved to each subcommand's `--help`.
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 - **Docs reorganized by task shape (Diátaxis).** `docs/README.md` now
   indexes every doc under tutorials / how-to guides / reference /
