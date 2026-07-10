@@ -91,9 +91,13 @@ fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
 
 fn rbgp_json(grpc_addr: &str, args: &[&str]) -> serde_json::Value {
     let output = rbgp(grpc_addr, args);
+    // `config diff`/`config plan` exit 2 when changes are present (the
+    // detailed exit-code contract); their JSON is still the successful
+    // answer. Everything else must exit 0; 1 stays an error.
+    let code = output.status.code();
     assert!(
-        output.status.success(),
-        "rbgp {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        output.status.success() || code == Some(2),
+        "rbgp {args:?} failed (exit {code:?})\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
