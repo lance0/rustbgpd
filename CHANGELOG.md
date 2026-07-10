@@ -11,6 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Global cross-peer path-attribute interning (LAN-336).** The
+  attribute intern table moved from one-per-peer (`AdjRibIn`) to a
+  single daemon-wide table owned by the RIB manager — the analog of
+  BIRD's refcounted `rta` cache. Identical attribute sets from
+  different peers (the common RR/RS reality: reflection preserves
+  `NEXT_HOP`, so dual-fed clients advertise byte-identical attribute
+  vectors) now share one allocation instead of one copy per peer.
+  Measured on the allocator-tracked `memory_profile` harness at
+  2 peers × 100k with per-prefix-unique, cross-peer-identical
+  attributes (`full_rib_diverse`, new shape): live heap
+  310.4 -> 181.1 MiB (-41.7%), intern entries 200k -> 100k. The
+  pre-existing `full_rib` / `rr_fanout` / `adj_rib_in` shapes carry one
+  attribute set per peer by construction (their entire attribute heap
+  is ~1 KiB), so they are byte-neutral — the intern dimension is
+  degenerate there, not measured as a win.
+  Reclaim is unchanged in kind — `Arc` strong-count sweeps at the same
+  batch seams that swept the per-peer tables, plus the peer-teardown
+  seam — and is pinned by a cross-peer churn test (steady-state
+  replace churn holds the table flat; removing one of two sharing
+  peers reclaims nothing; removing the last empties it). New gauge
+  `bgp_rib_attr_intern_global_size` (entries), refreshed at every
+  insert/remove batch seam.
+
 - **M85/M86 core-RR interop labs against BIRD and OpenBGPD.** Two new
   hosted-CI containerlab jobs pair a rustbgpd route reflector with the
   route-server incumbents: **M85** (two BIRD 2.0.12 clients + a
@@ -562,6 +585,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   both corpora now report full term coverage. (LAN-342)
 
 ### Changed
+- **Per-peer `bgp_rib_attr_intern_size{peer}` gauge replaced by
+  `bgp_rib_attr_intern_global_size`** (LAN-336): the per-peer intern
+  tables it measured no longer exist. The GR-restart/hot-reload/
+  inject-churn soak harnesses, the Grafana attribute-intern panel, and
+  OPERATIONS.md now read the global gauge; the soak slope gates are
+  unchanged in meaning (flat under steady-state churn or the gate
+  fails).
 - **CLI consistency sweep (LAN-329).** One noun, one file-arg style, one
   empty-state shape across `rbgp`; every old spelling keeps working as
   an alias, so existing scripts are unaffected.

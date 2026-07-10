@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
+use rustbgpd_rib::attr_intern::AttrInternTable;
 use rustbgpd_rib::loc_rib::LocRib;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_wire::{
@@ -204,6 +205,30 @@ fn typical_attributes(peer_idx: u32) -> Vec<PathAttribute> {
     ]
 }
 
+/// Per-prefix-unique attribute set, identical across peers for the same
+/// prefix index. Models the LAN-336 RR dual-feed shape: two clients
+/// advertising the same routes carry byte-identical attribute sets
+/// (NEXT_HOP preserved by reflection), while attribute diversity across
+/// prefixes matches a real table (unique AS_PATH tails / MED / community
+/// values per route) instead of `typical_attributes`' single set per peer.
+fn diverse_attributes(idx: u32) -> Vec<PathAttribute> {
+    vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![
+                64512 + (idx % 1024),
+                65100 + (idx % 7),
+                65200 + (idx % 3),
+                idx,
+            ])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 255, 0, 1)),
+        PathAttribute::LocalPref(100),
+        PathAttribute::Med(idx % 16),
+        PathAttribute::Communities(vec![0xFFFF_0001, idx]),
+    ]
+}
+
 fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
     Route {
         prefix,
@@ -266,24 +291,6 @@ fn adj_in_prefix_index_mem_size(_rib: &AdjRibIn) -> usize {
 }
 
 #[cfg(feature = "bench-internals")]
-fn adj_in_attr_intern_len(rib: &AdjRibIn) -> usize {
-    rib.bench_attr_intern_len()
-}
-#[cfg(not(feature = "bench-internals"))]
-fn adj_in_attr_intern_len(_rib: &AdjRibIn) -> usize {
-    0
-}
-
-#[cfg(feature = "bench-internals")]
-fn adj_in_attr_intern_capacity(rib: &AdjRibIn) -> usize {
-    rib.bench_attr_intern_capacity()
-}
-#[cfg(not(feature = "bench-internals"))]
-fn adj_in_attr_intern_capacity(_rib: &AdjRibIn) -> usize {
-    0
-}
-
-#[cfg(feature = "bench-internals")]
 fn loc_route_capacity(rib: &LocRib) -> usize {
     rib.bench_route_capacity()
 }
@@ -319,16 +326,18 @@ fn adj_out_prefix_index_mem_size(_rib: &AdjRibOut) -> usize {
     0
 }
 
-fn adj_in_stats(ribs: &[&AdjRibIn]) -> ComponentStats {
-    ribs.iter().fold(ComponentStats::ZERO, |mut stats, rib| {
+fn adj_in_stats(ribs: &[&AdjRibIn], intern: &AttrInternTable) -> ComponentStats {
+    let mut stats = ribs.iter().fold(ComponentStats::ZERO, |mut stats, rib| {
         stats.adj_in_routes += rib.len();
         stats.adj_in_capacity += adj_in_route_capacity(rib);
         stats.adj_in_prefix_index_entries += adj_in_prefix_index_len(rib);
         stats.adj_in_prefix_index_bytes += adj_in_prefix_index_mem_size(rib);
-        stats.adj_in_attr_intern_entries += adj_in_attr_intern_len(rib);
-        stats.adj_in_attr_intern_capacity += adj_in_attr_intern_capacity(rib);
         stats
-    })
+    });
+    // One global cross-peer table (LAN-336), not a per-rib sum.
+    stats.adj_in_attr_intern_entries = intern.len();
+    stats.adj_in_attr_intern_capacity = intern.capacity();
+    stats
 }
 
 fn loc_stats(rib: &LocRib) -> ComponentStats {
@@ -373,18 +382,22 @@ fn measure_adj_rib_in(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     ALLOC.reset_peak();
     let start = Instant::now();
 
+    let mut intern = AttrInternTable::new();
     let mut rib =
         AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
     for prefix in prefixes {
-        rib.insert(make_route(*prefix, 1, &attrs));
+        let mut route = make_route(*prefix, 1, &attrs);
+        intern.intern(&mut route.attributes);
+        rib.insert(route);
     }
 
     let elapsed_ms = start.elapsed().as_millis();
     let live_bytes = ALLOC.allocated() - baseline;
     let peak_bytes = ALLOC.peak() - baseline;
-    let stats = adj_in_stats(&[&rib]);
+    let stats = adj_in_stats(&[&rib], &intern);
     let route_copies = stats.adj_in_routes;
     drop(rib);
+    drop(intern);
 
     MemoryRow {
         profile,
@@ -407,6 +420,7 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     ALLOC.reset_peak();
     let start = Instant::now();
 
+    let mut intern = AttrInternTable::new();
     let mut rib1 =
         AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
     let mut rib2 =
@@ -414,8 +428,12 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for prefix in prefixes {
-        rib1.insert(make_route(*prefix, 1, &attrs1));
-        rib2.insert(make_route(*prefix, 2, &attrs2));
+        let mut r1 = make_route(*prefix, 1, &attrs1);
+        intern.intern(&mut r1.attributes);
+        rib1.insert(r1);
+        let mut r2 = make_route(*prefix, 2, &attrs2);
+        intern.intern(&mut r2.attributes);
+        rib2.insert(r2);
     }
     for prefix in prefixes {
         let candidates = rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
@@ -425,15 +443,72 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let elapsed_ms = start.elapsed().as_millis();
     let live_bytes = ALLOC.allocated() - baseline;
     let peak_bytes = ALLOC.peak() - baseline;
-    let stats = merge_stats(&[adj_in_stats(&[&rib1, &rib2]), loc_stats(&loc)]);
+    let stats = merge_stats(&[adj_in_stats(&[&rib1, &rib2], &intern), loc_stats(&loc)]);
     let route_copies = stats.adj_in_routes + stats.loc_routes;
     drop(loc);
     drop(rib1);
     drop(rib2);
+    drop(intern);
 
     MemoryRow {
         profile,
         shape: "full_rib",
+        prefixes: prefixes.len(),
+        input_peers: 2,
+        output_peers: 0,
+        route_copies,
+        live_bytes,
+        peak_bytes,
+        elapsed_ms,
+        stats,
+    }
+}
+
+/// `full_rib` with per-prefix-diverse, cross-peer-identical attributes
+/// (see [`diverse_attributes`]). This is the shape where attribute-set
+/// heap is a first-order cost and where cross-peer interning can act;
+/// the plain `full_rib` shape carries one attribute set per peer by
+/// construction, so its intern dimension is degenerate (2 entries).
+fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+    let baseline = ALLOC.allocated();
+    ALLOC.reset_peak();
+    let start = Instant::now();
+
+    let mut intern = AttrInternTable::new();
+    let mut rib1 =
+        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
+    let mut rib2 =
+        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut loc = LocRib::with_capacity(prefixes.len());
+
+    for (idx, prefix) in prefixes.iter().enumerate() {
+        #[expect(clippy::cast_possible_truncation, reason = "profile sizes fit u32")]
+        let attrs = diverse_attributes(idx as u32);
+        let mut r1 = make_route(*prefix, 1, &attrs);
+        intern.intern(&mut r1.attributes);
+        rib1.insert(r1);
+        let mut r2 = make_route(*prefix, 2, &attrs);
+        intern.intern(&mut r2.attributes);
+        rib2.insert(r2);
+    }
+    for prefix in prefixes {
+        let candidates = rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
+        loc.recompute(*prefix, candidates);
+    }
+
+    let elapsed_ms = start.elapsed().as_millis();
+    let live_bytes = ALLOC.allocated() - baseline;
+    let peak_bytes = ALLOC.peak() - baseline;
+    let stats = merge_stats(&[adj_in_stats(&[&rib1, &rib2], &intern), loc_stats(&loc)]);
+    let route_copies = stats.adj_in_routes + stats.loc_routes;
+    drop(loc);
+    drop(rib1);
+    drop(rib2);
+    drop(intern);
+
+    MemoryRow {
+        profile,
+        shape: "full_rib_diverse",
         prefixes: prefixes.len(),
         input_peers: 2,
         output_peers: 0,
@@ -452,6 +527,7 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     ALLOC.reset_peak();
     let start = Instant::now();
 
+    let mut intern = AttrInternTable::new();
     let mut rib1 =
         AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
     let mut rib2 =
@@ -459,8 +535,12 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for prefix in prefixes {
-        rib1.insert(make_route(*prefix, 1, &attrs1));
-        rib2.insert(make_route(*prefix, 2, &attrs2));
+        let mut r1 = make_route(*prefix, 1, &attrs1);
+        intern.intern(&mut r1.attributes);
+        rib1.insert(r1);
+        let mut r2 = make_route(*prefix, 2, &attrs2);
+        intern.intern(&mut r2.attributes);
+        rib2.insert(r2);
     }
     for prefix in prefixes {
         let candidates = rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
@@ -481,7 +561,7 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let live_bytes = ALLOC.allocated() - baseline;
     let peak_bytes = ALLOC.peak() - baseline;
     let stats = merge_stats(&[
-        adj_in_stats(&[&rib1, &rib2]),
+        adj_in_stats(&[&rib1, &rib2], &intern),
         loc_stats(&loc),
         adj_out_stats(&[&out1, &out2]),
     ]);
@@ -491,6 +571,7 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     drop(loc);
     drop(rib1);
     drop(rib2);
+    drop(intern);
 
     MemoryRow {
         profile,
@@ -507,11 +588,12 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
 }
 
 fn profile_rows(profile: &'static str, sizes: &[usize]) -> Vec<MemoryRow> {
-    let mut rows = Vec::with_capacity(sizes.len() * 3);
+    let mut rows = Vec::with_capacity(sizes.len() * 4);
     for &size in sizes {
         let prefixes = generate_prefixes(size);
         rows.push(measure_adj_rib_in(profile, &prefixes));
         rows.push(measure_full_rib(profile, &prefixes));
+        rows.push(measure_full_rib_diverse(profile, &prefixes));
         rows.push(measure_rr_fanout(profile, &prefixes));
         drop(prefixes);
     }
@@ -549,7 +631,7 @@ fn configured_profile() -> (&'static str, Vec<usize>) {
 #[test]
 fn memory_profile_schema_quick() {
     let rows = profile_rows("schema", &[512]);
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 4);
 
     let adj = rows.iter().find(|row| row.shape == "adj_rib_in").unwrap();
     assert_eq!(adj.prefixes, 512);
@@ -567,6 +649,14 @@ fn memory_profile_schema_quick() {
     assert_eq!(full.route_copies, 512 * 3);
     assert_eq!(full.stats.adj_in_routes, 512 * 2);
     assert_eq!(full.stats.loc_routes, 512);
+
+    let diverse = rows
+        .iter()
+        .find(|row| row.shape == "full_rib_diverse")
+        .unwrap();
+    assert_eq!(diverse.input_peers, 2);
+    assert_eq!(diverse.route_copies, 512 * 3);
+    assert_eq!(diverse.stats.adj_in_routes, 512 * 2);
 
     let rr = rows.iter().find(|row| row.shape == "rr_fanout").unwrap();
     assert_eq!(rr.input_peers, 2);

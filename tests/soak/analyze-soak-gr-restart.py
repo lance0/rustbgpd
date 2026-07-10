@@ -4,7 +4,7 @@
 Reads the CSV emitted by run-soak-gr-restart-intern-gc.sh and emits a
 JSON verdict against the soak-specific gates:
 
-  - intern table size (bgp_rib_attr_intern_size) slope per hour < 1.0
+  - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
     (the intern table should not grow across restart cycles; a positive
     slope indicates gc_intern_table is not reclaiming stranded sets)
   - RSS slope (steady state, MB/hour) < 1.0

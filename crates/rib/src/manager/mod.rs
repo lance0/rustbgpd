@@ -89,6 +89,12 @@ impl RtcMembership {
 /// No `Arc<RwLock>` — all state is owned by this task.
 pub struct RibManager {
     ribs: HashMap<IpAddr, AdjRibIn>,
+    /// Global cross-peer attribute intern table (LAN-336). Owned by this
+    /// task like everything else — lock-free by construction. Every route
+    /// insertion seam interns `route.attributes` here BEFORE storing the
+    /// route; every removal seam runs [`RibManager::gc_attr_intern`]
+    /// afterwards (see `crate::attr_intern` for the reclaim rules).
+    attr_intern: crate::attr_intern::AttrInternTable,
     /// See [`UnicastPrefixPeers`] for the maintenance contract.
     unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
@@ -685,6 +691,25 @@ impl PendingRoutesReceived {
 }
 
 impl RibManager {
+    /// Sweep the global attribute intern table (drop entries no route
+    /// references any more) and refresh its gauge. Run after any batch
+    /// that removed or replaced routes — the same seams that swept the
+    /// per-peer tables before LAN-336.
+    fn gc_attr_intern(&mut self) {
+        self.attr_intern.gc();
+        self.sync_attr_intern_gauge();
+    }
+
+    /// Refresh the global intern-table gauge without sweeping. Run after
+    /// insert-only batches so growth is visible at every mutation seam
+    /// (a gauge a scenario never updates cannot gate anything).
+    fn sync_attr_intern_gauge(&self) {
+        self.metrics
+            .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
+    }
+}
+
+impl RibManager {
     /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
     pub fn new(
@@ -726,6 +751,7 @@ impl RibManager {
         }
         Self {
             ribs: HashMap::new(),
+            attr_intern: crate::attr_intern::AttrInternTable::new(),
             unicast_prefix_peers: UnicastPrefixPeers::default(),
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
@@ -2524,9 +2550,10 @@ impl RibManager {
                 }
             }
 
-            for route in announced {
+            for mut route in announced {
                 let key = route.key();
                 let family = route.family.to_afi_safi();
+                self.attr_intern.intern(&mut route.attributes);
                 needs_intern_gc |= rib.insert_bgpls(route);
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
@@ -2543,14 +2570,11 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_bgpls_keys(&affected);
-        if !affected.is_empty()
-            && let Some(rib) = self.ribs.get_mut(&peer)
-        {
+        if !affected.is_empty() {
             if needs_intern_gc {
-                rib.gc_intern_table();
+                self.attr_intern.gc();
             }
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -2585,9 +2609,10 @@ impl RibManager {
                 }
             }
 
-            for route in announced {
+            for mut route in announced {
                 let key = route.key();
                 let family = route.afi_safi();
+                self.attr_intern.intern(&mut route.attributes);
                 needs_intern_gc |= rib.insert_vpn(route);
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
@@ -2604,14 +2629,11 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_vpn_keys(&affected);
-        if !affected.is_empty()
-            && let Some(rib) = self.ribs.get_mut(&peer)
-        {
+        if !affected.is_empty() {
             if needs_intern_gc {
-                rib.gc_intern_table();
+                self.attr_intern.gc();
             }
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -2656,9 +2678,10 @@ impl RibManager {
                 }
             }
 
-            for route in announced {
+            for mut route in announced {
                 let key = route.key();
                 let family = route.afi_safi();
+                self.attr_intern.intern(&mut route.attributes);
                 needs_intern_gc |= rib.insert_labeled(route);
                 affected.insert(key);
                 if active_refresh.contains(&family)
@@ -2675,14 +2698,11 @@ impl RibManager {
         }
         self.update_peer_refresh_metrics(peer);
         self.recompute_labeled_keys(&affected);
-        if !affected.is_empty()
-            && let Some(rib) = self.ribs.get_mut(&peer)
-        {
+        if !affected.is_empty() {
             if needs_intern_gc {
-                rib.gc_intern_table();
+                self.attr_intern.gc();
             }
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -2725,8 +2745,9 @@ impl RibManager {
                     removed_stale += 1;
                 }
             }
-            for route in announced {
+            for mut route in announced {
                 let key = route.key();
+                self.attr_intern.intern(&mut route.attributes);
                 needs_intern_gc |= rib.insert_rtc(route);
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
@@ -2741,14 +2762,11 @@ impl RibManager {
         self.decrement_refresh_stale_count(peer, family.0, family.1, removed_stale);
         self.update_peer_refresh_metrics(peer);
         self.recompute_rtc_keys(&affected);
-        if !affected.is_empty()
-            && let Some(rib) = self.ribs.get_mut(&peer)
-        {
+        if !affected.is_empty() {
             if needs_intern_gc {
-                rib.gc_intern_table();
+                self.attr_intern.gc();
             }
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.sync_attr_intern_gauge();
         }
         self.rebuild_rtc_membership_and_restage_vpn(peer);
     }

@@ -8,8 +8,8 @@
 # rustbgpd has gr_restart_time=15, gr_stale_routes_time=20,
 # llgr_stale_time=60. The soak harness cyclically restarts FRR's
 # bgpd to drive the rustbgpd GR-restart → stale-mark → EoR →
-# stale-clear → gc_intern_table path repeatedly, sampling RSS and
-# the bgp_rib_attr_intern_size gauge to prove the intern table
+# stale-clear → attribute-intern gc path repeatedly, sampling RSS and
+# the bgp_rib_attr_intern_global_size gauge to prove the intern table
 # does not grow across restart cycles.
 #
 # Usage:

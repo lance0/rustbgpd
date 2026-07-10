@@ -12,6 +12,8 @@
 pub mod adj_rib_in;
 /// Per-peer outbound RIB storage.
 pub mod adj_rib_out;
+/// Global cross-peer path-attribute interning (LAN-336).
+pub mod attr_intern;
 /// Best-path selection algorithm (RFC 4271 §9.1.2).
 pub mod best_path;
 /// RFC 9069 Loc-RIB BMP synthesis (UPDATE PDUs + fabricated OPEN).
@@ -41,6 +43,7 @@ mod test_support;
 /// RIB update messages and outbound route structures.
 pub mod update;
 
+pub use attr_intern::AttrInternTable;
 pub use best_path::{
     BestPathReason, MultipathEligibility, best_path_cmp, best_path_reason_detail,
     multipath_eligibility, multipath_equal,

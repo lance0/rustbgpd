@@ -7,6 +7,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rustbgpd_policy::{PolicyChain, RouteContext, evaluate_chain};
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
+use rustbgpd_rib::attr_intern::AttrInternTable;
 use rustbgpd_rib::best_path::best_path_cmp;
 use rustbgpd_rib::loc_rib::LocRib;
 use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -147,12 +148,19 @@ fn bench_adj_rib_in_insert(c: &mut Criterion) {
         let routes: Vec<Route> = prefixes.iter().map(|p| make_route(*p, 1)).collect();
         group.bench_with_input(BenchmarkId::from_parameter(count), &routes, |b, routes| {
             b.iter_batched(
-                || AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
-                |mut rib| {
+                || {
+                    (
+                        AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+                        AttrInternTable::new(),
+                    )
+                },
+                |(mut rib, mut intern)| {
                     for route in routes {
-                        rib.insert(route.clone());
+                        let mut route = route.clone();
+                        intern.intern(&mut route.attributes);
+                        rib.insert(route);
                     }
-                    rib
+                    (rib, intern)
                 },
                 BatchSize::LargeInput,
             );
@@ -207,15 +215,20 @@ fn bench_rib_pipeline(c: &mut Criterion) {
                             AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
                             LocRib::new(),
                             AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1))),
+                            AttrInternTable::new(),
                         )
                     },
-                    |(mut rib1, mut rib2, mut loc, mut out)| {
+                    |(mut rib1, mut rib2, mut loc, mut out, mut intern)| {
                         // Insert into Adj-RIB-In from two peers
                         for route in *p1_routes {
-                            rib1.insert(route.clone());
+                            let mut route = route.clone();
+                            intern.intern(&mut route.attributes);
+                            rib1.insert(route);
                         }
                         for route in *p2_routes {
-                            rib2.insert(route.clone());
+                            let mut route = route.clone();
+                            intern.intern(&mut route.attributes);
+                            rib2.insert(route);
                         }
                         // Recompute best path for each prefix
                         for prefix in *prefixes {
@@ -227,7 +240,7 @@ fn bench_rib_pipeline(c: &mut Criterion) {
                                 out.insert(best.clone());
                             }
                         }
-                        (rib1, rib2, loc, out)
+                        (rib1, rib2, loc, out, intern)
                     },
                     BatchSize::LargeInput,
                 );
@@ -265,11 +278,14 @@ fn bench_bulk_initial_load(c: &mut Criterion) {
                                 IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
                                 routes.len(),
                             ),
+                            AttrInternTable::new(),
                         )
                     },
-                    |(mut rib, mut loc, mut out)| {
+                    |(mut rib, mut loc, mut out, mut intern)| {
                         for route in *routes {
-                            rib.insert(route.clone());
+                            let mut route = route.clone();
+                            intern.intern(&mut route.attributes);
+                            rib.insert(route);
                         }
 
                         for prefix in *prefixes {
@@ -280,7 +296,7 @@ fn bench_bulk_initial_load(c: &mut Criterion) {
                             }
                         }
 
-                        (rib, loc, out)
+                        (rib, loc, out, intern)
                     },
                     BatchSize::LargeInput,
                 );
@@ -310,18 +326,23 @@ fn bench_route_churn(c: &mut Criterion) {
                 let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)));
                 let rib2 = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)));
                 let mut loc = LocRib::new();
+                let mut intern = AttrInternTable::new();
                 for route in &base_routes {
-                    rib.insert(route.clone());
+                    let mut route = route.clone();
+                    intern.intern(&mut route.attributes);
+                    rib.insert(route);
                 }
                 for prefix in &prefixes {
                     loc.recompute(*prefix, rib.iter_prefix(prefix));
                 }
-                (rib, rib2, loc)
+                (rib, rib2, loc, intern)
             },
-            |(rib, mut rib2, mut loc)| {
+            |(rib, mut rib2, mut loc, mut intern)| {
                 // Announce churn routes from peer 2
                 for route in &churn_routes {
-                    rib2.insert(route.clone());
+                    let mut route = route.clone();
+                    intern.intern(&mut route.attributes);
+                    rib2.insert(route);
                 }
                 for prefix in &prefixes[..churn_count] {
                     let candidates = rib.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
@@ -334,7 +355,10 @@ fn bench_route_churn(c: &mut Criterion) {
                 for prefix in &prefixes[..churn_count] {
                     loc.recompute(*prefix, rib.iter_prefix(prefix));
                 }
-                (rib, rib2, loc)
+                // Reclaim the withdrawn churn attrs — the manager gc's at
+                // this seam, so the benched pipeline does too.
+                intern.gc();
+                (rib, rib2, loc, intern)
             },
             BatchSize::LargeInput,
         );

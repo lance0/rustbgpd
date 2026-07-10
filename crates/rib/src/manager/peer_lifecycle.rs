@@ -362,6 +362,13 @@ impl RibManager {
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
         }
+        // The removed Adj-RIB-In held the peer's route bodies; dropping it
+        // releases their attribute Arcs. Sweep the global intern table now
+        // (after the recomputes above dropped any Loc-RIB selected-route
+        // clones) so a departed peer cannot leave stranded attribute sets —
+        // the reclaim the per-peer tables used to get for free on drop.
+        drop(rib);
+        self.gc_attr_intern();
     }
 
     /// Handle a peer *deletion* (the neighbor was removed from the

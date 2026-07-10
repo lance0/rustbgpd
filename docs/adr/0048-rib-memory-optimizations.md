@@ -4,6 +4,12 @@
 
 Accepted
 
+> **Update (LAN-336):** the per-`AdjRibIn` intern table described below was
+> replaced by a single daemon-wide cross-peer table owned by the RIB manager
+> (`crates/rib/src/attr_intern.rs`). The interning mechanics (content-hash
+> lookup, `Arc` strong-count GC) are unchanged; only the scope moved from
+> one-table-per-peer to one table for all peers and families.
+
 ## Context
 
 With a full Internet routing table (~900k IPv4 prefixes), memory consumption is

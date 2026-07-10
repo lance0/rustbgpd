@@ -88,8 +88,9 @@ impl RibManager {
             .entry(source)
             .or_insert_with(|| AdjRibIn::new(source));
         let mut affected = HashSet::with_capacity(routes.len());
-        for route in routes {
+        for mut route in routes {
             affected.insert(route.prefix);
+            self.attr_intern.intern(&mut route.attributes);
             rib.insert(route);
         }
         for prefix in &affected {

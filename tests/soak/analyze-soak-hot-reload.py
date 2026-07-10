@@ -5,7 +5,7 @@ Reads the CSV emitted by run-soak-hot-reload.sh and emits a JSON
 verdict against the soak-specific gates:
 
   - RSS slope (steady state, MB/hour) < 1.0
-  - intern table size (bgp_rib_attr_intern_size) slope per hour < 1.0
+  - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
   - peak RSS < 512 MB
   - session established in final 3 samples (no flap from live-apply)
   - at least one apply cycle recorded

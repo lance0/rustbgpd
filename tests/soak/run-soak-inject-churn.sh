@@ -285,7 +285,7 @@ sample_row() {
     else
         established=0
     fi
-    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_size)
+    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \

@@ -4,7 +4,7 @@
 # Repeatedly restarts FRR's bgpd to drive rustbgpd through the
 # Graceful Restart state machine: session down → stale-mark →
 # reconnect → EoR → stale-clear → gc_intern_table. Samples RSS and
-# the bgp_rib_attr_intern_size Prometheus gauge each cycle to prove
+# the bgp_rib_attr_intern_global_size Prometheus gauge each cycle to prove
 # the interned-attribute table does not grow across restart cycles
 # (the leak class fixed in #603 and unsoaked at HEAD until now).
 #
@@ -201,7 +201,7 @@ sample_row() {
     local prom rss intern_size gr_active established
     prom=$(prom_scrape)
     rss=$(container_rss_mb)
-    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_size)
+    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
     gr_active=$(prom_extract_or_zero "$prom" bgp_gr_active_peers)
     if frr_established_seen; then
         established=1

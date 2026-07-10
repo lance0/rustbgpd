@@ -514,19 +514,20 @@ bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
 | `LocRib` | 96 bytes |
 
 `PathAttribute` grew from 72 to 112 bytes since the v0.30-era figures (new
-attribute variants). It is interned per peer, so the per-route impact is
-amortized to near zero (see below), but it does raise the per-unique-attribute-
-set heap cost.
+attribute variants). It is interned (globally, across all peers — LAN-336),
+so the per-route impact is amortized to near zero (see below), but it does
+raise the per-unique-attribute-set heap cost.
 
 `Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
 reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
 
-Path attribute interning in `AdjRibIn` deduplicates identical attribute sets
-across routes from the same peer. A `HashSet<Arc<Vec<PathAttribute>>>` intern
-table maps each unique attribute set to a shared `Arc`. Routes with identical
-attributes (common in bulk advertisements) share one heap allocation instead of
-each having their own copy.
+Path attribute interning deduplicates identical attribute sets across routes
+from ALL peers: a single RIB-manager-owned `AttrInternTable` (LAN-336, the
+analog of BIRD's `rta` cache) maps each unique attribute set to a shared
+`Arc`. Routes with identical attributes — bulk advertisements from one peer,
+or the same route re-advertised by multiple RR clients — share one heap
+allocation instead of one copy per route or per peer.
 
 ### Per-Route Heap Allocation
 
@@ -565,8 +566,8 @@ can separate those cliffs from real storage regressions.
 *prefix-index migration* note below.) This is the **RIB-only, allocator-tracked**
 structural memory (2× Adj-RIB-In +
 Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
-across copies, and attribute interning within each `AdjRibIn` shares one
-allocation across routes with identical attributes. It is **distinct from the
+across copies, and global attribute interning shares one allocation across
+routes with identical attributes, whichever peers they came from. It is **distinct from the
 full-process RSS** below — it excludes the daemon's operational surfaces
 (event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
 

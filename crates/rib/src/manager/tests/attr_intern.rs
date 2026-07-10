@@ -29,7 +29,7 @@ fn evpn_withdraw_gcs_attr_intern_under_mac_mobility() {
         manager.process_evpn_withdraw_chunk(peer, vec![key]);
     }
 
-    let intern = manager.ribs[&peer].intern_len();
+    let intern = manager.attr_intern.len();
     assert!(
         intern <= EVPN_ROUTE_EVENT_HISTORY_CAPACITY,
         "EVPN attribute intern table grew unbounded under MAC-mobility churn: \
@@ -62,7 +62,7 @@ fn evpn_announce_replace_reclaims_attr_intern() {
         manager.process_evpn_announce_chunk(peer, vec![route]);
     }
 
-    let intern = manager.ribs[&peer].intern_len();
+    let intern = manager.attr_intern.len();
     // Bounded by the event-history ring plus the single live route and the
     // in-flight event (~ring + 2); pre-fix this grew to `moves` (6096).
     let bound = EVPN_ROUTE_EVENT_HISTORY_CAPACITY + 16;
@@ -92,6 +92,7 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
         route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
         let key = route.key();
+        manager.attr_intern.intern(&mut route.attributes);
         manager
             .ribs
             .entry(LOCAL_PEER)
@@ -101,7 +102,7 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
         manager.handle_withdraw_evpn(key, reply_tx);
     }
 
-    let intern = manager.ribs[&LOCAL_PEER].intern_len();
+    let intern = manager.attr_intern.len();
     assert!(
         intern <= 1,
         "injected EVPN re-origination leaked the intern table: {intern} sets (expected <= 1)"
@@ -126,7 +127,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
     );
-    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+    assert_eq!(manager.attr_intern.len(), 1);
 
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -150,7 +151,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
         "withdraw recompute must remove the selected Loc-RIB clone"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         0,
         "post-recompute GC must reclaim the withdrawn route's interned attributes"
     );
@@ -179,7 +180,7 @@ fn unicast_inject_replace_reclaims_attr_intern_after_loc_rib_recompute() {
         Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
     );
     assert_eq!(
-        manager.ribs[&LOCAL_PEER].intern_len(),
+        manager.attr_intern.len(),
         1,
         "injected unicast re-originations must leave only the live route's interned attrs"
     );
@@ -198,7 +199,7 @@ fn unicast_withdraw_injected_reclaims_attr_intern_after_loc_rib_recompute() {
     route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
     let (reply_tx, _reply_rx) = oneshot::channel();
     manager.handle_inject_route(route, reply_tx);
-    assert_eq!(manager.ribs[&LOCAL_PEER].intern_len(), 1);
+    assert_eq!(manager.attr_intern.len(), 1);
 
     let (reply_tx, _reply_rx) = oneshot::channel();
     manager.handle_withdraw_injected(Prefix::V4(prefix), 0, reply_tx);
@@ -208,7 +209,7 @@ fn unicast_withdraw_injected_reclaims_attr_intern_after_loc_rib_recompute() {
         "withdrawing the injected route must recompute it out of the Loc-RIB"
     );
     assert_eq!(
-        manager.ribs[&LOCAL_PEER].intern_len(),
+        manager.attr_intern.len(),
         0,
         "withdraw-injected must reclaim the selected route's interned attrs"
     );
@@ -234,7 +235,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
     );
-    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+    assert_eq!(manager.attr_intern.len(), 1);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -261,7 +262,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         "GR expiry should promote the retained route into LLGR stale state"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         0,
         "GR expiry must reclaim the pre-promotion interned set after Loc-RIB recompute"
     );
@@ -290,7 +291,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         "End-of-RIB should clear LLGR stale on the retained route"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         1,
         "only the re-advertised route's live interned set survives EoR — the \
          orphaned pre-promotion set stays reclaimed"
@@ -316,7 +317,7 @@ fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
         Some(peer)
     );
-    assert_eq!(manager.ribs[&peer].intern_len(), 1);
+    assert_eq!(manager.attr_intern.len(), 1);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -337,7 +338,7 @@ fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
         "GR expiry should remove the stale route from the Loc-RIB"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         0,
         "GR expiry must reclaim the selected route's interned attrs after recompute"
     );
@@ -365,7 +366,7 @@ fn unicast_announce_replace_reclaims_attr_intern() {
         manager.process_announce_chunk(peer, vec![route]);
     }
 
-    let intern = manager.ribs[&peer].intern_len();
+    let intern = manager.attr_intern.len();
     assert_eq!(
         intern, 1,
         "unicast re-advertise (replace, no withdraw) churn leaked the intern table: \
@@ -400,9 +401,8 @@ fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
         manager.handle_bgpls_routes_received(peer, vec![], vec![key]);
     }
 
-    let rib = &manager.ribs[&peer];
     assert_eq!(
-        rib.bgpls_len(),
+        manager.ribs[&peer].bgpls_len(),
         0,
         "every churned BGP-LS route was withdrawn from the Adj-RIB-In"
     );
@@ -412,16 +412,16 @@ fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
         "every churned BGP-LS route was removed from the Loc-RIB"
     );
     assert_eq!(
-        rib.intern_len(),
+        manager.attr_intern.len(),
         0,
         "BGP-LS pure-withdraw churn leaked the intern table: {} interned sets after {moves} withdraws",
-        rib.intern_len()
+        manager.attr_intern.len()
     );
 }
 
 #[test]
-fn bgpls_pure_add_records_peer_attr_intern_size() {
-    // Per-peer intern-size telemetry must move on growth, not only on later
+fn bgpls_pure_add_records_global_attr_intern_size() {
+    // Intern-size telemetry must move on growth, not only on later
     // replacement/withdraw GC. BGP-LS is representative of the RR-only
     // families handled in manager/mod.rs: insert_* returns "replaced", so a
     // first-time route add grows the intern table while `needs_intern_gc`
@@ -437,18 +437,14 @@ fn bgpls_pure_add_records_peer_attr_intern_size() {
     manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
 
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         1,
-        "the pure add should grow the peer's intern table"
+        "the pure add should grow the global intern table"
     );
-    let gauge = gauge_metric_value(
-        &metrics,
-        "bgp_rib_attr_intern_size",
-        &[("peer", &peer.to_string())],
-    );
+    let gauge = gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]);
     assert!(
         (gauge - 1.0).abs() < f64::EPSILON,
-        "pure-add growth must be visible in the exported per-peer gauge"
+        "pure-add growth must be visible in the exported global gauge"
     );
 }
 
@@ -470,9 +466,10 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     for seq in 0..64u32 {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100 + seq);
         route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        manager.attr_intern.intern(&mut route.attributes);
         rib.insert_evpn(route);
     }
-    assert_eq!(manager.ribs[&peer].intern_len(), 64);
+    assert_eq!(manager.attr_intern.len(), 64);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         peer,
@@ -491,7 +488,7 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
         .expect("GR-preserved peer shell should stay alive");
     assert_eq!(rib.evpn_len(), 0, "EVPN was not GR-preserved");
     assert_eq!(
-        rib.intern_len(),
+        manager.attr_intern.len(),
         0,
         "GR family pruning must reclaim EVPN attribute intern entries"
     );
@@ -521,7 +518,7 @@ fn graceful_restart_entry_gcs_attr_intern_for_loc_rib_selected_bgpls() {
         let route = make_bgpls_route(peer_addr, u8::try_from(seq).unwrap(), 100 + seq);
         manager.handle_bgpls_routes_received(peer, vec![route], vec![]);
     }
-    assert_eq!(manager.ribs[&peer].intern_len(), count as usize);
+    assert_eq!(manager.attr_intern.len(), count as usize);
     assert_eq!(manager.loc_rib.iter_bgpls().count(), count as usize);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
@@ -546,7 +543,7 @@ fn graceful_restart_entry_gcs_attr_intern_for_loc_rib_selected_bgpls() {
         "GR entry withdraws BGP-LS from the Loc-RIB"
     );
     assert_eq!(
-        rib.intern_len(),
+        manager.attr_intern.len(),
         0,
         "GR entry must reclaim the interned attribute sets of the Loc-RIB-selected \
          BGP-LS routes it withdraws (gc must run after the Loc-RIB recompute)"
@@ -571,7 +568,7 @@ fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
     let survivor = make_bgpls_route(peer_addr, 21, 100);
     let omitted = make_bgpls_route(peer_addr, 22, 200);
     manager.handle_bgpls_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
-    assert_eq!(manager.ribs[&peer].intern_len(), 2);
+    assert_eq!(manager.attr_intern.len(), 2);
 
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         session_id: 0,
@@ -594,7 +591,7 @@ fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
         "EoRR sweeps the omitted BGP-LS route, leaving only the survivor"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         1,
         "EoRR sweep must reclaim the swept route's interned attribute set \
          (gc must run after finish_route_refresh's Loc-RIB recompute)"
@@ -617,7 +614,7 @@ fn enhanced_route_refresh_vpn_eorr_gcs_attr_intern_for_swept_route() {
     let survivor = make_vpn_rib_route(peer_addr, 21, 100, 100);
     let omitted = make_vpn_rib_route(peer_addr, 22, 100, 200);
     manager.handle_vpn_routes_received(peer, vec![survivor.clone(), omitted], vec![]);
-    assert_eq!(manager.ribs[&peer].intern_len(), 2);
+    assert_eq!(manager.attr_intern.len(), 2);
 
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         session_id: 0,
@@ -640,9 +637,116 @@ fn enhanced_route_refresh_vpn_eorr_gcs_attr_intern_for_swept_route() {
         "EoRR sweeps the omitted VPN route, leaving only the survivor"
     );
     assert_eq!(
-        manager.ribs[&peer].intern_len(),
+        manager.attr_intern.len(),
         1,
         "EoRR sweep must reclaim the swept VPN route's interned attribute set \
          (gc must run after finish_route_refresh's Loc-RIB recompute)"
+    );
+}
+
+#[test]
+fn cross_peer_identical_attrs_share_one_global_intern_entry() {
+    // The LAN-336 premise: two RR clients advertising the same route carry
+    // byte-identical attribute sets (reflection preserves NEXT_HOP). The
+    // global table must collapse both peers' allocations to ONE entry, and
+    // both stored routes must share that allocation (Arc pointer equality
+    // across Adj-RIB-Ins — per-peer tables could never produce this).
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    manager.ribs.insert(peer1, AdjRibIn::new(peer1));
+    manager.ribs.insert(peer2, AdjRibIn::new(peer2));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let attrs = vec![PathAttribute::Med(100), PathAttribute::LocalPref(200)];
+
+    let mut r1 = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    r1.attributes = Arc::new(attrs.clone());
+    let mut r2 = make_route(prefix, Ipv4Addr::new(10, 0, 0, 2));
+    r2.attributes = Arc::new(attrs);
+    assert!(!Arc::ptr_eq(&r1.attributes, &r2.attributes));
+
+    manager.process_announce_chunk(peer1, vec![r1]);
+    manager.process_announce_chunk(peer2, vec![r2]);
+
+    assert_eq!(
+        manager.attr_intern.len(),
+        1,
+        "identical attribute sets from two peers must intern to one entry"
+    );
+    let a1 = &manager.ribs[&peer1]
+        .get(&Prefix::V4(prefix), 0)
+        .unwrap()
+        .attributes;
+    let a2 = &manager.ribs[&peer2]
+        .get(&Prefix::V4(prefix), 0)
+        .unwrap()
+        .attributes;
+    assert!(
+        Arc::ptr_eq(a1, a2),
+        "both peers' stored routes must share one allocation"
+    );
+    // Referenced by: intern table + peer1 route + peer2 route + the
+    // Loc-RIB selected clone. The point: >= 3 proves cross-peer sharing.
+    assert!(Arc::strong_count(a1) >= 3);
+}
+
+#[test]
+fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
+    // Reclaim proof for the global table (same discipline as the slab
+    // slot-reuse test): steady-state replace churn across two peers must
+    // hold the table at exactly one entry per live attribute set — a table
+    // that only grows is a soak-killer. Afterwards, tearing down one peer
+    // keeps the shared entries alive (the other peer still references
+    // them); tearing down the last peer drops the table to zero.
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    manager.ribs.insert(peer1, AdjRibIn::new(peer1));
+    manager.ribs.insert(peer2, AdjRibIn::new(peer2));
+
+    let n = 64u8;
+    let cycles = 10u32;
+    for cycle in 0..cycles {
+        for (peer, nh) in [
+            (peer1, Ipv4Addr::new(10, 0, 0, 1)),
+            (peer2, Ipv4Addr::new(10, 0, 0, 2)),
+        ] {
+            let routes: Vec<_> = (0..n)
+                .map(|i| {
+                    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, i, 0), 24);
+                    let mut route = make_route(prefix, nh);
+                    // Per-prefix-unique, cross-peer-identical, rotated
+                    // every cycle so each cycle replaces every set.
+                    route.attributes = Arc::new(vec![
+                        PathAttribute::Med(u32::from(i)),
+                        PathAttribute::LocalPref(cycle),
+                    ]);
+                    route
+                })
+                .collect();
+            manager.process_announce_chunk(peer, routes);
+        }
+        assert_eq!(
+            manager.attr_intern.len(),
+            usize::from(n),
+            "cycle {cycle}: one global entry per live attribute set — \
+             replaced sets must be reclaimed, cross-peer duplicates merged"
+        );
+    }
+
+    manager.handle_peer_deleted(peer2);
+    assert_eq!(
+        manager.attr_intern.len(),
+        usize::from(n),
+        "peer2 teardown must NOT reclaim sets peer1's routes still share"
+    );
+    manager.handle_peer_deleted(peer1);
+    assert_eq!(
+        manager.attr_intern.len(),
+        0,
+        "tearing down the last referencing peer must empty the table"
     );
 }
