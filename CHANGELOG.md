@@ -349,6 +349,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (LAN-318)
 
 ### Changed
+- Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 
 - **Release publication is now fail-closed.** The binary-release and
   container-image workflows refuse to publish unless the pushed tag

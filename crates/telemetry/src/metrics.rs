@@ -165,10 +165,6 @@ pub struct BgpMetrics {
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records: IntGauge,
-    /// Deprecated alias kept for one release; remove after the
-    /// `bgp_aspa_records` rename ships (a gauge must not carry a
-    /// `_total` suffix).
-    aspa_records_total: IntGauge,
 
     // ── Validation-cache import refresh ───────────────────────
     validation_import_refreshes: IntCounterVec,
@@ -854,13 +850,6 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
-        let aspa_records_total = IntGauge::new(
-            "bgp_aspa_records_total",
-            "DEPRECATED: gauge misnamed with a counter `_total` suffix; \
-             use bgp_aspa_records instead. Removed in the next release.",
-        )
-        .expect("valid metric definition");
-
         let validation_import_refreshes = IntCounterVec::new(
             Opts::new(
                 "bgp_validation_import_refreshes_total",
@@ -1511,9 +1500,6 @@ impl BgpMetrics {
             .register(Box::new(aspa_records.clone()))
             .expect("metric not already registered");
         registry
-            .register(Box::new(aspa_records_total.clone()))
-            .expect("metric not already registered");
-        registry
             .register(Box::new(validation_import_refreshes.clone()))
             .expect("metric not already registered");
         registry
@@ -1750,7 +1736,6 @@ impl BgpMetrics {
             gr_timer_expired,
             rpki_vrp_count,
             aspa_records,
-            aspa_records_total,
             validation_import_refreshes,
             route_refresh_in_progress,
             route_refresh_stale_entries,
@@ -2539,12 +2524,8 @@ impl BgpMetrics {
     }
 
     /// Set ASPA record count.
-    ///
-    /// Also updates the deprecated `bgp_aspa_records_total` alias,
-    /// kept for one release after the `bgp_aspa_records` rename.
-    pub fn set_aspa_records_total(&self, count: i64) {
+    pub fn set_aspa_records(&self, count: i64) {
         self.aspa_records.set(count);
-        self.aspa_records_total.set(count);
     }
 
     /// Record validation-cache-triggered inbound Route Refresh work.
@@ -3586,15 +3567,14 @@ mod tests {
     }
 
     #[test]
-    fn aspa_records_exports_new_name_and_deprecated_alias() {
+    fn aspa_records_exports_only_the_correct_gauge_name() {
         let m = BgpMetrics::new();
-        m.set_aspa_records_total(3);
+        m.set_aspa_records(3);
 
         let text = gather_text(&m);
         assert!(text.contains("bgp_aspa_records 3"));
-        // Deprecated alias kept for one release after the rename.
-        assert!(text.contains("bgp_aspa_records_total 3"));
-        assert!(text.contains("DEPRECATED"));
+        // The misnamed `_total` alias is gone; a gauge must not carry it.
+        assert!(!text.contains("bgp_aspa_records_total"));
     }
 
     #[test]
