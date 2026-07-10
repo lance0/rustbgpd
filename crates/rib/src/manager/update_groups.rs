@@ -1089,6 +1089,25 @@ impl RibManager {
         if !group.dirty_members.is_empty() {
             let withdrawn: Vec<(Prefix, u32)> = out.withdrawn_keys().collect();
             group.tombstones.extend(withdrawn);
+            // A member ALREADY dirty when a source flip stages onto it
+            // never reaches the per-member matrix (its pass takes the
+            // resync arm), so its member-scoped withdraw of the displaced
+            // route would be lost: the key stays IN the table (invisible
+            // to tombstones) and the resync announces table ∖ own-sourced.
+            // Record it as an extra (over-)withdraw at staging; the
+            // resync's `member_retains` guard drops it if the source
+            // flips back before the resync runs.
+            let dirty: Vec<IpAddr> = group.dirty_members.iter().copied().collect();
+            for member in dirty {
+                let lost: Vec<(Prefix, u32)> = out.member_scoped_withdraws(member).collect();
+                if !lost.is_empty() {
+                    self.pending_extra_withdraws
+                        .entry(member)
+                        .or_default()
+                        .unicast
+                        .extend(lost);
+                }
+            }
         }
         out
     }
