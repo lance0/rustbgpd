@@ -767,7 +767,8 @@ fn push_route_limit_drop_for_route(
         sampled_rows: 0,
         suppressed_rows: 0,
         total_rows: 0,
-        sample_limit: u32::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE).unwrap(),
+        sample_limit: u32::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE)
+            .expect("MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE (128) fits u32"),
     });
     counters.sampled += 1;
 }

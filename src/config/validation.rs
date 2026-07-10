@@ -134,10 +134,18 @@ impl Config {
                 });
             }
             if tls_count == 3 {
-                // SAFETY: all three are Some — checked above.
-                let cert = cfg.tls_cert_file.as_deref().unwrap();
-                let key = cfg.tls_key_file.as_deref().unwrap();
-                let ca = cfg.tls_client_ca_file.as_deref().unwrap();
+                let cert = cfg
+                    .tls_cert_file
+                    .as_deref()
+                    .expect("tls_count == 3 means all three TLS paths are Some");
+                let key = cfg
+                    .tls_key_file
+                    .as_deref()
+                    .expect("tls_count == 3 means all three TLS paths are Some");
+                let ca = cfg
+                    .tls_client_ca_file
+                    .as_deref()
+                    .expect("tls_count == 3 means all three TLS paths are Some");
                 validate_grpc_pem_file(cert, "grpc_tcp.tls_cert_file", PemKind::Certificate)?;
                 validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
                 validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
