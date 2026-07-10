@@ -79,6 +79,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A v1-fallback RTR cache restart caused a validation blackout at data
+  expiry instead of an immediate re-fallback.** After a v1 session (e.g.
+  StayRTR) dropped, the client re-probed protocol v2 on every reconnect;
+  a v1-only cache answers that with a version-0 Error Report, which fails
+  the session version check before any fallback signal can fire — and
+  with data held, the fallback path was unreachable. The client looped on
+  version-mismatch retries for the whole expire interval, dropped the
+  held VRPs ("cache server down"), flapped validation to `not_found`, and
+  only then re-landed v1. The client now reconnects at the version the
+  held epoch was validated under, so a downgraded cache restart re-lands
+  its v1 session within one retry interval with full retention; v2 is
+  deliberately re-probed at the epoch-less points (initial start and
+  after data expiry), so a cache that later gains v2 support is still
+  discovered. A Serial Query rejected with an Error Report (StayRTR
+  answers an unknown session with "Session ID mismatch" error code 0
+  rather than a Cache Reset) now also drops the dead epoch — data and
+  expiry retained — so the next retry resynchronizes with a full Reset
+  Query instead of re-sending the same rejected query. (LAN-312)
 - **Update-group members that were outbound-dirty when a unicast source flip
   staged onto them could permanently retain the displaced route on the wire.**
   An already-dirty grouped member never runs the per-member source-flip matrix

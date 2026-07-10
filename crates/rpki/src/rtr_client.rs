@@ -177,12 +177,24 @@ impl RtrClient {
     }
 
     fn prepare_fresh_connection_attempt(&mut self) {
-        // Only reset to v2 if we have had a successful session before.
-        // If we never completed a v2 transaction (no epoch and version is
-        // still v2), the previous attempt was rejected — keep the
-        // downgraded version so the v1 fallback sticks across retries.
-        if self.epoch.is_some() {
-            self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
+        // Reconnect at the version the held data was validated under.
+        // Re-probing v2 while holding a v1 epoch wedges against v1-only
+        // caches (StayRTR, GoRTR): they answer the v2 query with a
+        // version-0 Error Report, which fails the version check as a
+        // decode-level mismatch, and with data held no fallback signal
+        // fires — the client would loop until the data expired and
+        // validation flapped. A downgraded cache that merely restarted
+        // must instead re-land its v1 session within one retry, with
+        // full retention.
+        //
+        // v2 upgrade policy: the preferred version is deliberately
+        // re-probed only at the epoch-less points — initial start and
+        // after data expiry (see `handle_disconnected_session`) — so a
+        // cache that later gains v2 support is still discovered without
+        // risking held data. With no epoch, keep the current (possibly
+        // downgraded) version so the v1 fallback sticks across retries.
+        if let Some(epoch) = self.epoch {
+            self.negotiated_version = epoch.version;
         }
     }
 
@@ -294,6 +306,12 @@ impl RtrClient {
             self.epoch = None;
             self.last_end_of_data_at = None;
             self.data_expires_at = None;
+            // Data expiry is the deliberate v2 re-probe point: with
+            // nothing held there is no retention to protect, so try the
+            // preferred version again in case the cache gained v2
+            // support. A still-v1-only cache answers the probe with a
+            // rejection, and the epoch-less fallback path re-lands v1.
+            self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
         }
         // Wake at expiry if it lands inside the retry window, so retained
         // data cannot outlive its expire interval across failed retries.
@@ -739,6 +757,20 @@ impl RtrClient {
                                 text = %text,
                                 "RTR error report received"
                             );
+                            // An Error Report is fatal to the session, and
+                            // one answering our Serial Query means the
+                            // incremental path is dead too: a restarted
+                            // cache that no longer knows our session may
+                            // reject the query outright (StayRTR sends
+                            // "Session ID mismatch" error code 0 instead of
+                            // a Cache Reset). Drop the epoch — retaining
+                            // the data and its expiry — so the reconnect
+                            // resynchronizes with a full Reset Query
+                            // instead of retrying the same rejected query
+                            // until the data expires.
+                            if matches!(query, QueryKind::Serial) {
+                                self.epoch = None;
+                            }
                             return Err(RtrError::ServerError { code, text });
                         }
                         _ => {
@@ -889,10 +921,13 @@ mod tests {
     /// transaction-deadline timer is pending, tokio's paused clock
     /// auto-advances to that timer and the transaction times out.
     async fn write_pdus(stream: &mut TcpStream, pdus: &[RtrPdu]) {
+        write_pdus_version(stream, pdus, crate::rtr_codec::RTR_VERSION_2).await;
+    }
+
+    async fn write_pdus_version(stream: &mut TcpStream, pdus: &[RtrPdu], version: u8) {
         let mut buf = Vec::new();
         for pdu in pdus {
-            pdu.encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION_2)
-                .unwrap();
+            pdu.encode_with_version(&mut buf, version).unwrap();
         }
         stream.write_all(&buf).await.unwrap();
     }
@@ -1663,6 +1698,246 @@ mod tests {
             }
         );
         assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Drive the client through the code-4 v2 rejection into a v1
+    /// session and establish a v1 epoch (session 7, serial 100) with one
+    /// prefix, serving the given expire interval. Consumes the resulting
+    /// `FullTable` update and returns the live v1 stream.
+    async fn establish_v1_epoch(
+        listener: &TcpListener,
+        vrp_rx: &mut mpsc::Receiver<VrpUpdate>,
+        expire: u32,
+    ) -> TcpStream {
+        let (mut stream_v2, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream_v2).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+        write_pdu(
+            &mut stream_v2,
+            RtrPdu::ErrorReport {
+                code: 4,
+                pdu: vec![],
+                text: "Unsupported Protocol Version".to_string(),
+            },
+        )
+        .await;
+        drop(stream_v2);
+
+        let (mut stream_v1, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream_v1).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+        write_pdus_version(
+            &mut stream_v1,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let update = vrp_rx.recv().await.unwrap();
+        assert!(matches!(update, VrpUpdate::FullTable { .. }));
+        stream_v1
+    }
+
+    /// LAN-312: a v1-only cache (`StayRTR`) restarting while data is held
+    /// must not wedge the client. The client must reconnect at v1 —
+    /// never re-probing v2 with held v1 data, since the cache can only
+    /// answer that with a version-0 Error Report the version check
+    /// rejects before any fallback signal fires — and re-land the v1
+    /// session within one retry interval with full retention.
+    #[tokio::test(start_paused = true)]
+    async fn v1_cache_restart_relands_v1_within_one_retry_with_retention() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        // Large expire interval: the paused clock auto-advances past idle
+        // timers, and expiry must stay out of reach so the only way this
+        // test passes is an immediate v1 re-land — never the
+        // expiry-then-recover blackout this fix removes.
+        let client = RtrClient::new(test_config(addr, 60, 5, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let stream_v1 = establish_v1_epoch(&listener, &mut vrp_rx, 3600).await;
+
+        // The cache restarts: connection drops.
+        drop(stream_v1);
+
+        // StayRTR-like restarted cache: any v2 query is answered with a
+        // version-0 Error Report and a close. The fixed client never
+        // sends one — it reconnects straight at v1.
+        let mut relanded = None;
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (version, pdu) = read_pdu_with_version(&mut stream).await;
+            if version == crate::rtr_codec::RTR_VERSION_2 {
+                write_pdu_version(
+                    &mut stream,
+                    RtrPdu::ErrorReport {
+                        code: 8,
+                        pdu: vec![],
+                        text: "Bad protocol version".to_string(),
+                    },
+                    0,
+                )
+                .await;
+                drop(stream);
+                continue;
+            }
+            relanded = Some((stream, pdu));
+            break;
+        }
+        let (mut stream, pdu) = relanded.expect(
+            "client wedged: kept re-probing v2 while holding v1 data instead of re-landing v1",
+        );
+        // Same epoch resumed at its own version — an incremental query.
+        assert_eq!(
+            pdu,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        // Retention held throughout: no ServerDown, no validation flap.
+        assert!(vrp_rx.try_recv().is_err());
+
+        // The restarted cache no longer knows the session: StayRTR
+        // answers the old-session Serial Query with a "Session ID
+        // mismatch" Error Report (code 0) and closes — NOT a Cache
+        // Reset. The client must drop the dead epoch (keeping the data)
+        // and resynchronize with a full Reset Query on the next retry,
+        // never re-sending the same rejected Serial Query.
+        write_pdus_version(
+            &mut stream,
+            &[RtrPdu::ErrorReport {
+                code: 0,
+                pdu: vec![],
+                text: "Session ID mismatch: client is desynchronized".to_string(),
+            }],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        drop(stream);
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+        assert_eq!(
+            pdu,
+            RtrPdu::ResetQuery,
+            "client kept retrying the rejected Serial Query instead of resynchronizing"
+        );
+        assert!(vrp_rx.try_recv().is_err());
+        write_pdus_version(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 9 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 114, 0),
+                    asn: 65002,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 9,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// The deliberate v2 re-probe point: once held v1 data expires
+    /// (nothing left to protect), the client probes the preferred
+    /// version again and can upgrade to a cache that gained v2 support.
+    #[tokio::test(start_paused = true)]
+    async fn data_expiry_reprobes_v2_for_upgrade() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        // v1 epoch whose data expires before the next refresh.
+        let _stream_v1 = establish_v1_epoch(&listener, &mut vrp_rx, 30).await;
+
+        // The cache never speaks again; the expire interval passes and
+        // the held entries are dropped.
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+
+        // Epoch-less again: the client re-probes v2 and upgrades.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 11 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 115, 0),
+                    asn: 65003,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 11,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 115, 0), 24, 24, 65003)],
+                aspa_records: vec![],
+            }
+        );
 
         client_handle.abort();
         let _ = client_handle.await;
