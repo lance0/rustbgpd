@@ -29,11 +29,19 @@ use super::lexer::{Tok, Token, lex};
 /// errors in the same run.
 #[must_use]
 pub fn parse(source: &str) -> (SourceFile, Vec<Diagnostic>) {
-    let (tokens, mut diags) = lex(source);
+    parse_module(source, 0)
+}
+
+/// [`parse`] with spans attributed to module index `file` — the
+/// multi-module (LAN-300) entry point used by the import resolver.
+#[must_use]
+pub fn parse_module(source: &str, file: u32) -> (SourceFile, Vec<Diagnostic>) {
+    let (tokens, mut diags) = lex(source, file);
     let mut parser = Parser {
         src: source,
         tokens,
         pos: 0,
+        file,
         diags: Vec::new(),
     };
     let file = parser.source_file();
@@ -45,6 +53,8 @@ struct Parser<'src> {
     src: &'src str,
     tokens: Vec<Token>,
     pos: usize,
+    /// Module index for synthesized (EOF) spans.
+    file: u32,
     diags: Vec<Diagnostic>,
 }
 
@@ -93,7 +103,7 @@ impl Parser<'_> {
 
     fn eof_span(&self) -> Span {
         let end = self.src.len();
-        Span::new(end..end)
+        Span::in_file(end..end, self.file)
     }
 
     fn here(&self) -> Span {
@@ -391,8 +401,15 @@ impl Parser<'_> {
                 Tok::Ident if self.text(token) == "fn" => {
                     self.fn_def().map(|def| file.fns.push(def))
                 }
+                // Top-level contextual `import` (LAN-300, ADR-0103
+                // Decision 2.2): same additive footing as `fn` — top
+                // level never admitted a bare identifier, so a set or
+                // policy named `import` keeps working.
+                Tok::Ident if self.text(token) == "import" => {
+                    self.import_def().map(|path| file.imports.push(path))
+                }
                 _ => Err(self.error_expected(
-                    "a top-level item (`prefix-set`, `community-set`, `asn-set`, `fn`, `policy`, or `test`)",
+                    "a top-level item (`import`, `prefix-set`, `community-set`, `asn-set`, `fn`, `policy`, or `test`)",
                 )),
             };
             if result.is_err() {
@@ -405,6 +422,16 @@ impl Parser<'_> {
             }
         }
         file
+    }
+
+    /// `import "relative/path.rpol"` (LAN-300). The parser records the
+    /// declaration; resolution — path handling, cycle/budget checks,
+    /// and the merge — happens in [`super::modules`].
+    fn import_def(&mut self) -> PResult<Spanned<String>> {
+        self.bump(); // the contextual `import` identifier
+        // No terminator: top-level items are self-delimiting, like the
+        // brace-block definitions.
+        self.expect_str("a quoted import path (`import \"lib/common.rpol\"`)")
     }
 
     fn prefix_set_def(&mut self) -> PResult<PrefixSetDef> {

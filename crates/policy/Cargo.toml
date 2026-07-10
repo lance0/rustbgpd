@@ -18,12 +18,16 @@ logos = "0.16"
 regex = "1"
 rustc-hash.workspace = true
 rustbgpd-wire.workspace = true
+# Module content digests for `rbgp policy check --list-deps`
+# (LAN-300); already in the workspace dependency graph.
+sha2 = "0.10"
 thiserror.workspace = true
 # Rate-limited eval-error WARN (LAN-299, ADR-0103 Decision 4).
 tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "policy_eval"

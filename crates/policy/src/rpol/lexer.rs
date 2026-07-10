@@ -313,15 +313,17 @@ pub struct Token {
     pub span: Span,
 }
 
-/// Lex the entire source. Unrecognized characters become diagnostics
-/// (one per contiguous bad region) and lexing continues, so the parser
-/// still sees — and can report on — the rest of the file.
+/// Lex the entire source, attributing spans to module index `file`
+/// (0 for a single-source compile). Unrecognized characters become
+/// diagnostics (one per contiguous bad region) and lexing continues,
+/// so the parser still sees — and can report on — the rest of the
+/// file.
 #[must_use]
-pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
     let mut tokens = Vec::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     for (result, range) in Tok::lexer(source).spanned() {
-        let span = Span::new(range);
+        let span = Span::in_file(range, file);
         let Ok(kind) = result else {
             // Coalesce adjacent error characters into one diagnostic.
             if let Some(last) = diagnostics.last_mut()
@@ -348,7 +350,7 @@ mod tests {
     use super::*;
 
     fn kinds(src: &str) -> Vec<Tok> {
-        let (tokens, diags) = lex(src);
+        let (tokens, diags) = lex(src, 0);
         assert!(diags.is_empty(), "unexpected lex errors: {diags:?}");
         tokens.into_iter().map(|t| t.kind).collect()
     }
@@ -430,7 +432,7 @@ mod tests {
 
     #[test]
     fn unrecognized_tokens_are_reported_and_skipped() {
-        let (tokens, diags) = lex("policy @@ demo");
+        let (tokens, diags) = lex("policy @@ demo", 0);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("unrecognized token"));
         assert_eq!(

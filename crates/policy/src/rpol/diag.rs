@@ -10,22 +10,35 @@
 use std::fmt;
 use std::ops::Range;
 
-/// A byte range into the source text.
+/// A byte range into one source file of a compile.
+///
+/// `file` indexes the module list of the compile that produced the
+/// span (LAN-300): 0 is the main file, which is also the only file a
+/// single-source compile ([`crate::rpol::RpolFile::parse`]) ever has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     /// Byte offset of the first character.
     pub start: usize,
     /// Byte offset one past the last character.
     pub end: usize,
+    /// Module (file) index within the compile; 0 = main file.
+    pub file: u32,
 }
 
 impl Span {
-    /// Construct a span from a byte range.
+    /// Construct a span from a byte range into the main file.
     #[must_use]
     pub fn new(range: Range<usize>) -> Self {
+        Self::in_file(range, 0)
+    }
+
+    /// Construct a span from a byte range into module `file`.
+    #[must_use]
+    pub fn in_file(range: Range<usize>, file: u32) -> Self {
         Self {
             start: range.start,
             end: range.end,
+            file,
         }
     }
 
@@ -35,6 +48,7 @@ impl Span {
         Span {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
+            file: self.file,
         }
     }
 
@@ -117,24 +131,44 @@ impl Diagnostics {
     }
 
     /// Render every diagnostic as an ariadne report against `source`,
-    /// attributed to `filename`. `color` enables ANSI styling.
+    /// attributed to `filename` — the single-source form; every span's
+    /// `file` index is expected to be 0. `color` enables ANSI styling.
+    #[must_use]
+    pub fn render(&self, filename: &str, source: &str, color: bool) -> String {
+        self.render_sources(&[(filename.to_string(), source.to_string())], color)
+    }
+
+    /// Render every diagnostic against a multi-module compile
+    /// (LAN-300): `sources[i]` is the `(display path, text)` of module
+    /// `i`, matching each span's `file` index, so an error in an
+    /// imported file renders an excerpt of — and names — that file.
     ///
     /// # Panics
     ///
     /// Never in practice: writing to an in-memory buffer is infallible.
     #[must_use]
-    pub fn render(&self, filename: &str, source: &str, color: bool) -> String {
+    pub fn render_sources(&self, sources: &[(String, String)], color: bool) -> String {
         use ariadne::{Config, Label, Report, ReportKind};
 
+        let name_of = |span: &Span| -> String {
+            sources
+                .get(span.file as usize)
+                .or_else(|| sources.first())
+                .map(|(name, _)| name.clone())
+                .unwrap_or_default()
+        };
         let mut out = Vec::new();
         for diag in &self.0 {
-            let primary = diag.labels.first().map_or(0..0, |(span, _)| span.range());
-            let mut report = Report::build(ReportKind::Error, (filename.to_string(), primary))
+            let primary = diag.labels.first().map_or_else(
+                || (name_of(&Span::new(0..0)), 0..0),
+                |(span, _)| (name_of(span), span.range()),
+            );
+            let mut report = Report::build(ReportKind::Error, primary)
                 .with_config(Config::default().with_color(color))
                 .with_message(&diag.message);
             for (index, (span, label)) in diag.labels.iter().enumerate() {
                 report = report.with_label(
-                    Label::new((filename.to_string(), span.range()))
+                    Label::new((name_of(span), span.range()))
                         .with_message(label)
                         .with_order(i32::try_from(index).unwrap_or(i32::MAX)),
                 );
@@ -144,10 +178,7 @@ impl Diagnostics {
             }
             report
                 .finish()
-                .write(
-                    ariadne::sources([(filename.to_string(), source.to_string())]),
-                    &mut out,
-                )
+                .write(ariadne::sources(sources.to_vec()), &mut out)
                 .expect("writing a diagnostic to an in-memory buffer cannot fail");
         }
         String::from_utf8_lossy(&out).into_owned()

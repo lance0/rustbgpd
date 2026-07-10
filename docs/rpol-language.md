@@ -928,10 +928,97 @@ Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is
 `rbgp policy test` (below).
 
+## Modules and imports
+
+```rpol
+import "lib/bogons.rpol"
+import "lib/customers.rpol"
+
+policy edge-in {
+    term bogon { if route.prefix in bogons { reject } }        # from lib/bogons.rpol
+    term customer { if route.prefix in customers { accept } }  # from lib/customers.rpol
+}
+```
+
+`import "relative/path.rpol"` is a top-level declaration that splices
+another file's definitions — sets, functions, policies, and `test`
+blocks — into the compilation unit. Modules are a **resolution
+feature, not a language feature** (ADR-0103): after resolution the
+compiled artifact is indistinguishable from one concatenated source,
+and only diagnostics remember file boundaries (an error in an imported
+file renders an excerpt of *that* file).
+
+**Resolution and roots.** Import paths must be relative. Each resolves
+against the importing file's directory first, then against each
+configured policy root in order — `[policy] rpol_roots` in the daemon
+config, repeatable `--root DIR` for `rbgp policy check`. The resolved
+file (after symlinks and `..` are canonicalized away) must stay inside
+the main file's directory or one of the roots; escaping every root is
+a compile error. There is no ambient working-directory lookup.
+
+**One flat namespace.** All modules share a single namespace after
+resolution; defining the same set/fn/policy/test name in two modules
+is a compile error naming both files. This is the deliberate V1 shape
+— shared libraries (bogon lists, customer sets, hygiene policies) get
+short unprefixed names at every use site. Qualified names
+(`bogons.martians`) and selective imports are compatible later
+extensions if real collision pain shows up; today, rename at the
+definition.
+
+**Determinism and reload identity.** Imports resolve depth-first in
+declaration order — never filesystem order — and each file loads once
+(diamond imports are fine; cycles are compile errors naming the
+cycle). The policy identity the reload planner compares is the
+**resolved module graph's content**: editing an imported leaf makes
+every unit that (transitively) imports it read as changed, while a
+byte-identical graph reloads as a content-equal no-op regardless of
+file paths. One unit compiles all-or-nothing — a broken or missing
+import anywhere rejects the whole load and the running generation is
+untouched.
+
+**Budgets.** Import nesting ≤ 8; each file ≤ 1 MiB; a unit's total
+source ≤ 8 MiB across ≤ 64 files. All enforced at load with
+diagnostics; evaluation never touches the filesystem.
+
+**Auditing.** `rbgp policy check FILE --list-deps [--root DIR]...`
+prints the resolved graph — every module's canonical path, SHA-256
+content hash, and imports — for packaging and change review.
+
+Inline sources (`rbgp policy test`, the `TestPolicy` RPC) cannot
+import: there is no filesystem to resolve against, and the diagnostic
+says so. Check import-using files with `rbgp policy check`; the daemon
+resolves them at config load / SIGHUP.
+
+### Migration example — extracting a shared library
+
+```rpol
+# Before: every edge policy file carries its own bogon list.
+prefix-set bogons { 10.0.0.0/8 le 32, 192.168.0.0/16 le 32, ... }
+policy edge-in { term bogon { if route.prefix in bogons { reject } } ... }
+```
+
+```rpol
+# lib/bogons.rpol — the shared library (sets, fns, even policies):
+prefix-set bogons { 10.0.0.0/8 le 32, 192.168.0.0/16 le 32, ... }
+
+# edge.rpol — after: one definition, imported where needed.
+import "lib/bogons.rpol"
+policy edge-in { term bogon { if route.prefix in bogons { reject } } ... }
+
+test still-rejects-bogons {           # tests see imported names too
+    route { prefix 10.1.0.0/24 }
+    expect edge-in == reject
+}
+```
+
+Because the resolved content is identical, this refactor reloads as a
+no-op: no chain reinstall, no Route Refresh.
+
 ## Grammar sketch
 
 ```text
-file        := (prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
+file        := (import-decl | prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
+import-decl := "import" STRING                    # contextual `import` (LAN-300)
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
@@ -1004,6 +1091,7 @@ in the config (full reference:
 ```toml
 [policy]
 rpol_files = ["policies/core.rpol"]        # relative to the config file
+rpol_roots = ["policies/lib"]              # extra `import` roots, same resolution
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -1266,7 +1354,7 @@ user-defined types, no maps (safety is total by construction —
 ADR-0096 Decision 2; the ADR-0103 extension program adds bounded
 constructs slice by slice — checked arithmetic shipped as LAN-299,
 bindings as LAN-302, bounded loops as LAN-303, pure functions as
-LAN-304). No `as-path-set`. No `else if` chains and no nested `if`
+LAN-304, modules and imports as LAN-300). No `as-path-set`. No `else if` chains and no nested `if`
 (keep terms small; use `&&` or more terms). No mutable state of any
 kind — `let` bindings (LAN-302) are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and

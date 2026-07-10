@@ -11922,6 +11922,89 @@ fn rpol_files_load_resolve_and_evaluate_in_chains() {
     assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
 }
 
+/// LAN-300: a config-referenced `.rpol` file resolves its `import`
+/// graph — from its own directory and from `[policy] rpol_roots`
+/// (rewritten absolute like `rpol_files`) — and a broken import
+/// anywhere rejects the whole load (one atomic candidate per unit,
+/// ADR-0103 Decision 8.1).
+#[test]
+fn rpol_imports_resolve_through_config_roots_and_fail_atomically() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::create_dir_all(dir.path().join("shared/lib")).expect("mkdir");
+    fs::write(
+        dir.path().join("shared/lib/bogons.rpol"),
+        "prefix-set bogons { 127.0.0.0/8 le 32 }",
+    )
+    .expect("write lib");
+    fs::write(
+        dir.path().join("policies/core.rpol"),
+        "import \"lib/bogons.rpol\"\n\
+         policy edge-in { term bogon { if route.prefix in bogons { reject } } }",
+    )
+    .expect("write rpol");
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+rpol_roots = ["shared"]
+import_chain = ["edge-in"]
+"#;
+    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    let config = load_dir(&dir).expect("config with rpol imports loads");
+    // Roots rewritten absolute, like rpol_files.
+    assert_eq!(config.policy.rpol_roots.len(), 1);
+    assert!(Path::new(&config.policy.rpol_roots[0]).is_absolute());
+    // The imported prefix-set participates in the compiled chain.
+    let chain = config.import_chain().expect("resolves").expect("present");
+    let ctx = rustbgpd_policy::RouteContext {
+        prefix: Some(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            "127.0.0.1".parse().unwrap(),
+            32,
+        ))),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path: None,
+        as_path_len: 0,
+        origin_asn: None,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        family: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Deny);
+
+    // Break the imported leaf: the WHOLE config load is rejected —
+    // no partial registry, and the diagnostic names the leaf file.
+    fs::write(
+        dir.path().join("shared/lib/bogons.rpol"),
+        "prefix-set bogons { not-a-prefix }",
+    )
+    .expect("rewrite lib");
+    let err = load_dir(&dir).expect_err("broken import rejects the load");
+    assert!(err.contains("bogons.rpol"), "names the leaf module: {err}");
+}
+
 // ── LAN-296: computed prepend operands at config attachment ─────────
 
 /// A config dir whose neighbor binds `.rpol` chains in BOTH
