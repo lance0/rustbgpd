@@ -433,6 +433,13 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
   `bgp_rib_loc_prefixes{afi_safi}`, `bgp_max_prefix_exceeded_total`.
 - **GR / FIB** — `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
   `bgp_fib_routes_installed_total`, `bgp_fib_kernel_failures_total`.
+- **Allocator** — `jemalloc_allocated_bytes`, `jemalloc_active_bytes`,
+  `jemalloc_resident_bytes`, `jemalloc_mapped_bytes`. Present in builds
+  with the `jemalloc` feature (the published container image and
+  release tarballs); refreshed at scrape time. `allocated` is live
+  application bytes, `resident` is jemalloc's contribution to RSS —
+  a widening gap between the two is retained-but-unused allocator
+  memory, the first thing to check before suspecting a leak.
 - **Durable event outbox** (ADR-0072) —
   `bgp_event_outbox_committed_total{category}`,
   `bgp_event_outbox_dropped_total{category, reason}`,

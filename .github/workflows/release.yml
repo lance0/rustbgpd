@@ -72,9 +72,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Build release binaries
+        # --features rustbgpd/jemalloc: the shipped daemon must be the
+        # same build the published benchmarks are measured on (jemalloc
+        # as the global allocator + allocator gauges on /metrics).
+        # tikv-jemalloc-sys cross-compiles for aarch64 via the
+        # aarch64-linux-gnu-gcc toolchain installed above.
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --workspace --release --target ${{ matrix.target }}
+        run: cargo build --workspace --release --features rustbgpd/jemalloc --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |

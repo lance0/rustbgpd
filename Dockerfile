@@ -7,15 +7,19 @@
 #   runtime (DEFAULT) — lean production image: the daemon + the `rbgp`
 #     CLI, nonroot user, nothing else. This is what the GHCR release
 #     image publishes (.github/workflows/container.yml builds the
-#     default target).
+#     default target). Built with the full `release` profile (fat-LTO,
+#     codegen-units=1) and `--features jemalloc` — the exact build
+#     every number in docs/BENCHMARKS.md is measured on.
 #   dev — interop / CI / lab image: adds the EVPN load-gen helpers
 #     (evpn-tester / evpn-monitor), the interop start script, and
-#     iproute2/ping for containerlab topologies.
+#     iproute2/ping for containerlab topologies. Built with the fast
+#     `ci` profile — interop M-jobs rebuild this image constantly and
+#     the fat-LTO serial link would slow every lab run.
 #
 # Multi-stage build with cargo-chef separating dep compilation from
-# workspace compilation. Builds the `ci` profile (release-shaped but
-# without fat-LTO / codegen-units=1) so the 15 workspace crates plus
-# ~300 deps actually parallelize.
+# workspace compilation. Two builder stages share the planner recipe
+# and the BuildKit cache mounts; only the stages a given --target
+# needs are built.
 #
 # Cache levers:
 #   - cargo-chef: dep build layer invalidates only on Cargo.lock change
@@ -48,6 +52,7 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
+# ── builder: fast `ci`-profile build for the dev image ───────────────
 FROM chef AS builder
 COPY --from=planner /build/recipe.json recipe.json
 # Cook deps under cache mounts. Dep layer invalidates only when
@@ -69,6 +74,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/ci/rbgp /out/ && \
     cp target/ci/evpn-tester /out/ && \
     cp target/ci/evpn-monitor /out/
+
+# ── builder-release: benchmarked-profile build for the runtime image ─
+# Full `release` profile (fat-LTO, codegen-units=1) with jemalloc as
+# the global allocator — the published image must be the same build
+# the benchmarks are measured on, not the CI-shaped one.
+FROM chef AS builder-release
+COPY --from=planner /build/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo chef cook --release --features rustbgpd/jemalloc --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --release --features rustbgpd/jemalloc -p rustbgpd -p rustbgpctl && \
+    mkdir -p /out && \
+    cp target/release/rustbgpd /out/ && \
+    cp target/release/rbgp /out/
 
 # ── dev: interop / CI / lab image ────────────────────────────────────
 # Ships the daemon + CLI plus the development-only helpers the
@@ -96,8 +120,9 @@ EXPOSE 179 9179
 CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
 
 # ── runtime: lean production image (DEFAULT target) ──────────────────
-# Daemon + rbgp only — no dev/test/bench helpers. Runs as a nonroot
-# user; Docker's default net.ipv4.ip_unprivileged_port_start=0 lets it
+# Daemon + rbgp only — no dev/test/bench helpers. Binaries come from
+# builder-release (fat-LTO + jemalloc, the benchmarked build). Runs as
+# a nonroot user; Docker's default net.ipv4.ip_unprivileged_port_start=0 lets it
 # bind port 179 (grant CAP_NET_BIND_SERVICE explicitly on runtimes
 # that don't, e.g. some Kubernetes setups). Kernel-dataplane features
 # (Linux FIB / EVPN VTEP) additionally need CAP_NET_ADMIN — see
@@ -112,8 +137,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /var/lib/rustbgpd \
     && chown rustbgpd:rustbgpd /var/lib/rustbgpd
 
-COPY --from=builder /out/rustbgpd /usr/local/bin/rustbgpd
-COPY --from=builder /out/rbgp /usr/local/bin/rbgp
+COPY --from=builder-release /out/rustbgpd /usr/local/bin/rustbgpd
+COPY --from=builder-release /out/rbgp /usr/local/bin/rbgp
 COPY LICENSE-MIT LICENSE-APACHE /
 
 USER rustbgpd

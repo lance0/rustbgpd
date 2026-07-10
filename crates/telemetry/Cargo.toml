@@ -11,8 +11,15 @@ categories.workspace = true
 description = "Prometheus metrics and structured tracing for rustbgpd"
 readme = "README.md"
 
+[features]
+# Export jemalloc allocator statistics on the Prometheus registry.
+# Enabled by the root `jemalloc` feature so the gauges exist exactly
+# when jemalloc is the global allocator.
+jemalloc = ["tikv-jemalloc-ctl"]
+
 [dependencies]
 prometheus.workspace = true
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true

@@ -702,6 +702,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rules are now `prefix = None` in the policy context, matching the import
   path and the BGP-LS prefixless-context convention; rules that do carry a
   destination prefix still evaluate it unchanged. (LAN-291)
+- **Published artifacts now match the benchmarked build.** The GHCR
+  runtime image and the release tarballs previously shipped without the
+  `jemalloc` feature — and the image additionally used the fast CI
+  profile (`lto = false`, `codegen-units = 16`) — while every published
+  benchmark is measured on a fat-LTO `--release` build with jemalloc as
+  the global allocator. Both artifacts are now built `--release
+  --features jemalloc`; the `dev` interop image keeps the CI profile
+  for lab build speed. jemalloc builds also export allocator gauges on
+  the Prometheus endpoint, refreshed at scrape time:
+  `jemalloc_allocated_bytes`, `jemalloc_active_bytes`,
+  `jemalloc_resident_bytes`, and `jemalloc_mapped_bytes`. (LAN-331)
 
 ## [0.50.0] — 2026-07-05
 
