@@ -288,6 +288,16 @@ enum Command {
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Diff a candidate TOML file against the daemon's live runtime snapshot
+    ///
+    /// Changed neighbor / peer-group fields are annotated with their
+    /// live-impact class ([hot-applied], [session reset: ...], [restart
+    /// required]) and the diff ends with a plan summary line. Exit codes
+    /// are terraform-style detailed codes (`rbgp diff`, the route diff,
+    /// has its own separate 0/1/2 contract).
+    #[command(after_help = "Exit codes:\n  \
+        0  candidate matches the runtime config (no changes)\n  \
+        1  error (unreadable candidate, invalid config, connection or daemon failure)\n  \
+        2  changes present")]
     Diff {
         /// Candidate TOML file to validate and compare
         #[arg(long, value_name = "PATH")]
@@ -295,6 +305,13 @@ enum ConfigAction {
     },
 
     /// Validate and classify a candidate transaction without mutation
+    ///
+    /// Exit codes are terraform-style detailed codes (`rbgp diff`, the
+    /// route diff, has its own separate 0/1/2 contract).
+    #[command(after_help = "Exit codes:\n  \
+        0  no changes (plan is a noop)\n  \
+        1  error (unreadable candidate, invalid config, connection or daemon failure)\n  \
+        2  changes present (plan is committable or rejected)")]
     Plan {
         /// Candidate TOML file to validate and classify
         #[arg(long, value_name = "PATH")]
@@ -1409,6 +1426,15 @@ fn generate_completions(shell: Shell, binary_name: &'static str, output: &mut dy
     clap_complete::generate(shell, &mut cli_command(binary_name), binary_name, output);
 }
 
+/// Terminate with the `config diff` / `config plan` detailed exit code:
+/// 0 when the candidate matches the runtime config, 2 when changes are
+/// present (errors take the generic exit-1 path in `main`).
+fn exit_with_change_status(has_changes: bool) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(commands::config::change_status_exit_code(has_changes));
+}
+
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
@@ -1537,19 +1563,21 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
         Command::Config { action } => match action {
             ConfigAction::Diff { from_file } => {
-                commands::config::diff(connection, &from_file, json).await
+                let has_changes = commands::config::diff(connection, &from_file, json).await?;
+                exit_with_change_status(has_changes);
             }
             ConfigAction::Plan {
                 from_file,
                 expected_runtime_snapshot_token,
             } => {
-                commands::config::plan(
+                let has_changes = commands::config::plan(
                     connection,
                     &from_file,
                     expected_runtime_snapshot_token.as_deref(),
                     json,
                 )
-                .await
+                .await?;
+                exit_with_change_status(has_changes);
             }
             ConfigAction::Apply {
                 from_file,
@@ -2490,6 +2518,33 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).unwrap();
 
         assert!(matches!(cli.command, Command::Global));
+    }
+
+    #[test]
+    fn config_diff_and_plan_help_document_detailed_exit_codes() {
+        let mut command = cli_command(BINARY_NAME);
+        let config = command
+            .find_subcommand_mut("config")
+            .expect("config subcommand exists");
+        for name in ["diff", "plan"] {
+            let help = config
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("config {name} subcommand exists"))
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("Exit codes:"),
+                "config {name} --help must document exit codes: {help}"
+            );
+            assert!(
+                help.contains("2  changes present"),
+                "config {name} --help must document exit code 2: {help}"
+            );
+            assert!(
+                help.contains("1  error"),
+                "config {name} --help must document exit code 1: {help}"
+            );
+        }
     }
 
     #[test]

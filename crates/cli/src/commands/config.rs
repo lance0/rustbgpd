@@ -21,7 +21,16 @@ pub struct ApplyOptions<'a> {
     pub confirm_timeout_seconds: Option<u32>,
 }
 
-pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result<(), CliError> {
+/// Detailed exit code for `config diff` / `config plan`: 0 when the
+/// candidate matches the runtime config, 2 when changes are present
+/// (errors exit 1 through the generic CLI error path).
+pub fn change_status_exit_code(has_changes: bool) -> i32 {
+    if has_changes { 2 } else { 0 }
+}
+
+/// Returns whether the candidate differs from the runtime config, for the
+/// 0 (no changes) / 2 (changes present) exit-code contract.
+pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result<bool, CliError> {
     let candidate_toml = read_candidate_toml(from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -35,15 +44,17 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
     } else {
         print!("{}", resp.human_text);
     }
-    Ok(())
+    Ok(resp.has_any_changes)
 }
 
+/// Returns whether the plan contains changes (status other than noop),
+/// for the 0 (no changes) / 2 (changes present) exit-code contract.
 pub async fn plan(
     connection: Connection,
     from_file: &str,
     expected_runtime_snapshot_token: Option<&str>,
     json: bool,
-) -> Result<(), CliError> {
+) -> Result<bool, CliError> {
     let candidate_toml = read_candidate_toml(from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -62,7 +73,7 @@ pub async fn plan(
     } else {
         print_plan_human(&resp);
     }
-    Ok(())
+    Ok(resp.status != ConfigTransactionPlanStatus::Noop as i32)
 }
 
 pub async fn apply(
@@ -411,15 +422,58 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        diff(connection, path.to_str().unwrap(), true)
+        let has_changes = diff(connection, path.to_str().unwrap(), true)
             .await
             .unwrap();
 
+        assert!(has_changes, "mock serves a changed diff → exit code 2");
         assert_eq!(server.state.config_diff_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             server.state.last_config_diff.lock().await.as_deref(),
             Some("[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n")
         );
+    }
+
+    #[tokio::test]
+    async fn diff_without_changes_reports_no_changes_for_exit_code_0() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_diff_no_changes
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let has_changes = diff(connection, path.to_str().unwrap(), true)
+            .await
+            .unwrap();
+
+        assert!(!has_changes, "no-changes diff must map to exit code 0");
+    }
+
+    #[tokio::test]
+    async fn diff_rpc_error_maps_to_cli_error_for_exit_code_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+        let server = spawn_mock_server(None).await;
+        *server.state.config_diff_error.lock().await = Some((
+            tonic::Code::InvalidArgument,
+            "candidate config invalid".to_string(),
+        ));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let result = diff(connection, path.to_str().unwrap(), true).await;
+
+        assert!(result.is_err(), "daemon error must take the exit-1 path");
+    }
+
+    #[test]
+    fn change_status_exit_codes_are_terraform_style() {
+        assert_eq!(change_status_exit_code(false), 0);
+        assert_eq!(change_status_exit_code(true), 2);
     }
 
     #[tokio::test]
@@ -430,10 +484,11 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
+        let has_changes = plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
             .await
             .unwrap();
 
+        assert!(has_changes, "committable plan → exit code 2");
         assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 1);
         let request = server.state.last_config_plan.lock().await.clone().unwrap();
         assert_eq!(
@@ -441,6 +496,22 @@ mod tests {
             "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n"
         );
         assert_eq!(request.expected_runtime_snapshot_token, "kv1:old:1");
+    }
+
+    #[tokio::test]
+    async fn plan_noop_reports_no_changes_for_exit_code_0() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+        let server = spawn_mock_server(None).await;
+        server.state.config_plan_noop.store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let has_changes = plan(connection, path.to_str().unwrap(), None, true)
+            .await
+            .unwrap();
+
+        assert!(!has_changes, "noop plan must map to exit code 0");
     }
 
     #[tokio::test]

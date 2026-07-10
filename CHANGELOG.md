@@ -368,6 +368,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was not evaluated; `not_seen` keeps its exit-0 evaluated-answer
   semantics, and `--json` carries the distinct outcome values.
   (LAN-320)
+- **Config diffs render operator values, impact classes, and a plan
+  summary instead of Rust debug output.** `rbgp config diff` /
+  `config plan` / `rustbgpd --diff` no longer leak `Some(90) →
+  Some(30)` into field change lines: values render bare (`hold_time:
+  90 → 30`), absent optionals render `(unset)`, and secret-bearing or
+  inline-policy fields stay summarized as `<changed>`. Each changed
+  neighbor / peer-group field is annotated with its reload-matrix
+  impact class (`[hot-applied]`, `[session reset: OPEN renegotiation]`
+  / `TCP re-establish` / `session re-establish`, `[restart required]`;
+  fields whose class the existing classifiers disagree on carry no
+  annotation), and the diff ends with a rollup line (`Plan: 1 to add,
+  1 to change · 1 session will reset`). The JSON diff's `changes`
+  entries are now structured objects with the stable key set `{field,
+  old, new, impact}` (honest `null` for absent values and unknown
+  impact) plus a top-level `summary` object with neighbor counts,
+  `sessions_will_reset`, and `restart_required`. `rbgp config diff`
+  and `config plan` adopt detailed exit codes documented in `--help`:
+  0 = no changes, 1 = error, 2 = changes present (a separate contract
+  from the `rbgp diff` route diff). (LAN-321)
 
 - **`rbgp` errors are now actionable.** Connect failures name the
   endpoint the CLI actually dialed and the failure class (`cannot

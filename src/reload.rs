@@ -1225,7 +1225,10 @@ pub(crate) async fn reload_config(
             .collect();
         for n in &diff.changed {
             if let Some(old_n) = old_map.get(n.address.as_str()) {
-                let changes = config::describe_neighbor_changes(old_n, n);
+                let changes: Vec<String> = config::describe_neighbor_changes(old_n, n)
+                    .iter()
+                    .map(config::FieldChange::render)
+                    .collect();
                 info!(
                     address = %n.address,
                     changes = %changes.join(", "),

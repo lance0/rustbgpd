@@ -1622,20 +1622,180 @@ pub struct NeighborDiff {
     pub changed: Vec<Neighbor>,
 }
 
-/// Describe which fields changed between two `Neighbor` configurations.
+/// Live-impact class for a single `[[neighbors]]` / `[peer_groups]` field
+/// edit, surfaced from the reload matrix (`docs/reload-matrix.md`, the
+/// per-field classification pinned by the reload-matrix structural tests)
+/// so diff renderings can annotate each changed field with what applying
+/// it does to the affected peer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFieldImpact {
+    /// Reload-matrix class `live`: the value applies to the running peer
+    /// without renegotiating the session.
+    HotApplied,
+    /// Reload-matrix class `live (effective next session)`: the value is
+    /// OPEN-negotiated, socket-scoped, or registered at session
+    /// establishment, so applying it takes a session reset.
+    SessionReset,
+    /// Reload-matrix class `restart-required`: a daemon restart is needed.
+    RestartRequired,
+}
+
+/// Reload-matrix impact class + human annotation for one neighbor /
+/// peer-group field named by [`describe_neighbor_changes`] /
+/// [`describe_peer_group_changes`].
 ///
-/// Returns a list of human-readable change descriptions (e.g. "`hold_time`: 90 → 45").
-pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> {
+/// Fields whose class the existing classifiers disagree on return `None`
+/// and the diff renders no annotation rather than guessing:
+/// - `remote_asn`: the matrix classes it restart-required identity, but
+///   `diff_neighbors` keys on `(address, interface)` only, so an edit
+///   flows through the reconcile delete/re-add path.
+/// - `peer_group`: the matrix classes it live, but the transaction
+///   executor routes a reassignment to the session-reshape executor.
+fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)> {
+    Some(match field {
+        "description"
+        | "max_prefixes"
+        | "gr_stale_routes_time"
+        | "local_ipv6_nexthop"
+        | "remove_private_as"
+        | "log_level"
+        | "import_policy"
+        | "export_policy"
+        | "import_policy_chain"
+        | "export_policy_chain" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        "hold_time"
+        | "families"
+        | "graceful_restart"
+        | "gr_restart_time"
+        | "llgr_stale_time"
+        | "role"
+        | "strict_role"
+        | "prefix_orf_receive"
+        | "disable_ipv4_unicast"
+        | "add_path" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: OPEN renegotiation",
+        ),
+        "md5_password" | "ttl_security" | "send_hold_time" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: TCP re-establish",
+        ),
+        "route_reflector_client" | "orr_vantage" | "route_server_client" | "per_client_best" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: session re-establish",
+        ),
+        "tcp_ao" | "bfd" => (ConfigFieldImpact::RestartRequired, "restart required"),
+        _ => return None,
+    })
+}
+
+/// One changed field on a neighbor or peer group.
+///
+/// Serializes with the stable key set `{field, old, new, impact}`:
+/// `old`/`new` are the JSON forms of the config values with honest `null`
+/// for an absent optional (rendered `(unset)` in human output), and
+/// `impact` is the reload-matrix class or `null` when unknown.
+/// Secret-bearing and inline-policy fields carry `null` on both value
+/// sides and render `<changed>` — the values are never exposed.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FieldChange {
+    pub field: &'static str,
+    pub old: serde_json::Value,
+    pub new: serde_json::Value,
+    pub impact: Option<ConfigFieldImpact>,
+    #[serde(skip)]
+    annotation: Option<&'static str>,
+    #[serde(skip)]
+    values_summarized: bool,
+}
+
+impl FieldChange {
+    fn new<T: serde::Serialize>(field: &'static str, old: &T, new: &T) -> Self {
+        let (impact, annotation) = match config_field_impact(field) {
+            Some((impact, annotation)) => (Some(impact), Some(annotation)),
+            None => (None, None),
+        };
+        Self {
+            field,
+            old: json_config_value(old),
+            new: json_config_value(new),
+            impact,
+            annotation,
+            values_summarized: false,
+        }
+    }
+
+    /// A change whose values are deliberately withheld (secrets such as
+    /// `md5_password` / `tcp_ao`, or inline policy bodies too large to
+    /// inline): both value sides are `null` and the human rendering says
+    /// `<changed>`.
+    fn summarized(field: &'static str) -> Self {
+        let (impact, annotation) = match config_field_impact(field) {
+            Some((impact, annotation)) => (Some(impact), Some(annotation)),
+            None => (None, None),
+        };
+        Self {
+            field,
+            old: serde_json::Value::Null,
+            new: serde_json::Value::Null,
+            impact,
+            annotation,
+            values_summarized: true,
+        }
+    }
+
+    /// Human line for this change: `hold_time: 90 → 30  [session reset:
+    /// OPEN renegotiation]`. Absent values render `(unset)`; withheld
+    /// values render `<changed>`.
+    pub fn render(&self) -> String {
+        let values = if self.values_summarized {
+            "<changed>".to_string()
+        } else {
+            format!(
+                "{} → {}",
+                render_json_config_value(&self.old),
+                render_json_config_value(&self.new)
+            )
+        };
+        match self.annotation {
+            Some(annotation) => format!("{}: {values}  [{annotation}]", self.field),
+            None => format!("{}: {values}", self.field),
+        }
+    }
+
+    /// True when applying this field edit resets the affected session.
+    pub fn resets_session(&self) -> bool {
+        self.impact == Some(ConfigFieldImpact::SessionReset)
+    }
+}
+
+fn json_config_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// Render one JSON config value for human output: `null` → `(unset)`,
+/// strings bare, everything else (numbers, bools, arrays, objects) as
+/// compact JSON — never Rust `Debug` syntax.
+fn render_json_config_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "(unset)".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Describe which fields changed between two `Neighbor` configurations.
+pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldChange> {
     let mut changes = Vec::new();
 
     macro_rules! cmp_field {
         ($field:ident) => {
             if old.$field != new.$field {
-                changes.push(format!(
-                    "{}: {:?} → {:?}",
+                changes.push(FieldChange::new(
                     stringify!($field),
-                    old.$field,
-                    new.$field
+                    &old.$field,
+                    &new.$field,
                 ));
             }
         };
@@ -1666,36 +1826,26 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(add_path);
     cmp_field!(log_level);
 
-    // md5_password: log change without revealing values
+    // Secret-bearing fields: report the change without revealing values.
     if old.md5_password != new.md5_password {
-        changes.push("md5_password: <changed>".to_string());
+        changes.push(FieldChange::summarized("md5_password"));
     }
     if old.tcp_ao != new.tcp_ao {
-        changes.push("tcp_ao: <changed restart-required>".to_string());
+        changes.push(FieldChange::summarized("tcp_ao"));
     }
     if old.bfd != new.bfd {
-        changes.push("bfd: <changed restart-required>".to_string());
+        changes.push(FieldChange::summarized("bfd"));
     }
 
-    // Policy changes: summarize rather than dump full config
+    // Inline policy bodies: summarize rather than dump full config.
     if old.import_policy != new.import_policy {
-        changes.push("import_policy: <changed>".to_string());
+        changes.push(FieldChange::summarized("import_policy"));
     }
     if old.export_policy != new.export_policy {
-        changes.push("export_policy: <changed>".to_string());
+        changes.push(FieldChange::summarized("export_policy"));
     }
-    if old.import_policy_chain != new.import_policy_chain {
-        changes.push(format!(
-            "import_policy_chain: {:?} → {:?}",
-            old.import_policy_chain, new.import_policy_chain
-        ));
-    }
-    if old.export_policy_chain != new.export_policy_chain {
-        changes.push(format!(
-            "export_policy_chain: {:?} → {:?}",
-            old.export_policy_chain, new.export_policy_chain
-        ));
-    }
+    cmp_field!(import_policy_chain);
+    cmp_field!(export_policy_chain);
 
     changes
 }
@@ -1836,7 +1986,7 @@ pub struct ConfigDiff {
     /// not just in the raw `peer_groups` / `policy` diffs.
     pub effective_neighbor_impact: Vec<EffectiveNeighborImpact>,
     pub peer_groups: PeerGroupDiff,
-    pub peer_group_details: Vec<(String, Vec<String>)>,
+    pub peer_group_details: Vec<(String, Vec<FieldChange>)>,
     pub policy: PolicyDiff,
     /// `[global] honor_graceful_shutdown` changed. This is
     /// reload-applied through the peer manager, not restart-required.
@@ -2080,7 +2230,7 @@ pub struct NeighborAddSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborChangeSummary {
     pub address: String,
-    pub changes: Vec<String>,
+    pub changes: Vec<FieldChange>,
 }
 
 impl ConfigDiff {
@@ -2153,6 +2303,72 @@ impl ConfigDiff {
     pub fn has_any_changes(&self) -> bool {
         self.has_actionable_changes() || self.has_informational_changes()
     }
+
+    /// Distinct config entries (static neighbors or dynamic ranges) whose
+    /// live session(s) the classifiers say will reset when this diff is
+    /// applied: changed neighbors with at least one session-reset-class
+    /// field edit, plus inheritance-driven session-reshape impacts. Counts
+    /// config entries, not live TCP sessions (a dynamic range counts once
+    /// however many sessions it currently holds).
+    pub fn session_reset_entries(&self) -> usize {
+        let mut addresses: std::collections::BTreeSet<&str> = self
+            .neighbors
+            .changed
+            .iter()
+            .filter(|change| change.changes.iter().any(FieldChange::resets_session))
+            .map(|change| change.address.as_str())
+            .collect();
+        addresses.extend(
+            self.effective_neighbor_impact
+                .iter()
+                .filter(|impact| !impact.kind.is_policy_chain())
+                .map(|impact| impact.address.as_str()),
+        );
+        addresses.len()
+    }
+}
+
+/// Terraform-style rollup line for the human diff: neighbor
+/// add/change/remove counts, the session-reset count from
+/// [`ConfigDiff::session_reset_entries`], and whether a daemon restart is
+/// required for part of the change.
+fn plan_summary_line(diff: &ConfigDiff) -> String {
+    use std::fmt::Write as _;
+
+    let mut counts = Vec::new();
+    let added = diff.neighbors.added.len();
+    let changed = diff.neighbors.changed.len();
+    let removed = diff.neighbors.removed.len();
+    if added > 0 {
+        counts.push(format!("{added} to add"));
+    }
+    if changed > 0 {
+        counts.push(format!("{changed} to change"));
+    }
+    if removed > 0 {
+        counts.push(format!("{removed} to remove"));
+    }
+    if counts.is_empty() {
+        counts.push("no neighbor changes".to_string());
+    }
+    let mut line = format!("Plan: {}", counts.join(", "));
+    let resets = diff.session_reset_entries();
+    match resets {
+        // A restart-required change resets every session anyway, so a
+        // "no session resets" claim would mislead.
+        0 if !diff.has_restart_required_changes() => {
+            line.push_str(" · no session resets expected");
+        }
+        0 => {}
+        1 => line.push_str(" · 1 session will reset"),
+        n => {
+            let _ = write!(line, " · {n} sessions will reset");
+        }
+    }
+    if diff.has_restart_required_changes() {
+        line.push_str(" · daemon restart required for some changes");
+    }
+    line
 }
 
 /// Section-level v1 transaction support classification.
@@ -2545,6 +2761,13 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         "has_informational_changes": diff.has_informational_changes(),
         "has_any_changes": diff.has_any_changes(),
         "evpn_runtime_change_class": diff.evpn_runtime_change_class,
+        "summary": {
+            "neighbors_added": diff.neighbors.added.len(),
+            "neighbors_changed": diff.neighbors.changed.len(),
+            "neighbors_removed": diff.neighbors.removed.len(),
+            "sessions_will_reset": diff.session_reset_entries(),
+            "restart_required": diff.has_restart_required_changes(),
+        },
         "reload_applied": {
             "neighbors": &diff.neighbors,
             "peer_groups": &diff.peer_groups,
@@ -2677,7 +2900,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             for n in &diff.neighbors.changed {
                 let _ = writeln!(out, "    {} {}:", style.change_marker, n.address);
                 for change in &n.changes {
-                    let _ = writeln!(out, "        {change}");
+                    let _ = writeln!(out, "        {}", change.render());
                 }
             }
             out.push('\n');
@@ -2694,7 +2917,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             for (name, details) in &diff.peer_group_details {
                 let _ = writeln!(out, "    {} {name}:", style.change_marker);
                 for change in details {
-                    let _ = writeln!(out, "        {change}");
+                    let _ = writeln!(out, "        {}", change.render());
                 }
             }
             out.push('\n');
@@ -2863,7 +3086,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         out.push('\n');
     }
 
-    if !diff.has_any_changes() {
+    if diff.has_any_changes() {
+        let _ = writeln!(out, "{}", plan_summary_line(diff));
+    } else {
         let _ = writeln!(out, "{}", style.no_changes);
     }
     out
@@ -4168,8 +4393,9 @@ fn compute_effective_neighbor_impact(
 
         if old_resolved.peer_group != new_resolved.peer_group {
             reasons.push(format!(
-                "peer_group resolved as {:?} (was {:?})",
-                new_resolved.peer_group, old_resolved.peer_group
+                "peer_group resolved as {} (was {})",
+                new_resolved.peer_group.as_deref().unwrap_or("(unset)"),
+                old_resolved.peer_group.as_deref().unwrap_or("(unset)")
             ));
         } else if let Some(name) = new_resolved.peer_group.as_deref()
             && pg_changed.contains(name)
@@ -4359,17 +4585,19 @@ pub fn diff_peer_groups(
 }
 
 /// Describe which fields changed between two `PeerGroupConfig` values.
-pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig) -> Vec<String> {
+pub fn describe_peer_group_changes(
+    old: &PeerGroupConfig,
+    new: &PeerGroupConfig,
+) -> Vec<FieldChange> {
     let mut changes = Vec::new();
 
     macro_rules! cmp_field {
         ($field:ident) => {
             if old.$field != new.$field {
-                changes.push(format!(
-                    "{}: {:?} → {:?}",
+                changes.push(FieldChange::new(
                     stringify!($field),
-                    old.$field,
-                    new.$field
+                    &old.$field,
+                    &new.$field,
                 ));
             }
         };
@@ -4398,26 +4626,16 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(log_level);
 
     if old.md5_password != new.md5_password {
-        changes.push("md5_password: <changed>".to_string());
+        changes.push(FieldChange::summarized("md5_password"));
     }
     if old.import_policy != new.import_policy {
-        changes.push("import_policy: <changed>".to_string());
+        changes.push(FieldChange::summarized("import_policy"));
     }
     if old.export_policy != new.export_policy {
-        changes.push("export_policy: <changed>".to_string());
+        changes.push(FieldChange::summarized("export_policy"));
     }
-    if old.import_policy_chain != new.import_policy_chain {
-        changes.push(format!(
-            "import_policy_chain: {:?} → {:?}",
-            old.import_policy_chain, new.import_policy_chain
-        ));
-    }
-    if old.export_policy_chain != new.export_policy_chain {
-        changes.push(format!(
-            "export_policy_chain: {:?} → {:?}",
-            old.export_policy_chain, new.export_policy_chain
-        ));
-    }
+    cmp_field!(import_policy_chain);
+    cmp_field!(export_policy_chain);
 
     changes
 }
