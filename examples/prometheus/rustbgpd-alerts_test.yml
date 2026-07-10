@@ -247,3 +247,32 @@ tests:
                 continuously for over an hour. A dirty update-group
                 member appears wedged; its resync is not draining
                 residue.
+
+  # ── BgpPolicyEvalErrors ───────────────────────────────────────
+  - interval: 1m
+    input_series:
+      # Two eval errors at minute 5 — fires.
+      - series: 'bgp_policy_eval_errors_total{direction="import", kind="arithmetic", instance="edge1:9179"}'
+        values: "0 0 0 0 0 2 2 2 2 2 2 2 2 2 2 2"
+      # Flat counter — must not fire.
+      - series: 'bgp_policy_eval_errors_total{direction="export", kind="dataset", instance="edge2:9179"}'
+        values: "7x15"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpPolicyEvalErrors
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BgpPolicyEvalErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              direction: import
+              kind: arithmetic
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Policy evaluation errors (import, arithmetic)"
+              description: >-
+                bgp_policy_eval_errors_total{direction="import",
+                kind="arithmetic"} on edge1:9179 increased by 2 in the
+                last 15 minutes. Routes hitting the failing statement
+                are being denied.
