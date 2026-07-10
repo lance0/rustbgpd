@@ -73,6 +73,11 @@ pub(crate) struct MockState {
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
     pub(crate) last_delete_policy: Mutex<Option<server_proto::DeletePolicyRequest>>,
     pub(crate) last_explain_import: Mutex<Option<server_proto::ExplainImportPolicyRequest>>,
+    // LAN-320: when set, `explain_import_policy` answers with one
+    // synthetic match carrying this outcome (empty decision fields)
+    // instead of the canned permit/deny fixtures — drives the
+    // not_seen / cache_disabled / no_session CLI pins.
+    pub(crate) explain_import_synthetic_outcome: Mutex<Option<server_proto::ImportExplainOutcome>>,
     pub(crate) last_test_policy: Mutex<Option<server_proto::TestPolicyRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
@@ -1631,6 +1636,25 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
     ) -> Result<Response<server_proto::ExplainImportPolicyResponse>, Status> {
         let req = request.into_inner();
         *self.state.last_explain_import.lock().await = Some(req.clone());
+
+        if let Some(outcome) = *self.state.explain_import_synthetic_outcome.lock().await {
+            return Ok(Response::new(server_proto::ExplainImportPolicyResponse {
+                peer_address: req.peer_address.clone(),
+                prefix: req.prefix.clone(),
+                prefix_length: req.prefix_length,
+                afi_safi: req.afi_safi,
+                current_policy_generation: 0,
+                matches: vec![server_proto::ImportExplainMatch {
+                    outcome: outcome as i32,
+                    peer_address: req.peer_address,
+                    prefix: req.prefix,
+                    prefix_length: req.prefix_length,
+                    path_id: req.path_id.unwrap_or(0),
+                    afi_safi: req.afi_safi,
+                    ..Default::default()
+                }],
+            }));
+        }
 
         let modifications = Some(server_proto::ExplainModifications {
             set_local_pref: Some(200),

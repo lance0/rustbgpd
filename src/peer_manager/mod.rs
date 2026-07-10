@@ -815,8 +815,9 @@ impl PeerManager {
                         } => {
                             // Resolve the unique session for this address and
                             // forward to its task. No live session → None,
-                            // which the RPC layer renders as NOT_SEEN (the
-                            // session-local cache is gone, per ADR-0073).
+                            // which the RPC layer renders as NO_SESSION (the
+                            // session-local cache is gone, per ADR-0073 /
+                            // LAN-320).
                             let result = match self
                                 .unique_peer_key_for_address(address)
                                 .and_then(|key| self.peers.get(&key))

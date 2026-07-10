@@ -5432,6 +5432,43 @@ async fn explain_disabled_stores_no_decisions() {
         "explain disabled must store no decision"
     );
 }
+/// LAN-320: the explain reply carries the session's own cache-enabled
+/// flag (snapshotted from `[policy.explain] enabled` at session build)
+/// so the RPC layer can report `CACHE_DISABLED` distinctly instead of
+/// a `NOT_SEEN` lookalike.
+#[tokio::test]
+async fn explain_reply_carries_cache_enabled_flag() {
+    for enabled in [true, false] {
+        let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        peer_config.connect_retry_secs = 30;
+        peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+        peer_config.gr_restart_time = 120;
+        let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        config.explain_enabled = enabled;
+        let metrics = BgpMetrics::new();
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let mut session = PeerSession::new(
+            config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
+        );
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = session
+            .handle_command(PeerCommand::ExplainImportPolicy {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+                path_id: None,
+                reply: reply_tx,
+            })
+            .await;
+        let reply = reply_rx.await.expect("session replied");
+        assert_eq!(
+            reply.cache_enabled, enabled,
+            "reply must snapshot the session's own explain flag"
+        );
+        assert!(reply.matches.is_empty(), "nothing cached, nothing matched");
+    }
+}
 /// Import policy chains accumulate modifications across matching permit
 /// policies before the route reaches the RIB.
 #[expect(
