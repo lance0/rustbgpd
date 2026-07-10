@@ -749,6 +749,23 @@ opt-in config); at those scales the on/off difference is within noise. The
 2p/100k row shows **both** the v0.32.0 default (event-history off) and the
 opt-in (on).
 
+**Re-run 2026-07-09** on current `main` (**v0.50.0**, default event-history
+off), same host and harness, all targets back to back on an idle machine —
+these are the current headline numbers (also summarized in
+[COMPARISON.md](COMPARISON.md)):
+
+| Scenario | rustbgpd 0.50.0 | BIRD 2.18 (master) | GoBGP 4.3.0 |
+|---|---|---|---|
+| 10p × 1k | conv 2 s · total 8.3 s · 42 MB | conv 2 s · total 9.3 s · 9 MB | conv 3 s · total 10.4 s · 51 MB |
+| 2p × 10k | conv 2 s · total 8.3 s · 52 MB | conv 2 s · total 9.3 s · 9 MB | conv 3 s · total 10.4 s · 43 MB |
+| 2p × 100k | conv 3 s · total 12.1 s · 246 MB | conv 3 s · total 12.2 s · 25 MB | conv 6 s · total 15.4 s · 197 MB |
+
+Deltas vs the v0.32.0 table below: rustbgpd 2p/100k RSS ~284 → 246 MB and
+10p/1k ~90 → 42 MB (trie prefix indexes, attribute interning, update-groups);
+convergence and total time flat-to-better everywhere; GoBGP's 2p/100k
+convergence doubled relative to rustbgpd's. BIRD/GoBGP versions identical to
+the prior run, so their cells move only within noise.
+
 **Re-confirmed 2026-06-02** on current `main` (post-v0.33.0, default
 **event-history off**), same host — this is a no-regression check, not a new set
 of headline numbers:
