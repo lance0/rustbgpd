@@ -464,10 +464,81 @@ fn bench_set_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+/// LAN-299 value expressions: the arithmetic cost itself, and the
+/// constant-action contrast proving chains that use NO arithmetic keep
+/// their cost (constant expressions fold to the same IR as literals,
+/// and the eval-error slot rides the walk for free). Both chains
+/// compile from `.rpol` so they exercise the real frontend output.
+fn bench_value_expr(c: &mut Criterion) {
+    let mut store = SetStore::new();
+    let constant = rustbgpd_policy::rpol::compile_rpol(
+        "policy p { term t { if route.med >= 10 { set med 50; set local-pref 200; accept } } }",
+        &mut store,
+    )
+    .expect("compiles");
+    // Folded constant ACTIONS are IR-identical to the literal form
+    // (guards with arithmetic keep their ValueCmp shape by design —
+    // different absent-operand semantics); the bench then contrasts
+    // real arithmetic (field operands, builtins).
+    let folded = rustbgpd_policy::rpol::compile_rpol(
+        "policy p { term t { if route.med >= 10 { set med 25 + 25; set local-pref 2 * 100; accept } } }",
+        &mut store,
+    )
+    .expect("compiles");
+    assert_eq!(
+        constant, folded,
+        "constant arithmetic actions fold to the literal IR"
+    );
+    let arithmetic = rustbgpd_policy::rpol::compile_rpol(
+        "policy p { term t { if route.as-path.len * 10 >= route.med { set med route.med + 50; set local-pref min(route.local-pref * 2, 400); accept } } }",
+        &mut store,
+    )
+    .expect("compiles");
+
+    let communities: Vec<u32> = Vec::new();
+    let as_path_str = String::new();
+    let ctx = RouteContext {
+        prefix: Some(matching_prefix()),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &communities,
+        large_communities: &[],
+        as_path_str: &as_path_str,
+        as_path_len: 3,
+        origin_asn: Some(65200),
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: Some(65001),
+        peer_group: None,
+        route_type: None,
+        family: None,
+        evpn_route_type: None,
+        local_pref: Some(100),
+        med: Some(20),
+    };
+
+    let mut group = c.benchmark_group("value_expr");
+    group.bench_function("constant_actions", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&constant).evaluate_with_attribution(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("arithmetic_actions", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&arithmetic).evaluate_with_attribution(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_policy_eval,
     bench_policy_predicate_eval,
-    bench_set_heavy
+    bench_set_heavy,
+    bench_value_expr
 );
 criterion_main!(benches);

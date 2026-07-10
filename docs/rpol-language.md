@@ -69,8 +69,10 @@ report.
 
 - **Comments**: `#` to end of line.
 - **Identifiers** (set, policy, term, test, parameter names) are
-  kebab-case: `[A-Za-z_][A-Za-z0-9_]*(-[A-Za-z0-9_]+)*`. There is no
-  arithmetic in the language, so `-` inside names is unambiguous.
+  kebab-case: `[A-Za-z_][A-Za-z0-9_]*(-[A-Za-z0-9_]+)*`. Maximal munch
+  is permanent (ADR-0103): `a-b` is always one identifier, so binary
+  subtraction requires whitespace — `route.med - 1` subtracts,
+  `route.med-1` is an unknown-field error (with a did-you-mean note).
 - **Reserved keywords** (not usable as names): `prefix-set`,
   `community-set`, `policy`, `term`, `test`, `if`, `else`, `set`,
   `add`, `remove`, `prepend`, `accept`, `reject`, `apply`, `in`,
@@ -112,7 +114,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments |
+| u32 | integer literals, parameters | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -247,6 +249,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.origin-as in customers` | asn-set membership (one hash probe) |
 | `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
+| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | checked-arithmetic comparison (see "Value expressions"); an unresolvable operand **denies** the route |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
 | `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
 | `route.rpki == invalid` | RPKI origin validation state |
@@ -270,6 +273,95 @@ nor `!=` nor `in` (`!(... in ...)` negates plainly, matching the
 prefix-set precedent).
 
 `==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
+
+### Value expressions — checked u32 arithmetic
+
+u32 value positions — the right side of a u32 comparison, and the
+`set local-pref` / `set med` arguments — accept **value expressions**
+(ADR-0103, LAN-299): arithmetic over integer literals, parameters,
+u32-typed fields (`route.local-pref`, `route.med`,
+`route.as-path.len`, `route.origin-as`, `peer.asn`), and three bounded
+builtins. A comparison's left side may also carry arithmetic when it
+starts with a field.
+
+```rpol
+set med route.med + 50
+set local-pref min(route.local-pref * 2, 400)
+if route.as-path.len * 10 >= route.med { reject }
+if route.med >= threshold + 20 { set local-pref 90 }
+```
+
+- **Operators**: `+ - * / %`, with `* / %` binding tighter than
+  `+ -`, and both tighter than comparisons. Parentheses group inside
+  value positions (a `(` at the *start* of an `if` condition opens a
+  boolean group, so lead with the field: `route.med + 2 * 3 >= n`,
+  or put the parenthesized arithmetic on the right).
+- **Whitespace disambiguates `-`**: identifiers are kebab-case with
+  permanent maximal munch, so `route.med - 1` is subtraction and
+  `route.med-1` is an unknown-field error.
+- **Builtins**: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`.
+  Statically inverted clamp bounds (`lo > hi` with both constant) are
+  a compile error; a data-dependent inversion is an evaluation error.
+- **Everything is checked.** All arithmetic is checked u32: overflow,
+  underflow, and division/modulo by zero are **evaluation errors**,
+  never wraps or process traps.
+- **Constant folding.** Constant subexpressions fold at compile time
+  with the same checked operators: `set med 25 + 25` compiles to
+  exactly what `set med 50` does, and a statically invalid constant
+  expression (`4294967295 + 1`, `1 / 0`) is a compile error at its
+  source span.
+
+**Failure is closed (the evaluation-error contract).** Any evaluation
+error — checked-arithmetic failure, inverted clamp, or an **absent
+operand** (`route.origin-as` on an empty/`AS_SET`-only path, unknown
+`peer.asn`) — denies the route: staged modifications are discarded,
+the chain's eval-error counter increments, a rate-limited WARN names
+the failing policy and term, and explain traces render the error in
+place of a verdict. `route.local-pref` and `route.med` read their
+implicit defaults (100 / 0) when absent, consistent with comparisons.
+Note the deliberate divergence from plain comparisons: an
+arithmetic-free `route.origin-as == 64500` on an origin-less route
+matches neither `==` nor `!=` (never-match), while
+`route.origin-as * 1 == 64500` is unresolvable and **denies** — the
+computed form has no non-verdict to fall back to, exactly like
+computed prepend operands.
+
+**Update-group note.** `peer.asn` as an operand (guard or computed
+`set` value) reads peer identity and keeps its peers out of shared
+update groups; arithmetic over route fields alone never disqualifies
+grouping.
+
+Migration example — BIRD's arithmetic filters are the natural
+comparison. A BIRD MED-dampening filter:
+
+```text
+filter pad_med {
+    if bgp_med + 50 > 1000 then reject;
+    bgp_med = bgp_med + 50;
+    bgp_local_pref = bgp_local_pref * 2;
+    accept;
+}
+```
+
+becomes:
+
+```rpol
+policy pad-med {
+    term dampen { if route.med + 50 >= 1001 { reject } }
+    term pad {
+        set med route.med + 50;
+        set local-pref min(route.local-pref * 2, 400);
+        accept
+    }
+}
+```
+
+The difference under the syntax: BIRD's integer arithmetic evaluates
+in a general-purpose interpreter, and an out-of-range result is
+whatever the interpreter does that day; `.rpol` arithmetic is checked
+u32 with a pinned failure contract (deny + counter + explain), and
+the `min` cap makes the local-pref doubling total instead of relying
+on it.
 
 ### `route.family` — one chain, many families
 
@@ -325,8 +417,8 @@ Two consequences worth internalizing:
 | Action | Effect |
 |---|---|
 | `accept` / `reject` | terminal verdict (see evaluation order) |
-| `set local-pref <u32>` | override `LOCAL_PREF` |
-| `set med <u32>` | override `MED` |
+| `set local-pref <u32 \| value-expr>` | override `LOCAL_PREF`, e.g. `set local-pref min(route.local-pref * 2, 400)` |
+| `set med <u32 \| value-expr>` | override `MED`, e.g. `set med route.med + 50` |
 | `set next-hop <ip>` / `set next-hop self` | override `NEXT_HOP` |
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
@@ -340,7 +432,12 @@ policy, later `set`s of the same attribute win; across a chain, the
 existing merge semantics apply (later policy wins scalars, add/remove
 lists merge with later-policy-wins cancellation). Literal and computed
 prepends share one scalar slot: a later prepend of either form
-replaces an earlier one of either form.
+replaces an earlier one of either form; computed `set` values share
+their attribute's slot the same way. A computed `set` value resolves
+when the matched term's action executes — constant expressions have
+already folded to literals at compile time, and expressions reading
+route/peer fields evaluate per route (an evaluation error denies the
+route; see "Value expressions").
 
 ### Computed prepend operands
 
@@ -447,15 +544,21 @@ term        := "term" IDENT "{" stmt* "}"
 stmt        := if-stmt | action [";"]
 if-stmt     := "if" expr "{" (action [";"])* "}" ["else" "{" (action [";"])* "}"]
 action      := "accept" | "reject"
-             | "set" ("local-pref" | "med") u32arg
+             | "set" ("local-pref" | "med") value
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
              | "prepend" "as" (u32arg | "self" | "peer" | "origin") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate
-predicate   := field (("=="|"!="|">="|"<=") rhs | "in" IDENT | "has" community
+predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" community
              | "matches" STRING | "contains" u32arg)
+             | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
+value       := mul (("+"|"-") mul)*                            # checked u32
+mul         := atom (("*"|"/"|"%") atom)*
+atom        := INT | IDENT | field | "(" value ")"
+             | ("min"|"max") "(" value "," value ")"
+             | "clamp" "(" value "," value "," value ")"
 field       := ("route" | "peer") ("." IDENT)+
 u32arg      := INT | IDENT          # parameter reference
 test-def    := "test" IDENT "{" route-block [peer-block] expect+ "}"
@@ -742,10 +845,12 @@ hit counters — those come free after the rewrite.
 ## Deliberate V1 exclusions
 
 No loops, no user-defined types, no maps (safety is total by
-construction — ADR-0096 Decision 2). No `as-path-set`. No `else if`
-chains and no nested `if` (keep terms small; use `&&` or more terms).
-No arithmetic. EVPN route type takes only an integer literal (no
-parameters — the value is wire-encoded u8). Full-form all-numeric
+construction — ADR-0096 Decision 2; the ADR-0103 extension program
+adds bounded constructs slice by slice — checked arithmetic shipped
+as LAN-299). No `as-path-set`. No `else if` chains and no nested `if`
+(keep terms small; use `&&` or more terms). No `let` bindings (the
+next ADR-0103 slice). EVPN route type takes only an integer literal
+(no parameters — the value is wire-encoded u8). Full-form all-numeric
 IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the
 supported form.

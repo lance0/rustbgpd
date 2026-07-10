@@ -12,10 +12,13 @@ use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix};
 
 use crate::engine::{CommunityMatch, parse_community_match};
 
+use crate::ir::ArithOp;
+
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityKind, CommunityLit, CommunitySetDef, ExpectDef, Expr,
     FieldPath, FieldRoot, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef,
-    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, WithAssertion,
+    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, ValueExprAst,
+    WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -594,12 +597,12 @@ impl Parser<'_> {
                 let target = self.expect_ident("`local-pref`, `med`, or `next-hop`")?;
                 match target.node.as_str() {
                     "local-pref" => {
-                        let arg = self.u32_arg("a u32 value or parameter")?;
+                        let arg = self.value_expr(0)?;
                         let span = token.span.to(arg.span());
                         Ok(ActionStmt::SetLocalPref(arg, span))
                     }
                     "med" => {
-                        let arg = self.u32_arg("a u32 value or parameter")?;
+                        let arg = self.value_expr(0)?;
                         let span = token.span.to(arg.span());
                         Ok(ActionStmt::SetMed(arg, span))
                     }
@@ -768,6 +771,175 @@ impl Parser<'_> {
         })
     }
 
+    // ── value expressions (LAN-299) ─────────────────────────────────
+
+    /// The arithmetic operator at the cursor, if any.
+    fn peek_arith(&self) -> Option<ArithOp> {
+        match self.peek().map(|t| t.kind) {
+            Some(Tok::Plus) => Some(ArithOp::Add),
+            Some(Tok::Minus) => Some(ArithOp::Sub),
+            Some(Tok::Star) => Some(ArithOp::Mul),
+            Some(Tok::Slash) => Some(ArithOp::Div),
+            Some(Tok::Percent) => Some(ArithOp::Rem),
+            _ => None,
+        }
+    }
+
+    /// `value_expr := value_mul (("+"|"-") value_mul)*` — checked u32
+    /// arithmetic (LAN-299). `*`/`/`/`%` bind tighter than `+`/`-`;
+    /// both bind tighter than comparisons. Chained operators count
+    /// toward [`MAX_EXPR_DEPTH`] like `&&`/`||` chains do.
+    fn value_expr(&mut self, mut depth: u32) -> PResult<ValueExprAst> {
+        let mut lhs = self.value_mul(depth)?;
+        while let Some(op @ (ArithOp::Add | ArithOp::Sub)) = self.peek_arith() {
+            self.bump();
+            depth += 1;
+            self.check_expr_depth(depth)?;
+            let rhs = self.value_mul(depth)?;
+            let span = lhs.span().to(rhs.span());
+            lhs = ValueExprAst::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// `value_mul := value_atom (("*"|"/"|"%") value_atom)*`.
+    fn value_mul(&mut self, mut depth: u32) -> PResult<ValueExprAst> {
+        let mut lhs = self.value_atom(depth)?;
+        while let Some(op @ (ArithOp::Mul | ArithOp::Div | ArithOp::Rem)) = self.peek_arith() {
+            self.bump();
+            depth += 1;
+            self.check_expr_depth(depth)?;
+            let rhs = self.value_atom(depth)?;
+            let span = lhs.span().to(rhs.span());
+            lhs = ValueExprAst::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// One value operand: integer literal, parameter or builtin call
+    /// (`min`/`max`/`clamp` — contextual: only an identifier followed
+    /// by `(` is a call), `route.`/`peer.` field, or a parenthesized
+    /// value expression.
+    fn value_atom(&mut self, depth: u32) -> PResult<ValueExprAst> {
+        self.check_expr_depth(depth)?;
+        match self.peek().map(|t| t.kind) {
+            Some(Tok::Int) => {
+                let (value, span) = self.expect_u32("a u32 value")?;
+                Ok(ValueExprAst::Lit(value, span))
+            }
+            Some(Tok::Ident) => {
+                let name = self.expect_ident("a parameter or builtin")?;
+                if self.at(Tok::LParen) {
+                    self.value_call(name, depth)
+                } else {
+                    Ok(ValueExprAst::Ident(name))
+                }
+            }
+            Some(Tok::RouteKw | Tok::PeerKw) => Ok(ValueExprAst::Field(self.field_path()?)),
+            Some(Tok::LParen) => {
+                self.bump();
+                let inner = self.value_expr(depth + 1)?;
+                self.expect(Tok::RParen, "`)`")?;
+                Ok(inner)
+            }
+            _ => Err(self.error_expected(
+                "a u32 value (integer, parameter, `route.<field>`, `min(`/`max(`/`clamp(`, or `(`)",
+            )),
+        }
+    }
+
+    /// The argument list of a builtin call; the typechecker validates
+    /// the name and arity.
+    fn value_call(&mut self, name: Spanned<String>, depth: u32) -> PResult<ValueExprAst> {
+        self.expect(Tok::LParen, "`(`")?;
+        let mut args = Vec::new();
+        while !self.at(Tok::RParen) {
+            args.push(self.value_expr(depth + 1)?);
+            if self.eat(Tok::Comma).is_none() {
+                break;
+            }
+        }
+        let end = self
+            .expect(Tok::RParen, "`)` or `,` and another argument")?
+            .span;
+        let span = name.span.to(end);
+        Ok(ValueExprAst::Call { name, args, span })
+    }
+
+    /// Continue a value expression whose first atom is already parsed
+    /// (the comparison-RHS path: `rhs()` consumed an atom, then an
+    /// arithmetic operator appeared). Finishes the `*`-level run the
+    /// atom opens, then the `+`-level.
+    fn value_expr_from_atom(&mut self, atom: ValueExprAst) -> PResult<ValueExprAst> {
+        let mut lhs = atom;
+        let mut depth = 0u32;
+        while let Some(op @ (ArithOp::Mul | ArithOp::Div | ArithOp::Rem)) = self.peek_arith() {
+            self.bump();
+            depth += 1;
+            self.check_expr_depth(depth)?;
+            let rhs = self.value_atom(depth)?;
+            let span = lhs.span().to(rhs.span());
+            lhs = ValueExprAst::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        while let Some(op @ (ArithOp::Add | ArithOp::Sub)) = self.peek_arith() {
+            self.bump();
+            depth += 1;
+            self.check_expr_depth(depth)?;
+            let rhs = self.value_mul(depth)?;
+            let span = lhs.span().to(rhs.span());
+            lhs = ValueExprAst::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// Reinterpret an already-parsed comparison RHS as a value-expr
+    /// atom (the arithmetic-continuation path). Non-u32-shaped
+    /// operands get a spanned diagnostic.
+    fn rhs_into_value_atom(&mut self, rhs: Rhs) -> PResult<ValueExprAst> {
+        match rhs {
+            Rhs::Int(value, span) => Ok(ValueExprAst::Lit(value, span)),
+            Rhs::Ident(name) => {
+                if self.at(Tok::LParen) {
+                    self.value_call(name, 0)
+                } else {
+                    Ok(ValueExprAst::Ident(name))
+                }
+            }
+            Rhs::Field(path) => Ok(ValueExprAst::Field(path)),
+            other => {
+                self.diags.push(Diagnostic::new(
+                    other.span(),
+                    format!(
+                        "arithmetic requires u32 operands, found {}",
+                        other.describe()
+                    ),
+                    "not a u32 operand",
+                ));
+                Err(Fail)
+            }
+        }
+    }
+
     fn field_path(&mut self) -> PResult<FieldPath> {
         let root_token = self.bump().expect("caller checked route/peer");
         let root = if root_token.kind == Tok::RouteKw {
@@ -790,6 +962,12 @@ impl Parser<'_> {
 
     fn predicate_expr(&mut self) -> PResult<Expr> {
         let field = self.field_path()?;
+        // LAN-299: arithmetic after the field makes the whole
+        // comparison a value comparison (`route.med + 50 >= p`).
+        if self.peek_arith().is_some() {
+            let lhs = self.value_expr_from_atom(ValueExprAst::Field(field))?;
+            return self.value_cmp_tail(lhs);
+        }
         let Some(op_token) = self.peek() else {
             return Err(self.error_expected(
                 "an operator (`==`, `!=`, `>=`, `<=`, `in`, `has`, `matches`, or `contains`)",
@@ -804,7 +982,37 @@ impl Parser<'_> {
                     Tok::GtEq => CmpOp::Ge,
                     _ => CmpOp::Le,
                 };
+                // LAN-299: `(` after a comparison operator can only
+                // open a value expression (it was a parse error before
+                // arithmetic landed), e.g. `route.med == (x + 2) * 3`.
+                if self.at(Tok::LParen) {
+                    let rhs = self.value_expr(0)?;
+                    let span = field.span.to(rhs.span());
+                    return Ok(Expr::ValueCmp {
+                        lhs: ValueExprAst::Field(field),
+                        op,
+                        rhs,
+                        span,
+                    });
+                }
                 let rhs = self.rhs()?;
+                // LAN-299: an arithmetic operator (or a builtin call's
+                // `(`) after the RHS atom upgrades the comparison to a
+                // value comparison; plain shapes keep the legacy
+                // (never-match-on-absent) `Cmp` form.
+                if self.peek_arith().is_some()
+                    || (matches!(rhs, Rhs::Ident(_)) && self.at(Tok::LParen))
+                {
+                    let atom = self.rhs_into_value_atom(rhs)?;
+                    let rhs = self.value_expr_from_atom(atom)?;
+                    let span = field.span.to(rhs.span());
+                    return Ok(Expr::ValueCmp {
+                        lhs: ValueExprAst::Field(field),
+                        op,
+                        rhs,
+                        span,
+                    });
+                }
                 let span = field.span.to(rhs.span());
                 Ok(Expr::Cmp {
                     field,
@@ -837,6 +1045,26 @@ impl Parser<'_> {
                 "an operator (`==`, `!=`, `>=`, `<=`, `in`, `has`, `matches`, or `contains`)",
             )),
         }
+    }
+
+    /// The `<cmp-op> <value-expr>` tail of a value comparison whose
+    /// left side is already parsed (LAN-299).
+    fn value_cmp_tail(&mut self, lhs: ValueExprAst) -> PResult<Expr> {
+        let op = match self.peek().map(|t| t.kind) {
+            Some(Tok::EqEq) => CmpOp::Eq,
+            Some(Tok::NotEq) => CmpOp::Ne,
+            Some(Tok::GtEq) => CmpOp::Ge,
+            Some(Tok::LtEq) => CmpOp::Le,
+            _ => {
+                return Err(
+                    self.error_expected("a comparison operator (`==`, `!=`, `>=`, or `<=`)")
+                );
+            }
+        };
+        self.bump();
+        let rhs = self.value_expr(0)?;
+        let span = lhs.span().to(rhs.span());
+        Ok(Expr::ValueCmp { lhs, op, rhs, span })
     }
 
     fn rhs(&mut self) -> PResult<Rhs> {

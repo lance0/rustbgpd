@@ -1,0 +1,14 @@
+policy edges {
+    term t {
+        if route.origin-as % 2 == 0 || peer.asn - 1 >= route.med / 3 {
+            set local-pref clamp(route.local-pref, 100, 400);
+            set med max(min(route.med, 400), 25 + 25);
+            accept
+        }
+    }
+}
+
+test boundary {
+    route { med 4294967295 }
+    expect edges == reject
+}

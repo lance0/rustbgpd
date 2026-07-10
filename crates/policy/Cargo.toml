@@ -19,6 +19,8 @@ regex = "1"
 rustc-hash.workspace = true
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
+# Rate-limited eval-error WARN (LAN-299, ADR-0103 Decision 4).
+tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

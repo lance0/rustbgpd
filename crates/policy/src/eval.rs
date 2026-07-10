@@ -15,14 +15,166 @@
 //! (the `ATTR` const generic) — the plain [`CompiledChain::evaluate`]
 //! path never touches it.
 
+use std::fmt;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crate::engine::{
-    IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult, RouteContext,
-    RouteModifications,
+    IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult, PrependAs,
+    RouteContext, RouteModifications,
 };
-use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, TermAction};
+use crate::ir::{
+    ArithOp, Cmp, CompiledChain, CompiledPolicy, MatchExpr, TermAction, ValueCmpOp, ValueExpr,
+    ValueField,
+};
 use crate::sets::prefix_entry_matches;
+
+/// Why a route evaluation failed (LAN-299, the ADR-0103 Decision 4
+/// rails). ANY of these resolves the route as a uniform **Deny**:
+/// staged modifications are discarded, the chain's
+/// [`PolicyHitCounters::eval_errors`] counter increments on the
+/// counting paths, a rate-limited WARN names the failing policy/term,
+/// and explain traces render the error in place of a verdict. Later
+/// language slices (locals, loops, functions — ADR-0103) add kinds
+/// here; the disposition never varies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalErrorKind {
+    /// `+` or `*` exceeded `u32::MAX`.
+    Overflow,
+    /// `-` went below zero (no signed types in the value model).
+    Underflow,
+    /// `/` with a zero divisor.
+    DivideByZero,
+    /// `%` with a zero divisor.
+    RemainderByZero,
+    /// `clamp(x, lo, hi)` evaluated with `lo > hi` (the statically
+    /// known case is a compile error; this is the data-dependent one).
+    ClampInverted,
+    /// A `u32` field operand with no default was absent (origin AS on
+    /// an empty/`AS_SET`-only path, unknown peer ASN).
+    AbsentField(ValueField),
+    /// A computed prepend operand (LAN-296) could not resolve —
+    /// unknown context value, or zero (ASN 0 is prohibited on the
+    /// wire, RFC 7607).
+    AbsentPrependOperand(PrependAs),
+}
+
+impl EvalErrorKind {
+    /// Stable short label (counter/log-friendly).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            EvalErrorKind::Overflow => "overflow",
+            EvalErrorKind::Underflow => "underflow",
+            EvalErrorKind::DivideByZero => "divide-by-zero",
+            EvalErrorKind::RemainderByZero => "remainder-by-zero",
+            EvalErrorKind::ClampInverted => "clamp-inverted",
+            EvalErrorKind::AbsentField(_) => "absent-operand",
+            EvalErrorKind::AbsentPrependOperand(_) => "absent-prepend-operand",
+        }
+    }
+}
+
+impl fmt::Display for EvalErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EvalErrorKind::Overflow => write!(f, "arithmetic overflow"),
+            EvalErrorKind::Underflow => write!(f, "arithmetic underflow"),
+            EvalErrorKind::DivideByZero => write!(f, "division by zero"),
+            EvalErrorKind::RemainderByZero => write!(f, "remainder by zero"),
+            EvalErrorKind::ClampInverted => write!(f, "clamp bounds inverted (lo > hi)"),
+            EvalErrorKind::AbsentField(field) => {
+                write!(f, "`{}` has no value for this route", field.as_str())
+            }
+            EvalErrorKind::AbsentPrependOperand(operand) => {
+                write!(f, "prepend as {} unresolvable (", operand.as_str())?;
+                match operand {
+                    PrependAs::LocalAs => write!(f, "the chain carries no local ASN")?,
+                    PrependAs::PeerAs => write!(f, "the peer ASN is unknown")?,
+                    PrependAs::OriginAs => write!(f, "the route has no origin AS")?,
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// Evaluate a compiled value expression against a route context.
+/// Pure and allocation-free; every arithmetic step is checked
+/// (ADR-0103 Decision 2 — the SIGFPE class is unrepresentable).
+/// Recursion depth is bounded by the frontend (`MAX_EXPR_DEPTH`).
+pub(crate) fn eval_value(expr: &ValueExpr, ctx: &RouteContext<'_>) -> Result<u32, EvalErrorKind> {
+    match expr {
+        ValueExpr::Const(value) => Ok(*value),
+        ValueExpr::Field(field) => match field {
+            ValueField::LocalPref => Ok(ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF)),
+            ValueField::Med => Ok(ctx.med.unwrap_or(IMPLICIT_MED)),
+            // Wire-bounded far below u32::MAX; saturate rather than
+            // invent an error kind for an impossible input.
+            ValueField::AsPathLen => Ok(u32::try_from(ctx.as_path_len).unwrap_or(u32::MAX)),
+            ValueField::OriginAs => ctx
+                .origin_asn
+                .ok_or(EvalErrorKind::AbsentField(ValueField::OriginAs)),
+            ValueField::PeerAsn => ctx
+                .peer_asn
+                .ok_or(EvalErrorKind::AbsentField(ValueField::PeerAsn)),
+        },
+        ValueExpr::Binary { op, lhs, rhs } => {
+            let lhs = eval_value(lhs, ctx)?;
+            let rhs = eval_value(rhs, ctx)?;
+            checked_arith(*op, lhs, rhs)
+        }
+        ValueExpr::Min(a, b) => Ok(eval_value(a, ctx)?.min(eval_value(b, ctx)?)),
+        ValueExpr::Max(a, b) => Ok(eval_value(a, ctx)?.max(eval_value(b, ctx)?)),
+        ValueExpr::Clamp(x, lo, hi) => {
+            let x = eval_value(x, ctx)?;
+            let lo = eval_value(lo, ctx)?;
+            let hi = eval_value(hi, ctx)?;
+            if lo > hi {
+                return Err(EvalErrorKind::ClampInverted);
+            }
+            Ok(x.clamp(lo, hi))
+        }
+    }
+}
+
+/// One checked arithmetic step — the only place `u32` operators are
+/// applied, shared by evaluation and compile-time constant folding so
+/// the two can never disagree about what overflows.
+pub(crate) fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
+    match op {
+        ArithOp::Add => lhs.checked_add(rhs).ok_or(EvalErrorKind::Overflow),
+        ArithOp::Sub => lhs.checked_sub(rhs).ok_or(EvalErrorKind::Underflow),
+        ArithOp::Mul => lhs.checked_mul(rhs).ok_or(EvalErrorKind::Overflow),
+        ArithOp::Div => lhs.checked_div(rhs).ok_or(EvalErrorKind::DivideByZero),
+        ArithOp::Rem => lhs.checked_rem(rhs).ok_or(EvalErrorKind::RemainderByZero),
+    }
+}
+
+/// Rate-limited operator-visible WARN for evaluation errors: at most
+/// one line per second process-wide (errors are per-route and can
+/// arrive at line rate; the counters carry the volume). The clock read
+/// is on the error path only — the ADR-0103 Decision 7 purity contract
+/// exempts observability, and the hot path never reaches here.
+fn warn_eval_error(policy: Option<&str>, term: Option<&str>, kind: EvalErrorKind) {
+    static START: OnceLock<Instant> = OnceLock::new();
+    static LAST_WARN: AtomicU64 = AtomicU64::new(0);
+    let now = START.get_or_init(Instant::now).elapsed().as_secs() + 1;
+    let last = LAST_WARN.load(Ordering::Relaxed);
+    if now > last
+        && LAST_WARN
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::warn!(
+            policy = policy.unwrap_or("<inline>"),
+            term = term.unwrap_or("<unnamed>"),
+            reason = kind.label(),
+            "policy evaluation error: {kind} — route denied (fail closed)"
+        );
+    }
+}
 
 /// Live per-term guard-hit counters for one chain (ADR-0096 Decision
 /// 3.3, the IOS-XR `show pcl` idea): `hits[p][t]` counts how many
@@ -39,6 +191,7 @@ use crate::sets::prefix_entry_matches;
 pub struct PolicyHitCounters {
     policies: Vec<Vec<AtomicU64>>,
     evals: AtomicU64,
+    eval_errors: AtomicU64,
 }
 
 impl PolicyHitCounters {
@@ -52,6 +205,7 @@ impl PolicyHitCounters {
                 .map(|policy| (0..policy.terms.len()).map(|_| AtomicU64::new(0)).collect())
                 .collect(),
             evals: AtomicU64::new(0),
+            eval_errors: AtomicU64::new(0),
         }
     }
 
@@ -60,6 +214,16 @@ impl PolicyHitCounters {
     #[must_use]
     pub fn evals(&self) -> u64 {
         self.evals.load(Ordering::Relaxed)
+    }
+
+    /// Routes denied by an evaluation error (LAN-299, ADR-0103
+    /// Decision 4: checked-arithmetic failure or absent operand) since
+    /// chain install. A nonzero value means some policy is erroring —
+    /// the rate-limited WARN log and explain traces name where and
+    /// why.
+    #[must_use]
+    pub fn eval_errors(&self) -> u64 {
+        self.eval_errors.load(Ordering::Relaxed)
     }
 
     /// Snapshot of the per-term hit grid (`snapshot()[p][t]`).
@@ -81,11 +245,17 @@ impl PolicyHitCounters {
 /// modifications (cloned only if merged). `PermitOwned` carries
 /// modifications accumulated from `Continue` terms merged with the
 /// deciding term's own — only policies that actually hit a `Continue`
-/// term (an `.rpol`-only construct) pay the clone.
+/// term (an `.rpol`-only construct) pay the clone. `Error` is the
+/// LAN-299 evaluation-error rail: a guard or action-time value
+/// expression failed; the caller denies the route, counts, and warns.
 enum PolicyDecision<'a> {
     Permit(Option<&'a RouteModifications>),
     PermitOwned(RouteModifications),
     Deny,
+    Error {
+        kind: EvalErrorKind,
+        term_index: usize,
+    },
 }
 
 impl CompiledChain {
@@ -176,6 +346,27 @@ impl CompiledChain {
                         },
                     );
                 }
+                // The LAN-299 eval-error rail (ADR-0103 Decision 4):
+                // uniform Deny, staged modifications discarded (the
+                // accumulator drops here), operator-visible counter +
+                // rate-limited WARN naming the failing policy/term.
+                PolicyDecision::Error { kind, term_index } => {
+                    if COUNT && let Some(hits) = hits {
+                        hits.eval_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let term = policy
+                        .terms
+                        .get(term_index)
+                        .and_then(|term| term.name.as_deref());
+                    warn_eval_error(policy.name.as_deref(), term, kind);
+                    return (
+                        PolicyResult::deny(),
+                        PolicyEvaluation {
+                            action: PolicyAction::Deny,
+                            matched_policy: if ATTR { policy.name.clone() } else { None },
+                        },
+                    );
+                }
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
                     accumulated.merge_from(mods.clone());
                 }
@@ -220,7 +411,9 @@ impl CompiledChain {
     /// Evaluate recording per-term guard hits — the `rbgp policy test`
     /// backend (ADR-0096 Decision 6). Decision semantics are identical
     /// to [`evaluate_with_attribution`](Self::evaluate_with_attribution)
-    /// (same walk, same merge rules); additionally `hits[p][t]` is
+    /// (same walk, same merge rules; an evaluation error denies the
+    /// route, LAN-299 — dry runs move no live counters and log no
+    /// WARN); additionally `hits[p][t]` is
     /// incremented whenever policy `p`'s term `t`'s guard matches
     /// during the walk (`Continue` terms included; terms after the
     /// deciding term are not evaluated, mirroring first-match-wins).
@@ -244,18 +437,25 @@ impl CompiledChain {
             let mut permit_mods: Option<Option<RouteModifications>> = None;
             let mut denied = false;
             for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
-                if self.eval_expr(&term.guard, ctx) {
+                let mut err = None;
+                let matched = self.eval_expr(&term.guard, ctx, &mut err);
+                if err.is_some() {
+                    // Guard evaluation error: fail closed (LAN-299).
+                    denied = true;
+                    break;
+                }
+                if matched {
                     *hit += 1;
                     match &term.action {
                         TermAction::Permit(mods) => {
-                            match self.resolve_computed_prepend(mods, ctx) {
+                            match self.resolve_computed(mods, ctx) {
                                 Ok(resolved) => {
                                     permit_mods =
                                         Some(Some(resolved.unwrap_or_else(|| mods.clone())));
                                 }
-                                // Unresolvable computed prepend operand:
-                                // fail closed (same rule as the live walk).
-                                Err(()) => denied = true,
+                                // Unresolvable computed operand: fail
+                                // closed (same rule as the live walk).
+                                Err(_) => denied = true,
                             }
                             break;
                         }
@@ -264,7 +464,7 @@ impl CompiledChain {
                             break;
                         }
                         TermAction::Continue(mods) => {
-                            if let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) {
+                            if let Ok(resolved) = self.resolve_computed(mods, ctx) {
                                 continued
                                     .get_or_insert_with(RouteModifications::default)
                                     .merge_from(resolved.unwrap_or_else(|| mods.clone()));
@@ -314,7 +514,14 @@ impl CompiledChain {
     ) -> PolicyDecision<'a> {
         let mut continued: Option<RouteModifications> = None;
         for (term_index, term) in policy.terms.iter().enumerate() {
-            if self.eval_expr(&term.guard, ctx) {
+            let mut err = None;
+            let matched = self.eval_expr(&term.guard, ctx, &mut err);
+            if let Some(kind) = err {
+                // Guard evaluation error (LAN-299): terminal for the
+                // route regardless of the guard's boolean outcome.
+                return PolicyDecision::Error { kind, term_index };
+            }
+            if matched {
                 if COUNT && let Some(hits) = hits {
                     // Same shape invariant as the per-policy slice: a
                     // term row shorter than the policy is impossible by
@@ -326,12 +533,14 @@ impl CompiledChain {
                 }
                 match &term.action {
                     TermAction::Permit(mods) => {
-                        // LAN-296: fold a computed prepend operand into
-                        // the literal field before the modifications
-                        // leave the evaluator; an unresolvable operand
-                        // fails the route closed.
-                        let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) else {
-                            return PolicyDecision::Deny;
+                        // LAN-296/LAN-299: fold computed operands
+                        // (prepend, set values) into literal fields
+                        // before the modifications leave the
+                        // evaluator; an unresolvable operand fails the
+                        // route closed on the eval-error rail.
+                        let resolved = match self.resolve_computed(mods, ctx) {
+                            Ok(resolved) => resolved,
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         };
                         return match (continued, resolved) {
                             (Some(mut acc), resolved) => {
@@ -346,8 +555,9 @@ impl CompiledChain {
                     }
                     TermAction::Deny => return PolicyDecision::Deny,
                     TermAction::Continue(mods) => {
-                        let Ok(resolved) = self.resolve_computed_prepend(mods, ctx) else {
-                            return PolicyDecision::Deny;
+                        let resolved = match self.resolve_computed(mods, ctx) {
+                            Ok(resolved) => resolved,
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         };
                         continued
                             .get_or_insert_with(RouteModifications::default)
@@ -363,33 +573,46 @@ impl CompiledChain {
         }
     }
 
-    /// Resolve a matched term's computed prepend operand (LAN-296)
-    /// against the evaluation context, at action-execution time.
+    /// Resolve a matched term's computed operands — the LAN-296
+    /// prepend operand and the LAN-299 computed `set` values — against
+    /// the evaluation context, at action-execution time.
     ///
-    /// - `Ok(None)` — no computed operand (the hot path; no clone).
-    /// - `Ok(Some(owned))` — a clone with the operand folded into the
-    ///   literal `as_path_prepend`, so downstream consumers (merge,
-    ///   apply, memoization, API surfaces) only ever see concrete ASNs.
-    /// - `Err(())` — the operand's context value is unknown (absent
-    ///   origin / unknown peer ASN / chain without `local_asn`, or a
-    ///   zero value): the caller fails the route **closed** (uniform
-    ///   Deny, the ADR-0103 Decision 4 disposition; this migrates onto
-    ///   the LAN-299 evaluation-error rails — counter + trace error
-    ///   events — when they land). ASN 0 is never prepended.
-    pub(crate) fn resolve_computed_prepend(
+    /// - `Ok(None)` — nothing computed (the hot path; no clone).
+    /// - `Ok(Some(owned))` — a clone with every operand folded into
+    ///   its literal field, so downstream consumers (merge, apply,
+    ///   memoization, API surfaces) only ever see concrete values.
+    /// - `Err(kind)` — an operand is unresolvable (absent context
+    ///   value, checked-arithmetic failure): the caller fails the
+    ///   route **closed** on the eval-error rail (uniform Deny +
+    ///   counter + rate-limited WARN + explain error trace, ADR-0103
+    ///   Decision 4). ASN 0 is never prepended (RFC 7607).
+    pub(crate) fn resolve_computed(
         &self,
         mods: &RouteModifications,
         ctx: &RouteContext<'_>,
-    ) -> Result<Option<RouteModifications>, ()> {
-        let Some((operand, count)) = mods.as_path_prepend_computed else {
+    ) -> Result<Option<RouteModifications>, EvalErrorKind> {
+        if mods.as_path_prepend_computed.is_none()
+            && mods.set_local_pref_computed.is_none()
+            && mods.set_med_computed.is_none()
+        {
             return Ok(None);
-        };
-        let Some(asn) = operand.resolve(self.local_asn, ctx) else {
-            return Err(());
-        };
+        }
         let mut resolved = mods.clone();
-        resolved.as_path_prepend = Some((asn, count));
-        resolved.as_path_prepend_computed = None;
+        if let Some((operand, count)) = mods.as_path_prepend_computed {
+            let asn = operand
+                .resolve(self.local_asn, ctx)
+                .ok_or(EvalErrorKind::AbsentPrependOperand(operand))?;
+            resolved.as_path_prepend = Some((asn, count));
+            resolved.as_path_prepend_computed = None;
+        }
+        if let Some(expr) = &mods.set_local_pref_computed {
+            resolved.set_local_pref = Some(eval_value(expr, ctx)?);
+            resolved.set_local_pref_computed = None;
+        }
+        if let Some(expr) = &mods.set_med_computed {
+            resolved.set_med = Some(eval_value(expr, ctx)?);
+            resolved.set_med_computed = None;
+        }
         Ok(Some(resolved))
     }
 
@@ -397,9 +620,20 @@ impl CompiledChain {
     /// explain walk's window into the live matcher, so explain and
     /// evaluation cannot disagree about whether a guard fires (the
     /// same discipline as the legacy walk sharing
-    /// `PolicyStatement::matches`).
-    pub(crate) fn guard_matches(&self, expr: &MatchExpr, ctx: &RouteContext<'_>) -> bool {
-        self.eval_expr(expr, ctx)
+    /// `PolicyStatement::matches`). `Err` when the guard contains a
+    /// value expression that failed to evaluate — the live walk denies
+    /// the route there (LAN-299), and explain must render the same.
+    pub(crate) fn guard_matches(
+        &self,
+        expr: &MatchExpr,
+        ctx: &RouteContext<'_>,
+    ) -> Result<bool, EvalErrorKind> {
+        let mut err = None;
+        let matched = self.eval_expr(expr, ctx, &mut err);
+        match err {
+            Some(kind) => Err(kind),
+            None => Ok(matched),
+        }
     }
 
     /// Evaluate one guard node. Pure and allocation-free; set/regex
@@ -410,12 +644,41 @@ impl CompiledChain {
     /// is capped by the frontend (`MAX_EXPR_DEPTH` at parse,
     /// `MAX_APPLY_DEPTH`/`MAX_APPLY_EXPANSION` at typecheck — LAN-184 /
     /// LAN-290), so this recursion is statically bounded.
-    fn eval_expr(&self, expr: &MatchExpr, ctx: &RouteContext<'_>) -> bool {
+    ///
+    /// `err` is the LAN-299 eval-error slot: a [`MatchExpr::ValueCmp`]
+    /// whose value expression fails sets it (first error wins) and
+    /// yields `false`; callers must treat a set slot as terminal for
+    /// the route (uniform Deny) — the boolean is then meaningless.
+    /// Short-circuited subtrees are never evaluated, so an error on a
+    /// path the walk never reaches does not fire (lazy, like the
+    /// arithmetic itself).
+    fn eval_expr(
+        &self,
+        expr: &MatchExpr,
+        ctx: &RouteContext<'_>,
+        err: &mut Option<EvalErrorKind>,
+    ) -> bool {
         match expr {
             MatchExpr::True => true,
-            MatchExpr::And(children) => children.iter().all(|child| self.eval_expr(child, ctx)),
-            MatchExpr::Or(children) => children.iter().any(|child| self.eval_expr(child, ctx)),
-            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx),
+            MatchExpr::And(children) => {
+                children.iter().all(|child| self.eval_expr(child, ctx, err))
+            }
+            MatchExpr::Or(children) => children.iter().any(|child| self.eval_expr(child, ctx, err)),
+            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx, err),
+            MatchExpr::ValueCmp(node) => {
+                match (eval_value(&node.lhs, ctx), eval_value(&node.rhs, ctx)) {
+                    (Ok(lhs), Ok(rhs)) => match node.op {
+                        ValueCmpOp::Eq => lhs == rhs,
+                        ValueCmpOp::Ne => lhs != rhs,
+                        ValueCmpOp::Ge => lhs >= rhs,
+                        ValueCmpOp::Le => lhs <= rhs,
+                    },
+                    (Err(kind), _) | (_, Err(kind)) => {
+                        err.get_or_insert(kind);
+                        false
+                    }
+                }
+            }
             MatchExpr::PrefixEq { prefix, ge, le } => ctx
                 .prefix
                 .is_some_and(|candidate| prefix_entry_matches(*prefix, *ge, *le, candidate)),

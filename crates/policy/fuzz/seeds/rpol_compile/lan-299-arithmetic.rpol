@@ -1,0 +1,10 @@
+policy arith(bump: u32) {
+    term compute {
+        if route.as-path.len * 10 >= route.med && route.med + bump <= 4294967295 {
+            set med route.med + 50;
+            set local-pref min(route.local-pref * 2, 400);
+            accept
+        }
+    }
+    term rest { reject }
+}
