@@ -2692,6 +2692,7 @@ dependencies = [
  "prost",
  "ratatui",
  "rustbgpd-api",
+ "rustbgpd-bmp",
  "rustbgpd-evpn",
  "rustbgpd-policy",
  "rustbgpd-wire",

@@ -25,7 +25,7 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{ListNeighborsRequest, ListRoutesRequest, Route};
 use rustbgpctl::ribdiff::{
     self, AsPathSegment, AsSegmentKind, DiffClass, DiffLimits, DiffReport, FamilyId, Nlri,
-    PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, Verdict,
+    PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, UnknownAttr, Verdict,
 };
 use serde::Deserialize;
 
@@ -51,6 +51,7 @@ const IGNORABLE_ATTRIBUTES: &[&str] = &[
     "communities",
     "extended_communities",
     "large_communities",
+    "unknown",
 ];
 
 /// Honest limitations of the live gRPC source, emitted verbatim in both
@@ -372,6 +373,7 @@ fn apply_ignores(attrs: &mut PathAttrs, ignored: &[String]) {
             "communities" => attrs.communities.clear(),
             "extended_communities" => attrs.extended_communities.clear(),
             "large_communities" => attrs.large_communities.clear(),
+            "unknown" => attrs.unknown.clear(),
             _ => unreachable!("validated in validate_ignore_attributes"),
         }
     }
@@ -396,6 +398,23 @@ fn parse_prefix(prefix: &str) -> Result<(IpAddr, u8, FamilyId), String> {
         return Err(format!("prefix length {len} exceeds {max_len}: {prefix}"));
     }
     Ok((addr, len, family))
+}
+
+/// Decode a lowercase/uppercase hex string into bytes (`unknown_attrs`
+/// values). Odd length or non-hex digits are malformed.
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
+        return Err(format!(
+            "invalid hex value {s:?} (expected an even number of hex digits)"
+        ));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|_| format!("invalid hex value {s:?} (non-hex digit)"))
+        })
+        .collect()
 }
 
 fn parse_large_community(s: &str) -> Result<[u32; 3], String> {
@@ -456,6 +475,19 @@ struct RouteRecord {
     extended_communities: Vec<u64>,
     #[serde(default)]
     large_communities: Vec<String>,
+    #[serde(default)]
+    unknown_attrs: Vec<UnknownAttrRecord>,
+}
+
+/// An untyped path attribute preserved by a snapshot producer (e.g. the
+/// from-bmp adapter): wire flags + type code + hex-encoded value octets.
+/// Compared byte-exact by the engine ([`UnknownAttr`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnknownAttrRecord {
+    type_code: u8,
+    flags: u8,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -663,6 +695,17 @@ fn convert_snapshot_route(route: RouteRecord) -> Result<SnapshotRoute, String> {
         .iter()
         .map(|s| parse_large_community(s))
         .collect::<Result<Vec<_>, _>>()?;
+    let unknown = route
+        .unknown_attrs
+        .into_iter()
+        .map(|attr| {
+            Ok(UnknownAttr {
+                type_code: attr.type_code,
+                flags: attr.flags,
+                value: parse_hex(&attr.value)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let attrs = PathAttrs {
         origin: route.origin,
         as_path: as_path_segment(&route.as_path),
@@ -672,7 +715,7 @@ fn convert_snapshot_route(route: RouteRecord) -> Result<SnapshotRoute, String> {
         communities,
         extended_communities: route.extended_communities,
         large_communities,
-        unknown: Vec::new(),
+        unknown,
     };
     Ok((
         family,
@@ -1216,6 +1259,20 @@ mod tests {
         let err = run_against(&server, &opts(file.path())).await.unwrap_err();
         assert!(
             err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+
+        // Malformed unknown_attrs hex value.
+        let file = snapshot_file(&[
+            header_line(),
+            format!(
+                r#"{{"record":"route","peer":"{PEER}","peer_asn":{PEER_ASN},"prefix":"10.0.0.0/24","unknown_attrs":[{{"type_code":35,"flags":192,"value":"0zz0"}}]}}"#
+            ),
+            trailer_line(1),
+        ]);
+        let err = run_against(&server, &opts(file.path())).await.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid hex value"),
             "unexpected error: {err}"
         );
     }
@@ -1811,6 +1868,127 @@ mod tests {
             // Add-Path copies matched as a multiplicity-2 multiset).
             assert!(rendered.contains("ipv4_unicast: matched 1"));
             assert!(rendered.contains("ipv6_unicast: matched 1"));
+        }
+
+        /// Wire-truth routes matching the from-bmp golden capture
+        /// (crates/cli/src/commands/ribsnap_bmp.rs `golden_capture`,
+        /// regenerated with `BLESS=1`).
+        fn from_bmp_wire_truth() -> Vec<Vec<server_proto::Route>> {
+            let peer_a = vec![
+                server_proto::Route {
+                    prefix: "100.64.0.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.254".to_string(),
+                    origin: 1,
+                    as_path: vec![65500],
+                    local_pref_attr: Some(200),
+                    extended_communities: vec![0x0002_FFDC_0000_0064],
+                    large_communities: vec!["65500:7:9".to_string()],
+                    path_id: 1,
+                    ..Default::default()
+                },
+                server_proto::Route {
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.254".to_string(),
+                    origin: 0,
+                    as_path: vec![65500, 64999],
+                    med: 121,
+                    communities: vec![(65500 << 16) | 100],
+                    path_id: 1,
+                    ..Default::default()
+                },
+                server_proto::Route {
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.253".to_string(),
+                    origin: 0,
+                    as_path: vec![65500, 64998],
+                    path_id: 2,
+                    ..Default::default()
+                },
+            ];
+            let peer_b = vec![
+                server_proto::Route {
+                    prefix: "100.65.0.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.254".to_string(),
+                    origin: 0,
+                    as_path: vec![65500, 64997],
+                    ..Default::default()
+                },
+                server_proto::Route {
+                    prefix: "2001:db8:100::".to_string(),
+                    prefix_length: 48,
+                    next_hop: "2001:db8::1".to_string(),
+                    origin: 0,
+                    as_path: vec![65500, 64997],
+                    med: 51,
+                    ..Default::default()
+                },
+            ];
+            vec![peer_a, peer_b]
+        }
+
+        async fn from_bmp_server(
+            pages: Vec<Vec<server_proto::Route>>,
+        ) -> crate::test_support::MockServerHandle {
+            let server = spawn_mock_server(None).await;
+            *server.state.list_neighbors_response.lock().await =
+                vec![neighbor("192.0.2.1", 65001), neighbor("2001:db8::2", 65002)];
+            *server.state.list_route_pages.lock().await = pages
+                .into_iter()
+                .map(|routes| {
+                    let total = routes.len() as u64;
+                    page(routes, "", total)
+                })
+                .collect();
+            server
+        }
+
+        /// End-to-end for the from-bmp adapter's in-sync verdict: the
+        /// golden snapshot (BMP capture → canonical records) diffs
+        /// clean against a daemon advertising the same wire truth.
+        /// `--ignore-attribute unknown` reflects the documented live
+        /// limitation: the snapshot preserves the capture's OTC and
+        /// unknown transitive attributes byte-exact, but they are not
+        /// visible over gRPC.
+        #[tokio::test]
+        async fn from_bmp_golden_diffs_clean() {
+            let golden = fixture_path("from-bmp.expected.ndjson");
+            let server = from_bmp_server(from_bmp_wire_truth()).await;
+            let mut opts = opts(&golden);
+            opts.ignore_attributes = vec!["unknown".to_string()];
+            let (rendered, code) = run_against(&server, &opts).await.unwrap();
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            assert!(rendered.contains("192.0.2.1 AS65001 ipv4_unicast: matched 2"));
+            assert!(rendered.contains("2001:db8::2 AS65002 ipv4_unicast: matched 1"));
+            assert!(rendered.contains("2001:db8::2 AS65002 ipv6_unicast: matched 1"));
+        }
+
+        /// End-to-end divergent verdict: preserved unknown attributes
+        /// surface as divergence when not ignored (the operator must
+        /// decide, never a silent drop), and an attribute delta on the
+        /// live side reads as attribute-changed.
+        #[tokio::test]
+        async fn from_bmp_golden_divergence_is_reported() {
+            let golden = fixture_path("from-bmp.expected.ndjson");
+            // Unignored unknown attributes: the incumbent capture has
+            // them, gRPC cannot see them.
+            let server = from_bmp_server(from_bmp_wire_truth()).await;
+            let (rendered, code) = run_against(&server, &opts(&golden)).await.unwrap();
+            assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
+            assert!(rendered.contains("100.64.0.0/24 [attribute-changed] unknown:"));
+
+            // A real attribute delta (MED drift on the v6 route).
+            let mut truth = from_bmp_wire_truth();
+            truth[1][1].med = 999;
+            let server = from_bmp_server(truth).await;
+            let mut opts = opts(&golden);
+            opts.ignore_attributes = vec!["unknown".to_string()];
+            let (rendered, code) = run_against(&server, &opts).await.unwrap();
+            assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
+            assert!(rendered.contains("med: 51 -> 999"));
         }
     }
 

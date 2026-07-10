@@ -57,19 +57,27 @@ pub struct FromMrtOpts<'a> {
     pub generation: u64,
 }
 
+/// An attribute outside the typed snapshot fields, preserved as its wire
+/// triple (flags, type code, value octets) in `unknown_attrs`.
+pub(crate) type UnknownWireAttr = (u8, u8, Vec<u8>);
+
 /// One decoded RIB entry, reduced to the `rbgp-ribsnap/1` route fields.
 /// Absent attributes stay `None`/empty — never defaulted.
 #[derive(Default)]
-struct SnapRoute {
-    path_id: Option<u32>,
-    origin: Option<u8>,
-    as_path: Vec<u32>,
-    next_hop: Option<IpAddr>,
-    med: Option<u32>,
-    local_pref: Option<u32>,
-    communities: Vec<u32>,
-    extended_communities: Vec<u64>,
-    large_communities: Vec<[u32; 3]>,
+pub(crate) struct SnapRoute {
+    pub(crate) path_id: Option<u32>,
+    pub(crate) origin: Option<u8>,
+    pub(crate) as_path: Vec<u32>,
+    pub(crate) next_hop: Option<IpAddr>,
+    pub(crate) med: Option<u32>,
+    pub(crate) local_pref: Option<u32>,
+    pub(crate) communities: Vec<u32>,
+    pub(crate) extended_communities: Vec<u64>,
+    pub(crate) large_communities: Vec<[u32; 3]>,
+    /// Untyped attributes preserved byte-exact (see `unknown_attrs` in
+    /// docs/ribdiff.md). The MRT adapter leaves this empty (documented
+    /// limitation); the BMP adapter fills it.
+    pub(crate) unknown_attrs: Vec<UnknownWireAttr>,
 }
 
 /// Run the adapter: print the snapshot to stdout on success, an error to
@@ -130,53 +138,7 @@ fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute
     out.push_str(&header.to_string());
     out.push('\n');
     for (addr, len, route) in routes {
-        let mut record = serde_json::json!({
-            "record": "route",
-            "peer": peer.to_string(),
-            "peer_asn": opts.peer_asn,
-            "prefix": format!("{addr}/{len}"),
-        });
-        let object = record.as_object_mut().expect("literal object");
-        if let Some(origin) = route.origin {
-            object.insert("origin".into(), origin.into());
-        }
-        if !route.as_path.is_empty() {
-            object.insert("as_path".into(), route.as_path.clone().into());
-        }
-        if let Some(next_hop) = route.next_hop {
-            object.insert("next_hop".into(), next_hop.to_string().into());
-        }
-        // MED 0 is omitted like an absent MED: the consumer's live side
-        // cannot distinguish them (documented in docs/ribdiff.md).
-        if let Some(med) = route.med
-            && med != 0
-        {
-            object.insert("med".into(), med.into());
-        }
-        if let Some(local_pref) = route.local_pref {
-            object.insert("local_pref".into(), local_pref.into());
-        }
-        if !route.communities.is_empty() {
-            object.insert("communities".into(), route.communities.clone().into());
-        }
-        if !route.extended_communities.is_empty() {
-            object.insert(
-                "extended_communities".into(),
-                route.extended_communities.clone().into(),
-            );
-        }
-        if !route.large_communities.is_empty() {
-            let rendered: Vec<String> = route
-                .large_communities
-                .iter()
-                .map(|[a, b, c]| format!("{a}:{b}:{c}"))
-                .collect();
-            object.insert("large_communities".into(), rendered.into());
-        }
-        if let Some(path_id) = route.path_id {
-            object.insert("path_id".into(), path_id.into());
-        }
-        out.push_str(&record.to_string());
+        out.push_str(&route_record_json(peer, opts.peer_asn, *addr, *len, route));
         out.push('\n');
     }
     let trailer = serde_json::json!({"record": "trailer", "routes": routes.len()});
@@ -185,21 +147,98 @@ fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute
     out
 }
 
-/// Bounds-checked big-endian reader over a byte slice.
-struct Cursor<'a> {
+/// Render one `rbgp-ribsnap/1` route record (shared by the MRT and BMP
+/// adapters). Absent attributes are omitted, never defaulted.
+pub(crate) fn route_record_json(
+    peer: IpAddr,
+    peer_asn: u32,
+    addr: IpAddr,
+    len: u8,
+    route: &SnapRoute,
+) -> String {
+    let mut record = serde_json::json!({
+        "record": "route",
+        "peer": peer.to_string(),
+        "peer_asn": peer_asn,
+        "prefix": format!("{addr}/{len}"),
+    });
+    let object = record.as_object_mut().expect("literal object");
+    if let Some(origin) = route.origin {
+        object.insert("origin".into(), origin.into());
+    }
+    if !route.as_path.is_empty() {
+        object.insert("as_path".into(), route.as_path.clone().into());
+    }
+    if let Some(next_hop) = route.next_hop {
+        object.insert("next_hop".into(), next_hop.to_string().into());
+    }
+    // MED 0 is omitted like an absent MED: the consumer's live side
+    // cannot distinguish them (documented in docs/ribdiff.md).
+    if let Some(med) = route.med
+        && med != 0
+    {
+        object.insert("med".into(), med.into());
+    }
+    if let Some(local_pref) = route.local_pref {
+        object.insert("local_pref".into(), local_pref.into());
+    }
+    if !route.communities.is_empty() {
+        object.insert("communities".into(), route.communities.clone().into());
+    }
+    if !route.extended_communities.is_empty() {
+        object.insert(
+            "extended_communities".into(),
+            route.extended_communities.clone().into(),
+        );
+    }
+    if !route.large_communities.is_empty() {
+        let rendered: Vec<String> = route
+            .large_communities
+            .iter()
+            .map(|[a, b, c]| format!("{a}:{b}:{c}"))
+            .collect();
+        object.insert("large_communities".into(), rendered.into());
+    }
+    if !route.unknown_attrs.is_empty() {
+        let rendered: Vec<serde_json::Value> = route
+            .unknown_attrs
+            .iter()
+            .map(|(flags, type_code, value)| {
+                let hex: String = value.iter().fold(String::new(), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                });
+                serde_json::json!({"flags": flags, "type_code": type_code, "value": hex})
+            })
+            .collect();
+        object.insert("unknown_attrs".into(), rendered.into());
+    }
+    if let Some(path_id) = route.path_id {
+        object.insert("path_id".into(), path_id.into());
+    }
+    record.to_string()
+}
+
+/// Bounds-checked big-endian reader over a byte slice (shared by the MRT
+/// and BMP adapters).
+pub(crate) struct Cursor<'a> {
     buf: &'a [u8],
 }
 
 impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    pub(crate) fn remaining(&self) -> &'a [u8] {
+        self.buf
+    }
+
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         if self.buf.len() < n {
             return Err(format!(
                 "truncated record: need {n} bytes, have {}",
@@ -211,18 +250,23 @@ impl<'a> Cursor<'a> {
         Ok(head)
     }
 
-    fn read_u8(&mut self) -> Result<u8, String> {
+    pub(crate) fn read_u8(&mut self) -> Result<u8, String> {
         Ok(self.take(1)?[0])
     }
 
-    fn read_u16(&mut self) -> Result<u16, String> {
+    pub(crate) fn read_u16(&mut self) -> Result<u16, String> {
         let b = self.take(2)?;
         Ok(u16::from_be_bytes([b[0], b[1]]))
     }
 
-    fn read_u32(&mut self) -> Result<u32, String> {
+    pub(crate) fn read_u32(&mut self) -> Result<u32, String> {
         let b = self.take(4)?;
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub(crate) fn read_u64(&mut self) -> Result<u64, String> {
+        let b = self.take(8)?;
+        Ok(u64::from_be_bytes(b.try_into().expect("length checked")))
     }
 }
 

@@ -1,0 +1,7 @@
+{"generation":3,"record":"header","schema":"rbgp-ribsnap/1","source":"from-bmp/1 view=adj-rib-out-post-policy synthetic-lab"}
+{"as_path":[65500],"extended_communities":[844270311309412],"large_communities":["65500:7:9"],"local_pref":200,"next_hop":"192.0.2.254","origin":1,"path_id":1,"peer":"192.0.2.1","peer_asn":65001,"prefix":"100.64.0.0/24","record":"route","unknown_attrs":[{"flags":192,"type_code":35,"value":"0000ffdc"},{"flags":192,"type_code":200,"value":"deadbeef"}]}
+{"as_path":[65500,64999],"communities":[4292608100],"med":121,"next_hop":"192.0.2.254","origin":0,"path_id":1,"peer":"192.0.2.1","peer_asn":65001,"prefix":"203.0.113.0/24","record":"route"}
+{"as_path":[65500,64998],"next_hop":"192.0.2.253","origin":0,"path_id":2,"peer":"192.0.2.1","peer_asn":65001,"prefix":"203.0.113.0/24","record":"route"}
+{"as_path":[65500,64997],"next_hop":"192.0.2.254","origin":0,"peer":"2001:db8::2","peer_asn":65002,"prefix":"100.65.0.0/24","record":"route"}
+{"as_path":[65500,64997],"med":51,"next_hop":"2001:db8::1","origin":0,"peer":"2001:db8::2","peer_asn":65002,"prefix":"2001:db8:100::/48","record":"route"}
+{"record":"trailer","routes":5}
