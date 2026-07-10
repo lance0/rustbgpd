@@ -451,6 +451,12 @@ impl RibManager {
         self.gr_deferred_eor.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
+        // Purge the peer's queued route batches. This upholds the
+        // "peer rib must exist before chunk processing" expectation in
+        // the distribution chunk handlers: `enqueue_routes_received`
+        // creates the Adj-RIB-In if absent, and the only removal path
+        // (`clear_peer_adj_rib_in`) is followed by this purge in every
+        // caller, so a queued chunk can never outlive its rib.
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
         // Drop per-peer export-policy counters alongside the rest of the
         // per-peer state. Without this the HashMap grows unbounded as
