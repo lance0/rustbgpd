@@ -133,6 +133,12 @@ enum Command {
     /// Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)
     Orr,
 
+    /// Compare live RIB views against an external snapshot (read-only)
+    Diff {
+        #[command(subcommand)]
+        action: DiffAction,
+    },
+
     /// Manage FlowSpec routes
     Flowspec {
         #[command(subcommand)]
@@ -652,6 +658,68 @@ enum NeighborAction {
         /// Address family to refresh
         #[arg(short = 'a', long)]
         family: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiffAction {
+    /// Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot
+    ///
+    /// The snapshot format (`rbgp-ribsnap/1`) is one JSON object per line:
+    /// a header record, route records, and a counted completion trailer
+    /// (see docs/ribdiff.md). Comparison is semantic (multiset of paths
+    /// per peer/family/NLRI; RFC 7911 path IDs are never compared) and
+    /// fail-closed: equality is never asserted from incomplete, truncated,
+    /// over-limit, or drifting input.
+    ///
+    /// Live-source limitation: the daemon proto carries MED as a bare
+    /// integer, so MED-absent and MED 0 are indistinguishable over gRPC;
+    /// live med=0 is compared as absent and snapshot producers should omit
+    /// `med` when it is zero or absent (or pass --ignore-attribute med).
+    #[command(after_help = "Exit codes:\n  \
+        0  complete inputs, no semantic differences\n  \
+        1  complete inputs, differences found\n  \
+        2  incomplete, malformed, stale, mixed-generation, unsupported, or \
+        over-limit input, or an operational error (equality never asserted)")]
+    Advertised {
+        /// Peer address to compare; may be repeated. Omit to compare every
+        /// peer present in the snapshot.
+        #[arg(long)]
+        peer: Vec<String>,
+
+        /// Path to the incumbent `rbgp-ribsnap/1` NDJSON snapshot
+        #[arg(long, value_name = "PATH")]
+        against: String,
+
+        /// Address family filter (ipv4_unicast, ipv6_unicast); may be repeated
+        #[arg(short = 'a', long)]
+        family: Vec<String>,
+
+        /// Maximum retained routes per side; exceeding it refuses the
+        /// comparison (exit 2)
+        #[arg(long, default_value_t = 4_000_000)]
+        max_routes: usize,
+
+        /// Maximum snapshot bytes read; exceeding it refuses the
+        /// comparison (exit 2)
+        #[arg(long, default_value_t = 1 << 30)]
+        max_input_bytes: u64,
+
+        /// Attribute to exclude from comparison on both sides (origin,
+        /// as_path, next_hop, med, local_pref, communities,
+        /// extended_communities, large_communities); may be repeated
+        #[arg(long)]
+        ignore_attribute: Vec<String>,
+
+        /// Maximum detailed difference rows in human output (--json is
+        /// always complete)
+        #[arg(long, default_value_t = 20)]
+        detail: usize,
+
+        /// Overall wall-clock budget in seconds; expiry refuses the
+        /// comparison (exit 2)
+        #[arg(long, default_value_t = 120)]
+        deadline: u64,
     },
 }
 
@@ -1248,6 +1316,44 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     } = &cli.command
     {
         std::process::exit(commands::policy::check_local(file, cli.json));
+    }
+
+    // `diff` owns its 0/1/2 exit-code contract (2 = any operational
+    // error, including an unreachable daemon), so it bypasses the generic
+    // connect-then-exit-1 path.
+    if let Command::Diff {
+        action:
+            DiffAction::Advertised {
+                peer,
+                against,
+                family,
+                max_routes,
+                max_input_bytes,
+                ignore_attribute,
+                detail,
+                deadline,
+            },
+    } = &cli.command
+    {
+        let opts = commands::diff::AdvertisedDiffOpts {
+            peers: peer.clone(),
+            against: PathBuf::from(against),
+            families: family.clone(),
+            max_routes: *max_routes,
+            max_input_bytes: *max_input_bytes,
+            ignore_attributes: ignore_attribute.clone(),
+            detail: *detail,
+            deadline_seconds: *deadline,
+            json: cli.json,
+        };
+        let code = match connect(&cli.addr, cli.token_file.as_deref()).await {
+            Ok(connection) => commands::diff::advertised(connection, &opts).await,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                commands::diff::EXIT_INCOMPARABLE
+            }
+        };
+        std::process::exit(code);
     }
 
     let addr = cli.addr.clone();
@@ -2193,6 +2299,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         },
         Command::Completions { .. } => unreachable!("handled before connect"),
+
+        Command::Diff { .. } => unreachable!("handled before connect"),
     }
 }
 
@@ -2627,6 +2735,47 @@ mod tests {
         } else {
             panic!("expected Rib Advertised explain command");
         }
+    }
+
+    #[test]
+    fn test_parse_diff_advertised() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "diff",
+            "advertised",
+            "--peer",
+            "192.0.2.1",
+            "--against",
+            "incumbent.ndjson",
+            "--ignore-attribute",
+            "med",
+            "--max-routes",
+            "1000",
+        ])
+        .unwrap();
+        let Command::Diff {
+            action:
+                DiffAction::Advertised {
+                    peer,
+                    against,
+                    ignore_attribute,
+                    max_routes,
+                    max_input_bytes,
+                    detail,
+                    deadline,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected Diff Advertised command");
+        };
+        assert_eq!(peer, vec!["192.0.2.1"]);
+        assert_eq!(against, "incumbent.ndjson");
+        assert_eq!(ignore_attribute, vec!["med"]);
+        assert_eq!(max_routes, 1000);
+        assert_eq!(max_input_bytes, 1 << 30);
+        assert_eq!(detail, 20);
+        assert_eq!(deadline, 120);
     }
 
     #[test]

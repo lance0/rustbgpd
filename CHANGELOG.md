@@ -86,6 +86,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attributes, record and total bytes); incomplete, truncated, or
   mixed-generation captures are never reported in sync. Ingestion
   adapters (live gRPC, MRT, BMP) and the CLI surface land separately.
+- **`rbgp diff advertised` — live Adj-RIB-Out vs incumbent snapshot**
+  (LAN-307). First operator workflow on the semantic RIB diff engine:
+  compares what the daemon advertises to each peer (paginated
+  `ListAdvertisedRoutes`, processed one peer at a time so both full
+  sides are never held in memory) against a versioned `rbgp-ribsnap/1`
+  NDJSON snapshot of an incumbent route server's advertised view.
+  Exit codes: 0 in sync, 1 divergent, 2 comparison refused — and the
+  refusal is fail-closed everywhere: snapshots require a header and a
+  counted completion trailer (EOF alone is never completeness), unknown
+  fields and trailer-count mismatches are malformed, live pagination
+  refuses repeated page tokens and mid-walk `total_count` drift, hard
+  route/byte limits are enforced before buffering, deadlines expire the
+  comparison, and an unavailable requested peer or family refuses the
+  aggregate equal verdict. Human summary with bounded detail rows and a
+  complete `--json` report; both emit the ignored-attribute choices and
+  the live-source normalization notes (notably: the proto's bare-integer
+  MED makes MED-absent and MED 0 indistinguishable over gRPC, so live
+  `med=0` is compared as absent). Strictly read-only. Snapshot format,
+  producer snippets, and the shadow-trial workflow are documented in
+  `docs/ribdiff.md` and the route-server cookbook pages; `rbgp doctor`
+  bundles reference the tool without collecting route contents.
 - **M84 interop job: multi-cache RTR/ASPA epoch conformance** (LAN-243).
   One containerlab receipt drives the 8210bis per-cache epoch model against
   Routinator (real RTR v2, offline via `--no-rir-tals` + SLURM assertions),

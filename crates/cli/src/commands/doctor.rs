@@ -255,7 +255,10 @@ pub async fn run(
                 "neighbors.json",
                 "events.json",
             ],
-            note: "No daemon config file or bearer token material is copied.",
+            note: "No daemon config file or bearer token material is copied. Route \
+                   contents are not collected; when route-level divergence against an \
+                   incumbent is suspected, run `rbgp diff advertised` separately and \
+                   attach its report if appropriate.",
         },
     )?;
 
