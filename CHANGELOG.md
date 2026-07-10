@@ -25,6 +25,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-context guards. ASN sets are an `.rpol`-only surface (no TOML
   equivalent), following the strict-next-hop precedent. (LAN-249)
 
+- **Typed `route.family` predicates in `.rpol`** — one policy chain attached
+  to several address families can now branch per family
+  (`if route.family == ipv4-unicast { ... }`, `==`/`!=` only) over a closed
+  enum covering every family rustbgpd evaluates: IPv4/IPv6 unicast,
+  IPv4/IPv6 labeled-unicast, VPNv4/VPNv6, IPv4/IPv6 FlowSpec, EVPN, RTC,
+  BGP-LS, and BGP-LS VPN. The family is typed knowledge carried by the
+  evaluation context at every import/export/explain/policy-test site — never
+  inferred from prefix shape — and family predicates are route-context-only,
+  so they never disqualify a peer from update-group sharing. Explain traces
+  render the source-level expression, and `test` fixtures take an explicit
+  `family` field. (LAN-295)
 - **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
   in each peer's Adj-RIB-In table (attribute-memory dedup); sum across peers
   for the daemon-wide total. Three containerlab soak harnesses (GR-restart

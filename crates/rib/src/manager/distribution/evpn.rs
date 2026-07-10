@@ -1,7 +1,7 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
-    NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext, Safi,
-    debug, evpn_routes_equal, gauge_val, record_export_policy_eval, route_type,
+    NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext,
+    RouteFamily, Safi, debug, evpn_routes_equal, gauge_val, record_export_policy_eval, route_type,
     should_suppress_ibgp_inner, warn,
 };
 
@@ -317,6 +317,7 @@ impl RibManager {
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
+                family: Some(RouteFamily::Evpn),
                 evpn_route_type: Some(best.route_type()),
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),

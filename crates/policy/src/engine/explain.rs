@@ -651,6 +651,8 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::EvpnRouteTypeNe(evpn_type) => {
             format!("route.evpn-route-type != {evpn_type}")
         }
+        MatchExpr::FamilyIs(family) => format!("route.family == {}", family.as_str()),
+        MatchExpr::FamilyNe(family) => format!("route.family != {}", family.as_str()),
         MatchExpr::RpkiIs(state) => format!(
             "route.rpki == {}",
             match state {

@@ -952,6 +952,9 @@ impl Parser<'_> {
                 let (value, span) = self.expect_u32("an EVPN route type (1-5)")?;
                 Ok(RouteField::EvpnRouteType(value, field.span.to(span)))
             }
+            "family" => Ok(RouteField::Family(
+                self.expect_ident("a route family (`ipv4-unicast`, `evpn`, ...)")?,
+            )),
             other => {
                 let known = [
                     "prefix",
@@ -966,6 +969,7 @@ impl Parser<'_> {
                     "aspa",
                     "route-type",
                     "evpn-route-type",
+                    "family",
                 ];
                 let mut diag = Diagnostic::new(
                     field.span,

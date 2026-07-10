@@ -5,7 +5,7 @@ use super::{
     RouteContext, Safi, UnicastPrefixPeers, VrpTable, debug, evaluate_chain_with_attribution,
     family_label, gauge_val, policy_label_with_term, prefix_family, record_export_policy_eval,
     route_type, route_type_label, route_type_message, routes_equal, rr_suppression_reason,
-    should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
+    should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa, validate_route_rpki,
 };
 
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
@@ -400,6 +400,7 @@ impl RibManager {
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,
                     route_type: Some(route_type(candidate.origin_type)),
+                    family: Some(unicast_route_family(&prefix)),
                     evpn_route_type: None,
                     local_pref: candidate.local_pref_attr(),
                     med: candidate.med_attr(),
@@ -621,6 +622,7 @@ impl RibManager {
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: explain.route_type,
+            family: Some(unicast_route_family(&prefix)),
             evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
@@ -1097,6 +1099,7 @@ impl RibManager {
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(candidate.origin_type)),
+                family: Some(unicast_route_family(prefix)),
                 evpn_route_type: None,
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
@@ -1355,6 +1358,7 @@ impl RibManager {
             peer_asn,
             peer_group,
             route_type: Some(route_type(best.origin_type)),
+            family: Some(unicast_route_family(prefix)),
             evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
@@ -1617,6 +1621,7 @@ impl RibManager {
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: Some(route_type(best.origin_type)),
+            family: Some(unicast_route_family(prefix)),
             evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),

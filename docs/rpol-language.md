@@ -119,6 +119,7 @@ has a known type and every operator a fixed signature.
 | rpki-state | `valid`, `invalid`, `not-found` | `route.rpki` |
 | aspa-state | `valid`, `invalid`, `unknown` | `route.aspa` |
 | route-type | `local`, `internal`, `external` | `route.route-type` |
+| route-family | `ipv4-unicast`, `ipv6-unicast`, `ipv4-labeled-unicast`, `ipv6-labeled-unicast`, `vpnv4`, `vpnv6`, `ipv4-flowspec`, `ipv6-flowspec`, `evpn`, `rtc`, `bgp-ls`, `bgp-ls-vpn` | `route.family` |
 | IP address | address literals | `route.next-hop`, `peer.address` |
 | string | string literals | regexes, `peer.group` |
 
@@ -252,6 +253,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.aspa == unknown` | ASPA verification state |
 | `route.route-type == external` | route source class |
 | `route.evpn-route-type == 2` | EVPN route type (integer literal 1–5, RFC 7432 §7; `==`/`!=` only) |
+| `route.family == ipv4-unicast` | typed AFI/SAFI route family (`==`/`!=` only); route-context-only, so it never disqualifies update-group sharing |
 | `peer.address == 192.0.2.1` | evaluation-peer address |
 | `peer.asn == 65010` | evaluation-peer ASN (`==`/`!=` only) |
 | `peer.group == "leaf"` | evaluation-peer group name |
@@ -266,8 +268,41 @@ corresponding attribute is absent. `route.origin-as` is absent on
 empty and `AS_SET`-only paths and then matches neither `==` nor `!=`
 nor `in` (`!(... in ...)` negates plainly, matching the prefix-set
 precedent).
+`route.route-type`, `route.evpn-route-type`, and `route.family` never
+match when the corresponding attribute is absent.
 
 `==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
+
+### `route.family` — one chain, many families
+
+`route.family` is the route's **typed** AFI/SAFI family, carried by the
+evaluation context itself — never inferred from the shape of the
+route's prefix (BGP-LS and RTC NLRIs have no prefix at all; a FlowSpec
+rule's destination component is not its family). It lets one chain
+attached to several families branch per family instead of being split
+into near-identical per-family policies.
+
+Migration example — before, two chains that differ only in one guard:
+
+```rpol
+policy edge-v4 { term dampen { if route.med >= 500 { reject } } term rest { accept } }
+policy edge-v6 { term dampen { if route.med >= 800 { reject } } term rest { accept } }
+```
+
+after, one chain attached to both families:
+
+```rpol
+policy edge {
+    term dampen-v4 { if route.family == ipv4-unicast && route.med >= 500 { reject } }
+    term dampen-v6 { if route.family == ipv6-unicast && route.med >= 800 { reject } }
+    term rest { accept }
+}
+```
+
+Family predicates read no peer identity, so unlike `peer.*` or strict
+next-hop they never push an export peer onto the ungrouped
+`policy_peer_context` path — peers sharing the chain still share one
+update group.
 
 ### `apply` — policy as predicate
 
@@ -331,6 +366,12 @@ length is the whitespace-word count of the string form; the fixture
 origin AS is the last plain ASN outside `{...}` AS_SET braces
 (mirroring the typed-path rule), so `as-path "65010 64500"` has
 origin 64500 and `as-path "{64500 64501}"` has none.
+`route-type`, `evpn-route-type`, `family`. Omitted fields are absent
+attributes (so `local-pref`/`med` comparisons see the implicit 100/0,
+`rpki` defaults to `not-found`, `aspa` to `unknown`; an omitted
+`family` matches no family predicate — it is never derived from the
+fixture's `prefix`). The fixture AS-path
+length is the whitespace-word count of the string form.
 
 `with` assertions check the evaluation result's **modifications**
 (the frontend has no live route to apply them to): `local-pref N`,

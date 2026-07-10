@@ -460,6 +460,18 @@ fn lower_cmp(
                 MatchExpr::RouteTypeIs(route_type)
             }
         }
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: a context
+        // without typed family knowledge must match neither `==` nor
+        // `!=` (LAN-209 class), and `Not(FamilyIs)` would wrongly match
+        // it.
+        Field::Family => {
+            let family = family_value(rhs_ident(rhs));
+            if op == CmpOp::Ne {
+                MatchExpr::FamilyNe(family)
+            } else {
+                MatchExpr::FamilyIs(family)
+            }
+        }
         // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
         // next-hop must match neither `==` nor `!=` (LAN-209), and
         // `Not(NextHopEq)` would wrongly match when the attribute is
@@ -642,6 +654,26 @@ fn rhs_ident(rhs: &Rhs) -> &str {
     match rhs {
         Rhs::Ident(name) => &name.node,
         _ => unreachable!("typechecked: enum operand"),
+    }
+}
+
+/// Language spelling → [`RouteFamily`] (the inverse of
+/// `RouteFamily::as_str`; members pinned by `FAMILY_MEMBERS`).
+pub(super) fn family_value(name: &str) -> crate::engine::RouteFamily {
+    use crate::engine::RouteFamily;
+    match name {
+        "ipv4-unicast" => RouteFamily::Ipv4Unicast,
+        "ipv6-unicast" => RouteFamily::Ipv6Unicast,
+        "ipv4-labeled-unicast" => RouteFamily::Ipv4LabeledUnicast,
+        "ipv6-labeled-unicast" => RouteFamily::Ipv6LabeledUnicast,
+        "vpnv4" => RouteFamily::Vpnv4,
+        "vpnv6" => RouteFamily::Vpnv6,
+        "ipv4-flowspec" => RouteFamily::Ipv4Flowspec,
+        "ipv6-flowspec" => RouteFamily::Ipv6Flowspec,
+        "evpn" => RouteFamily::Evpn,
+        "rtc" => RouteFamily::RtConstrain,
+        "bgp-ls" => RouteFamily::BgpLs,
+        _ => RouteFamily::BgpLsVpn,
     }
 }
 

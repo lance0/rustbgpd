@@ -8,7 +8,8 @@ use super::{
     resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
-    NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
+    NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteFamily, RouteModifications,
+    RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{OtcBlockReason, RrLoopReason};
 use rustbgpd_wire::AspaValidationContext;
@@ -1216,6 +1217,7 @@ impl PeerSession {
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
                             route_type: policy_route_type,
+                            family: Some(RouteFamily::Ipv4Unicast),
                             evpn_route_type: None,
                             local_pref: policy_local_pref,
                             med: policy_med,
@@ -1384,6 +1386,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1456,6 +1460,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: Some(route.route_type()),
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1516,6 +1522,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1575,6 +1583,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1638,6 +1648,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1700,6 +1712,8 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                                family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                                 evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
@@ -1763,6 +1777,8 @@ impl PeerSession {
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
                             route_type: policy_route_type,
+                            // Typed family from the MP_REACH AFI/SAFI (LAN-295).
+                            family: RouteFamily::from_afi_safi(mp.afi, mp.safi),
                             evpn_route_type: None,
                             local_pref: policy_local_pref,
                             med: policy_med,

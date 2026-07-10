@@ -32,7 +32,9 @@ use crate::update::{
     RouteQueryKey, RouteQueryScope, route_query_key,
 };
 
-use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
+use helpers::{
+    DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family, unicast_route_family,
+};
 
 /// Reverse index of unicast announcing peers: prefix → the peers whose
 /// Adj-RIB-In currently holds at least one route for it. `FxHash` +
@@ -2100,6 +2102,7 @@ impl RibManager {
                         peer_asn: target_peer_asn,
                         peer_group: target_peer_group,
                         route_type: Some(route_type_for(cand.origin_type)),
+                        family: Some(unicast_route_family(&prefix)),
                         evpn_route_type: None,
                         local_pref: cand.local_pref_attr(),
                         med: cand.med_attr(),

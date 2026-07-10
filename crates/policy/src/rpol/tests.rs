@@ -69,6 +69,7 @@ fn route_ctx(prefix: Prefix, communities: &[u32], rpki: RpkiValidation) -> Route
         peer_asn: None,
         peer_group: None,
         route_type: None,
+        family: None,
         evpn_route_type: None,
         local_pref: None,
         med: None,
@@ -1014,6 +1015,7 @@ fn absent_ctx() -> RouteContext<'static> {
         peer_asn: None,
         peer_group: None,
         route_type: None,
+        family: None,
         evpn_route_type: None,
         local_pref: None,
         med: None,
@@ -1047,6 +1049,7 @@ fn absent_route_attribute_matches_neither_eq_nor_ne() {
         ("route.prefix", "10.0.0.0/24"),
         ("route.route-type", "external"),
         ("route.evpn-route-type", "3"),
+        ("route.family", "evpn"),
     ];
     let absent = absent_ctx();
     for (field, literal) in fields {
@@ -1294,6 +1297,173 @@ fn asn_set_diagnostics() {
         "{rendered}"
     );
 
+    // Out-of-range ASN literals are rejected at parse.
+    let (_, rendered) = diagnostics_of("asn-set wide { 5000000000 }");
+    assert!(rendered.contains("does not fit in u32"), "{rendered}");
+
+    // Duplicate set names are rejected.
+    let (_, rendered) = diagnostics_of("asn-set a { 1 }\nasn-set a { 2 }");
+    assert!(rendered.contains("duplicate asn-set `a`"), "{rendered}");
+
+    // `in` on a field with no set kind names all three.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.med in something { accept } } }");
+    assert!(rendered.contains("asn-sets"), "{rendered}");
+}
+
+// ── route.family (LAN-295) ──────────────────────────────────────────
+
+/// Every supported family spelling lowers to its typed IR value and
+/// evaluates strictly: `==` matches exactly its own family and nothing
+/// else (families are typed knowledge — never classified from the
+/// context's prefix).
+#[test]
+fn family_eq_pins_every_supported_family() {
+    use crate::engine::RouteFamily;
+
+    let families = [
+        ("ipv4-unicast", RouteFamily::Ipv4Unicast),
+        ("ipv6-unicast", RouteFamily::Ipv6Unicast),
+        ("ipv4-labeled-unicast", RouteFamily::Ipv4LabeledUnicast),
+        ("ipv6-labeled-unicast", RouteFamily::Ipv6LabeledUnicast),
+        ("vpnv4", RouteFamily::Vpnv4),
+        ("vpnv6", RouteFamily::Vpnv6),
+        ("ipv4-flowspec", RouteFamily::Ipv4Flowspec),
+        ("ipv6-flowspec", RouteFamily::Ipv6Flowspec),
+        ("evpn", RouteFamily::Evpn),
+        ("rtc", RouteFamily::RtConstrain),
+        ("bgp-ls", RouteFamily::BgpLs),
+        ("bgp-ls-vpn", RouteFamily::BgpLsVpn),
+    ];
+    let base = absent_ctx();
+    for (spelling, family) in families {
+        let chain = reject_if(&format!("route.family == {spelling}"));
+        assert_eq!(
+            chain.policies[0].terms[0].guard,
+            MatchExpr::FamilyIs(family),
+            "`{spelling}` lowers to its typed value"
+        );
+        for (other_spelling, other) in families {
+            let ctx = RouteContext {
+                family: Some(other),
+                ..base
+            };
+            let expect = if other == family {
+                PolicyAction::Deny
+            } else {
+                PolicyAction::Permit
+            };
+            assert_eq!(
+                chain.evaluate(&ctx).action,
+                expect,
+                "family {other_spelling} vs `route.family == {spelling}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn family_ne_absent_does_not_match() {
+    // A context without typed family knowledge must match neither `==`
+    // nor `!=` (the LAN-209 absent class).
+    let chain = reject_if("route.family != evpn");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::FamilyNe(crate::engine::RouteFamily::Evpn)
+    );
+    let base = absent_ctx();
+    let differing = RouteContext {
+        family: Some(crate::engine::RouteFamily::Ipv4Unicast),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    let equal = RouteContext {
+        family: Some(crate::engine::RouteFamily::Evpn),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent family must not match `!= evpn`"
+    );
+}
+
+/// The honest-context rule (ADR-0077): the family is typed knowledge,
+/// never inferred from prefix shape. A context carrying an IPv4 prefix
+/// but no typed family matches no family predicate; one carrying an
+/// IPv4 prefix with typed FlowSpec-v6 knowledge matches `ipv6-flowspec`
+/// (families whose policy prefix is a v4 destination component still
+/// classify by their typed family, not the prefix).
+#[test]
+fn family_is_never_classified_from_prefix_shape() {
+    use crate::engine::RouteFamily;
+
+    let v4_prefix_no_family = RouteContext {
+        prefix: Some(v4(10, 0, 0, 0, 24)),
+        ..absent_ctx()
+    };
+    for guard in ["route.family == ipv4-unicast", "route.family != evpn"] {
+        let chain = reject_if(guard);
+        assert_eq!(
+            chain.evaluate(&v4_prefix_no_family).action,
+            PolicyAction::Permit,
+            "a v4 prefix without typed family knowledge must not match `{guard}`"
+        );
+    }
+
+    let v4_prefix_v6_flowspec = RouteContext {
+        prefix: Some(v4(10, 0, 0, 0, 24)),
+        family: Some(RouteFamily::Ipv6Flowspec),
+        ..absent_ctx()
+    };
+    let chain = reject_if("route.family == ipv6-flowspec");
+    assert_eq!(
+        chain.evaluate(&v4_prefix_v6_flowspec).action,
+        PolicyAction::Deny,
+        "typed family wins regardless of the policy prefix's shape"
+    );
+    let chain = reject_if("route.family == ipv4-unicast");
+    assert_eq!(
+        chain.evaluate(&v4_prefix_v6_flowspec).action,
+        PolicyAction::Permit,
+        "the v4 prefix must not classify the route as ipv4-unicast"
+    );
+}
+
+/// Family predicates are route-context-only: they never disqualify a
+/// peer from update-group sharing the way peer-dependent predicates do
+/// (`requires_peer_context` drives the update-group fingerprint).
+#[test]
+fn family_predicates_do_not_require_peer_context() {
+    let family_chain = compile_ok(
+        "policy fam {
+            term v4-only { if route.family != ipv4-unicast { reject } }
+            term rest { accept }
+        }",
+    );
+    assert!(!family_chain.requires_peer_context());
+
+    // Control: a genuinely peer-dependent chain still trips the flag.
+    let peer_chain = compile_ok(
+        "policy peered {
+            term nh { if route.next-hop == peer.address { reject } }
+            term rest { accept }
+        }",
+    );
+    assert!(peer_chain.requires_peer_context());
+}
+
+#[test]
+fn family_rejects_ordering_unknown_member_and_wrong_type() {
+    let (diags, rendered) =
+        diagnostics_of("policy p { term t { if route.family >= ipv4-unicast { accept } } }");
+    assert_eq!(diags.len(), 1, "{rendered}");
+    assert!(
+        rendered.contains("supports only `==` and `!=`"),
+        "{rendered}"
+    );
+
     // ASN literals are u32 — no 16-bit truncation, out-of-range rejected.
     let (_, rendered) = diagnostics_of("asn-set wide { 5000000000 }");
     assert!(rendered.contains("does not fit in u32"), "{rendered}");
@@ -1376,4 +1546,57 @@ test non-member-origin-rejected {
         "unexpected failures: {:?}",
         report.failures
     );
+    let (diags, rendered) =
+        diagnostics_of("policy p { term t { if route.family == ipv4-unicats { accept } } }");
+    assert_eq!(diags.len(), 1, "{rendered}");
+    assert!(
+        rendered.contains("did you mean `ipv4-unicast`?"),
+        "{rendered}"
+    );
+
+    let (diags, rendered) =
+        diagnostics_of("policy p { term t { if route.family == 42 { accept } } }");
+    assert_eq!(diags.len(), 1, "{rendered}");
+    assert!(rendered.contains("type mismatch"), "{rendered}");
+}
+
+/// The in-language test runner: `family` is an explicit fixture field;
+/// an omitted fixture family is absent (matches neither `==` nor `!=`)
+/// even when the fixture carries a prefix.
+#[test]
+fn family_in_test_fixtures() {
+    let source = r"
+policy evpn-only {
+    term fam { if route.family != evpn { reject } }
+    term rest { accept }
+}
+
+test evpn-family-accepted {
+    route { family evpn }
+    expect evpn-only == accept
+}
+
+test other-family-rejected {
+    route { family vpnv4 }
+    expect evpn-only == reject
+}
+
+test no-family-is-absent-not-prefix-classified {
+    route { prefix 10.0.0.0/24 }
+    expect evpn-only == accept
+}
+";
+    let report = run_rpol_tests(source).expect("compiles");
+    assert_eq!(report.total, 3);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+#[test]
+fn family_fixture_rejects_unknown_member() {
+    let (diags, rendered) = diagnostics_of(
+        "policy p { term t { accept } }
+         test t { route { family evnp } expect p == accept }",
+    );
+    assert_eq!(diags.len(), 1, "{rendered}");
+    assert!(rendered.contains("did you mean `evpn`?"), "{rendered}");
 }

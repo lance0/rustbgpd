@@ -139,8 +139,12 @@ impl PeerSession {
                 // cached pre-policy context against the session's import
                 // chain. Explain-only work on the command path — the inbound
                 // UPDATE hot path is untouched.
+                // Typed family from the explain key's AFI/SAFI — the
+                // same pair the cached decision was recorded under
+                // (LAN-295).
+                let family = rustbgpd_policy::RouteFamily::from_afi_safi(afi, safi);
                 for m in &mut matches {
-                    m.statements = self.statement_trace_for(prefix, &m.result);
+                    m.statements = self.statement_trace_for(prefix, family, &m.result);
                 }
                 let _ = reply.send(super::import_decision_cache::ImportExplainReply {
                     current_generation: generation,
@@ -219,6 +223,7 @@ impl PeerSession {
     fn statement_trace_for(
         &self,
         prefix: rustbgpd_wire::Prefix,
+        family: Option<rustbgpd_policy::RouteFamily>,
         result: &super::import_decision_cache::LookupResult,
     ) -> Vec<rustbgpd_policy::StatementAttribution> {
         use super::import_decision_cache::{CachedOutcome, LookupResult};
@@ -261,6 +266,7 @@ impl PeerSession {
             } else {
                 RouteType::Internal
             }),
+            family,
             evpn_route_type: None,
             local_pref: cached.local_pref,
             med: cached.med,

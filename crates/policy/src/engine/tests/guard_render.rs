@@ -137,6 +137,14 @@ fn every_node_type_renders_its_golden_form() {
         ),
         (MatchExpr::EvpnRouteTypeIs(2), "route.evpn-route-type == 2"),
         (
+            MatchExpr::FamilyIs(crate::engine::RouteFamily::Ipv4Unicast),
+            "route.family == ipv4-unicast",
+        ),
+        (
+            MatchExpr::FamilyNe(crate::engine::RouteFamily::Evpn),
+            "route.family != evpn",
+        ),
+        (
             MatchExpr::RpkiIs(RpkiValidation::NotFound),
             "route.rpki == not-found",
         ),

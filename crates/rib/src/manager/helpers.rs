@@ -2,8 +2,13 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+use rustbgpd_policy::RouteFamily;
 use rustbgpd_rpki::{AspaTable, VrpTable};
-use rustbgpd_wire::{Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{
+    Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi, VpnAddressFamily, VpnRouteKey,
+};
+
+use crate::route::BgpLsFamily;
 
 /// Sentinel peer address for locally-injected routes.
 pub(super) const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -130,6 +135,59 @@ pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     match prefix {
         Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
         Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+    }
+}
+
+// ── Typed policy families (LAN-295) ─────────────────────────────────
+// Every mapping below starts from typed route knowledge — a RIB key,
+// the stored wire AFI, or the NLRI's own address family — never from a
+// fabricated/placeholder prefix (the ADR-0077 honest-context rule).
+
+/// A unicast NLRI *is* its prefix, so the prefix's address family is
+/// the route's typed family.
+#[must_use]
+pub(super) fn unicast_route_family(prefix: &Prefix) -> RouteFamily {
+    match prefix {
+        Prefix::V4(_) => RouteFamily::Ipv4Unicast,
+        Prefix::V6(_) => RouteFamily::Ipv6Unicast,
+    }
+}
+
+/// A labeled-unicast NLRI is a prefix plus a label stack (RFC 8277);
+/// the prefix's address family is the route's typed family.
+#[must_use]
+pub(super) fn labeled_route_family(prefix: &Prefix) -> RouteFamily {
+    match prefix {
+        Prefix::V4(_) => RouteFamily::Ipv4LabeledUnicast,
+        Prefix::V6(_) => RouteFamily::Ipv6LabeledUnicast,
+    }
+}
+
+/// `VPNv4` vs `VPNv6` from the VPN RIB key's typed inner address family.
+#[must_use]
+pub(super) fn vpn_route_family(key: &VpnRouteKey) -> RouteFamily {
+    match key.prefix.family() {
+        VpnAddressFamily::V4 => RouteFamily::Vpnv4,
+        VpnAddressFamily::V6 => RouteFamily::Vpnv6,
+    }
+}
+
+/// `FlowSpec` family from the stored wire AFI (`FlowSpec` NLRIs are
+/// AFI 1/2 only — the decoder rejects anything else).
+#[must_use]
+pub(super) fn flowspec_route_family(afi: Afi) -> RouteFamily {
+    match afi {
+        Afi::Ipv6 => RouteFamily::Ipv6Flowspec,
+        _ => RouteFamily::Ipv4Flowspec,
+    }
+}
+
+/// BGP-LS vs BGP-LS VPN from the typed RIB key family.
+#[must_use]
+pub(super) fn bgpls_route_family(family: BgpLsFamily) -> RouteFamily {
+    match family {
+        BgpLsFamily::LinkState => RouteFamily::BgpLs,
+        BgpLsFamily::LinkStateVpn => RouteFamily::BgpLsVpn,
     }
 }
 

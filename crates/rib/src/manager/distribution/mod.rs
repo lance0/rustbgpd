@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use rustbgpd_policy::{
-    PolicyAction, PolicyChain, PolicyEvaluation, RouteContext, RouteType,
+    PolicyAction, PolicyChain, PolicyEvaluation, RouteContext, RouteFamily, RouteType,
     evaluate_chain_with_attribution,
 };
 use rustbgpd_rpki::VrpTable;
@@ -16,9 +16,10 @@ use rustbgpd_wire::{
 use tracing::{debug, info, warn};
 
 use super::helpers::{
-    LOCAL_PEER, bgpls_routes_equal, evpn_routes_equal, gauge_val, labeled_routes_equal,
-    prefix_family, routes_equal, rtc_routes_equal, should_suppress_ibgp_inner, validate_route_aspa,
-    validate_route_rpki, vpn_routes_equal,
+    LOCAL_PEER, bgpls_route_family, bgpls_routes_equal, evpn_routes_equal, flowspec_route_family,
+    gauge_val, labeled_route_family, labeled_routes_equal, prefix_family, routes_equal,
+    rtc_routes_equal, should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa,
+    validate_route_rpki, vpn_route_family, vpn_routes_equal,
 };
 use super::{
     PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager,

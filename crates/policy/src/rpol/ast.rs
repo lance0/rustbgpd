@@ -484,6 +484,8 @@ pub enum RouteField {
     RouteType(Spanned<String>),
     /// `evpn-route-type 2`.
     EvpnRouteType(u32, Span),
+    /// `family ipv4-unicast|evpn|...` (LAN-295).
+    Family(Spanned<String>),
 }
 
 /// One field of a `peer { ... }` fixture.

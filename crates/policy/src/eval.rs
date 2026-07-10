@@ -420,6 +420,10 @@ impl CompiledChain {
             MatchExpr::EvpnRouteTypeNe(evpn_type) => {
                 ctx.evpn_route_type.is_some_and(|t| t != *evpn_type)
             }
+            MatchExpr::FamilyIs(family) => ctx.family == Some(*family),
+            // `!=` mirrors `==`: a context without typed family
+            // knowledge matches neither.
+            MatchExpr::FamilyNe(family) => ctx.family.is_some_and(|f| f != *family),
             MatchExpr::RpkiIs(state) => ctx.validation_state == *state,
             MatchExpr::AspaIs(state) => ctx.aspa_state == *state,
         }
@@ -473,6 +477,7 @@ mod tests {
             peer_asn: None,
             peer_group: None,
             route_type: None,
+            family: None,
             evpn_route_type: None,
             local_pref: None,
             med: None,

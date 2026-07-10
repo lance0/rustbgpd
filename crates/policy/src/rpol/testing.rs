@@ -13,7 +13,7 @@ use std::net::IpAddr;
 
 use rustbgpd_wire::{AspaValidation, ExtendedCommunity, LargeCommunity, Prefix, RpkiValidation};
 
-use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteType};
+use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteFamily, RouteType};
 use crate::sets::SetStore;
 
 use super::ast::{CommunityLit, NextHopArg, PeerField, RouteField, TestDef, WithAssertion};
@@ -67,6 +67,7 @@ struct Fixture {
     rpki: RpkiValidation,
     aspa: AspaValidation,
     route_type: Option<RouteType>,
+    family: Option<RouteFamily>,
     evpn_route_type: Option<u8>,
     peer_address: Option<IpAddr>,
     peer_asn: Option<u32>,
@@ -150,6 +151,12 @@ impl Fixture {
                     fixture.evpn_route_type =
                         Some(u8::try_from(*value).expect("typechecked range"));
                 }
+                // Typed family knowledge comes only from an explicit
+                // fixture statement — never inferred from the fixture
+                // prefix's shape (the ADR-0077 honest-context rule).
+                RouteField::Family(name) => {
+                    fixture.family = Some(super::lower::family_value(&name.node));
+                }
             }
         }
         for field in &test.peer {
@@ -178,6 +185,7 @@ impl Fixture {
             peer_asn: self.peer_asn,
             peer_group: self.peer_group.as_deref(),
             route_type: self.route_type,
+            family: self.family,
             evpn_route_type: self.evpn_route_type,
             local_pref: self.local_pref,
             med: self.med,

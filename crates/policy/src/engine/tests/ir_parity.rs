@@ -389,6 +389,7 @@ fn blank_ctx() -> RouteContext<'static> {
         peer_asn: None,
         peer_group: None,
         route_type: None,
+        family: None,
         evpn_route_type: None,
         local_pref: None,
         med: None,
@@ -500,6 +501,7 @@ fn contexts(b: &Backing) -> Vec<(&'static str, RouteContext<'_>)> {
             RouteContext {
                 prefix: Some(v4_prefix([10, 20, 30, 0], 24)),
                 route_type: Some(RouteType::Local),
+                family: None,
                 evpn_route_type: Some(2),
                 ..blank_ctx()
             },
@@ -507,6 +509,7 @@ fn contexts(b: &Backing) -> Vec<(&'static str, RouteContext<'_>)> {
         (
             "evpn_ip_prefix",
             RouteContext {
+                family: None,
                 evpn_route_type: Some(5),
                 ..blank_ctx()
             },
