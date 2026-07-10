@@ -132,6 +132,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawal, and a same-session serial regression resolved by exactly one
   Reset Query resync with the stale VRP purged. Local-only, like the other
   RTR-cache jobs (M21/M27/M59).
+- **NIST-BRIO offline ASPA conformance subset extended to the full demo
+  catalog** (NIST-BRIO b7.1.2, commit 23ee402f): upstream exp46 (#4–#6)
+  and exp79 (#7–#9), downstream exp8 and exp14 (#2–#4) join the existing
+  exp13/exp1/exp57/exp910 vectors, now covering the AS0-only
+  ("no providers") ASPA attestation shape on both the upstream and
+  downstream procedures, encoded exactly as the BRIO cache scripts send
+  it (`addASPA 65060 0`). Also pinned: RFC 1982 serial-number comparison
+  at the wrap and half-window boundaries. Shipped RTR/ASPA behavior was
+  drift-checked against draft-ietf-sidrops-8210bis-26 and
+  draft-ietf-sidrops-aspa-verification-26 (the -26 clarification that
+  AS_PATH preprocessing removes *consecutive* duplicates matches the
+  shipped compression exactly); stale -25 doc references trued up.
+  (LAN-243)
 
 ### Changed
 
@@ -145,6 +158,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Malformed ASPA announcements are rejected instead of poisoning the ASPA
+  table.** Per draft-ietf-sidrops-8210bis-26 §5.12 ("ASPA Provider List
+  Error"), an ASPA announcement carrying no Provider ASNs — previously
+  stored as an empty provider set, turning every route through that
+  customer AS ASPA-Invalid — or carrying AS 0 among multiple providers now
+  fails the transaction and drops the cache session (retention semantics
+  unchanged). The legal single-provider AS 0 "no providers" attestation
+  stays accepted. (LAN-243)
 - **A v1-fallback RTR cache restart caused a validation blackout at data
   expiry instead of an immediate re-fallback.** After a v1 session (e.g.
   StayRTR) dropped, the client re-probed protocol v2 on every reconnect;

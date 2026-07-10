@@ -280,7 +280,7 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
 /// Runs the same role-aware ASPA verification that was used at import time.
 /// Returns `Unknown` if no `AS_PATH` is present.
 ///
-/// Per `draft-ietf-sidrops-aspa-verification-25` §6.2, ASPA applies only
+/// Per `draft-ietf-sidrops-aspa-verification-26` §6.2, ASPA applies only
 /// to IPv4/IPv6 unicast. This helper is invoked from unicast-RIB contexts
 /// only (distribution and graceful-restart revalidation of unicast
 /// routes), so the §6.2 precondition is satisfied by construction. If
