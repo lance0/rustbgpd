@@ -601,6 +601,12 @@ treated as allocator/map-capacity noise unless the PR is memory-targeted.
 > durable memory cost is the three-layer route-storage model (Adj-RIB-In +
 > Loc-RIB + Adj-RIB-Out) and its prefix-keyed `hashbrown` bucket arrays — the
 > target for any future memory work, not the runtime or operational surfaces.
+>
+> **Superseded (2026-07):** this profile predates the update-groups arc. The
+> re-baseline in [`docs/perf/rebaseline-2026-07.md`](perf/rebaseline-2026-07.md)
+> shows per-peer Adj-RIB-Out is now ~0.1% (grouped peers share one group
+> table); map/index bucket storage still dominates (~79%), redistributed
+> across the group table, Loc-RIB, and Adj-RIB-In.
 
 > **Prefix-index migration (trie-backed indexes).** The first measured fix
 > targeting the bucket-array overhead above: the two prefix-keyed *indexes* —
