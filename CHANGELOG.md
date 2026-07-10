@@ -66,6 +66,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so they never disqualify a peer from update-group sharing. Explain traces
   render the source-level expression, and `test` fixtures take an explicit
   `family` field. (LAN-295)
+- **Direction-aware computed AS_PATH prepend operands in `.rpol`** —
+  `prepend as self|peer|origin <count>` prepends the local speaker's ASN
+  (`[global] asn`, stamped onto the chain at attach time), the evaluation
+  peer's ASN, or the route's origin AS (the `route.origin-as` value). `peer`
+  is import-only: bound as an export chain it would prepend the receiving
+  peer's own ASN (rejected by the receiver as an own-AS loop, RFC 4271
+  §9.1.2), so the config resolver refuses the attachment with a diagnostic
+  naming the policy and term — at load, reload, and transaction time alike.
+  `prepend as peer` registers as peer-dependent for update-group
+  fingerprinting; `self`/`origin` chains still group. Operands resolve when
+  the matched term's action executes; a missing or zero context value fails
+  the route closed (ASN 0 never reaches the wire), with the failing operand
+  and reason rendered in explain traces. The fixed-AS form and a policy
+  parameter named `origin` keep their existing meaning, and test fixtures
+  gain a `peer { local-as N }` field backing `self`. (LAN-296)
 - **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
   in each peer's Adj-RIB-In table (attribute-memory dedup); sum across peers
   for the daemon-wide total. Three containerlab soak harnesses (GR-restart

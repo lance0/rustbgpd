@@ -11919,6 +11919,164 @@ fn rpol_files_load_resolve_and_evaluate_in_chains() {
     assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
 }
 
+// ── LAN-296: computed prepend operands at config attachment ─────────
+
+/// A config dir whose neighbor binds `.rpol` chains in BOTH
+/// directions, for direction-legality tests.
+fn rpol_directional_config_dir(
+    rpol_source: &str,
+    import_chain: &str,
+    export_chain: &str,
+) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), rpol_source).expect("write rpol");
+    let toml = format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = [{import_chain}]
+export_policy_chain = [{export_chain}]
+"#,
+    );
+    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    dir
+}
+
+const PREPEND_OPERANDS_RPOL: &str = r"
+policy peer-pad { term inbound-pad { prepend as peer 3; accept } }
+policy self-pad { term outbound-pad { prepend as self 3; accept } }
+policy origin-pad { term origin-pad { prepend as origin 2; accept } }
+";
+
+/// Direction legality is enforced when the chain is attached: a
+/// `prepend as peer` member is import-only, and binding it as an
+/// export chain fails the config load with the exact diagnostic.
+#[test]
+fn prepend_as_peer_rejected_on_export_attachment() {
+    let dir = rpol_directional_config_dir(PREPEND_OPERANDS_RPOL, r#""peer-pad""#, r#""peer-pad""#);
+    let error = load_dir(&dir).expect_err("export-bound `prepend as peer` must fail the load");
+    assert!(error.contains("peer-pad"), "{error}");
+    assert!(error.contains("inbound-pad"), "{error}");
+    assert!(error.contains("prepend as peer"), "{error}");
+    assert!(error.contains("import-only"), "{error}");
+    assert!(error.contains("own-AS loop"), "{error}");
+}
+
+/// The legal cells of the matrix: `peer` on import, `self`/`origin` on
+/// export (and import). The export chain's rpol members carry the
+/// attach-time `[global] asn`, so `prepend as self` resolves to it.
+#[test]
+fn prepend_operand_legal_directions_attach_and_resolve() {
+    let dir = rpol_directional_config_dir(
+        PREPEND_OPERANDS_RPOL,
+        r#""peer-pad", "origin-pad""#,
+        r#""self-pad", "origin-pad""#,
+    );
+    let config = load_dir(&dir).expect("legal operand placements load");
+    let neighbor = &config.neighbors[0];
+    let (import, export) = config
+        .effective_policy_chains_for_neighbor(neighbor)
+        .expect("chains resolve");
+    let import = import.expect("import chain configured");
+    let export = export.expect("export chain configured");
+
+    // Attach-time local_asn stamp on every rpol member.
+    for chain in [&import, &export] {
+        for member in &chain.policies {
+            let compiled = member.rpol.as_deref().expect("rpol member");
+            assert_eq!(compiled.local_asn, Some(65001));
+        }
+    }
+
+    let ctx = rustbgpd_policy::RouteContext {
+        prefix: Some(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            "10.10.3.0".parse().unwrap(),
+            24,
+        ))),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 1,
+        origin_asn: Some(64500),
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: Some(65002),
+        peer_group: None,
+        route_type: None,
+        family: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    // Import: `prepend as peer` resolves to the neighbor's ASN (the
+    // later `origin-pad` member wins the shared prepend slot — chain
+    // merge semantics — so evaluate the peer-pad member's chain alone).
+    let peer_only = rustbgpd_policy::PolicyChain::from_named(vec![import.policies[0].clone()]);
+    let result = peer_only.evaluate(&ctx);
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((65002, 3)));
+
+    // Export: `prepend as self` resolves to the daemon's [global] asn.
+    let self_only = rustbgpd_policy::PolicyChain::from_named(vec![export.policies[0].clone()]);
+    let result = self_only.evaluate(&ctx);
+    assert_eq!(result.modifications.as_path_prepend, Some((65001, 3)));
+
+    // Both directions: `origin` resolves from the route.
+    let result = export.evaluate(&ctx);
+    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
+}
+
+/// `prepend as peer` on the GLOBAL export chain is rejected too — the
+/// direction check lives in the shared resolver, not per-neighbor.
+#[test]
+fn prepend_as_peer_rejected_on_global_export_chain() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), PREPEND_OPERANDS_RPOL).expect("write rpol");
+    fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+export_chain = ["peer-pad"]
+"#,
+    )
+    .expect("write config");
+    let error = load_dir(&dir).expect_err("global export `prepend as peer` must fail");
+    assert!(error.contains("prepend as peer"), "{error}");
+    assert!(error.contains("import-only"), "{error}");
+}
+
 #[test]
 fn rpol_compile_diagnostics_fail_config_load() {
     let dir = rpol_config_dir(

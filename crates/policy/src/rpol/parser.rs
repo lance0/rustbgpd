@@ -15,7 +15,7 @@ use crate::engine::{CommunityMatch, parse_community_match};
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityKind, CommunityLit, CommunitySetDef, ExpectDef, Expr,
     FieldPath, FieldRoot, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef,
-    Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, WithAssertion,
+    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -657,8 +657,23 @@ impl Parser<'_> {
             }
             Tok::PrependKw => {
                 self.bump();
-                self.expect(Tok::AsKw, "`as` (`prepend as <asn> <count>`)")?;
-                let asn = self.u32_arg("an ASN")?;
+                self.expect(
+                    Tok::AsKw,
+                    "`as` (`prepend as <asn|self|peer|origin> <count>`)",
+                )?;
+                // Computed operands (LAN-296): `self` / `peer` are
+                // keyword tokens (previously parse errors here, so
+                // purely additive); `origin` is a contextual
+                // identifier that flows through the parameter path and
+                // is disambiguated against the policy's declared
+                // parameters (`PrependAsArg::operand`).
+                let asn = if self.eat(Tok::SelfKw).is_some() {
+                    PrependAsArg::SelfAs
+                } else if self.eat(Tok::PeerKw).is_some() {
+                    PrependAsArg::Peer
+                } else {
+                    PrependAsArg::Value(self.u32_arg("an ASN, `self`, `peer`, or `origin`")?)
+                };
                 let count = self.u32_arg("a prepend count")?;
                 let span = token.span.to(count.span());
                 Ok(ActionStmt::Prepend { asn, count, span })
@@ -999,7 +1014,8 @@ impl Parser<'_> {
     }
 
     fn peer_field(&mut self) -> PResult<PeerField> {
-        let field = self.expect_ident("a peer fixture field (`address`, `asn`, `group`)")?;
+        let field =
+            self.expect_ident("a peer fixture field (`address`, `asn`, `local-as`, `group`)")?;
         match field.node.as_str() {
             "address" => {
                 let (addr, _) = self.expect_ip("an IP address")?;
@@ -1009,6 +1025,10 @@ impl Parser<'_> {
                 let (value, _) = self.expect_u32("an ASN")?;
                 Ok(PeerField::Asn(value))
             }
+            "local-as" => {
+                let (value, _) = self.expect_u32("an ASN")?;
+                Ok(PeerField::LocalAs(value))
+            }
             "group" => Ok(PeerField::Group(self.expect_str("a group name string")?)),
             other => {
                 let mut diag = Diagnostic::new(
@@ -1016,7 +1036,9 @@ impl Parser<'_> {
                     format!("unknown peer fixture field `{other}`"),
                     "not a peer fixture field",
                 );
-                if let Some(suggestion) = super::diag::closest(other, ["address", "asn", "group"]) {
+                if let Some(suggestion) =
+                    super::diag::closest(other, ["address", "asn", "local-as", "group"])
+                {
                     diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                 }
                 self.diags.push(diag);

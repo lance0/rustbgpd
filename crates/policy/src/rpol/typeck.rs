@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::engine::AsPathRegex;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityKind, Expr, FieldPath, FieldRoot, PolicyDef, Rhs, RouteField,
-    SourceFile, Stmt, U32Arg,
+    ActionStmt, CmpOp, CommunityKind, Expr, FieldPath, FieldRoot, PolicyDef, PrependAsArg, Rhs,
+    RouteField, SourceFile, Stmt, U32Arg,
 };
 use super::diag::{Diagnostic, Span, Spanned, closest};
 
@@ -290,7 +290,16 @@ impl Checker<'_> {
                 }
             }
             ActionStmt::Prepend { asn, count, .. } => {
-                self.check_u32_arg(asn, params);
+                // A computed operand (`self`/`peer`, or an `origin`
+                // identifier that is not a declared parameter —
+                // LAN-296) needs no parameter check; the operand
+                // decision itself is shared with lowering via
+                // `PrependAsArg::operand`.
+                if asn.operand(|name| params.contains(&name)).is_none()
+                    && let PrependAsArg::Value(arg) = asn
+                {
+                    self.check_u32_arg(arg, params);
+                }
                 match count {
                     U32Arg::Lit(value, span) => {
                         if *value == 0 || *value > 255 {

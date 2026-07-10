@@ -30,7 +30,7 @@ use rustbgpd_wire::{
 pub use schema::*;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
-use self::parse::{parse_families, parse_policy, resolve_chain};
+use self::parse::{ChainDirection, parse_families, parse_policy, resolve_chain};
 use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 
 #[cfg(test)]
@@ -429,6 +429,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Import,
+                self.global.asn,
             )?;
 
             Ok(chain)
@@ -451,6 +453,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Export,
+                self.global.asn,
             )
         }
     }
@@ -582,6 +586,8 @@ impl Config {
                     &self.policy.rpol,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
+                    ChainDirection::Import,
+                    self.global.asn,
                 )?
             }
         } else {
@@ -602,6 +608,8 @@ impl Config {
                     &self.policy.rpol,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
+                    ChainDirection::Export,
+                    self.global.asn,
                 )?
             }
         } else {
@@ -626,6 +634,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Import,
+                self.global.asn,
             )?
         }
         .or_else(|| global_import.clone());
@@ -647,6 +657,8 @@ impl Config {
                 &self.policy.rpol,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+                ChainDirection::Export,
+                self.global.asn,
             )?
         }
         .or_else(|| global_export.clone());

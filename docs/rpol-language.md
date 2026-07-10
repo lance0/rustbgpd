@@ -334,12 +334,63 @@ Two consequences worth internalizing:
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (count: literal 1–255) |
+| `prepend as self\|peer\|origin <count>` | prepend a computed ASN (see below) |
 
 The kind keyword must match the literal's kind (`add community
 RT:...` is a compile error pointing at `add ext-community`). Within a
 policy, later `set`s of the same attribute win; across a chain, the
 existing merge semantics apply (later policy wins scalars, add/remove
-lists merge with later-policy-wins cancellation).
+lists merge with later-policy-wins cancellation). Literal and computed
+prepends share one scalar slot: a later prepend of either form
+replaces an earlier one of either form.
+
+### Computed prepend operands
+
+`prepend as` also takes a computed operand instead of a literal ASN:
+
+- **`self`** — the local speaker's ASN (the daemon's `[global] asn`,
+  stamped onto the chain when it is attached; in-language tests state
+  it with the `peer { local-as N }` fixture field).
+- **`peer`** — the evaluation peer's ASN.
+- **`origin`** — the route's origin AS: the last ASN of the rightmost
+  non-empty `AS_SEQUENCE` (the same value `route.origin-as` reads).
+  A policy *parameter* named `origin` shadows the operand — the
+  parameter keeps its existing meaning.
+
+**Direction legality.** `self` and `origin` are legal on import and
+export chains. `peer` is **import-only**: on an export chain it would
+prepend the *receiving* peer's own ASN, which the receiver rejects as
+an own-AS loop (RFC 4271 §9.1.2) unless it runs allowas-in. A chain
+using `prepend as peer` is rejected when it is attached as an export
+chain (config load, reload, transaction) — a config error naming the
+policy and term, never a per-route runtime surprise.
+
+| operand  | import | export | notes |
+|---|---|---|---|
+| `self`   | yes | yes | outbound TE; inbound self-prepend biases best-path like the literal form already could |
+| `peer`   | yes | **rejected at attach** | the inbound "prepend the neighbor's AS" idiom |
+| `origin` | yes | yes | origin AS is already in the path — no loop-detection impact |
+
+*Comparison:* FRR's `set as-path prepend last-as N` (prepend the
+neighbor's AS) is its inbound route-map idiom and the model for
+`prepend as peer`; FRR has no `self`/`origin` operands (operators
+write literals). BIRD's `bgp_path.prepend()` takes only explicit ASN
+values — no peer-derived operand exists there at all. Neither
+implementation documents a legitimate outbound use of a
+peer-AS prepend, hence the attach-time rejection.
+
+**Failure is closed.** A computed operand resolves when the matched
+term's action executes. If the value is unknown — no usable
+`AS_SEQUENCE` for `origin`, unknown peer ASN for `peer`, a chain
+evaluated outside a daemon config for `self` — or the context value is
+zero (AS 0 is prohibited on the wire, RFC 7607), the route is
+**denied**: staged modifications are discarded, ASN 0 is never
+prepended, and explain traces name the failing term, operand, and
+reason.
+
+**Update-group note.** `prepend as peer` reads peer identity, so (like
+`peer.asn` guards) it keeps its peers out of shared update groups;
+`self` and `origin` never disqualify grouping.
 
 Extended-community wire encoding follows the daemon's other
 frontends: dotted-quad admin → RFC 4360 type 0x01, ASN > 65535 →
@@ -350,7 +401,7 @@ type 0x02, otherwise type 0x00 (subtype 0x02 RT / 0x03 RO).
 ```rpol
 test NAME {
     route { FIELD VALUE; ... }
-    [peer { address IP; asn N; group "NAME" }]
+    [peer { address IP; asn N; local-as N; group "NAME" }]
     expect POLICY[(args)] == accept|reject [with ASSERTION, ...]
     [expect ...]
 }
@@ -373,7 +424,12 @@ typed-path rule), so `as-path "65010 64500"` has origin 64500 and
 (the frontend has no live route to apply them to): `local-pref N`,
 `med N`, `next-hop IP|self`, `community LIT` (and
 `large-community`/`ext-community`, asserting presence in the add
-lists), `prepend as ASN COUNT`.
+lists), `prepend as ASN COUNT`. Computed prepend operands resolve
+during evaluation, so the assertion states the **resolved** ASN:
+`peer { asn 65010 }` + `prepend as peer 3` asserts as
+`with prepend as 65010 3`. `peer { local-as N }` supplies the value
+`prepend as self` resolves to (omitted ⇒ it fails closed and the
+expectation is a `reject`).
 
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is
@@ -396,7 +452,7 @@ action      := "accept" | "reject"
              | "set" ("local-pref" | "med") u32arg
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
-             | "prepend" "as" u32arg INT
+             | "prepend" "as" (u32arg | "self" | "peer" | "origin") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate

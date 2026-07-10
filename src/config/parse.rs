@@ -291,6 +291,18 @@ pub(super) fn parse_named_policy(
     })
 }
 
+/// Which direction a policy chain is being bound to. Direction is
+/// knowable at every attachment site (the global / peer-group /
+/// neighbor import vs export config keys), so direction legality is
+/// enforced once at attach time — never discovered per route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainDirection {
+    /// Inbound policy (`import_policy_chain` / `[policy] import_chain`).
+    Import,
+    /// Outbound policy (`export_policy_chain` / `[policy] export_chain`).
+    Export,
+}
+
 /// Resolve a list of policy names to a `PolicyChain`. Each entry is
 /// tagged with its configured name so the chain-eval attribution path
 /// (used by `bgp_policy_routes_total` and the explain surface) can
@@ -304,12 +316,22 @@ pub(super) fn parse_named_policy(
 /// and the ADR-0076 planner's structural diff both see the compiled
 /// content. Every `.rpol` member of one chain compiles through one
 /// `SetStore`, so identical set data dedupes within the chain.
+///
+/// LAN-296: every `.rpol` member is stamped with `local_asn` (the
+/// `[global] asn`, backing `prepend as self`), and an export-bound
+/// chain is rejected when any member carries the import-only
+/// `prepend as peer` action. Every install path — initial load, SIGHUP
+/// reload, the rpol overlay, config transactions, and the gRPC policy
+/// admin — resolves through this function, so the direction check
+/// holds everywhere by construction.
 pub(super) fn resolve_chain(
     names: &[String],
     definitions: &HashMap<String, NamedPolicyConfig>,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
     neighbor_sets: &HashMap<String, NeighborSetConfig>,
     peer_groups: &HashMap<String, PeerGroupConfig>,
+    direction: ChainDirection,
+    local_asn: u32,
 ) -> Result<Option<PolicyChain>, ConfigError> {
     if names.is_empty() {
         return Ok(None);
@@ -327,9 +349,33 @@ pub(super) fn resolve_chain(
                     }
                 });
             }
-            resolve_rpol_chain_ref(name, rpol, &mut store)
+            resolve_rpol_chain_ref(name, rpol, &mut store, local_asn)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // LAN-296 direction legality: `prepend as peer` on an export chain
+    // would prepend the RECEIVING peer's own ASN — rejected by the
+    // receiver as an own-AS loop (RFC 4271 §9.1.2) — so it is refused
+    // at attach time, not discovered per route. TOML members cannot
+    // carry computed operands, so only `.rpol` members are probed.
+    if direction == ChainDirection::Export {
+        for named in &policies {
+            if let Some(compiled) = named.rpol.as_deref()
+                && let Some((_, term)) = compiled.peer_prepend_action()
+            {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "export policy chain member {:?} (term {:?}) uses `prepend as peer`: \
+                         on export this prepends the receiving peer's own ASN, which the \
+                         receiver rejects as an own-AS loop (RFC 4271 §9.1.2); \
+                         `prepend as peer` is import-only — use `prepend as self` or \
+                         a literal ASN on export",
+                        named.name.as_deref().unwrap_or("<inline>"),
+                        term.unwrap_or("<unnamed>"),
+                    ),
+                });
+            }
+        }
+    }
     Ok(Some(PolicyChain::from_named(policies)))
 }
 
@@ -340,6 +386,7 @@ fn resolve_rpol_chain_ref(
     reference: &str,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
     store: &mut rustbgpd_policy::sets::SetStore,
+    local_asn: u32,
 ) -> Result<rustbgpd_policy::NamedPolicy, ConfigError> {
     let (base, args) = rustbgpd_policy::rpol::parse_call_form(reference).map_err(|detail| {
         ConfigError::InvalidPolicyEntry {
@@ -362,10 +409,14 @@ fn resolve_rpol_chain_ref(
             ),
         });
     }
-    let compiled = entry
+    let mut compiled = entry
         .file
         .compile_policy(base, &args, store)
         .expect("registry entry names a policy defined in its file");
+    // Attach-time stamp backing `prepend as self` (LAN-296): the
+    // daemon's `[global] asn`. Deterministic from config, so reloads
+    // of an unchanged file still diff as no-ops.
+    compiled.local_asn = Some(local_asn);
     Ok(rustbgpd_policy::NamedPolicy::from_rpol(
         reference.to_string(),
         std::sync::Arc::new(compiled),
@@ -507,6 +558,9 @@ fn parse_modifications(
         extended_communities_remove: remove.extended,
         large_communities_add: add.large,
         large_communities_remove: remove.large,
+        // Computed prepend operands (LAN-296) are an `.rpol`-only
+        // surface; the TOML frontend stays literal-only.
+        as_path_prepend_computed: None,
         as_path_prepend,
     })
 }

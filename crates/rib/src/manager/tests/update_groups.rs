@@ -594,6 +594,90 @@ async fn family_predicate_export_chain_still_groups() {
     handle.await.unwrap();
 }
 
+/// LAN-296: computed prepend operands and update-group eligibility —
+/// the second level of the proof (`requires_peer_context` at the chain
+/// level is pinned in `crates/policy/src/rpol/tests.rs`). A
+/// `prepend as peer` export chain reads peer identity, so its peers
+/// fall back to `policy_peer_context` (defense in depth: config
+/// attachment rejects such chains on export outright — this pins the
+/// fingerprint for chains installed through other paths). `prepend as
+/// self` / `prepend as origin` are chain/route-context-only and must
+/// still group.
+#[tokio::test]
+async fn computed_prepend_export_chains_group_unless_peer_dependent() {
+    use std::sync::Arc;
+
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    fn rpol_chain(source: &str, name: &str) -> PolicyChain {
+        let mut store = SetStore::new();
+        let compiled = RpolFile::parse(source)
+            .expect("clean rpol")
+            .compile_policy(name, &[], &mut store)
+            .expect("policy exists");
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            name.to_string(),
+            Arc::new(compiled),
+        )])
+    }
+
+    let self_pad = "policy self-pad { term t { prepend as self 3; accept } }";
+    let origin_pad = "policy origin-pad { term t { prepend as origin 2; accept } }";
+    let peer_pad = "policy peer-pad { term t { prepend as peer 3; accept } }";
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // Two peers sharing a `prepend as self` chain and two sharing a
+    // `prepend as origin` chain: both pairs must group.
+    let self_a = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
+    let self_b = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 2));
+    for peer in [self_a, self_b] {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(rpol_chain(self_pad, "self-pad"));
+        let _rx = peer_up(&tx, spec).await;
+    }
+    let origin_a = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 3));
+    let origin_b = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 4));
+    for peer in [origin_a, origin_b] {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(rpol_chain(origin_pad, "origin-pad"));
+        let _rx = peer_up(&tx, spec).await;
+    }
+    // A `prepend as peer` chain disqualifies its peer from grouping.
+    let peer_dep = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 5));
+    let mut spec = PeerUpSpec::ibgp(peer_dep);
+    spec.export_policy = Some(rpol_chain(peer_pad, "peer-pad"));
+    let _rx = peer_up(&tx, spec).await;
+
+    let self_group = query_update_group(&tx, self_a).await;
+    assert!(
+        self_group.starts_with("group:"),
+        "`prepend as self` must not disqualify grouping: {self_group}"
+    );
+    assert_eq!(query_update_group(&tx, self_b).await, self_group);
+
+    let origin_group = query_update_group(&tx, origin_a).await;
+    assert!(
+        origin_group.starts_with("group:"),
+        "`prepend as origin` must not disqualify grouping: {origin_group}"
+    );
+    assert_eq!(query_update_group(&tx, origin_b).await, origin_group);
+
+    assert_eq!(
+        query_update_group(&tx, peer_dep).await,
+        "policy_peer_context",
+        "`prepend as peer` must register as peer-dependent"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// LAN-210: a grouped member's export-policy counters must not drift
 /// from an otherwise-identical ungrouped peer's across a dirty resync.
 /// Before the fix the dirty-resync distribution pass replayed the group

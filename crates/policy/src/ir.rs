@@ -343,6 +343,19 @@ pub struct CompiledChain {
     pub community_set_names: Vec<Option<String>>,
     /// Source names of `asn_sets` entries (same indexing).
     pub asn_set_names: Vec<Option<String>>,
+    /// The local speaker's ASN, stamped at attach time by the config
+    /// chain resolver — the value `.rpol` `prepend as self` resolves
+    /// to (LAN-296, see [`crate::engine::PrependAs`]). Carried on the
+    /// chain rather than the per-route context because it is
+    /// config-constant (`[global] asn`) and rides with the policy into
+    /// every evaluation path (live distribution, import, explain
+    /// dry-runs) without per-site plumbing. `None` for chains compiled
+    /// outside a daemon config (standalone `rbgp policy check`, unit
+    /// tests) unless the harness provides one — `prepend as self` then
+    /// fails closed. Participates in `PartialEq` like everything else:
+    /// deterministic from config, so unchanged reloads still diff as
+    /// no-ops.
+    pub local_asn: Option<u32>,
 }
 
 impl CompiledChain {
@@ -358,6 +371,7 @@ impl CompiledChain {
             prefix_set_names: Vec::new(),
             community_set_names: Vec::new(),
             asn_set_names: Vec::new(),
+            local_asn: None,
         }
     }
 
@@ -395,12 +409,15 @@ impl CompiledChain {
     /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
     /// ASN, or peer-group matching — a strict-next-hop
     /// [`MatchExpr::NextHopEqPeer`] / [`MatchExpr::NextHopNePeer`]
-    /// node, or a [`MatchExpr::PeerAsInSet`] membership probe).
+    /// node, a [`MatchExpr::PeerAsInSet`] membership probe, or a
+    /// peer-derived `prepend as peer` action, LAN-296 — the last is
+    /// defense in depth: export attachment rejects it outright).
     /// Content-equal chains with
     /// such a guard can still yield peer-different verdicts, so
     /// update-group fingerprinting must not group peers that share one.
-    /// Import chains are evaluated per-session and are unaffected by
-    /// this flag.
+    /// `prepend as self` / `prepend as origin` are chain/route-context
+    /// only and deliberately do NOT count here. Import chains are
+    /// evaluated per-session and are unaffected by this flag.
     #[must_use]
     pub fn requires_peer_context(&self) -> bool {
         self.any_guard_node(&|expr| {
@@ -411,7 +428,34 @@ impl CompiledChain {
                     | MatchExpr::NextHopNePeer
                     | MatchExpr::PeerAsInSet(_)
             )
-        })
+        }) || self.peer_prepend_action().is_some()
+    }
+
+    /// The first `prepend as peer` action in the chain, as the owning
+    /// `(policy-name, term-name)` pair for diagnostics — `None` when
+    /// the chain carries no peer-derived prepend.
+    ///
+    /// Direction legality (LAN-296): such an action is import-only. On
+    /// an export chain it would prepend the *receiving* peer's own ASN
+    /// — dropped by the receiver as an own-AS loop (RFC 4271 §9.1.2) —
+    /// so the config chain resolver rejects export attachment using
+    /// this probe (see [`crate::engine::PrependAs`] for the decision
+    /// note and the FRR/BIRD comparison).
+    #[must_use]
+    pub fn peer_prepend_action(&self) -> Option<(Option<&str>, Option<&str>)> {
+        use crate::engine::PrependAs;
+        for policy in &self.policies {
+            for term in &policy.terms {
+                let mods = match &term.action {
+                    TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
+                    TermAction::Deny => continue,
+                };
+                if matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _))) {
+                    return Some((policy.name.as_deref(), term.name.as_deref()));
+                }
+            }
+        }
+        None
     }
 
     /// Does any guard node across all policies satisfy `pred`?

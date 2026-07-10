@@ -1600,3 +1600,302 @@ fn family_fixture_rejects_unknown_member() {
     assert_eq!(diags.len(), 1, "{rendered}");
     assert!(rendered.contains("did you mean `evpn`?"), "{rendered}");
 }
+
+// ── computed prepend operands (LAN-296) ────────────────────────────
+
+/// A context with just the fields the prepend operands read.
+fn prepend_ctx(peer_asn: Option<u32>, origin_asn: Option<u32>) -> RouteContext<'static> {
+    RouteContext {
+        origin_asn,
+        peer_asn,
+        ..route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound)
+    }
+}
+
+/// The mods a single-policy chain's first term action carries.
+fn first_term_mods(chain: &crate::ir::CompiledChain) -> &RouteModifications {
+    match &chain.policies[0].terms[0].action {
+        TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
+        TermAction::Deny => panic!("expected a modifying term"),
+    }
+}
+
+#[test]
+fn computed_prepend_operands_lower_to_computed_slot() {
+    use crate::engine::PrependAs;
+    for (source_operand, expected) in [
+        ("self", PrependAs::LocalAs),
+        ("peer", PrependAs::PeerAs),
+        ("origin", PrependAs::OriginAs),
+    ] {
+        let chain = compile_ok(&format!(
+            "policy p {{ term t {{ prepend as {source_operand} 3; accept }} }}"
+        ));
+        let mods = first_term_mods(&chain);
+        assert_eq!(
+            mods.as_path_prepend_computed,
+            Some((expected, 3)),
+            "operand {source_operand}"
+        );
+        assert_eq!(mods.as_path_prepend, None, "operand {source_operand}");
+    }
+}
+
+/// Zero source-compatibility break: the literal and parameter forms
+/// still lower to the literal slot, and a policy parameter named
+/// `origin` keeps its parameter meaning (grammar-evolution rule).
+#[test]
+fn fixed_prepend_forms_unchanged() {
+    let chain = compile_ok("policy p { term t { prepend as 65001 3; accept } }");
+    let mods = first_term_mods(&chain);
+    assert_eq!(mods.as_path_prepend, Some((65001, 3)));
+    assert_eq!(mods.as_path_prepend_computed, None);
+
+    let mut store = SetStore::new();
+    let set =
+        super::RpolFile::parse("policy p(origin: u32) { term t { prepend as origin 2; accept } }")
+            .expect("compiles");
+    let chain = set
+        .compile_policy("p", &[64999], &mut store)
+        .expect("policy exists");
+    let mods = first_term_mods(&chain);
+    assert_eq!(
+        mods.as_path_prepend,
+        Some((64999, 2)),
+        "a parameter named `origin` must stay a parameter"
+    );
+    assert_eq!(mods.as_path_prepend_computed, None);
+}
+
+#[test]
+fn prepend_peer_resolves_to_peer_asn_on_import_eval() {
+    let chain = compile_ok("policy p { term t { prepend as peer 3; accept } }");
+    let result = chain.evaluate(&prepend_ctx(Some(65010), None));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((65010, 3)));
+    assert_eq!(result.modifications.as_path_prepend_computed, None);
+}
+
+#[test]
+fn prepend_origin_resolves_to_origin_asn() {
+    let chain = compile_ok("policy p { term t { prepend as origin 2; accept } }");
+    let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
+    assert_eq!(result.modifications.as_path_prepend_computed, None);
+}
+
+#[test]
+fn prepend_self_resolves_from_chain_local_asn() {
+    let mut chain = compile_ok("policy p { term t { prepend as self 4; accept } }");
+    chain.local_asn = Some(64512);
+    let result = chain.evaluate(&prepend_ctx(None, None));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((64512, 4)));
+    assert_eq!(result.modifications.as_path_prepend_computed, None);
+}
+
+/// Missing context fails the route CLOSED (uniform Deny) — and never
+/// prepends ASN 0. Covers all three operands, plus a zero context
+/// value (RFC 7607: AS 0 must never reach the wire).
+#[test]
+fn computed_prepend_missing_context_fails_closed() {
+    let cases: [(&str, RouteContext<'static>); 4] = [
+        ("peer", prepend_ctx(None, Some(64500))),
+        ("origin", prepend_ctx(Some(65010), None)),
+        ("self", prepend_ctx(Some(65010), Some(64500))),
+        // Zero peer ASN counts as unknown.
+        ("peer", prepend_ctx(Some(0), Some(64500))),
+    ];
+    for (operand, ctx) in cases {
+        let chain = compile_ok(&format!(
+            "policy p {{ term t {{ prepend as {operand} 3; accept }} }}"
+        ));
+        // No local_asn stamped: the `self` case is the missing case.
+        let result = chain.evaluate(&ctx);
+        assert_eq!(result.action, PolicyAction::Deny, "operand {operand}");
+        assert!(
+            result.modifications.is_empty(),
+            "fail closed discards staged modifications ({operand})"
+        );
+    }
+}
+
+/// A Continue term's failing computed operand also denies (the action
+/// executes when the term matches, even without a verdict).
+#[test]
+fn computed_prepend_failure_in_continue_term_denies() {
+    let chain = compile_ok(
+        "policy p {
+            term tag { prepend as origin 1 }
+            term rest { accept }
+        }",
+    );
+    let result = chain.evaluate(&prepend_ctx(None, None));
+    assert_eq!(result.action, PolicyAction::Deny);
+    // With an origin present the same chain permits.
+    let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((64500, 1)));
+}
+
+/// `prepend as peer` is peer-dependent for update-group
+/// fingerprinting; `self` and `origin` are not (they must never
+/// disqualify grouping).
+#[test]
+fn computed_prepend_peer_context_flags() {
+    let peer_chain = compile_ok("policy p { term t { prepend as peer 3; accept } }");
+    assert!(peer_chain.requires_peer_context());
+    assert!(peer_chain.peer_prepend_action().is_some());
+
+    for operand in ["self", "origin"] {
+        let chain = compile_ok(&format!(
+            "policy p {{ term t {{ prepend as {operand} 3; accept }} }}"
+        ));
+        assert!(!chain.requires_peer_context(), "operand {operand}");
+        assert!(chain.peer_prepend_action().is_none(), "operand {operand}");
+    }
+    // Literal prepends never flag either.
+    let literal = compile_ok("policy p { term t { prepend as 65001 3; accept } }");
+    assert!(!literal.requires_peer_context());
+}
+
+/// Literal and computed prepends share one merge slot: the later term
+/// wins regardless of form.
+#[test]
+fn computed_and_literal_prepends_share_the_merge_slot() {
+    let chain = compile_ok(
+        "policy p {
+            term tag { prepend as origin 2 }
+            term decide { prepend as 65001 1; accept }
+        }",
+    );
+    let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.as_path_prepend, Some((65001, 1)));
+
+    let chain = compile_ok(
+        "policy p {
+            term tag { prepend as 65001 1 }
+            term decide { prepend as origin 2; accept }
+        }",
+    );
+    let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
+    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
+}
+
+/// `evaluate_recording_hits` (the `rbgp policy test` backend) applies
+/// the same resolution and fail-closed rules as the live walk.
+#[test]
+fn recording_hits_resolves_and_fails_closed_like_live_eval() {
+    let chain = compile_ok("policy p { term t { prepend as peer 3; accept } }");
+    for ctx in [prepend_ctx(Some(65010), None), prepend_ctx(None, None)] {
+        let mut hits = chain.zero_term_hits();
+        let recorded = chain.evaluate_recording_hits(&ctx, &mut hits);
+        let live = chain.evaluate(&ctx);
+        assert_eq!(recorded, live);
+        assert_eq!(hits, vec![vec![1]], "matched term still counts");
+    }
+}
+
+/// Explain traces render the source-level operand — and agree with
+/// the live verdict, including the fail-closed case.
+#[test]
+fn computed_prepend_explain_renders_operand_and_agrees() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let mut compiled = compile_ok("policy p { term t { prepend as peer 3; accept } }");
+    compiled.local_asn = Some(64512);
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+
+    // Resolvable: permit, with the operand rendered in both the static
+    // term line and the resolved before→after modification line.
+    let ctx = prepend_ctx(Some(65010), None);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let step = &trace.steps[0];
+    assert!(
+        step.term_traces
+            .iter()
+            .any(|line| line.contains("prepend as peer 3")),
+        "term trace renders the source operand: {:?}",
+        step.term_traces
+    );
+    assert!(
+        step.modifications
+            .iter()
+            .any(|line| line.contains("as_path prepend peer=65010 x3")),
+        "modifications render operand + resolved value: {:?}",
+        step.modifications
+    );
+
+    // Unresolvable: fail-closed deny, rendered in the trace and in
+    // agreement with the live walk.
+    let ctx = prepend_ctx(None, None);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    let step = &trace.steps[0];
+    assert!(
+        step.term_traces
+            .iter()
+            .any(|line| line.contains("prepend as peer unresolvable")
+                && line.contains("fail closed")),
+        "failure is explainable: {:?}",
+        step.term_traces
+    );
+    assert!(step.modifications.is_empty(), "a deny contributes no mods");
+}
+
+/// In-language `test` fixtures cover all three operands: `peer { asn }`
+/// backs `peer`, the as-path fixture backs `origin`, and the new
+/// `peer { local-as }` field backs `self`.
+#[test]
+fn in_language_tests_cover_computed_operands() {
+    let source = r#"
+policy peer-pad { term t { prepend as peer 3; accept } }
+policy origin-pad { term t { prepend as origin 2; accept } }
+policy self-pad { term t { prepend as self 4; accept } }
+
+test peer-operand {
+    route { prefix 10.0.0.0/24 }
+    peer { asn 65010 }
+    expect peer-pad == accept with prepend as 65010 3
+}
+
+test origin-operand {
+    route { prefix 10.0.0.0/24; as-path "65010 64500" }
+    expect origin-pad == accept with prepend as 64500 2
+}
+
+test self-operand {
+    route { prefix 10.0.0.0/24 }
+    peer { asn 65010; local-as 64512 }
+    expect self-pad == accept with prepend as 64512 4
+}
+
+test missing-origin-fails-closed {
+    route { prefix 10.0.0.0/24; as-path "{64500 64501}" }
+    expect origin-pad == reject
+}
+
+test missing-peer-fails-closed {
+    route { prefix 10.0.0.0/24 }
+    expect peer-pad == reject
+}
+
+test missing-local-as-fails-closed {
+    route { prefix 10.0.0.0/24 }
+    peer { asn 65010 }
+    expect self-pad == reject
+}
+"#;
+    let report = run_rpol_tests(source).expect("compiles");
+    assert_eq!(report.total, 6);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
