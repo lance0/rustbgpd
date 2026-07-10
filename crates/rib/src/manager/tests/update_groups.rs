@@ -688,10 +688,14 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     .unwrap();
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
     assert_eq!(query_update_group(&tx, peer).await, "policy_peer_context");
+    // Two entries: the carried tombstone (p1) plus the dirty leaver's
+    // baseline key (p2) — a dirty mover's baseline rides the residue as
+    // (over-)withdraw candidates instead of seeding the Adj-RIB-Out
+    // (its snapshot is intended state, not wire state — LAN-346).
     assert_metric(
         residue(),
-        1.0,
-        "the extra withdraw carried across the move must stay in the residue gauge",
+        2.0,
+        "the extra withdraws carried across the move must stay in the residue gauge",
     );
 
     // Free the channel and let the resync timer drain the residue.

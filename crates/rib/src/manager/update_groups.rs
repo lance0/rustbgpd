@@ -1836,6 +1836,31 @@ impl RibManager {
                 self.join_group(gid, peer);
             }
             match (baseline, new_gid) {
+                // A member leaving a group DIRTY has a baseline that is
+                // INTENDED state, not wire state: the group table
+                // advances before the send that then fails, so the
+                // snapshot can hold announces the member never received.
+                // Using it for equality suppression would silently drop
+                // those announces from the resync — an under-advertise
+                // that nothing later heals (LAN-346). Keep only the
+                // baseline's withdraw duty: ride its keys (plus any
+                // retained baseline from an earlier unfinished regroup)
+                // as extra (over-)withdraw residue — the resync's
+                // retention guards filter them exactly — and let the
+                // dirty resync take the suppression-free arm
+                // (over-announce, the plain-dirty safe direction;
+                // announces are idempotent). Applies to both grouped and
+                // per-peer destinations: neither gets a baseline /
+                // seeded Adj-RIB-Out to suppress against.
+                (Some(base), _) if prev_gid.is_some() && self.dirty_peers.contains(&peer) => {
+                    let extras = self.pending_extra_withdraws.entry(peer).or_default();
+                    if let Some(prev) = self.pending_regroup_baseline.remove(&peer) {
+                        extras.unicast.extend(prev.unicast.into_keys());
+                        extras.vpn.extend(prev.vpn.into_keys());
+                    }
+                    extras.unicast.extend(base.unicast.into_keys());
+                    extras.vpn.extend(base.vpn.into_keys());
+                }
                 (Some(mut base), Some(_)) => {
                     // A grouped member keeps no per-family record of its
                     // unicast/VPN wire state in `adj_ribs_out` (join clears
