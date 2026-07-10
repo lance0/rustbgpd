@@ -15,6 +15,10 @@ categories.workspace = true
 description = "CLI tool for rustbgpd — thin gRPC wrapper for daemon management"
 readme = "README.md"
 
+[lib]
+name = "rustbgpctl"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rbgp"
 path = "src/main.rs"

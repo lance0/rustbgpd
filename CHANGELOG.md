@@ -18,8 +18,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   analyzer, exercise it and adjacent long-run paths. Recorded O(1) per peer at
   every Adj-RIB-In intern mutation site (GC, injection/withdraw, and announce
   growth) so the series tracks the live intern table under churn.
-
-### Changed
+- **Semantic RIB diff engine** (`rustbgpctl::ribdiff`) — canonical
+  route-record model and comparison core for canarying rustbgpd beside an
+  incumbent route server. Compares a multiset of semantic paths per
+  (peer, family, NLRI) — RFC 7911 path IDs are diagnostic only — and
+  classifies divergence as incumbent-only, rustbgpd-only,
+  attribute-changed, or multiplicity-changed with before/after attribute
+  deltas. Reports carry a versioned JSON schema (`rbgp-ribdiff/1`) and the
+  normalization profile (AS_PATH segment order/kind significant, sorted
+  community lists, absence-vs-zero MED/LOCAL_PREF, unknown attributes
+  compared byte-exact). Bounded ingestion (route count, paths per NLRI,
+  attributes, record and total bytes); incomplete, truncated, or
+  mixed-generation captures are never reported in sync. Ingestion
+  adapters (live gRPC, MRT, BMP) and the CLI surface land separately.
 
 - **Release publication is now fail-closed.** The binary-release and
   container-image workflows refuse to publish unless the pushed tag
