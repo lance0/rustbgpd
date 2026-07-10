@@ -687,6 +687,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the per-peer path also folds its retained regroup baseline into
   the seeded Adj-RIB-Out (wire values win), matching the union rule
   already used for grouped→grouped moves. (LAN-344)
+- **Announces missed while dirty are no longer equality-suppressed
+  against the regroup baseline.** A grouped member's regroup baseline
+  is a snapshot of the group table — intended state, not wire state:
+  the table advances before the send that then fails, so a member that
+  went dirty and then regrouped had its missed announces already in
+  the baseline, the one-shot resync diff suppressed them as
+  "unchanged", and the peer was left permanently missing the routes
+  (an under-advertise invisible to the residue gauge). The same
+  suppression hit the per-peer destination through the Adj-RIB-Out
+  seeded from that baseline on a grouped→ungrouped move. A member that
+  is dirty when it regroups now takes the suppression-free dirty
+  resync (full-table over-announce — announces are idempotent, the
+  same safe direction as the existing plain-dirty arm) with the
+  baseline keys riding its extra-(over-)withdraw residue, so the
+  baseline's withdraw duty — including the retained-baseline union
+  across a second regroup — is preserved exactly and nothing is
+  suppressed against unconfirmed state. Clean members' regroup diffs
+  are untouched and still suppress redundant announces. (LAN-346)
 - **`TestPolicy` no longer panics on a candidate source that probes a
   dataset.** A dry-run source declaring and referencing a `dataset`
   compiles per the language (LAN-305) but has no file bindings inside

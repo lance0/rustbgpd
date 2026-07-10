@@ -1203,6 +1203,165 @@ async fn oracle_second_regroup_while_dirty_unions_baseline_no_leak() {
     );
 }
 
+/// Under-advertise heal (LAN-346), grouped→grouped: a member misses an
+/// ANNOUNCE while dirty (the group table gains p3 but the send fails),
+/// then regroups. The regroup baseline is a snapshot of the group table
+/// — INTENDED state, which already contains p3 — so an equality diff
+/// against it suppresses the p3 announce the member never received and
+/// the route goes permanently missing. The successful resync after the
+/// regroup must put p3 on the member's wire.
+#[tokio::test]
+async fn oracle_announce_missed_while_dirty_heals_across_regroup() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a jammed send fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Sync C to wire {p1}.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.drain_one(C).await;
+        // Jam: p2 lands in the cap-1 channel and is NOT drained.
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        // p3 announce fails for C → dirty; the group table holds p3 but
+        // C's wire never saw it. The regroup baseline snapshot below
+        // will contain p3 anyway (intended state, not wire state).
+        o.routes(A, vec![ibgp_route(pfx(3, 0), A, 100, vec![])], vec![])
+            .await;
+        // Regroup C while dirty (grouped→grouped).
+        o.replace_policy(C, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)),
+        "the announce missed while dirty must not be equality-suppressed \
+         against the regroup baseline — p3 must reach the wire"
+    );
+}
+
+/// Under-advertise heal (LAN-346), grouped→ungrouped: same missed
+/// announce, but the dirty member's membership flips to the per-peer
+/// path. The baseline seeded into the Adj-RIB-Out contains the never-
+/// sent p3, so the per-peer equality diff suppresses it the same way.
+/// The per-peer resync must put p3 on the wire.
+#[tokio::test]
+async fn oracle_announce_missed_while_dirty_heals_across_move_to_per_peer_path() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a jammed send fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Sync C to wire {p1}.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.drain_one(C).await;
+        // Jam: p2 lands in the cap-1 channel and is NOT drained.
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        // p3 announce fails for C → dirty; C's wire never saw p3.
+        o.routes(A, vec![ibgp_route(pfx(3, 0), A, 100, vec![])], vec![])
+            .await;
+        // C's chain becomes peer-context-dependent (verdicts unchanged):
+        // a grouped→per-peer move while dirty.
+        o.replace_policy(C, Some(peer_context_permit_chain())).await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)),
+        "the announce missed while dirty must not be equality-suppressed \
+         against the seeded Adj-RIB-Out — p3 must reach the wire"
+    );
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0))
+            && c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "routes already delivered must stay advertised"
+    );
+}
+
+/// Suppression pin: a CLEAN member's regroup one-shot diff must keep
+/// equality-suppressing unchanged routes — the dirty-member announce
+/// heal must not regress the clean path into a full-table re-announce.
+#[tokio::test]
+async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(C, false, true, None, 64).await;
+
+        // C in sync on wire {p1, p2} — never dirty (ample capacity).
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+
+        // Clean regroup: the one-shot diff must assemble empty.
+        o.replace_policy(C, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_msgs = &grouped[&IpAddr::V4(C)];
+    for prefix in [pfx(1, 0), pfx(2, 0)] {
+        let announces = c_msgs
+            .iter()
+            .flat_map(|msg| &msg.announce)
+            .filter(|(p, _, _, _, _, _)| *p == Prefix::V4(prefix))
+            .count();
+        assert_eq!(
+            announces, 1,
+            "clean member must not re-announce unchanged {prefix} across a regroup"
+        );
+    }
+    assert!(
+        c_msgs.iter().all(|msg| msg.withdraw.is_empty()),
+        "clean regroup with no verdict change must not withdraw anything"
+    );
+}
+
 /// A permit-everything chain carrying a peer-context guard: the
 /// neighbor-set deny matches an ASN no test peer uses, so verdicts are
 /// unchanged, but `requires_peer_context` moves the peer off the
