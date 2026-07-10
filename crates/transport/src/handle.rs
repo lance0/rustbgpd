@@ -325,6 +325,31 @@ pub enum PeerCommand {
         /// session's current import-policy generation.
         reply: oneshot::Sender<ImportExplainReply>,
     },
+    /// Snapshot this session's live import-chain per-term hit counters
+    /// (ADR-0096 Decision 3.3, the import-side read surface). Read-only
+    /// — must not mutate session state or counters. `None` when no
+    /// import chain is installed (permit-all sessions have nothing to
+    /// count).
+    QueryImportPolicyTermHits {
+        /// Reply channel.
+        reply: oneshot::Sender<Option<ImportPolicyTermHits>>,
+    },
+}
+
+/// Per-term hit-counter snapshot for one session's installed import
+/// chain (`PeerCommand::QueryImportPolicyTermHits`).
+#[derive(Debug, Clone)]
+pub struct ImportPolicyTermHits {
+    /// Session-local import-policy generation (ADR-0073): starts at 0
+    /// at session-task construction and advances on every chain
+    /// install — including a content-equal reinstall — so counters
+    /// that reset to zero read as "new chain instance", not continuous
+    /// history.
+    pub generation: u64,
+    /// Routes evaluated through the chain since install.
+    pub evals: u64,
+    /// Per-term labeled hit counts, in chain walk order.
+    pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
 /// Outcome of a bounded session-state query
@@ -1161,6 +1186,29 @@ impl PeerHandle {
         })
         .await
         .ok()
+        .flatten()
+    }
+
+    /// Bounded snapshot of this session's import-chain per-term hit
+    /// counters. `None` folds together "no import chain installed",
+    /// "deadline expired", and "session task gone" — the stats surface
+    /// simply omits the peer in all three cases.
+    pub async fn query_import_policy_term_hits_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Option<ImportPolicyTermHits> {
+        let commands = self.commands.clone();
+        tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::QueryImportPolicyTermHits { reply: reply_tx })
+                .await
+                .ok()?;
+            reply_rx.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
         .flatten()
     }
 

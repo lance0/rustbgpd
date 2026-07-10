@@ -392,6 +392,12 @@ struct JsonPolicyStats {
     peer_address: String,
     direction: String,
     routes_evaluated: u64,
+    /// Install identity of the chain instance the counters belong to.
+    /// `None` for export chains (install generation not tracked yet,
+    /// LAN-311); import chains always report it, so counters that
+    /// reset to zero read as "new chain instance", not continuous
+    /// history.
+    policy_generation: Option<u64>,
     terms: Vec<JsonPolicyTermStat>,
 }
 
@@ -404,8 +410,8 @@ struct JsonPolicyTermStat {
     hits: u64,
 }
 
-/// `rbgp policy stats [--peer ADDR] [--direction export]` — live
-/// per-term hit counters of the installed chains (ADR-0096).
+/// `rbgp policy stats [--peer ADDR] [--direction import|export|both]`
+/// — live per-term hit counters of the installed chains (ADR-0096).
 pub async fn stats(
     connection: Connection,
     peer: Option<&str>,
@@ -430,6 +436,7 @@ pub async fn stats(
                 peer_address: chain.peer_address.clone(),
                 direction: chain.direction.clone(),
                 routes_evaluated: chain.routes_evaluated,
+                policy_generation: (chain.direction == "import").then_some(chain.policy_generation),
                 terms: chain
                     .terms
                     .iter()
@@ -452,8 +459,16 @@ pub async fn stats(
         return Ok(());
     }
     for chain in &resp.chains {
+        // Import chains carry an install generation (bumps on every
+        // chain install, content-equal reinstalls included); export
+        // chains do not track one yet (LAN-311).
+        let generation = if chain.direction == "import" {
+            format!(" (install generation {})", chain.policy_generation)
+        } else {
+            String::new()
+        };
         println!(
-            "{} {} chain — {} routes evaluated since install",
+            "{} {} chain — {} routes evaluated since install{generation}",
             chain.peer_address, chain.direction, chain.routes_evaluated
         );
         println!("  {:<32} {:<24} HITS", "POLICY", "TERM");
@@ -1395,6 +1410,20 @@ mod tests {
             .unwrap();
         let text_conn = connect(&server.addr, None).await.unwrap();
         stats(text_conn, None, "export", false).await.unwrap();
+    }
+
+    /// The direction flag passes through to the RPC: the mock server
+    /// answers "import" and "both" with direction-tagged chains
+    /// (import ones carrying an install generation), and both render.
+    #[tokio::test]
+    async fn stats_renders_import_and_both_directions() {
+        let server = spawn_mock_server(None).await;
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        stats(json_conn, Some("10.0.0.2"), "import", true)
+            .await
+            .unwrap();
+        let text_conn = connect(&server.addr, None).await.unwrap();
+        stats(text_conn, None, "both", false).await.unwrap();
     }
 
     #[test]

@@ -1514,20 +1514,16 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use rustbgpd_rib::RibUpdate;
 
         let req = request.into_inner();
-        match req.direction.as_str() {
-            "" | "export" => {}
-            "import" => {
-                return Err(Status::unimplemented(
-                    "import-side hit counters have no read surface yet; \
-                     counters accumulate and the query arrives in a later slice",
-                ));
-            }
+        let (want_export, want_import) = match req.direction.as_str() {
+            "" | "export" => (true, false),
+            "import" => (false, true),
+            "both" => (true, true),
             other => {
                 return Err(Status::invalid_argument(format!(
-                    "direction must be \"import\" or \"export\", got {other:?}"
+                    "direction must be \"import\", \"export\", or \"both\", got {other:?}"
                 )));
             }
-        }
+        };
         let peer: Option<IpAddr> = if req.peer_address.is_empty() {
             None
         } else {
@@ -1535,44 +1531,77 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 Status::invalid_argument(format!("invalid peer address {:?}", req.peer_address))
             })?)
         };
-        let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
-            Status::failed_precondition("policy stats runtime unavailable on this listener")
-        })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        rib_tx
-            .send(RibUpdate::QueryExportPolicyTermHits {
-                peer,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        let chains = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
-
-        Ok(Response::new(proto::GetPolicyStatsResponse {
-            chains: chains
+        let term_stats = |terms: Vec<rustbgpd_policy::TermHitRow>| -> Vec<proto::PolicyTermStat> {
+            terms
                 .into_iter()
-                .map(|chain| proto::PolicyChainStats {
+                .map(|row| proto::PolicyTermStat {
+                    policy_index: u32::try_from(row.policy_index).unwrap_or(u32::MAX),
+                    policy: row.policy.unwrap_or_default(),
+                    term_index: u32::try_from(row.term_index).unwrap_or(u32::MAX),
+                    term: row.term.unwrap_or_default(),
+                    hits: row.hits,
+                })
+                .collect()
+        };
+
+        // "both" reports export chains first, then import chains, each
+        // block sorted by peer address (deterministic output).
+        let mut out = Vec::new();
+        if want_export {
+            let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
+                Status::failed_precondition("policy stats runtime unavailable on this listener")
+            })?;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            rib_tx
+                .send(RibUpdate::QueryExportPolicyTermHits {
+                    peer,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            let chains = reply_rx
+                .await
+                .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+            out.extend(chains.into_iter().map(|chain| {
+                proto::PolicyChainStats {
                     peer_address: chain
                         .peer
                         .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
                     direction: "export".to_string(),
                     routes_evaluated: chain.evals,
-                    terms: chain
-                        .terms
-                        .into_iter()
-                        .map(|row| proto::PolicyTermStat {
-                            policy_index: u32::try_from(row.policy_index).unwrap_or(u32::MAX),
-                            policy: row.policy.unwrap_or_default(),
-                            term_index: u32::try_from(row.term_index).unwrap_or(u32::MAX),
-                            term: row.term.unwrap_or_default(),
-                            hits: row.hits,
-                        })
-                        .collect(),
+                    terms: term_stats(chain.terms),
+                    // Export chains do not track an install generation yet
+                    // (LAN-311); 0 = untracked, per the proto contract.
+                    policy_generation: 0,
+                }
+            }));
+        }
+        if want_import {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.peer_mgr_tx
+                .send(PeerManagerCommand::QueryImportPolicyTermHits {
+                    peer,
+                    reply: reply_tx,
                 })
-                .collect(),
-        }))
+                .await
+                .map_err(|_| Status::internal("peer manager unavailable"))?;
+            let chains = reply_rx
+                .await
+                .map_err(|_| Status::internal("peer manager dropped reply"))?;
+            out.extend(
+                chains
+                    .into_iter()
+                    .map(|(peer, snapshot)| proto::PolicyChainStats {
+                        peer_address: peer.to_string(),
+                        direction: "import".to_string(),
+                        routes_evaluated: snapshot.evals,
+                        terms: term_stats(snapshot.terms),
+                        policy_generation: snapshot.generation,
+                    }),
+            );
+        }
+
+        Ok(Response::new(proto::GetPolicyStatsResponse { chains: out }))
     }
 }
 
@@ -2687,10 +2716,34 @@ policy customer-in(peer_lp: u32) {
 
     // -- GetPolicyStats (ADR-0096 Decision 3.3) ---------------------
 
-    /// Fake RIB backend answering the term-hits query with one
-    /// installed chain snapshot.
+    /// Fake RIB + peer-manager backends answering the term-hits
+    /// queries with one installed chain snapshot each.
     fn stats_service() -> PolicyService {
-        let (peer_tx, _peer_rx) = mpsc::channel(8);
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::QueryImportPolicyTermHits { peer, reply } => {
+                        assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
+                        let _ = reply.send(vec![(
+                            "10.0.0.2".parse().unwrap(),
+                            rustbgpd_transport::ImportPolicyTermHits {
+                                generation: 3,
+                                evals: 11,
+                                terms: vec![rustbgpd_policy::TermHitRow {
+                                    policy_index: 0,
+                                    policy: Some("customer-in(200)".to_string()),
+                                    term_index: 0,
+                                    term: Some("customer-routes".to_string()),
+                                    hits: 9,
+                                }],
+                            },
+                        )]);
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
         let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
         tokio::spawn(async move {
             while let Some(update) = rib_rx.recv().await {
@@ -2750,22 +2803,66 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.terms[1].term, "", "TOML statements are unnamed");
         assert_eq!(chain.terms[1].term_index, 1);
         assert_eq!(chain.terms[1].hits, 2);
+        assert_eq!(
+            chain.policy_generation, 0,
+            "export chains do not track an install generation yet (LAN-311)"
+        );
     }
 
+    /// The import direction reads the session-side counters through
+    /// the peer manager and reports the install generation, so a
+    /// replaced chain (counters back to zero, generation advanced) is
+    /// never presented as continuous history.
     #[tokio::test]
-    async fn get_policy_stats_rejects_import_and_bad_direction() {
+    async fn get_policy_stats_reports_import_chains_with_generation() {
         let svc = stats_service();
-        let err = PolicyServiceRpc::get_policy_stats(
+        let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
-                peer_address: String::new(),
+                peer_address: "10.0.0.2".to_string(),
                 direction: "import".to_string(),
             }),
         )
         .await
-        .expect_err("import read surface is a follow-up");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect("import stats query succeeds")
+        .into_inner();
+        assert_eq!(resp.chains.len(), 1);
+        let chain = &resp.chains[0];
+        assert_eq!(chain.peer_address, "10.0.0.2");
+        assert_eq!(chain.direction, "import");
+        assert_eq!(chain.routes_evaluated, 11);
+        assert_eq!(chain.policy_generation, 3);
+        assert_eq!(chain.terms.len(), 1);
+        assert_eq!(chain.terms[0].term, "customer-routes");
+        assert_eq!(chain.terms[0].hits, 9);
+    }
 
+    /// `direction = "both"` returns the export block first, then the
+    /// import block — one deterministic response, not two commands.
+    #[tokio::test]
+    async fn get_policy_stats_both_orders_export_then_import() {
+        let svc = stats_service();
+        let resp = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "10.0.0.2".to_string(),
+                direction: "both".to_string(),
+            }),
+        )
+        .await
+        .expect("both-directions stats query succeeds")
+        .into_inner();
+        let directions: Vec<&str> = resp
+            .chains
+            .iter()
+            .map(|chain| chain.direction.as_str())
+            .collect();
+        assert_eq!(directions, ["export", "import"]);
+    }
+
+    #[tokio::test]
+    async fn get_policy_stats_rejects_bad_direction() {
+        let svc = stats_service();
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {

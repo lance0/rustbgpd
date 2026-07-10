@@ -534,17 +534,22 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
 
 Where `policy test` counts hits over a one-shot dry run, `rbgp policy
 stats` reads the **live** counters of the chains actually installed on
-the daemon: every route evaluated on the export path bumps its matched
-terms' counters (relaxed atomics — no measurable eval cost), and the
-query snapshots them without resetting anything (`SensitiveRead`).
+the daemon: every route evaluated on the import or export path bumps
+its matched terms' counters (relaxed atomics — no measurable eval
+cost), and the query snapshots them without resetting anything
+(`SensitiveRead`).
 
 ```console
-$ rbgp policy stats --peer 10.0.0.2
+$ rbgp policy stats --peer 10.0.0.2 --direction both
 10.0.0.2 export chain — 1204 routes evaluated since install
   POLICY                           TERM                     HITS
   customer-in(200)                 rpki-guard               3
   customer-in(200)                 customer-routes          990
   bogon-filter                     bogons                   211
+10.0.0.2 import chain — 890 routes evaluated since install (install generation 2)
+  POLICY                           TERM                     HITS
+  customer-in(200)                 rpki-guard               1
+  customer-in(200)                 customer-routes          889
 ```
 
 - Counters read as **since chain install**: replacing a peer's chain
@@ -553,10 +558,14 @@ $ rbgp policy stats --peer 10.0.0.2
   RIB-side export counters (the chain instance survives).
 - TOML chain members count too; their unnamed statements report by
   `term_index` (`statement 0`, `statement 1`, ...).
-- V1 surfaces the **export** direction (the RIB manager owns those
-  chains). Import-side counters accumulate identically inside each
-  session but have no read surface yet; `--direction import` says so
-  explicitly rather than guessing.
+- `--direction` selects **export** (the default), **import**, or
+  **both**. Export chains are read from the RIB manager; import chains
+  are read from each live session task, so a peer without a live
+  session reports no import chain.
+- Import chains report their **install generation** (bumps on every
+  chain install, content-equal reinstalls included), so counters that
+  reset to zero read as a chain replacement, not continuous history.
+  Export chains do not track an install generation yet.
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.
 - `--json` emits the rows structurally.
