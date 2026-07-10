@@ -250,7 +250,7 @@ sample_row() {
     local prom rss intern_size established
     prom=$(prom_scrape)
     rss=$(container_rss_mb)
-    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_size)
+    intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
     if frr_established_seen; then
         established=1
     else

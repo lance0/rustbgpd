@@ -90,7 +90,7 @@ pub struct BgpMetrics {
     rib_prefixes: IntGaugeVec,
     rib_adj_out_prefixes: IntGaugeVec,
     rib_loc_prefixes: IntGaugeVec,
-    rib_attr_intern_size: IntGaugeVec,
+    rib_attr_intern_global_size: IntGauge,
     route_event_history_depth: IntGauge,
     route_event_history_capacity: IntGauge,
 
@@ -376,12 +376,9 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
-        let rib_attr_intern_size = IntGaugeVec::new(
-            Opts::new(
-                "bgp_rib_attr_intern_size",
-                "Unique interned attribute sets in a peer's Adj-RIB-In intern table (gc_intern_table reclaims unreferenced entries). Sum across peers for the daemon-wide total.",
-            ),
-            &["peer"],
+        let rib_attr_intern_global_size = IntGauge::new(
+            "bgp_rib_attr_intern_global_size",
+            "Unique attribute sets in the daemon-wide cross-peer intern table (LAN-336). Reclaim sweeps drop entries no route references; refreshed at every insert/remove batch seam.",
         )
         .expect("valid metric definition");
 
@@ -1367,7 +1364,7 @@ impl BgpMetrics {
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
         registry
-            .register(Box::new(rib_attr_intern_size.clone()))
+            .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(route_event_history_depth.clone()))
@@ -1715,7 +1712,7 @@ impl BgpMetrics {
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
-            rib_attr_intern_size,
+            rib_attr_intern_global_size,
             route_event_history_depth,
             route_event_history_capacity,
             orr_spf_runs_total,
@@ -1865,7 +1862,6 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.messages_sent, peer);
         Self::reap_peer_series_from_vec(&self.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
-        Self::reap_peer_series_from_vec(&self.rib_attr_intern_size, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
@@ -2071,14 +2067,12 @@ impl BgpMetrics {
             .set(count);
     }
 
-    /// Set the number of unique interned attribute sets in one peer's
-    /// Adj-RIB-In intern table. O(1); sum across peers for the daemon-wide
-    /// total. Monitors `gc_intern_table` reclamation and live growth under
-    /// injection / route churn.
-    pub fn set_rib_attr_intern_size(&self, peer: &str, count: i64) {
-        self.rib_attr_intern_size
-            .with_label_values(&[peer])
-            .set(count);
+    /// Set the number of unique attribute sets in the daemon-wide
+    /// cross-peer intern table (LAN-336). O(1). Refreshed at every
+    /// insert/remove batch seam so reclaim regressions surface as a
+    /// monotonic slope, never a stale flat line.
+    pub fn set_rib_attr_intern_global_size(&self, count: i64) {
+        self.rib_attr_intern_global_size.set(count);
     }
 
     /// Set the number of retained events in the bounded route-event
@@ -3876,38 +3870,12 @@ mod tests {
     }
 
     #[test]
-    fn rib_attr_intern_size_gauge_is_per_peer() {
+    fn rib_attr_intern_global_size_gauge_is_daemon_wide() {
         let m = BgpMetrics::new();
-        m.set_rib_attr_intern_size("10.0.0.1", 7);
-        m.set_rib_attr_intern_size("10.0.0.2", 3);
-
-        assert_eq!(
-            m.rib_attr_intern_size
-                .with_label_values(&["10.0.0.1"])
-                .get(),
-            7
-        );
-        assert_eq!(
-            m.rib_attr_intern_size
-                .with_label_values(&["10.0.0.2"])
-                .get(),
-            3
-        );
-
-        m.reap_peer_series("10.0.0.1");
-        assert!(
-            !series_for_peer(&m, "10.0.0.1")
-                .iter()
-                .any(|name| name == "bgp_rib_attr_intern_size"),
-            "reaped peer's intern-size series should be gone"
-        );
-        // The other peer's series survives.
-        assert_eq!(
-            m.rib_attr_intern_size
-                .with_label_values(&["10.0.0.2"])
-                .get(),
-            3
-        );
+        m.set_rib_attr_intern_global_size(7);
+        assert_eq!(m.rib_attr_intern_global_size.get(), 7);
+        m.set_rib_attr_intern_global_size(3);
+        assert_eq!(m.rib_attr_intern_global_size.get(), 3);
     }
 
     #[test]
@@ -4434,7 +4402,6 @@ mod tests {
         m.record_message_sent(peer, "keepalive");
         m.record_message_received(peer, "update");
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
-        m.set_rib_attr_intern_size(peer, 11);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
@@ -4491,8 +4458,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 34 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 35);
+        // 33 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 34);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -4502,7 +4469,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 35);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 34);
     }
 
     #[test]

@@ -44,11 +44,7 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
     }
 
@@ -71,10 +67,11 @@ impl RibManager {
                 .ribs
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
-            for route in evpn_announced {
+            for mut route in evpn_announced {
                 debug!(%peer, route_type = route.route_type(), "evpn announced");
                 let key = route.key();
                 affected.insert(key);
+                self.attr_intern.intern(&mut route.attributes);
                 any_replaced |= rib.insert_evpn(route);
                 // Enhanced Route Refresh: re-advertised key removes from
                 // the stale set so EoRR's sweep doesn't withdraw it.
@@ -93,13 +90,10 @@ impl RibManager {
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                if any_replaced {
-                    rib.gc_intern_table();
-                }
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            if any_replaced {
+                self.attr_intern.gc();
             }
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -109,6 +103,8 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let key = route.key();
+        let mut route = route;
+        self.attr_intern.intern(&mut route.attributes);
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -118,13 +114,10 @@ impl RibManager {
         let mut evpn_affected = HashSet::new();
         evpn_affected.insert(key);
         self.recompute_and_distribute_evpn(&evpn_affected);
-        if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-            if replaced {
-                rib.gc_intern_table();
-            }
-            self.metrics
-                .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
+        if replaced {
+            self.attr_intern.gc();
         }
+        self.sync_attr_intern_gauge();
         let _ = reply.send(Ok(()));
     }
 
@@ -142,11 +135,7 @@ impl RibManager {
             let mut evpn_affected = HashSet::new();
             evpn_affected.insert(key);
             self.recompute_and_distribute_evpn(&evpn_affected);
-            if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(

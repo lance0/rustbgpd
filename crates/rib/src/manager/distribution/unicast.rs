@@ -813,11 +813,7 @@ impl RibManager {
             let changed = self.recompute_best_after_withdraw(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
     }
 
@@ -853,6 +849,7 @@ impl RibManager {
                 affected.insert(route.prefix);
                 let prefix = route.prefix;
                 let path_id = route.path_id;
+                self.attr_intern.intern(&mut route.attributes);
                 any_replaced |= rib.insert(route);
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
@@ -891,13 +888,10 @@ impl RibManager {
             let changed = self.recompute_best_after_announce(peer, &affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                if any_replaced {
-                    rib.gc_intern_table();
-                }
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            if any_replaced {
+                self.attr_intern.gc();
             }
+            self.sync_attr_intern_gauge();
         }
     }
 
@@ -907,6 +901,8 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let prefix = route.prefix;
+        let mut route = route;
+        self.attr_intern.intern(&mut route.attributes);
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -922,13 +918,10 @@ impl RibManager {
         affected.insert(prefix);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
-        if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-            if replaced {
-                rib.gc_intern_table();
-            }
-            self.metrics
-                .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
+        if replaced {
+            self.attr_intern.gc();
         }
+        self.sync_attr_intern_gauge();
 
         let _ = reply.send(Ok(()));
     }
@@ -951,11 +944,7 @@ impl RibManager {
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
-            if let Some(rib) = self.ribs.get_mut(&LOCAL_PEER) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&LOCAL_PEER.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(

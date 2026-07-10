@@ -255,11 +255,7 @@ impl RibManager {
             if !rtc_affected.is_empty() {
                 self.recompute_rtc_keys(&rtc_affected);
             }
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
             if rtc_swept {
                 // The EoR sweep removed RT interest the peer did not
                 // re-advertise: shrink its membership so no-longer-covered
@@ -430,11 +426,7 @@ impl RibManager {
             if !rtc_affected.is_empty() {
                 self.recompute_rtc_keys(&rtc_affected);
             }
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
             if rtc_swept {
                 // The EoR sweep removed LLGR-stale RT interest the peer did
                 // not re-advertise: shrink its membership so no-longer-
@@ -1392,9 +1384,9 @@ impl RibManager {
                 || !labeled_affected.is_empty()
                 || !rtc_affected.is_empty()
             {
-                rib.gc_intern_table();
+                self.attr_intern.gc();
                 self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                    .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
@@ -1494,45 +1486,29 @@ impl RibManager {
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
             // Reclaim attribute sets stranded by the stale-BGP-LS withdrawals
-            // above. The earlier gc_intern_table() ran before this recompute,
+            // above. The earlier intern gc ran before this recompute,
             // while the Loc-RIB still held the selected-route Arc clones, so
             // those orphans survived (gc only frees a set whose sole remaining
             // holder is the intern table). Now that recompute_bgpls_keys has
             // dropped the Loc-RIB clones, gc reclaims them — mirroring the
             // receive path's recompute-then-gc ordering.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
             // Same gc-after-recompute ordering as BGP-LS above: the swept VPN
             // routes' interned attribute sets stay alive in the Loc-RIB clone
             // until recompute_vpn_keys drops it, so gc must run after it.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !labeled_affected.is_empty() {
             self.recompute_labeled_keys(&labeled_affected);
             // Same gc-after-recompute ordering as VPN above.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
             // The sweep just mutated this peer's RTC Adj-RIB-In — its RT
             // membership shrank, so VPN routes no longer covered must be
             // withdrawn from this peer's Adj-RIB-Out.

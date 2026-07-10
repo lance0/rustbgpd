@@ -170,9 +170,9 @@ impl RibManager {
             // the peer Adj-RIB-In shell alive for preserved families. Reclaim
             // attribute sets stranded by those removals now rather than
             // waiting for an unrelated future withdraw on this peer.
-            rib.gc_intern_table();
+            self.attr_intern.gc();
             self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
         }
 
         if let Some(rib) = self.ribs.get(&peer) {
@@ -232,44 +232,28 @@ impl RibManager {
         if !bgpls_affected.is_empty() {
             self.recompute_bgpls_keys(&bgpls_affected);
             // Reclaim attribute sets stranded by the BGP-LS withdrawals above.
-            // The gc_intern_table() earlier in this method ran before this
+            // The intern gc earlier in this method ran before this
             // recompute, while the Loc-RIB still held the selected-route Arc
             // clones, so those orphans survived (gc only frees a set whose sole
             // remaining holder is the intern table). Now that recompute_bgpls_keys
             // has dropped the Loc-RIB clones, gc reclaims them — mirroring the
             // receive path's recompute-then-gc ordering.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
             // Same recompute-then-gc ordering rationale as BGP-LS above.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !labeled_affected.is_empty() {
             self.recompute_labeled_keys(&labeled_affected);
             // Same recompute-then-gc ordering rationale as BGP-LS above.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
             // Same recompute-then-gc ordering rationale as BGP-LS above.
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
-            }
+            self.gc_attr_intern();
         }
         // No RTC membership rebuild here even when routes were deleted:
         // `clear_outbound_peer_state` below drops this peer's
@@ -502,9 +486,9 @@ impl RibManager {
                 // sweeps). A second GC below runs after Loc-RIB recompute
                 // drops selected-route clones that were still holding old
                 // Arcs alive here.
-                rib.gc_intern_table();
+                self.attr_intern.gc();
                 self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                    .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             }
             if !non_llgr_families.is_empty() {
                 info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
@@ -533,18 +517,15 @@ impl RibManager {
             if rtc_changed {
                 self.recompute_rtc_keys(&rtc_affected);
             }
-            if (!affected.is_empty()
+            if !affected.is_empty()
                 || !fs_affected.is_empty()
                 || !evpn_affected.is_empty()
                 || !bgpls_affected.is_empty()
                 || !vpn_affected.is_empty()
                 || !labeled_affected.is_empty()
-                || rtc_changed)
-                && let Some(rib) = self.ribs.get_mut(&peer)
+                || rtc_changed
             {
-                rib.gc_intern_table();
-                self.metrics
-                    .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                self.gc_attr_intern();
             }
             if rtc_changed {
                 // A non-LLGR purge (or a NO_LLGR removal during promotion)
@@ -619,9 +600,9 @@ impl RibManager {
             l3vpn_swept = rib.sweep_stale_vpn();
             labeled_swept = rib.sweep_stale_labeled();
             rtc_swept = rib.sweep_stale_rtc();
-            rib.gc_intern_table();
+            self.attr_intern.gc();
             self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
         }
@@ -672,18 +653,15 @@ impl RibManager {
                 rtc_swept.into_iter().collect();
             self.recompute_rtc_keys(&rtc_affected);
         }
-        if (had_swept
+        if had_swept
             || had_fs_swept
             || had_evpn_swept
             || had_bgpls_swept
             || had_l3vpn_swept
             || had_labeled_swept
-            || had_rtc_swept)
-            && let Some(rib) = self.ribs.get_mut(&peer)
+            || had_rtc_swept
         {
-            rib.gc_intern_table();
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.gc_attr_intern();
         }
         if had_rtc_swept {
             // Same obligation as the LLGR branch: a re-established peer whose
@@ -756,9 +734,9 @@ impl RibManager {
                 labeled_swept.extend(rib.sweep_llgr_stale_family_labeled(family));
                 rtc_swept.extend(rib.sweep_llgr_stale_family_rtc(family));
             }
-            rib.gc_intern_table();
+            self.attr_intern.gc();
             self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+                .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
             llgr_stale_remaining = rib.iter().filter(|r| r.is_llgr_stale).count()
@@ -817,18 +795,15 @@ impl RibManager {
                 rtc_swept.into_iter().collect();
             self.recompute_rtc_keys(&rtc_affected);
         }
-        if (had_swept
+        if had_swept
             || had_fs_swept
             || had_evpn_swept
             || had_bgpls_swept
             || had_l3vpn_swept
             || had_labeled_swept
-            || had_rtc_swept)
-            && let Some(rib) = self.ribs.get_mut(&peer)
+            || had_rtc_swept
         {
-            rib.gc_intern_table();
-            self.metrics
-                .set_rib_attr_intern_size(&peer.to_string(), gauge_val(rib.intern_len()));
+            self.gc_attr_intern();
         }
         if had_rtc_swept {
             // Same obligation as the GR-expiry sweeps: the down peer's

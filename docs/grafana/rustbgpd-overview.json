@@ -1049,8 +1049,8 @@
     {
       "id": 39,
       "type": "timeseries",
-      "title": "Attribute intern table size (per peer)",
-      "description": "bgp_rib_attr_intern_size: interned path-attribute entries per peer's Adj-RIB-In. Updated on growth and reclaim; a monotonically climbing series under steady churn indicates an intern leak.",
+      "title": "Attribute intern table size (global)",
+      "description": "Unique attribute sets in the daemon-wide cross-peer intern table (LAN-336). Flat under steady-state churn; a monotonic slope means reclaim is broken.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1090,8 +1090,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (peer) (bgp_rib_attr_intern_size{instance=~\"$instance\",peer=~\"$peer\"})",
-          "legendFormat": "{{peer}}",
+          "expr": "bgp_rib_attr_intern_global_size{instance=~\"$instance\"}",
+          "legendFormat": "interned attribute sets",
           "refId": "A"
         }
       ]

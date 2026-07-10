@@ -40,10 +40,10 @@ use crate::slab::RouteSlab;
 /// A secondary `prefix_index` maps each prefix to its path IDs,
 /// enabling O(candidates) `iter_prefix()` lookups instead of O(N) full scans.
 ///
-/// Path attribute interning: routes from the same peer that share identical
-/// attributes reuse a single `Arc<Vec<PathAttribute>>` allocation.  This is
-/// common in bulk advertisements where every prefix has the same ORIGIN,
-/// `AS_PATH`, `NEXT_HOP`, `LOCAL_PREF`, MED, and communities.
+/// Path attribute interning happens *before* routes reach this table: the
+/// RIB manager deduplicates identical `Arc<Vec<PathAttribute>>` allocations
+/// across ALL peers through its global [`crate::attr_intern::AttrInternTable`]
+/// (LAN-336), so this struct only stores whatever `Arc`s it is handed.
 #[derive(Debug)]
 pub struct AdjRibIn {
     peer: IpAddr,
@@ -100,11 +100,6 @@ pub struct AdjRibIn {
     /// RTC route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
     rtc_llgr_stale_local_tags: HashSet<RtcRibRouteKey>,
-    /// Intern table: deduplicates identical attribute sets across routes.
-    /// Lookup by content returns the shared `Arc`.  Entries with
-    /// `strong_count == 1` (only the intern table itself) are garbage-
-    /// collected on `gc_intern_table()`.
-    attr_intern: HashSet<Arc<Vec<rustbgpd_wire::PathAttribute>>>,
 }
 
 impl AdjRibIn {
@@ -138,10 +133,6 @@ impl AdjRibIn {
             vpn_llgr_stale_local_tags: HashSet::default(),
             labeled_llgr_stale_local_tags: HashSet::default(),
             rtc_llgr_stale_local_tags: HashSet::default(),
-            attr_intern: HashSet::with_capacity_and_hasher(
-                route_capacity.clamp(16, 64),
-                FxBuildHasher,
-            ),
         }
     }
 
@@ -153,26 +144,20 @@ impl AdjRibIn {
 
     /// Insert or replace a route. Clears any stale tag on the key.
     ///
-    /// The route's attributes are interned: if an identical attribute set
-    /// already exists from a previous route, the existing `Arc` is reused
-    /// instead of keeping a separate allocation.
+    /// Attribute interning is the caller's job: the RIB manager interns
+    /// `route.attributes` through its global
+    /// [`crate::attr_intern::AttrInternTable`] before insertion.
     ///
     /// Returns `true` if an existing route at the same `(prefix, path_id)` was
     /// replaced. A replacement may strand the previous route's interned
     /// attribute set, so a caller processing a batch should run
-    /// [`Self::gc_intern_table`] once afterwards when any insert returned
-    /// `true` (see the unicast announce path in the RIB manager). A first-time
-    /// insert orphans nothing, so the initial-load flood skips the GC.
-    pub fn insert(&mut self, mut route: Route) -> bool {
+    /// [`crate::attr_intern::AttrInternTable::gc`] once afterwards when any
+    /// insert returned `true` (see the unicast announce path in the RIB
+    /// manager). A first-time insert orphans nothing, so the initial-load
+    /// flood skips the GC.
+    pub fn insert(&mut self, route: Route) -> bool {
         self.llgr_stale_local_tags
             .remove(&(route.prefix, route.path_id));
-
-        // Intern: reuse an existing Arc if one matches
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
 
         let path_id = route.path_id;
         let ids = self.prefix_index.entry_or_default(route.prefix);
@@ -215,10 +200,11 @@ impl AdjRibIn {
     }
 
     /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
-    /// BGP-LS, VPN, labeled-unicast, and RTC — plus all secondary indices,
-    /// stale tags, and the attribute intern table. Used when the per-peer
-    /// Adj-RIB-In needs to be wiped without also dropping the [`AdjRibIn`]
-    /// struct itself.
+    /// BGP-LS, VPN, labeled-unicast, and RTC — plus all secondary indices
+    /// and stale tags. Used when the per-peer Adj-RIB-In needs to be wiped
+    /// without also dropping the [`AdjRibIn`] struct itself. The caller must
+    /// follow up with [`crate::attr_intern::AttrInternTable::gc`] to reclaim
+    /// attribute sets the dropped routes were the last users of.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_index.clear();
@@ -237,7 +223,6 @@ impl AdjRibIn {
         self.vpn_llgr_stale_local_tags.clear();
         self.labeled_llgr_stale_local_tags.clear();
         self.rtc_llgr_stale_local_tags.clear();
-        self.attr_intern.clear();
     }
 
     /// Return the number of unicast routes stored.
@@ -269,20 +254,6 @@ impl AdjRibIn {
     #[must_use]
     pub fn bench_prefix_index_mem_size(&self) -> usize {
         self.prefix_index.mem_size()
-    }
-
-    /// Return the number of interned attribute sets.
-    #[cfg(feature = "bench-internals")]
-    #[must_use]
-    pub fn bench_attr_intern_len(&self) -> usize {
-        self.attr_intern.len()
-    }
-
-    /// Return the backing capacity of the attribute intern table.
-    #[cfg(feature = "bench-internals")]
-    #[must_use]
-    pub fn bench_attr_intern_capacity(&self) -> usize {
-        self.attr_intern.capacity()
     }
 
     /// Return `true` if no unicast routes are stored.
@@ -532,18 +503,6 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_community(&clear_local_llgr);
     }
 
-    /// Garbage-collect interned attribute sets that are no longer referenced
-    /// by any route (only the intern table itself holds the `Arc`).
-    pub fn gc_intern_table(&mut self) {
-        self.attr_intern.retain(|arc| Arc::strong_count(arc) > 1);
-    }
-
-    /// Return the number of unique interned attribute sets.
-    #[must_use]
-    pub fn intern_len(&self) -> usize {
-        self.attr_intern.len()
-    }
-
     // --- FlowSpec methods ---
 
     /// Insert or replace a `FlowSpec` route.
@@ -580,12 +539,13 @@ impl AdjRibIn {
     ///
     /// Re-advertising the same key with a new attribute set (notably RFC 7432
     /// §7.7 MAC Mobility, which increments a sequence number on every move)
-    /// strands the previous interned set. Callers must run [`Self::gc_intern_table`]
-    /// after a batch of inserts/withdraws to reclaim it — see the EVPN
+    /// strands the previous interned set. Callers must run
+    /// [`crate::attr_intern::AttrInternTable::gc`] after a batch of
+    /// inserts/withdraws to reclaim it — see the EVPN
     /// announce/withdraw/inject paths in the RIB manager.
     ///
     /// Returns `true` if an existing route at the same key was replaced.
-    pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) -> bool {
+    pub fn insert_evpn(&mut self, route: EvpnRibRoute) -> bool {
         let key = route.key();
         // Re-advertising a key drops any record that *we* locally injected
         // LLGR_STALE on the prior version of it — exactly as unicast `insert`
@@ -593,12 +553,6 @@ impl AdjRibIn {
         // a later EoR (`clear_llgr_stale_evpn`) would treat this fresh route as
         // locally tagged and strip a peer-originated LLGR_STALE off it.
         self.evpn_llgr_stale_local_tags.remove(&key);
-        // Intern attributes so identical attribute sets share one Arc.
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
         self.evpn_routes.insert(key, route).is_some()
     }
 
@@ -807,20 +761,15 @@ impl AdjRibIn {
     ///
     /// Returns `true` if an existing route at the same opaque key was replaced.
     /// A replacement may strand the previous route's interned attribute set.
-    /// BGP-LS batch callers run [`Self::gc_intern_table`] once after any
-    /// replacement or real withdrawal, after Loc-RIB recomputation has dropped
-    /// any selected-route clone.
-    pub fn insert_bgpls(&mut self, mut route: BgpLsRibRoute) -> bool {
+    /// BGP-LS batch callers run [`crate::attr_intern::AttrInternTable::gc`]
+    /// once after any replacement or real withdrawal, after Loc-RIB
+    /// recomputation has dropped any selected-route clone.
+    pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) -> bool {
         let key = route.key();
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
         self.bgpls_llgr_stale_local_tags.remove(&key);
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
         self.bgpls_routes.insert(key, route).is_some()
     }
 
@@ -1071,24 +1020,19 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
     }
 
-    /// Insert or replace a VPNv4/VPNv6 route, interning its attribute set.
+    /// Insert or replace a VPNv4/VPNv6 route.
     ///
     /// Returns `true` if an existing route at the same RD + prefix + path-id was
     /// replaced. A replacement may strand the previous route's interned attribute
-    /// set; VPN batch callers run [`Self::gc_intern_table`] once after any
-    /// replacement or real withdrawal, after Loc-RIB recomputation has dropped
-    /// any selected-route clone.
-    pub fn insert_vpn(&mut self, mut route: VpnRibRoute) -> bool {
+    /// set; VPN batch callers run [`crate::attr_intern::AttrInternTable::gc`]
+    /// once after any replacement or real withdrawal, after Loc-RIB
+    /// recomputation has dropped any selected-route clone.
+    pub fn insert_vpn(&mut self, route: VpnRibRoute) -> bool {
         let key = route.key();
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
         self.vpn_llgr_stale_local_tags.remove(&key);
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
         let ids = self.vpn_key_index.entry(key.nlri_key).or_default();
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
@@ -1372,26 +1316,21 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_vpn_community(&clear_local_llgr);
     }
 
-    /// Insert or replace a labeled-unicast route, interning its attribute set.
+    /// Insert or replace a labeled-unicast route.
     ///
     /// Returns `true` if an existing route at the same prefix + path-id was
     /// replaced (RFC 8277 §2.3 implicit-replace: a relabel of the same prefix
     /// lands on the same key). A replacement may strand the previous route's
     /// interned attribute set; labeled batch callers run
-    /// [`Self::gc_intern_table`] once after any replacement or real
-    /// withdrawal, after Loc-RIB recomputation has dropped any selected-route
-    /// clone.
-    pub fn insert_labeled(&mut self, mut route: LabeledRibRoute) -> bool {
+    /// [`crate::attr_intern::AttrInternTable::gc`] once after any replacement
+    /// or real withdrawal, after Loc-RIB recomputation has dropped any
+    /// selected-route clone.
+    pub fn insert_labeled(&mut self, route: LabeledRibRoute) -> bool {
         let key = route.key();
         // Mirror unicast `insert` / `insert_vpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
         self.labeled_llgr_stale_local_tags.remove(&key);
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
         let ids = self.labeled_key_index.entry(key.prefix).or_default();
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
@@ -1677,24 +1616,20 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_labeled_community(&clear_local_llgr);
     }
 
-    /// Insert or replace an RT-Constrain route, interning its attribute set.
+    /// Insert or replace an RT-Constrain route.
     ///
     /// Returns `true` if an existing route at the same NLRI + path-id was
     /// replaced. A replacement may strand the previous route's interned
-    /// attribute set; RTC batch callers run [`Self::gc_intern_table`] once
-    /// after any replacement or real withdrawal, after Loc-RIB recomputation
-    /// has dropped any selected-route clone.
-    pub fn insert_rtc(&mut self, mut route: RtcRibRoute) -> bool {
+    /// attribute set; RTC batch callers run
+    /// [`crate::attr_intern::AttrInternTable::gc`] once after any replacement
+    /// or real withdrawal, after Loc-RIB recomputation has dropped any
+    /// selected-route clone.
+    pub fn insert_rtc(&mut self, route: RtcRibRoute) -> bool {
         let key = route.key();
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
         self.rtc_llgr_stale_local_tags.remove(&key);
-        if let Some(existing) = self.attr_intern.get(&route.attributes) {
-            route.attributes = existing.clone();
-        } else {
-            self.attr_intern.insert(route.attributes.clone());
-        }
         self.rtc_routes.insert(key, route).is_some()
     }
 
@@ -2395,23 +2330,27 @@ mod tests {
     fn vpn_insert_reports_replacement_for_intern_gc() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
 
-        assert!(!rib.insert_vpn(make_vpn_route(nlri.clone(), 1)));
-        assert_eq!(rib.intern_len(), 1);
+        let mut first = make_vpn_route(nlri.clone(), 1);
+        intern.intern(&mut first.attributes);
+        assert!(!rib.insert_vpn(first));
+        assert_eq!(intern.len(), 1);
 
         let mut replacement = make_vpn_route(nlri, 2);
         replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_vpn(replacement));
         assert_eq!(
-            rib.intern_len(),
+            intern.len(),
             2,
             "replacement strands the previous interned attribute set before GC"
         );
 
-        rib.gc_intern_table();
-        assert_eq!(rib.intern_len(), 1);
+        intern.gc();
+        assert_eq!(intern.len(), 1);
     }
 
     #[test]
@@ -2510,23 +2449,27 @@ mod tests {
     fn rtc_insert_reports_replacement_for_intern_gc() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = rtc_nlri(100);
 
-        assert!(!rib.insert_rtc(make_rtc_route(nlri, 1)));
-        assert_eq!(rib.intern_len(), 1);
+        let mut first = make_rtc_route(nlri, 1);
+        intern.intern(&mut first.attributes);
+        assert!(!rib.insert_rtc(first));
+        assert_eq!(intern.len(), 1);
 
         let mut replacement = make_rtc_route(nlri, 2);
         replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_rtc(replacement));
         assert_eq!(
-            rib.intern_len(),
+            intern.len(),
             2,
             "replacement strands the previous interned attribute set before GC"
         );
 
-        rib.gc_intern_table();
-        assert_eq!(rib.intern_len(), 1);
+        intern.gc();
+        assert_eq!(intern.len(), 1);
     }
 
     #[test]
@@ -2644,23 +2587,27 @@ mod tests {
     fn bgpls_insert_reports_replacement_for_intern_gc() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = bgpls_nlri(8);
 
-        assert!(!rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1)));
-        assert_eq!(rib.intern_len(), 1);
+        let mut first = make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 1);
+        intern.intern(&mut first.attributes);
+        assert!(!rib.insert_bgpls(first));
+        assert_eq!(intern.len(), 1);
 
         let mut replacement = make_bgpls_route(BgpLsFamily::LinkState, nlri, 2);
         replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_bgpls(replacement));
         assert_eq!(
-            rib.intern_len(),
+            intern.len(),
             2,
             "replacement strands the previous interned attribute set before GC"
         );
 
-        rib.gc_intern_table();
-        assert_eq!(rib.intern_len(), 1);
+        intern.gc();
+        assert_eq!(intern.len(), 1);
     }
 
     #[test]
@@ -3095,11 +3042,14 @@ mod tests {
     }
 
     #[test]
-    fn intern_deduplicates_identical_attributes() {
+    fn interned_routes_share_one_arc_in_storage() {
         use rustbgpd_wire::Origin;
+
+        use crate::attr_intern::AttrInternTable;
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = AttrInternTable::new();
 
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -3110,16 +3060,16 @@ mod tests {
         let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
         let p3 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 3, 0), 24);
 
-        let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
-        r1.attributes = Arc::new(attrs.clone());
-        let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
-        r2.attributes = Arc::new(attrs.clone());
-        let mut r3 = make_route(p3, Ipv4Addr::new(10, 0, 0, 1));
-        r3.attributes = Arc::new(attrs);
-
-        rib.insert(r1);
-        rib.insert(r2);
-        rib.insert(r3);
+        for (prefix, set) in [
+            (p1, attrs.clone()),
+            (p2, attrs.clone()),
+            (p3, attrs.clone()),
+        ] {
+            let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+            route.attributes = Arc::new(set);
+            intern.intern(&mut route.attributes);
+            rib.insert(route);
+        }
 
         // All three routes should share the same Arc
         let a1 = &rib.get(&Prefix::V4(p1), 0).unwrap().attributes;
@@ -3129,59 +3079,39 @@ mod tests {
         assert!(Arc::ptr_eq(a2, a3));
 
         // Only one unique entry in the intern table
-        assert_eq!(rib.intern_len(), 1);
+        assert_eq!(intern.len(), 1);
     }
 
     #[test]
-    fn intern_separates_different_attributes() {
+    fn gc_after_withdraw_removes_orphaned_intern_entries() {
         use rustbgpd_wire::Origin;
+
+        use crate::attr_intern::AttrInternTable;
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = AttrInternTable::new();
 
         let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
         let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
         r1.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+        intern.intern(&mut r1.attributes);
         let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
         r2.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        intern.intern(&mut r2.attributes);
 
         rib.insert(r1);
         rib.insert(r2);
-
-        let a1 = &rib.get(&Prefix::V4(p1), 0).unwrap().attributes;
-        let a2 = &rib.get(&Prefix::V4(p2), 0).unwrap().attributes;
-        assert!(!Arc::ptr_eq(a1, a2));
-        assert_eq!(rib.intern_len(), 2);
-    }
-
-    #[test]
-    fn gc_intern_table_removes_orphaned_entries() {
-        use rustbgpd_wire::Origin;
-
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let mut rib = AdjRibIn::new(peer);
-
-        let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
-        let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
-
-        let attrs = vec![PathAttribute::Origin(Origin::Igp)];
-        let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
-        r1.attributes = Arc::new(attrs.clone());
-        let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
-        r2.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
-
-        rib.insert(r1);
-        rib.insert(r2);
-        assert_eq!(rib.intern_len(), 2);
+        assert_eq!(intern.len(), 2);
 
         // Withdraw p2 — its unique attrs become orphaned
         rib.withdraw(&Prefix::V4(p2), 0);
-        assert_eq!(rib.intern_len(), 2); // still there before GC
+        assert_eq!(intern.len(), 2); // still there before GC
 
-        rib.gc_intern_table();
-        assert_eq!(rib.intern_len(), 1); // orphan cleaned up
+        intern.gc();
+        assert_eq!(intern.len(), 1); // orphan cleaned up
     }
 
     #[test]
@@ -3448,23 +3378,23 @@ mod tests {
 
     #[test]
     fn promote_to_llgr_stale_evpn_arc_make_mut_preserves_other_routes() {
-        // Two routes share an Arc<Vec<PathAttribute>> via the intern table.
+        // Two routes share an Arc<Vec<PathAttribute>> — in production the
+        // manager's global intern table produces this sharing (LAN-336).
         // Promoting one must only mutate that route's copy, not the shared
         // Arc — otherwise both routes would gain LLGR_STALE when only one
         // is being promoted.
         let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer_ip);
-        // Both routes get identical attrs → interned to the same Arc
         let key_a = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         let key_b = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
+        // Share the allocation explicitly, as the intern table would.
+        let shared = Arc::clone(&rib.evpn_routes[&key_a].attributes);
+        rib.evpn_routes.get_mut(&key_b).unwrap().attributes = shared;
 
         // Confirm they actually share the Arc pre-promotion
         let before_a = Arc::as_ptr(&rib.evpn_routes[&key_a].attributes);
         let before_b = Arc::as_ptr(&rib.evpn_routes[&key_b].attributes);
-        assert_eq!(
-            before_a, before_b,
-            "intern table should have shared the Arc"
-        );
+        assert_eq!(before_a, before_b, "routes must share the Arc");
 
         // Mark only route A stale, promote — route B must NOT gain LLGR_STALE
         rib.evpn_routes.get_mut(&key_a).unwrap().is_stale = true;
@@ -3901,23 +3831,27 @@ mod tests {
     fn labeled_insert_reports_replacement_for_intern_gc() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
+        let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
 
-        assert!(!rib.insert_labeled(make_labeled_route(nlri.clone(), 1)));
-        assert_eq!(rib.intern_len(), 1);
+        let mut first = make_labeled_route(nlri.clone(), 1);
+        intern.intern(&mut first.attributes);
+        assert!(!rib.insert_labeled(first));
+        assert_eq!(intern.len(), 1);
 
         let mut replacement = make_labeled_route(nlri, 2);
         replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_labeled(replacement));
         assert_eq!(
-            rib.intern_len(),
+            intern.len(),
             2,
             "replacement strands the previous interned attribute set before GC"
         );
 
-        rib.gc_intern_table();
-        assert_eq!(rib.intern_len(), 1);
+        intern.gc();
+        assert_eq!(intern.len(), 1);
     }
 
     #[test]
