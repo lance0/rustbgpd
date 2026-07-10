@@ -767,24 +767,61 @@ impl CompiledChain {
     ///
     /// If `hits` is not shaped like `policies` (one counter per term).
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
-    )]
     pub fn evaluate_recording_hits(
         &self,
         ctx: &RouteContext<'_>,
         hits: &mut [Vec<u64>],
     ) -> PolicyResult {
-        assert_eq!(hits.len(), self.policies.len(), "hits shaped like chain");
+        // Scratch evaluated grid: this is a dry-run-only path, so the
+        // per-call grid allocation is fine.
+        let mut evaluated = self.zero_term_hits();
+        self.evaluate_recording_coverage(ctx, &mut evaluated, hits)
+    }
+
+    /// [`evaluate_recording_hits`](Self::evaluate_recording_hits) that
+    /// additionally records guard *evaluations*: `evaluated[p][t]`
+    /// increments whenever the walk reaches policy `p`'s term `t`'s
+    /// guard (matched or not), `matched[p][t]` whenever the guard
+    /// matches. The two facts back `rbgp policy check --coverage`
+    /// (LAN-323): a term that was never *evaluated* means earlier terms
+    /// always decided; one that was evaluated but never *matched* means
+    /// no fixture satisfied its guard. Decision semantics are identical.
+    ///
+    /// # Panics
+    ///
+    /// If either grid is not shaped like `policies` (one counter per
+    /// term).
+    #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
+    )]
+    pub fn evaluate_recording_coverage(
+        &self,
+        ctx: &RouteContext<'_>,
+        evaluated: &mut [Vec<u64>],
+        matched: &mut [Vec<u64>],
+    ) -> PolicyResult {
+        assert_eq!(matched.len(), self.policies.len(), "hits shaped like chain");
+        assert_eq!(
+            evaluated.len(),
+            self.policies.len(),
+            "evaluated shaped like chain"
+        );
         // LAN-303: dry runs are metered identically to the live walk.
         let mut fuel: u64 = MAX_EVAL_COST;
         // LAN-305: and pin dataset generations once, identically.
         let pinned_frame = self.pin_datasets();
         let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
         let mut accumulated = RouteModifications::default();
-        for (policy, policy_hits) in self.policies.iter().zip(hits.iter_mut()) {
+        for ((policy, policy_evals), policy_hits) in self
+            .policies
+            .iter()
+            .zip(evaluated.iter_mut())
+            .zip(matched.iter_mut())
+        {
             assert_eq!(policy_hits.len(), policy.terms.len());
+            assert_eq!(policy_evals.len(), policy.terms.len());
             let mut continued: Option<RouteModifications> = None;
             // `Some(None)` = permit with no deciding-term mods;
             // `None` after the loop = fell through to default_action.
@@ -792,7 +829,13 @@ impl CompiledChain {
             let mut denied = false;
             // LAN-302: same lazy `let` frame as the live walk.
             let mut locals: Option<LocalFrame> = None;
-            for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
+            for ((term, eval_count), hit) in policy
+                .terms
+                .iter()
+                .zip(policy_evals.iter_mut())
+                .zip(policy_hits.iter_mut())
+            {
+                *eval_count += 1;
                 let mut err = None;
                 let matched = self.eval_expr(
                     &term.guard,
@@ -1678,6 +1721,24 @@ mod tests {
         // Two 10/8 routes hit tag + accept-10; the miss hits only the
         // unconditional deny (terms after a decider are not evaluated).
         assert_eq!(hits, vec![vec![2, 2, 1]]);
+
+        // LAN-323: the coverage walk distinguishes evaluated from
+        // matched. Same three walks: the 10/8 routes evaluate tag +
+        // accept-10 and stop (accept-10 decides); the miss evaluates
+        // all three guards. Matched equals the recording-hits grid.
+        let mut evaluated = chain.zero_term_hits();
+        let mut matched = chain.zero_term_hits();
+        for route in [
+            ctx(Some(v4([10, 1, 0, 0], 24))),
+            ctx(Some(v4([10, 2, 0, 0], 24))),
+            ctx(Some(v4([192, 0, 2, 0], 24))),
+        ] {
+            let recorded = chain.evaluate_recording_coverage(&route, &mut evaluated, &mut matched);
+            let (plain, _) = chain.evaluate_with_attribution(&route);
+            assert_eq!(recorded, plain);
+        }
+        assert_eq!(evaluated, vec![vec![3, 3, 1]]);
+        assert_eq!(matched, vec![vec![2, 2, 1]]);
     }
 
     #[test]

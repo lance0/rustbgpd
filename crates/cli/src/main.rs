@@ -401,7 +401,7 @@ enum PolicyAction {
     /// Check an `.rpol` policy file locally: resolve its `import`
     /// graph, parse, typecheck, and run its in-language `test` blocks
     /// (from every module). No daemon connection. Exit codes: 0 clean,
-    /// 1 diagnostics, 2 test failures.
+    /// 1 diagnostics, 2 test failures, 3 coverage below --coverage-min.
     Check {
         /// Path to the main `.rpol` file
         file: String,
@@ -415,6 +415,19 @@ enum PolicyAction {
         /// tests (audit/packaging aid)
         #[arg(long)]
         list_deps: bool,
+        /// Report which policy terms the in-language tests exercised
+        /// (evaluated vs. matched, per term) plus static lints (unused
+        /// sets/datasets/fns, unreachable terms, unreferenced
+        /// policies). A report only — it never changes the exit code
+        /// by itself
+        #[arg(long)]
+        coverage: bool,
+        /// Minimum acceptable exercised-term percentage (implies
+        /// --coverage): exit 3 when coverage falls below PCT (CI
+        /// gate). Diagnostics (1) and test failures (2) take
+        /// precedence
+        #[arg(long, value_name = "PCT")]
+        coverage_min: Option<f64>,
     },
     /// Format `.rpol` files in the one canonical style (LAN-323).
     /// Rewrites each file in place (atomic write). Formatting never
@@ -1568,11 +1581,18 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 file,
                 roots,
                 list_deps,
+                coverage,
+                coverage_min,
             },
     } = &cli.command
     {
         std::process::exit(commands::policy::check_local(
-            file, roots, *list_deps, cli.json,
+            file,
+            roots,
+            *list_deps,
+            *coverage,
+            *coverage_min,
+            cli.json,
         ));
     }
 

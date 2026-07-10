@@ -4921,3 +4921,333 @@ policy scrub(target: u32) {
         assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Test coverage + static lints (LAN-323)
+// ─────────────────────────────────────────────────────────────────────
+
+mod coverage {
+    use super::super::{CoverageReport, LintKind, PolicyTestStatus, RpolFile, TermCoverage};
+
+    fn coverage_of(source: &str) -> CoverageReport {
+        let file = RpolFile::parse(source).expect("clean rpol");
+        let (tests, cov) = file.run_tests_with_coverage();
+        assert!(
+            tests.all_passed(),
+            "fixture tests must pass: {:?}",
+            tests.failures
+        );
+        cov
+    }
+
+    fn term<'a>(cov: &'a CoverageReport, policy: &str, name: &str) -> &'a TermCoverage {
+        cov.policies
+            .iter()
+            .find(|p| p.name == policy)
+            .expect("policy present")
+            .terms
+            .iter()
+            .find(|t| t.name == name)
+            .expect("term present")
+    }
+
+    /// The three per-term facts: matched, evaluated-but-never-matched,
+    /// and never-evaluated (earlier terms always decided) — plus the
+    /// headline exercised count and the unconditional-term rule
+    /// (matched whenever reached).
+    #[test]
+    fn attributes_evaluated_and_matched_per_term() {
+        let cov = coverage_of(
+            "
+policy p {
+    term a { if route.local-pref >= 500 { reject } }
+    term b { if route.med <= 10 { accept } }
+    term c { reject }
+}
+
+test hits-b {
+    route { prefix 10.0.0.0/24; med 5 }
+    expect p == accept
+}
+
+test falls-to-c {
+    route { prefix 10.0.0.0/24; med 50 }
+    expect p == reject
+}
+",
+        );
+        // Walk 1 decides at b; walk 2 falls through to c.
+        assert_eq!(
+            term(&cov, "p", "a"),
+            &TermCoverage {
+                name: "a".into(),
+                evaluated: 2,
+                matched: 0
+            }
+        );
+        assert_eq!(
+            term(&cov, "p", "b"),
+            &TermCoverage {
+                name: "b".into(),
+                evaluated: 2,
+                matched: 1
+            }
+        );
+        // Unconditional c matches whenever reached.
+        assert_eq!(
+            term(&cov, "p", "c"),
+            &TermCoverage {
+                name: "c".into(),
+                evaluated: 1,
+                matched: 1
+            }
+        );
+        assert_eq!(cov.terms_total(), 3);
+        assert_eq!(cov.terms_exercised(), 3);
+    }
+
+    /// A term earlier walks always decide past is never evaluated, and
+    /// parameterized instantiations aggregate into one policy entry.
+    #[test]
+    fn never_evaluated_terms_and_instantiations_aggregate() {
+        let cov = coverage_of(
+            "
+policy pin(lp: u32) {
+    term probe { if route.med == lp { accept } }
+    term fallthrough { accept }
+    term never { reject }
+}
+
+test med-200 {
+    route { prefix 10.0.0.0/24; med 200 }
+    expect pin(200) == accept
+    expect pin(300) == accept
+}
+",
+        );
+        // pin(200): probe matches and decides. pin(300): probe misses,
+        // fallthrough decides. `never` sits behind an unconditional
+        // accept in both instantiations.
+        assert_eq!(term(&cov, "pin", "probe").evaluated, 2);
+        assert_eq!(term(&cov, "pin", "probe").matched, 1);
+        assert_eq!(term(&cov, "pin", "fallthrough").evaluated, 1);
+        assert_eq!(term(&cov, "pin", "fallthrough").matched, 1);
+        assert_eq!(term(&cov, "pin", "never").evaluated, 0);
+        assert_eq!(cov.terms_exercised(), 2);
+        // ... and the unreachable-term lint agrees about `never`.
+        assert!(
+            cov.lints
+                .iter()
+                .any(|l| l.kind == LintKind::UnreachableTerm && l.message.contains("term never")),
+            "{:?}",
+            cov.lints
+        );
+    }
+
+    /// `apply` targets are exercised as inlined predicates — reported
+    /// as apply-only (no term attribution), never as untested; a policy
+    /// nothing references is untested and lint-flagged.
+    #[test]
+    fn apply_only_and_untested_statuses() {
+        let cov = coverage_of(
+            "
+policy helper {
+    term inner { if route.med == 1 { accept } }
+    term rest { reject }
+}
+
+policy outer {
+    term probe { if apply(helper) { accept } }
+}
+
+policy orphan {
+    term x { reject }
+}
+
+test t {
+    route { prefix 10.0.0.0/24; med 1 }
+    expect outer == accept
+}
+",
+        );
+        let status = |name: &str| {
+            cov.policies
+                .iter()
+                .find(|p| p.name == name)
+                .expect("policy present")
+                .status
+        };
+        assert_eq!(status("outer"), PolicyTestStatus::Tested);
+        assert_eq!(status("helper"), PolicyTestStatus::ApplyOnly);
+        assert_eq!(status("orphan"), PolicyTestStatus::Untested);
+        // Term-level facts through apply are not attributable: helper's
+        // terms stay unexercised in the headline count.
+        assert_eq!(term(&cov, "helper", "inner").evaluated, 0);
+        // Unreferenced-policy flags only the orphan — helper is
+        // applied, outer is tested.
+        let unreferenced: Vec<&str> = cov
+            .lints
+            .iter()
+            .filter(|l| l.kind == LintKind::UnreferencedPolicy)
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(unreferenced.len(), 1, "{unreferenced:?}");
+        assert!(unreferenced[0].contains("policy orphan"));
+    }
+
+    /// Unused sets, datasets, and fns are flagged; referenced ones are
+    /// not (including fn-to-fn calls).
+    #[test]
+    fn unused_definition_lints() {
+        let cov = coverage_of(
+            "
+prefix-set used-set { 10.0.0.0/8 le 32 }
+prefix-set dead-set { 192.0.2.0/24 }
+asn-set loop-set { 64512 }
+dataset asn-set dead-data
+
+fn helper(x: u32) -> u32 { x + 1 }
+fn wrapper(x: u32) -> u32 { helper(x) * 2 }
+fn dead-fn(x: u32) -> u32 { x }
+
+policy p {
+    term t {
+        if route.prefix in used-set {
+            set med wrapper(1);
+            accept
+        }
+    }
+    term l {
+        for asn in loop-set {
+            if asn in loop-set { reject }
+        }
+    }
+}
+",
+        );
+        let lints: Vec<(LintKind, &str)> = cov
+            .lints
+            .iter()
+            .map(|l| (l.kind, l.message.as_str()))
+            .collect();
+        assert!(
+            lints
+                .iter()
+                .any(|(k, m)| *k == LintKind::UnusedSet && m.contains("dead-set")),
+            "{lints:?}"
+        );
+        assert!(
+            lints
+                .iter()
+                .any(|(k, m)| *k == LintKind::UnusedDataset && m.contains("dead-data")),
+            "{lints:?}"
+        );
+        assert!(
+            lints
+                .iter()
+                .any(|(k, m)| *k == LintKind::UnusedFn && m.contains("dead-fn")),
+            "{lints:?}"
+        );
+        // Everything referenced stays off the list: used-set (guard),
+        // loop-set (for-source + binding probe), wrapper (action
+        // value), helper (called by wrapper).
+        assert!(
+            !lints.iter().any(|(_, m)| m.contains("used-set")),
+            "{lints:?}"
+        );
+        assert!(
+            !lints.iter().any(|(_, m)| m.contains("loop-set")),
+            "{lints:?}"
+        );
+        assert!(
+            !lints.iter().any(|(_, m)| m.contains("fn wrapper")),
+            "{lints:?}"
+        );
+        assert!(
+            !lints.iter().any(|(_, m)| m.contains("fn helper")),
+            "{lints:?}"
+        );
+    }
+
+    /// The unreachable-term lint covers exactly the static cases: a
+    /// bare terminal action, an `if`/`else` with both branches
+    /// terminal, and a constant guard that folds true (#768 folding).
+    /// Runtime guards stay conservatively reachable.
+    #[test]
+    fn unreachable_term_lint_constant_cases() {
+        let unreachable = |source: &str| -> Vec<String> {
+            coverage_of(source)
+                .lints
+                .iter()
+                .filter(|l| l.kind == LintKind::UnreachableTerm)
+                .map(|l| l.message.clone())
+                .collect()
+        };
+        // Bare terminal action.
+        let found = unreachable("policy p { term all { accept } term dead { reject } }");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("term dead") && found[0].contains("term all"));
+        // Both branches terminal — decides regardless of the guard.
+        let found = unreachable(
+            "policy p {
+                term split { if route.med == 1 { accept } else { reject } }
+                term dead { reject }
+            }",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        // Constant guard folding true with a terminal branch.
+        let found = unreachable(
+            "policy p {
+                term folded { if min(4, 2) >= 1 { accept } }
+                term dead { reject }
+            }",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        // A runtime guard without an else decides nothing statically.
+        let found = unreachable(
+            "policy p {
+                term maybe { if route.med == 1 { accept } }
+                term reachable { reject }
+            }",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// Coverage never changes test outcomes: the report from
+    /// `run_tests_with_coverage` equals `run_tests`' — including for a
+    /// failing suite (which still gets attributed).
+    #[test]
+    fn coverage_run_preserves_test_outcomes() {
+        let source = "
+policy p {
+    term a { if route.med <= 10 { accept } }
+    term b { reject }
+}
+
+test passes {
+    route { prefix 10.0.0.0/24; med 5 }
+    expect p == accept
+}
+
+test fails {
+    route { prefix 10.0.0.0/24; med 50 }
+    expect p == accept
+}
+";
+        let file = RpolFile::parse(source).expect("clean rpol");
+        let plain = file.run_tests();
+        let (with_cov, cov) = file.run_tests_with_coverage();
+        assert_eq!(plain, with_cov);
+        assert_eq!(with_cov.failures.len(), 1);
+        // The failing walk still counted: both walks evaluated `a`.
+        assert_eq!(
+            cov.policies
+                .iter()
+                .find(|p| p.name == "p")
+                .expect("policy present")
+                .terms[0]
+                .evaluated,
+            2
+        );
+    }
+}

@@ -60,8 +60,9 @@ $ echo $?
 ```
 
 Exit codes: `0` clean, `1` compile diagnostics (or unreadable file),
-`2` in-language test failures. `--json` emits a machine-readable
-report.
+`2` in-language test failures, `3` coverage below `--coverage-min`
+(see [Coverage and lints](#coverage-and-lints)). `--json` emits a
+machine-readable report.
 
 ## Lexical structure
 
@@ -1108,6 +1109,65 @@ test missing-origin-fails-closed {
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is
 `rbgp policy test` (below).
+
+### Coverage and lints
+
+`rbgp policy check FILE --coverage` reports which terms the `test`
+blocks actually exercised — the blind spot route-map hit counters
+miss and operators otherwise print-debug. For every term of every
+tested policy it reports two distinct facts: was the guard ever
+**evaluated** (the walk reached it), and did it ever **match**:
+
+```text
+coverage: 2/5 terms exercised by tests
+  policy edge-in
+    term bogon-guard      evaluated 5x, matched 2x
+    term customer-routes  evaluated 3x, never matched   <- no test route hits this
+    term rest             never evaluated               <- earlier terms always decide
+  policy unused-helper    never referenced by any test
+```
+
+"Never evaluated" means earlier terms always decided; "evaluated,
+never matched" means no fixture satisfies the guard. A term counts as
+*matched* in a walk when any of its conditional branches matched; an
+unconditional term (`term catch-all { accept }`) matches whenever it
+is reached. Parameterized policies aggregate across instantiations
+(`expect p(200)` and `expect p(300)` both count toward `p`). With
+imports, each policy is attributed to its defining file.
+
+Two boundaries, both deliberate:
+
+- **`apply` is a predicate, not a walk.** `apply(p)` inlines `p`'s
+  *decision* as a boolean guard, so term-level facts inside `p` are
+  not attributable through it. A policy reached only via `apply` from
+  tested policies is reported as `exercised via apply only (terms not
+  attributable)` — its terms stay in the denominator; test it
+  directly to cover them. `fn`s inline fully and have no terms.
+- **Chains live in the daemon config**, which a standalone check
+  cannot see. A policy referenced by no test and no `apply` is
+  reported as such (and lint-flagged) *within these files only* — it
+  may well be referenced by a config chain.
+
+Static lints ride the same pass and need no fixtures:
+
+- `unused-set` / `unused-dataset` / `unused-fn` — declared, never
+  referenced by any policy (fn-to-fn calls count as uses).
+- `unreachable-term` — an earlier term in the policy always decides.
+  Statically-certain cases only: a bare `accept`/`reject`, an
+  `if`/`else` with both branches terminal, or a constant guard that
+  folds true (e.g. a folded builtin call). Runtime guards are
+  conservatively reachable — this is not a reachability prover.
+- `unreferenced-policy` — no test and no `apply` names it in the
+  compilation unit (with the config-chain caveat above).
+
+Coverage is a report: it never changes the exit code by itself. For
+CI, `--coverage-min PCT` (which implies `--coverage`) exits **3**
+when the exercised-term percentage falls below the threshold —
+distinct from `1` (diagnostics) and `2` (test failures), which take
+precedence. `-j` adds a `coverage` object with stable keys
+(`terms_total`, `terms_exercised`, `percent`, per-policy `status` of
+`tested`/`apply-only`/`untested`, per-term `evaluated`/`matched`
+counts, and `lints` with machine-readable `kind` labels).
 
 ## Modules and imports
 

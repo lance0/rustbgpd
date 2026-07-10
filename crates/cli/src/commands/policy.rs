@@ -145,11 +145,22 @@ struct JsonChains {
 /// tests); no daemon. `roots` are extra `import` resolution roots
 /// (the file's own directory is always one); `list_deps` prints the
 /// resolved import graph + content hashes instead of running tests.
+/// `coverage` (or a `coverage_min` threshold, which implies it)
+/// additionally reports per-term test coverage and the static lints
+/// (LAN-323) — a report that never fails the check by itself; only
+/// `coverage_min` consumes it for the exit code.
 ///
 /// Returns the process exit code: 0 clean, 1 diagnostics (or an
-/// unreadable file), 2 test failures. Diagnostics render to stderr,
-/// results to stdout.
-pub fn check_local(path: &str, roots: &[String], list_deps: bool, json: bool) -> i32 {
+/// unreadable file), 2 test failures, 3 coverage below `coverage_min`.
+/// Diagnostics render to stderr, results to stdout.
+pub fn check_local(
+    path: &str,
+    roots: &[String],
+    list_deps: bool,
+    coverage: bool,
+    coverage_min: Option<f64>,
+    json: bool,
+) -> i32 {
     use std::io::IsTerminal;
     use std::path::PathBuf;
 
@@ -180,47 +191,24 @@ pub fn check_local(path: &str, roots: &[String], list_deps: bool, json: bool) ->
     if list_deps && let Some(file) = &file {
         return print_deps(path, file, json);
     }
-    let tests = file.as_ref().map(RpolFile::run_tests);
+    let want_coverage = coverage || coverage_min.is_some();
+    let (tests, cov) = match &file {
+        Some(file) if want_coverage => {
+            let (tests, cov) = file.run_tests_with_coverage();
+            (Some(tests), Some(cov))
+        }
+        Some(file) => (Some(file.run_tests()), None),
+        None => (None, None),
+    };
 
     if json {
-        #[derive(Serialize)]
-        struct JsonFailure<'a> {
-            name: &'a str,
-            message: &'a str,
-        }
-        #[derive(Serialize)]
-        struct JsonCheck<'a> {
-            file: &'a str,
-            ok: bool,
-            diagnostics: &'a [String],
-            tests_total: usize,
-            tests_passed: usize,
-            failures: Vec<JsonFailure<'a>>,
-        }
-        let out = JsonCheck {
-            file: path,
-            ok: diagnostics.is_empty()
-                && tests
-                    .as_ref()
-                    .is_none_or(rustbgpd_policy::rpol::TestReport::all_passed),
-            diagnostics: &diagnostics,
-            tests_total: tests.as_ref().map_or(0, |t| t.total),
-            tests_passed: tests
-                .as_ref()
-                .map_or(0, rustbgpd_policy::rpol::TestReport::passed),
-            failures: tests.as_ref().map_or_else(Vec::new, |t| {
-                t.failures
-                    .iter()
-                    .map(|f| JsonFailure {
-                        name: &f.name,
-                        message: &f.message,
-                    })
-                    .collect()
-            }),
-        };
-        if output::print_json_pretty(&out).is_err() {
-            return 1;
-        }
+        print_check_json(
+            path,
+            &diagnostics,
+            tests.as_ref(),
+            cov.as_ref(),
+            file.as_ref(),
+        );
     } else if !diagnostics.is_empty() {
         // Rendered excerpts already went to stderr above.
         eprintln!(
@@ -228,28 +216,214 @@ pub fn check_local(path: &str, roots: &[String], list_deps: bool, json: bool) ->
             diagnostics.len(),
             if diagnostics.len() == 1 { "" } else { "s" }
         );
-    } else if let Some(tests) = &tests {
-        if tests.total == 0 {
-            println!("{path}: ok (no tests)");
-        } else {
-            for failure in &tests.failures {
-                eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
+    } else {
+        if let Some(tests) = &tests {
+            if tests.total == 0 {
+                println!("{path}: ok (no tests)");
+            } else {
+                for failure in &tests.failures {
+                    eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
+                }
+                println!(
+                    "{path}: {} passed, {} failed",
+                    tests.passed(),
+                    tests.failures.len()
+                );
             }
-            println!(
-                "{path}: {} passed, {} failed",
-                tests.passed(),
-                tests.failures.len()
-            );
+        }
+        if let (Some(cov), Some(file)) = (&cov, &file) {
+            print_coverage_text(cov, file);
         }
     }
 
     if !diagnostics.is_empty() {
-        1
-    } else if tests.as_ref().is_some_and(|tests| !tests.all_passed()) {
-        2
-    } else {
-        0
+        return 1;
     }
+    if tests.as_ref().is_some_and(|tests| !tests.all_passed()) {
+        return 2;
+    }
+    if let (Some(min), Some(cov)) = (coverage_min, &cov)
+        && cov.percent() < min
+    {
+        eprintln!(
+            "{path}: coverage {:.1}% is below --coverage-min {min}%",
+            cov.percent()
+        );
+        return 3;
+    }
+    0
+}
+
+/// The `--coverage` text report (stdout): the exercised-term headline,
+/// per-policy term table, and lint lines. Policies defined in an
+/// imported module are attributed to their defining file.
+fn print_coverage_text(
+    cov: &rustbgpd_policy::rpol::CoverageReport,
+    file: &rustbgpd_policy::rpol::RpolFile,
+) {
+    use rustbgpd_policy::rpol::PolicyTestStatus;
+
+    println!(
+        "coverage: {}/{} terms exercised by tests",
+        cov.terms_exercised(),
+        cov.terms_total()
+    );
+    let module_path = |index: u32| -> &str {
+        file.modules()
+            .get(index as usize)
+            .map_or("", |m| m.path.as_str())
+    };
+    let multi_module = file.modules().len() > 1;
+    for policy in &cov.policies {
+        let origin = if multi_module {
+            format!("  ({})", module_path(policy.file))
+        } else {
+            String::new()
+        };
+        match policy.status {
+            PolicyTestStatus::Untested => {
+                println!(
+                    "  policy {}{origin}    never referenced by any test",
+                    policy.name
+                );
+                continue;
+            }
+            PolicyTestStatus::ApplyOnly => {
+                println!(
+                    "  policy {}{origin}    exercised via apply only (terms not attributable)",
+                    policy.name
+                );
+                continue;
+            }
+            PolicyTestStatus::Tested => println!("  policy {}{origin}", policy.name),
+        }
+        let width = policy.terms.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        for term in &policy.terms {
+            let facts = if term.evaluated == 0 {
+                "never evaluated               <- earlier terms always decide".to_string()
+            } else if term.matched == 0 {
+                format!(
+                    "evaluated {}x, never matched   <- no test route hits this",
+                    term.evaluated
+                )
+            } else {
+                format!("evaluated {}x, matched {}x", term.evaluated, term.matched)
+            };
+            println!("    term {:width$}  {facts}", term.name);
+        }
+    }
+    for lint in &cov.lints {
+        println!("lint [{}]: {}", lint.kind.label(), lint.message);
+    }
+}
+
+/// The `-j` form of `rbgp policy check` output (stable keys; the
+/// `coverage` object appears only under `--coverage`/`--coverage-min`).
+fn print_check_json(
+    path: &str,
+    diagnostics: &[String],
+    tests: Option<&rustbgpd_policy::rpol::TestReport>,
+    cov: Option<&rustbgpd_policy::rpol::CoverageReport>,
+    file: Option<&rustbgpd_policy::rpol::RpolFile>,
+) {
+    #[derive(Serialize)]
+    struct JsonFailure<'a> {
+        name: &'a str,
+        message: &'a str,
+    }
+    #[derive(Serialize)]
+    struct JsonCoverageTerm<'a> {
+        name: &'a str,
+        evaluated: u64,
+        matched: u64,
+    }
+    #[derive(Serialize)]
+    struct JsonCoveragePolicy<'a> {
+        name: &'a str,
+        file: &'a str,
+        status: &'static str,
+        terms: Vec<JsonCoverageTerm<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JsonLint<'a> {
+        kind: &'static str,
+        file: &'a str,
+        message: &'a str,
+    }
+    #[derive(Serialize)]
+    struct JsonCoverage<'a> {
+        terms_total: usize,
+        terms_exercised: usize,
+        percent: f64,
+        policies: Vec<JsonCoveragePolicy<'a>>,
+        lints: Vec<JsonLint<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JsonCheck<'a> {
+        file: &'a str,
+        ok: bool,
+        diagnostics: &'a [String],
+        tests_total: usize,
+        tests_passed: usize,
+        failures: Vec<JsonFailure<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<JsonCoverage<'a>>,
+    }
+    let module_path = |index: u32| -> &str {
+        file.and_then(|f| f.modules().get(index as usize))
+            .map_or("", |m| m.path.as_str())
+    };
+    let coverage = cov.map(|cov| JsonCoverage {
+        terms_total: cov.terms_total(),
+        terms_exercised: cov.terms_exercised(),
+        percent: cov.percent(),
+        policies: cov
+            .policies
+            .iter()
+            .map(|policy| JsonCoveragePolicy {
+                name: &policy.name,
+                file: module_path(policy.file),
+                status: policy.status.label(),
+                terms: policy
+                    .terms
+                    .iter()
+                    .map(|term| JsonCoverageTerm {
+                        name: &term.name,
+                        evaluated: term.evaluated,
+                        matched: term.matched,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        lints: cov
+            .lints
+            .iter()
+            .map(|lint| JsonLint {
+                kind: lint.kind.label(),
+                file: module_path(lint.file),
+                message: &lint.message,
+            })
+            .collect(),
+    });
+    let out = JsonCheck {
+        file: path,
+        ok: diagnostics.is_empty()
+            && tests.is_none_or(rustbgpd_policy::rpol::TestReport::all_passed),
+        diagnostics,
+        tests_total: tests.map_or(0, |t| t.total),
+        tests_passed: tests.map_or(0, rustbgpd_policy::rpol::TestReport::passed),
+        failures: tests.map_or_else(Vec::new, |t| {
+            t.failures
+                .iter()
+                .map(|f| JsonFailure {
+                    name: &f.name,
+                    message: &f.message,
+                })
+                .collect()
+        }),
+        coverage,
+    };
+    let _ = output::print_json_pretty(&out);
 }
 
 /// `rbgp policy check --list-deps` output: the resolved module graph
@@ -1597,11 +1771,11 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
             0
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, true),
+            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, true),
             0
         );
     }
@@ -1610,11 +1784,14 @@ mod tests {
     fn check_local_diagnostics_exit_one() {
         let tmp = write_rpol("policy p { term t { if route.zzz == 1 { accept } } }");
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
             1
         );
         // Unreadable file is also exit 1.
-        assert_eq!(check_local("/nonexistent/nope.rpol", &[], false, false), 1);
+        assert_eq!(
+            check_local("/nonexistent/nope.rpol", &[], false, false, None, false),
+            1
+        );
     }
 
     /// LAN-300: `check` resolves the import graph (tests in the main
@@ -1644,19 +1821,19 @@ mod tests {
         let main = main.to_str().unwrap();
         let root = lib.path().to_str().unwrap().to_string();
         // Without the root the import cannot resolve.
-        assert_eq!(check_local(main, &[], false, false), 1);
+        assert_eq!(check_local(main, &[], false, false, None, false), 1);
         // With it: clean check (the cross-module test runs) and deps.
         assert_eq!(
-            check_local(main, std::slice::from_ref(&root), false, false),
+            check_local(main, std::slice::from_ref(&root), false, false, None, false),
             0
         );
         assert_eq!(
-            check_local(main, std::slice::from_ref(&root), true, false),
+            check_local(main, std::slice::from_ref(&root), true, false, None, false),
             0
         );
-        assert_eq!(check_local(main, &[root], true, true), 0);
+        assert_eq!(check_local(main, &[root], true, false, None, true), 0);
         // --list-deps on a broken graph still exits 1.
-        assert_eq!(check_local(main, &[], true, false), 1);
+        assert_eq!(check_local(main, &[], true, false, None, false), 1);
     }
 
     #[test]
@@ -1669,7 +1846,41 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
+            2
+        );
+    }
+
+    /// LAN-323: `--coverage` is a report (exit 0 even with unexercised
+    /// terms), `--coverage-min` turns the shortfall into exit 3 (and
+    /// implies coverage without the flag), a met threshold passes, and
+    /// test failures keep precedence over the threshold.
+    #[test]
+    fn check_local_coverage_exit_codes() {
+        // Term `dead` is behind the deciding `all`: 1/2 exercised.
+        let tmp = write_rpol(
+            "policy p { term all { accept } term dead { reject } }
+             test accepts {
+                 route { prefix 10.0.0.0/24 }
+                 expect p == accept
+             }",
+        );
+        let path = tmp.path().to_str().unwrap();
+        assert_eq!(check_local(path, &[], false, true, None, false), 0);
+        assert_eq!(check_local(path, &[], false, true, None, true), 0);
+        assert_eq!(check_local(path, &[], false, false, Some(100.0), false), 3);
+        assert_eq!(check_local(path, &[], false, true, Some(50.0), false), 0);
+        // A failing test wins over the coverage threshold.
+        let failing = write_rpol(
+            "policy p { term t { reject } }
+             test should-fail {
+                 route { prefix 10.0.0.0/24 }
+                 expect p == accept
+             }",
+        );
+        let failing = failing.path().to_str().unwrap();
+        assert_eq!(
+            check_local(failing, &[], false, false, Some(100.0), false),
             2
         );
     }
@@ -2103,7 +2314,7 @@ mod tests {
         assert_eq!(fmt_local(&files, true), 0);
         // No temp residue from the atomic write.
         assert!(!dir.path().join("p.rpol.tmp").exists());
-        assert_eq!(check_local(&files[0], &[], false, false), 0);
+        assert_eq!(check_local(&files[0], &[], false, false, None, false), 0);
     }
 
     /// LAN-323: `--check` never rewrites, exits 1 on drift, and a

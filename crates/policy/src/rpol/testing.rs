@@ -275,6 +275,20 @@ pub(super) fn run_tests(
     lowerer: &mut Lowerer<'_>,
     store: &mut SetStore,
 ) -> TestReport {
+    run_tests_recording(tests, lowerer, store, None)
+}
+
+/// [`run_tests`] optionally feeding a coverage accumulator (LAN-323):
+/// with `Some`, every `expect` walk is re-run through the
+/// coverage-recording evaluator (identical decision semantics) and its
+/// evaluated/matched grids folded per source term. Test outcomes are
+/// unaffected.
+pub(super) fn run_tests_recording(
+    tests: &[TestDef],
+    lowerer: &mut Lowerer<'_>,
+    store: &mut SetStore,
+    mut coverage: Option<&mut super::coverage::CoverageAccum>,
+) -> TestReport {
     let mut report = TestReport {
         total: tests.len(),
         failures: Vec::new(),
@@ -313,6 +327,15 @@ pub(super) fn run_tests(
             // The fixture's `peer { local-as N }` plays the config
             // resolver's role for `prepend as self` (LAN-296).
             chain.local_asn = fixture.local_asn;
+            // LAN-323: attribute this walk's term coverage — a second,
+            // decision-identical evaluation, so the assertion path
+            // below stays exactly the shipped runner.
+            if let Some(accum) = coverage.as_deref_mut() {
+                let mut evaluated = chain.zero_term_hits();
+                let mut matched = chain.zero_term_hits();
+                let _ = chain.evaluate_recording_coverage(&ctx, &mut evaluated, &mut matched);
+                accum.record_walk(&chain.policies[0], &evaluated[0], &matched[0]);
+            }
             let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
             let call = render_call(&expect.policy.node, &args);
             // ADR-0103 Decision 4: an erroring evaluation is not a

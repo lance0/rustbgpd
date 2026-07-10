@@ -2656,7 +2656,7 @@ fn value_cost(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
 /// (reported where it happens — see `check_value_expr`). Folding uses
 /// the same [`checked_arith`] as evaluation, so compile-time folding
 /// and per-route evaluation can never disagree about what overflows.
-fn fold_const(expr: &ValueExprAst) -> Option<u32> {
+pub(super) fn fold_const(expr: &ValueExprAst) -> Option<u32> {
     match expr {
         ValueExprAst::Lit(value, _) => Some(*value),
         ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
