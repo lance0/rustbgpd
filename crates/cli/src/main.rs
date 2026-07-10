@@ -721,6 +721,60 @@ enum DiffAction {
         #[arg(long, default_value_t = 120)]
         deadline: u64,
     },
+
+    /// Produce an `rbgp-ribsnap/1` snapshot from an incumbent's own output
+    /// (offline; no daemon connection)
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot
+    ///
+    /// TABLE_DUMP_V2 is, by default, a collector RIB view — not a
+    /// per-client post-policy Adj-RIB-Out. The required --view flag is
+    /// the producer's attestation of what the dump actually is: only
+    /// `adj-rib-out-capture` yields a snapshot; `loc-rib` and
+    /// `adj-rib-in` are refused (exit 2) because comparing them against
+    /// an Adj-RIB-Out would report false divergence or false equality.
+    ///
+    /// RFC 8050 Add-Path subtypes are supported (path identifiers are
+    /// emitted as `path_id`); AS_PATH is decoded as 4-octet per RFC 6396
+    /// §4.3.4, and both the abbreviated and full RFC 4760 MP_REACH_NLRI
+    /// forms are accepted. See docs/ribdiff.md for the adapter contract.
+    #[command(after_help = "Exit codes:\n  \
+        0  snapshot emitted on stdout\n  \
+        2  refused (non-comparable view) or malformed/unreadable input \
+        (nothing emitted)")]
+    FromMrt {
+        /// Path to the MRT TABLE_DUMP_V2 file
+        file: PathBuf,
+
+        /// Attestation of what the dump is: adj-rib-out-capture (a
+        /// per-client post-policy capture; accepted), loc-rib, or
+        /// adj-rib-in (both refused as non-comparable)
+        #[arg(long, value_name = "VIEW")]
+        view: String,
+
+        /// Peer address the captured routes were advertised to
+        #[arg(long)]
+        peer: String,
+
+        /// ASN of that peer
+        #[arg(long)]
+        peer_asn: u32,
+
+        /// Free-form provenance label appended to the header `source`
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Capture-round generation stamped into the header
+        #[arg(long, default_value_t = 1)]
+        generation: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1354,6 +1408,34 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         };
         std::process::exit(code);
+    }
+
+    // `diff snapshot from-mrt` is a pure offline adapter (no daemon
+    // connection); it owns its 0/2 exit-code contract.
+    if let Command::Diff {
+        action:
+            DiffAction::Snapshot {
+                action:
+                    SnapshotAction::FromMrt {
+                        file,
+                        view,
+                        peer,
+                        peer_asn,
+                        source,
+                        generation,
+                    },
+            },
+    } = &cli.command
+    {
+        let opts = commands::ribsnap::FromMrtOpts {
+            file,
+            view,
+            peer,
+            peer_asn: *peer_asn,
+            source: source.as_deref(),
+            generation: *generation,
+        };
+        std::process::exit(commands::ribsnap::from_mrt(&opts));
     }
 
     let addr = cli.addr.clone();

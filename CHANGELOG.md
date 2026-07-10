@@ -145,6 +145,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   AS_PATH preprocessing removes *consecutive* duplicates matches the
   shipped compression exactly); stale -25 doc references trued up.
   (LAN-243)
+- **Incumbent snapshot adapters + golden-fixture matrix for `rbgp diff`**
+  (LAN-308). Four versioned adapters produce `rbgp-ribsnap/1` snapshots
+  from an incumbent's own output: `rbgp diff snapshot from-mrt` (in-binary;
+  RFC 6396 `TABLE_DUMP_V2` with RFC 8050 Add-Path subtypes, both
+  abbreviated and full-form `MP_REACH_NLRI` next hops, extended/large
+  communities from raw bytes) plus stdlib-only Python converters under
+  `scripts/ribsnap/` for BIRD 2 (`show route export`, verified 2.0.12),
+  FRR (`advertised-routes detail json`, verified 10.3.1; the
+  community-less summary form is refused), and GoBGP (`adj-out -j`,
+  verified 3.37.0; Add-Path duplicates carry no path identifier upstream
+  and convert as repeated records). `from-mrt` requires `--view` as a
+  producer attestation and refuses `loc-rib` / `adj-rib-in` dumps as
+  non-comparable (exit 2) — `TABLE_DUMP_V2` is a collector RIB view by
+  default, not an Adj-RIB-Out. All adapters share the fail-closed emission
+  contract (counted trailer only after a full parse; absent attributes
+  omitted, never defaulted; symbolic-only extended communities skipped
+  with a stderr note) and a `source`-field convention naming the adapter
+  contract version. Golden-fixture tests in `cargo test -p rustbgpctl`
+  pin each converter byte-for-byte against raw captures from real M83 lab
+  containers and diff them clean against the same capture's wire-truth
+  values, protecting against upstream schema drift; the cookbook gains
+  per-incumbent capture commands, prerequisites, limitations, and example
+  equal / explained-difference reports.
 
 ### Changed
 

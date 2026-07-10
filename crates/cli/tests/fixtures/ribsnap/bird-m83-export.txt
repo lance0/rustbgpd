@@ -1,0 +1,14 @@
+BIRD 2.0.12 ready.
+Table master4:
+100.70.0.0/24        blackhole [statics 02:00:42.574] * (200)
+	Type: static univ
+100.65.0.0/24        blackhole [statics 02:00:42.574] * (200)
+	Type: static univ
+	BGP.community: (65001,666)
+100.69.0.0/24        blackhole [statics 02:00:42.574] * (200)
+	Type: static univ
+203.0.113.0/24       blackhole [statics_uniq 02:00:42.574] * (200)
+	Type: static univ
+	BGP.med: 120
+	BGP.community: (65001,111)
+	BGP.large_community: (65001, 1, 1)
