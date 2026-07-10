@@ -35,6 +35,21 @@ use crate::vrp::VrpEntry;
 /// Maximum read buffer size (256 KiB).
 const MAX_READ_BUF: usize = 256 * 1024;
 
+/// Protocol ceiling for one PDU — 8210bis §5: the Length field "MUST
+/// NOT exceed 65,535 octets". The read buffer above is a transport
+/// buffer and stays larger; this is the per-frame acceptance limit. An
+/// over-limit length field is corrupt framing (Error Code 0).
+const MAX_PDU_LEN: usize = 65_535;
+
+// 8210bis §6 legal bounds for the End of Data timing parameters. The
+// refresh/retry minimums are 1 s, which every non-zero value already
+// satisfies; zero is handled as "not provided" (see
+// `apply_eod_timers`).
+const REFRESH_MAX_SECS: u64 = 86_400;
+const RETRY_MAX_SECS: u64 = 7_200;
+const EXPIRE_MIN_SECS: u64 = 600;
+const EXPIRE_MAX_SECS: u64 = 172_800;
+
 /// Wall-clock budget for one RTR transaction (query → End of Data).
 /// A full production table transfers in seconds; a cache that cannot
 /// complete within this window is broken or hostile.
@@ -417,6 +432,12 @@ impl RtrClient {
                 return Ok(None);
             };
             let pdu_len = pdu_len as usize;
+            // §5: the Length field "MUST NOT exceed 65,535 octets". An
+            // over-limit length is corrupt framing — fail now instead
+            // of buffering toward a frame that can never be legal.
+            if pdu_len > MAX_PDU_LEN {
+                return Err(RtrError::Decode(RtrDecodeError::InvalidLength));
+            }
             if parse_buf.len() < pdu_len {
                 return Ok(None);
             }
@@ -461,6 +482,87 @@ impl RtrClient {
             self.negotiation_complete = true;
             return Ok(Some(pdu));
         }
+    }
+
+    /// Adopt the End of Data timing parameters, bounded by §6.
+    ///
+    /// * Zero means "not provided" and leaves the current value alone
+    ///   (every §6 minimum is at least 1 s, so zero is never a legal
+    ///   value a cache could mean literally).
+    /// * A value above its §6 maximum (refresh 86400 s, retry 7200 s,
+    ///   expire 172800 s) is clamped down to that maximum — for expire
+    ///   in particular, the router "MUST NOT retain the data past the
+    ///   time indicated", and two days is the largest interval a cache
+    ///   can legally indicate.
+    /// * An expire below the §6 minimum of 600 s is used as-is with a
+    ///   warning: expiring early is always safe, while raising it would
+    ///   retain data longer than the cache said.
+    /// * §6: "Caches MUST set Expire Interval to a value larger than
+    ///   both the Refresh Interval and the Retry Interval." On
+    ///   violation the effective refresh/retry are lowered below the
+    ///   expire so a successful re-query can land before the data dies
+    ///   — never the other way around, which would extend retention.
+    fn apply_eod_timers(&mut self, refresh: u32, retry: u32, expire: u32) {
+        if refresh > 0 {
+            self.refresh_interval = Duration::from_secs(self.bounded_timer(
+                "refresh",
+                u64::from(refresh),
+                REFRESH_MAX_SECS,
+            ));
+        }
+        if retry > 0 {
+            self.retry_interval =
+                Duration::from_secs(self.bounded_timer("retry", u64::from(retry), RETRY_MAX_SECS));
+        }
+        if expire > 0 {
+            let expire = self.bounded_timer("expire", u64::from(expire), EXPIRE_MAX_SECS);
+            if expire < EXPIRE_MIN_SECS {
+                warn!(
+                    server = %self.config.server_addr,
+                    expire,
+                    minimum = EXPIRE_MIN_SECS,
+                    "RTR End of Data expire interval below the §6 minimum (using as-is: expiring early is safe)"
+                );
+            }
+            self.expire_interval = Duration::from_secs(expire);
+        }
+        let expire_interval = self.expire_interval;
+        let floor = expire_interval
+            .saturating_sub(Duration::from_secs(1))
+            .max(Duration::from_secs(1));
+        if self.refresh_interval >= expire_interval {
+            warn!(
+                server = %self.config.server_addr,
+                refresh_secs = self.refresh_interval.as_secs(),
+                expire_secs = expire_interval.as_secs(),
+                "RTR refresh interval not below expire interval (§6), lowering refresh"
+            );
+            self.refresh_interval = floor;
+        }
+        if self.retry_interval >= expire_interval {
+            warn!(
+                server = %self.config.server_addr,
+                retry_secs = self.retry_interval.as_secs(),
+                expire_secs = expire_interval.as_secs(),
+                "RTR retry interval not below expire interval (§6), lowering retry"
+            );
+            self.retry_interval = floor;
+        }
+    }
+
+    /// Clamp one End of Data timer to its §6 maximum, warning with both
+    /// the received and effective values.
+    fn bounded_timer(&self, timer: &'static str, value: u64, max: u64) -> u64 {
+        if value > max {
+            warn!(
+                server = %self.config.server_addr,
+                timer,
+                value,
+                clamped = max,
+                "RTR End of Data timer above the §6 maximum, clamped"
+            );
+        }
+        value.min(max)
     }
 
     async fn send_query(&self, stream: &mut TcpStream, query: QueryKind) -> Result<bool, RtrError> {
@@ -775,21 +877,35 @@ impl RtrClient {
                             customer_asn,
                             provider_asns,
                         } if pending_session.is_some() => {
-                            // 8210bis §5.12: an ASPA announcement MUST carry
-                            // at least one Provider ASN, and one carrying
-                            // multiple Provider ASNs MUST NOT contain AS 0
-                            // ("ASPA Provider List Error"). Accepting an
-                            // empty announcement would fabricate an
-                            // all-invalidating attestation for the customer.
-                            if flags & 1 == 1
-                                && (provider_asns.is_empty()
-                                    || (provider_asns.len() > 1 && provider_asns.contains(&0)))
-                            {
+                            // 8210bis §5.12 shape rules. An announcement
+                            // "MUST contain at least one Provider
+                            // Autonomous System Number"; one carrying
+                            // multiple providers "MUST NOT contain AS 0"
+                            // (an empty announcement would fabricate an
+                            // all-invalidating attestation); and the
+                            // providers come "in increasing numeric order"
+                            // with each one unique — i.e. strictly
+                            // increasing. A withdrawal (flag=0) carries the
+                            // customer AS only: "there MUST be no Provider
+                            // list, and the PDU Length MUST be 12" (the
+                            // codec derives the provider count from the
+                            // length, so a non-empty list here is exactly a
+                            // length other than 12). Any violation is an
+                            // "ASPA Provider List Error" (Error Code 9).
+                            let malformed = if flags & 1 == 1 {
+                                provider_asns.is_empty()
+                                    || (provider_asns.len() > 1 && provider_asns.contains(&0))
+                                    || !provider_asns.is_sorted_by(|a, b| a < b)
+                            } else {
+                                !provider_asns.is_empty()
+                            };
+                            if malformed {
                                 warn!(
                                     server = %self.config.server_addr,
                                     customer_asn,
+                                    announce = flags & 1 == 1,
                                     providers = provider_asns.len(),
-                                    "RTR ASPA announcement with invalid provider list"
+                                    "RTR ASPA PDU with invalid provider list"
                                 );
                                 // §5.12: "an Error PDU with Error Code 9
                                 // ... is returned by the router".
@@ -869,15 +985,7 @@ impl RtrClient {
                                 query = QueryKind::Reset;
                                 continue 'transaction;
                             }
-                            if refresh > 0 {
-                                self.refresh_interval = Duration::from_secs(u64::from(refresh));
-                            }
-                            if retry > 0 {
-                                self.retry_interval = Duration::from_secs(u64::from(retry));
-                            }
-                            if expire > 0 {
-                                self.expire_interval = Duration::from_secs(u64::from(expire));
-                            }
+                            self.apply_eod_timers(refresh, retry, expire);
                             let now = TokioInstant::now();
                             self.last_end_of_data_at = Some(now);
                             self.data_expires_at = Some(now + self.expire_interval);
@@ -2675,7 +2783,7 @@ mod tests {
     /// Error"): an Error Report with code 9 carrying the offending PDU is
     /// returned, the connection is dropped without publishing, and the
     /// reconnect starts over with a Reset Query.
-    async fn assert_aspa_announcement_rejected(aspa: RtrPdu) {
+    async fn assert_aspa_pdu_rejected(aspa: RtrPdu) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
@@ -2726,7 +2834,7 @@ mod tests {
     async fn aspa_announcement_without_providers_is_rejected() {
         // 8210bis §5.12: an announcement MUST contain at least one
         // Provider ASN (an empty set is only valid on a withdrawal).
-        assert_aspa_announcement_rejected(RtrPdu::Aspa {
+        assert_aspa_pdu_rejected(RtrPdu::Aspa {
             flags: 1,
             customer_asn: 65001,
             provider_asns: vec![],
@@ -2739,7 +2847,7 @@ mod tests {
         // 8210bis §5.12: a multi-provider announcement MUST NOT contain
         // AS 0. (A single-provider AS 0 announcement is the legal
         // "no providers" attestation and stays accepted.)
-        assert_aspa_announcement_rejected(RtrPdu::Aspa {
+        assert_aspa_pdu_rejected(RtrPdu::Aspa {
             flags: 1,
             customer_asn: 65001,
             provider_asns: vec![0, 65002],
@@ -2795,6 +2903,271 @@ mod tests {
 
         client_handle.abort();
         let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aspa_unsorted_providers_rejected() {
+        // 8210bis §5.12: providers come "in increasing numeric order".
+        assert_aspa_pdu_rejected(RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65003, 65002],
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aspa_duplicate_providers_rejected() {
+        // 8210bis §5.12: "Each Provider Autonomous System Number in a
+        // given ASPA PDU MUST be unique."
+        assert_aspa_pdu_rejected(RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002, 65002],
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aspa_withdrawal_with_providers_rejected() {
+        // 8210bis §5.12: on a withdrawal "there MUST be no Provider
+        // list, and the PDU Length MUST be 12". One provider encodes as
+        // length 16 — both violations on one wire frame.
+        assert_aspa_pdu_rejected(RtrPdu::Aspa {
+            flags: 0,
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn aspa_sorted_announcement_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: 65001,
+                    provider_asns: vec![65002, 65003, 65010],
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![],
+                aspa_records: vec![AspaRecord {
+                    customer_asn: 65001,
+                    provider_asns: vec![65002, 65003, 65010],
+                }],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §5: a PDU whose Length field exceeds 65,535 octets violates a
+    /// MUST NOT — corrupt framing. The client sends Error Report code 0
+    /// ("Corrupt Data") with the offending frame head embedded, drops
+    /// the session without publishing, and resynchronizes on reconnect.
+    #[tokio::test(start_paused = true)]
+    async fn pdu_length_over_65535_is_corrupt_framing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        // IPv4 Prefix header claiming a 65,536-octet PDU.
+        let frame: [u8; 8] = [
+            crate::rtr_codec::RTR_VERSION_2,
+            4,
+            0,
+            0,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+        ];
+        stream.write_all(&frame).await.unwrap();
+
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 0,
+                pdu: frame.to_vec(),
+                text: "corrupt PDU".to_string(),
+            }
+        );
+
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §5 boundary: a PDU of exactly 65,535 octets is legal and must be
+    /// parsed, not treated as corrupt framing. A maximum-size Error
+    /// Report code 2 ("No Data Available", non-fatal) proves it: the
+    /// client processes it as a server error — closing without sending
+    /// any Error Report of its own (§5.11) and retaining data — instead
+    /// of reporting Corrupt Data.
+    #[tokio::test(start_paused = true)]
+    async fn pdu_length_exactly_65535_is_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let report = RtrPdu::ErrorReport {
+            code: 2,
+            pdu: vec![],
+            text: "x".repeat(65_519), // 16-octet fixed part + text = 65,535
+        };
+        let mut buf = Vec::new();
+        report
+            .encode_with_version(&mut buf, crate::rtr_codec::RTR_VERSION_2)
+            .unwrap();
+        assert_eq!(buf.len(), 65_535);
+        stream.write_all(&buf).await.unwrap();
+
+        // The client drops the session without answering the Error
+        // Report (§5.11: never reply to one).
+        let mut probe = [0u8; 16];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut probe))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "expected a silent close, got bytes back");
+
+        // Non-fatal code 2: nothing flushed, resync on reconnect.
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: the router MUST NOT retain data past the Expire Interval,
+    /// whose maximum legal value is 172,800 s (2 days). A cache
+    /// supplying a larger expire is clamped: the data dies at the
+    /// two-day mark, not at the cache-supplied time.
+    #[tokio::test(start_paused = true)]
+    async fn eod_expire_above_two_day_maximum_expires_at_the_maximum() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // EoD supplies retry 7200 (the legal maximum) and expire
+        // 200,000 (over the two-day maximum).
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 7_200, 200_000).await;
+        let eod_at = TokioInstant::now();
+
+        // The cache goes away for good: every reconnect is accepted and
+        // immediately closed.
+        drop(stream);
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                drop(conn);
+            }
+        });
+
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        let elapsed = TokioInstant::now().duration_since(eod_at).as_secs();
+        // The paused clock auto-advances past pending timers while the
+        // client is in real socket I/O, so the flush lands shortly
+        // after — not exactly at — the two-day mark. The claim under
+        // test is the clamp: expiry at ~172,800 s, far below the
+        // cache-supplied 200,000 s.
+        assert!(
+            (172_800..175_000).contains(&elapsed),
+            "expected expiry at the 172,800 s §6 maximum, got {elapsed} s"
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6 timer acceptance rules, asserted on the effective intervals:
+    /// zero fields stay "not provided" (configured values untouched),
+    /// values above the §6 maxima clamp down, an expire below the §6
+    /// minimum is honored as-is (expiring early is safe), and a
+    /// refresh/retry not below the expire is lowered (§6: "Caches MUST
+    /// set Expire Interval to a value larger than both").
+    #[test]
+    fn eod_timer_bounds_and_relationships() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let new_client = || RtrClient::new(test_config(addr, 3600, 600, 7200), mpsc::channel(1).0);
+        let secs = |client: &RtrClient| {
+            (
+                client.refresh_interval.as_secs(),
+                client.retry_interval.as_secs(),
+                client.expire_interval.as_secs(),
+            )
+        };
+
+        // Zeros mean "not provided": configured values stay (#740).
+        let mut client = new_client();
+        client.apply_eod_timers(0, 0, 0);
+        assert_eq!(secs(&client), (3600, 600, 7200));
+
+        // Values above the §6 maxima clamp down to them.
+        let mut client = new_client();
+        client.apply_eod_timers(100_000, 10_000, 200_000);
+        assert_eq!(secs(&client), (86_400, 7_200, 172_800));
+
+        // The maxima themselves are legal and adopted verbatim.
+        let mut client = new_client();
+        client.apply_eod_timers(86_400, 7_200, 172_800);
+        assert_eq!(secs(&client), (86_400, 7_200, 172_800));
+
+        // Expire below the §6 minimum of 600 is used as-is — never
+        // raised — and drags the (configured) refresh/retry below it.
+        let mut client = new_client();
+        client.apply_eod_timers(0, 0, 300);
+        assert_eq!(secs(&client), (299, 299, 300));
+
+        // Refresh/retry at or above a legal expire are lowered below it.
+        let mut client = new_client();
+        client.apply_eod_timers(7_200, 6_000, 3_600);
+        assert_eq!(secs(&client), (3_599, 3_599, 3_600));
     }
 
     /// 8210bis §12 code table: codes 2, 4, and 12 are non-fatal (retain);

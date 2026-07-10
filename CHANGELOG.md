@@ -297,6 +297,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails the transaction and drops the cache session (retention semantics
   unchanged). The legal single-provider AS 0 "no providers" attestation
   stays accepted. (LAN-243)
+- **The RTR client enforces draft-ietf-sidrops-8210bis-26 PDU, timer, and
+  ASPA-shape acceptance limits.** A PDU whose Length field exceeds 65,535
+  octets (a §5 MUST NOT; previously accepted up to the 256 KiB read
+  buffer) is now rejected as corrupt framing with Error Report code 0.
+  End of Data timing parameters are bounded to their §6 legal ranges:
+  values above the maxima (refresh 86400 s, retry 7200 s, expire
+  172800 s) are clamped down with a warning — expire in particular can no
+  longer exceed the two-day ceiling the draft sets on data retention —
+  while an expire below the 600 s minimum is honored as-is (expiring
+  early is safe) and a refresh/retry not below the expire interval is
+  lowered under it per the §6 relationship rule; zero-valued fields keep
+  meaning "not provided". ASPA PDU shape checks now also reject
+  announcements whose provider lists are not strictly increasing
+  (§5.12: increasing numeric order, each provider unique) and
+  withdrawals carrying any provider list (PDU length other than 12),
+  both with Error Report code 9 and the offending PDU embedded.
+  Duplicate-announcement (code 7) and withdrawal-of-unknown (code 6)
+  detection remains unimplemented — the client does not hold the
+  per-cache active record set — and is documented as a deviation in
+  docs/RFC_NOTES.md. (LAN-314)
 - **A v1-fallback RTR cache restart caused a validation blackout at data
   expiry instead of an immediate re-fallback.** After a v1 session (e.g.
   StayRTR) dropped, the client re-probed protocol v2 on every reconnect;
