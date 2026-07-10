@@ -357,6 +357,7 @@ policy bogon-filter {
             communities: &[],
             large_communities: &[],
             as_path_str,
+            as_path: None,
             as_path_len: 1,
             origin_asn: None,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,

@@ -255,6 +255,66 @@ impl fmt::Display for ValueExpr {
     }
 }
 
+/// What a compiled `for` loop iterates (LAN-303, ADR-0103 Decision 3).
+/// Every source is finite by construction: route attribute lists are
+/// wire-bounded and set snapshots are load-bounded; the evaluator
+/// additionally enforces the per-loop iteration cap and fuel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopSource {
+    /// `route.communities` — the route's standard (RFC 1997)
+    /// communities as raw `u32` values, in attribute order. Large and
+    /// extended communities are not `u32`-shaped and do not iterate in
+    /// this slice (ADR-0103 Decision 2 value model).
+    Communities,
+    /// `route.as-path` — every ASN in wire order (segments in order,
+    /// ASNs within each segment in stored order, prepend duplicates
+    /// included; `AS_SET` members yielded individually — see
+    /// `rustbgpd_wire::AsPath::asns`). A route without an `AS_PATH`
+    /// iterates zero times.
+    AsPath,
+    /// A named `asn-set` — members in canonical order (the interned
+    /// sorted, deduplicated representation), so iteration order is
+    /// deterministic across compiles and insertion orders.
+    AsnSet(SetId),
+}
+
+impl LoopSource {
+    /// The `.rpol` source spelling for attribute sources (set sources
+    /// render by set name via the chain tables).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoopSource::Communities => "route.communities",
+            LoopSource::AsPath => "route.as-path",
+            LoopSource::AsnSet(_) => "<asn-set>",
+        }
+    }
+}
+
+/// A compiled `for` loop (LAN-303): bind each element of `source` to
+/// frame slot `slot` and walk `body` per iteration. The loop is one IR
+/// term inside its policy (the term grid stays a function of the
+/// source — ADR-0103 Decision 6.1); body terms live here, outside the
+/// policy's term/counter grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForEachNode {
+    /// What to iterate.
+    pub source: LoopSource,
+    /// Frame slot the loop variable occupies (a fresh value is written
+    /// per iteration; the slot follows LAN-302 scope reuse rules).
+    pub slot: u8,
+    /// The loop variable name as written, for explain rendering.
+    pub var: Box<str>,
+    /// Body terms, walked per iteration with loop semantics:
+    /// [`TermAction::Permit`]/[`TermAction::Deny`] terminate the policy
+    /// exactly as in an `if` body, [`TermAction::Continue`] accumulates
+    /// staged modifications, [`TermAction::Break`] exits this loop,
+    /// [`TermAction::ContinueLoop`] skips to the next iteration, and
+    /// nested [`TermAction::ForEach`] terms recurse (nesting depth is
+    /// typecheck-capped).
+    pub body: Vec<Term>,
+}
+
 /// Comparison operator of a [`MatchExpr::ValueCmp`] guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueCmpOp {
@@ -431,6 +491,34 @@ pub enum MatchExpr {
     /// (ADR-0103 Decision 4), unlike the never-match semantics of the
     /// plain scalar nodes above.
     ValueCmp(Box<ValueCmpNode>),
+    /// A `let`/loop binding's `u32` value is a member of an indexed
+    /// ASN set (LAN-303, `.rpol` `<binding> in <asn-set>`). One frame
+    /// load plus one hash probe; an unwritten frame is the fail-closed
+    /// [`EvalErrorKind`](crate::eval::EvalErrorKind) compiler-bug rail,
+    /// like every `Local` read.
+    LocalInAsnSet {
+        /// Frame slot to read.
+        slot: u8,
+        /// The binding name as written (explain rendering; participates
+        /// in equality like set names do).
+        name: Box<str>,
+        /// The probed set (indexes [`CompiledChain::asn_sets`]).
+        set: SetId,
+    },
+    /// A binding's `u32` value matches a community set's **standard**
+    /// members (LAN-303, `.rpol` `<binding> in <community-set>` where
+    /// the binding iterates `route.communities`). Standard communities
+    /// are raw `u32` values, so this is one hash probe against the
+    /// set's standard partition; large/extended members of the set are
+    /// not `u32`-comparable and never match a binding.
+    LocalInCommunitySet {
+        /// Frame slot to read.
+        slot: u8,
+        /// The binding name as written.
+        name: Box<str>,
+        /// The probed set (indexes [`CompiledChain::community_sets`]).
+        set: SetId,
+    },
     /// All children match (empty = true).
     And(Vec<MatchExpr>),
     /// Any child matches (empty = false).
@@ -476,7 +564,13 @@ impl MatchExpr {
             // table — cheaper than a community scan, comparable to the
             // prefix probe tier.
             | MatchExpr::OriginAsInSet(_)
-            | MatchExpr::PeerAsInSet(_) => 1,
+            | MatchExpr::PeerAsInSet(_)
+            // A binding probe (LAN-303) is one frame load + one hash
+            // probe — the same tier, for both set kinds (the community
+            // form probes one partition by value, never scanning the
+            // route's lists).
+            | MatchExpr::LocalInAsnSet { .. }
+            | MatchExpr::LocalInCommunitySet { .. } => 1,
             MatchExpr::NeighborIn(_) => 2,
             MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
             MatchExpr::AsPathMatches(_) => 4,
@@ -552,6 +646,40 @@ pub enum TermAction {
         /// The initializer (a checked value expression).
         expr: ValueExpr,
     },
+    /// A bounded `for` loop (LAN-303, ADR-0103 Decision 3): iterate
+    /// the node's finite source, binding each element and walking the
+    /// body terms per iteration. Never decides by itself — a body
+    /// verdict decides the policy; otherwise the walk continues past
+    /// the loop. Runtime-metered: each iteration decrements the
+    /// per-evaluation fuel and counts against the per-loop cap
+    /// (`MAX_LOOP_ITERATIONS`); exhaustion of either is an evaluation
+    /// error on the uniform Deny rail. `.rpol`-only — the TOML
+    /// frontend never emits this variant.
+    ForEach(Box<ForEachNode>),
+    /// `break` — exit the innermost enclosing loop; the walk continues
+    /// after it. Only valid inside a [`ForEach`](Self::ForEach) body
+    /// (the typechecker rejects it elsewhere); reaching one at policy
+    /// level is the fail-closed compiler-bug rail.
+    Break,
+    /// `continue` — skip to the enclosing loop's next iteration. Same
+    /// placement rules as [`Break`](Self::Break).
+    ContinueLoop,
+    /// `add`/`remove community <binding>` (LAN-303): stage the
+    /// binding's `u32` value as a standard-community add/remove at
+    /// execution time — inside a loop this resolves per iteration, so
+    /// a scrub loop stages each matched community individually. Like
+    /// [`Continue`](Self::Continue) it never decides. The staged value
+    /// lands in the ordinary literal modification lists, so downstream
+    /// consumers only ever see concrete values (the LAN-296/LAN-299
+    /// discipline).
+    CommunityVar {
+        /// True for `add`, false for `remove`.
+        add: bool,
+        /// Frame slot holding the community value.
+        slot: u8,
+        /// The binding name as written, for explain surfaces.
+        name: Box<str>,
+    },
 }
 
 /// One guarded action inside a [`CompiledPolicy`] — the compiled form
@@ -565,6 +693,23 @@ pub struct Term {
     pub guard: MatchExpr,
     /// The action taken when the guard matches.
     pub action: TermAction,
+}
+
+impl Term {
+    /// Does any term — this one or, recursively, any
+    /// [`TermAction::ForEach`] body term — satisfy `pred`? The
+    /// primitive the chain-level `requires_*` analyses walk with, so
+    /// guards and actions inside loop bodies participate exactly like
+    /// top-level ones (LAN-303).
+    pub fn any_term(&self, pred: &impl Fn(&Term) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
+        match &self.action {
+            TermAction::ForEach(node) => node.body.iter().any(|term| term.any_term(pred)),
+            _ => false,
+        }
+    }
 }
 
 /// Which frontend produced a compiled policy.
@@ -724,9 +869,25 @@ impl CompiledChain {
             // evaluates eagerly per route — an unknown peer ASN even
             // denies — so the binding alone makes verdicts
             // peer-dependent, whether or not the value is read.
-            || self.policies.iter().flat_map(|p| p.terms.iter()).any(
-                |term| matches!(&term.action, TermAction::Bind { expr, .. } if expr.reads_peer()),
+            || self.any_term_node(
+                &|term| matches!(&term.action, TermAction::Bind { expr, .. } if expr.reads_peer()),
             )
+    }
+
+    /// Whether evaluating this chain needs the typed `AS_PATH` on the
+    /// route context — true iff some term (loop bodies included)
+    /// iterates `route.as-path` (LAN-303, [`LoopSource::AsPath`]).
+    /// Construction sites that leave [`crate::engine::RouteContext::as_path`]
+    /// `None` make such loops iterate zero times, so callers with a
+    /// typed path in hand should always pass it.
+    #[must_use]
+    pub fn requires_as_path_asns(&self) -> bool {
+        self.any_term_node(&|term| {
+            matches!(
+                &term.action,
+                TermAction::ForEach(node) if node.source == LoopSource::AsPath
+            )
+        })
     }
 
     /// The first `prepend as peer` action in the chain, as the owning
@@ -742,13 +903,18 @@ impl CompiledChain {
     #[must_use]
     pub fn peer_prepend_action(&self) -> Option<(Option<&str>, Option<&str>)> {
         use crate::engine::PrependAs;
+        let carries_peer_prepend = |term: &Term| {
+            let (TermAction::Permit(mods) | TermAction::Continue(mods)) = &term.action else {
+                return false;
+            };
+            matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _)))
+        };
         for policy in &self.policies {
             for term in &policy.terms {
-                let mods = match &term.action {
-                    TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
-                    TermAction::Deny | TermAction::Bind { .. } => continue,
-                };
-                if matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _))) {
+                // Attribute a hit inside a loop body to the enclosing
+                // top-level term — that is the name explain and the
+                // attach-time rejection render.
+                if term.any_term(&carries_peer_prepend) {
                     return Some((policy.name.as_deref(), term.name.as_deref()));
                 }
             }
@@ -756,23 +922,26 @@ impl CompiledChain {
         None
     }
 
-    /// Does any guard node across all policies satisfy `pred`?
-    fn any_guard_node(&self, pred: &impl Fn(&MatchExpr) -> bool) -> bool {
+    /// Does any term across all policies — recursing into
+    /// [`TermAction::ForEach`] bodies (LAN-303) — satisfy `pred`?
+    fn any_term_node(&self, pred: &impl Fn(&Term) -> bool) -> bool {
         self.policies
             .iter()
             .flat_map(|policy| policy.terms.iter())
-            .any(|term| term.guard.any_node(pred))
+            .any(|term| term.any_term(pred))
+    }
+
+    /// Does any guard node across all policies satisfy `pred`?
+    fn any_guard_node(&self, pred: &impl Fn(&MatchExpr) -> bool) -> bool {
+        self.any_term_node(&|term| term.guard.any_node(pred))
     }
 
     /// Do any term's action modifications (Permit or Continue) across
     /// all policies satisfy `pred`?
     fn any_action_mods(&self, pred: &impl Fn(&RouteModifications) -> bool) -> bool {
-        self.policies
-            .iter()
-            .flat_map(|policy| policy.terms.iter())
-            .any(|term| match &term.action {
-                TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
-                TermAction::Deny | TermAction::Bind { .. } => false,
-            })
+        self.any_term_node(&|term| match &term.action {
+            TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
+            _ => false,
+        })
     }
 }

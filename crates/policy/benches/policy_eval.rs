@@ -123,6 +123,7 @@ fn bench_policy_eval(c: &mut Criterion) {
         communities: &communities,
         large_communities: &[],
         as_path_str: &as_path_str,
+        as_path: None,
         as_path_len: 3,
         origin_asn: None,
         validation_state: RpkiValidation::NotFound,
@@ -279,6 +280,7 @@ fn predicate_ctx<'a>(
         communities,
         large_communities: &[],
         as_path_str,
+        as_path: None,
         as_path_len: 3,
         origin_asn: None,
         validation_state: RpkiValidation::NotFound,
@@ -504,6 +506,7 @@ fn bench_value_expr(c: &mut Criterion) {
         communities: &communities,
         large_communities: &[],
         as_path_str: &as_path_str,
+        as_path: None,
         as_path_len: 3,
         origin_asn: Some(65200),
         validation_state: RpkiValidation::NotFound,
@@ -534,11 +537,88 @@ fn bench_value_expr(c: &mut Criterion) {
     group.finish();
 }
 
+/// LAN-303 bounded loops: the route-server community-scrub shape.
+///
+/// `probe` is today's guard idiom — one indexed set probe over the
+/// route's communities (`route.communities in scrub`). `loop_guard`
+/// expresses the same verdict as a per-element loop (`for c in
+/// route.communities { if c in scrub { reject } }`), and `loop_scrub`
+/// is the new capability the probe cannot express — removing each
+/// matched community (`remove community c`). The probe/loop delta is
+/// the honest per-route loop overhead (slot write + fuel decrement +
+/// body walk per element); `loop_free_baseline` pins that a chain with
+/// no compiled loops keeps the pre-LAN-303 cost (fuel init is one
+/// register write, never decremented).
+fn bench_loop_eval(c: &mut Criterion) {
+    let mut store = SetStore::new();
+    let probe = rustbgpd_policy::rpol::compile_rpol(
+        "community-set scrub { 65000:100, 65000:200, 65000:300 }
+         policy p { term t { if route.communities in scrub { reject } accept } }",
+        &mut store,
+    )
+    .expect("compiles");
+    let loop_guard = rustbgpd_policy::rpol::compile_rpol(
+        "community-set scrub { 65000:100, 65000:200, 65000:300 }
+         policy p { term t { for c in route.communities { if c in scrub { reject } } accept } }",
+        &mut store,
+    )
+    .expect("compiles");
+    let loop_scrub = rustbgpd_policy::rpol::compile_rpol(
+        "community-set scrub { 65000:100, 65000:200, 65000:300 }
+         policy p { term t { for c in route.communities { if c in scrub { remove community c } } accept } }",
+        &mut store,
+    )
+    .expect("compiles");
+    let loop_free = rustbgpd_policy::rpol::compile_rpol(
+        "community-set scrub { 65000:100, 65000:200, 65000:300 }
+         policy p { term t { if route.communities in scrub { set med 5 } accept } }",
+        &mut store,
+    )
+    .expect("compiles");
+
+    // A realistic transit route: 10 communities, one of them dirty.
+    let communities: Vec<u32> = (1..=9u32)
+        .map(|n| (65010 << 16) | n)
+        .chain([(65000 << 16) | 200])
+        .collect();
+    let as_path_str = String::new();
+    let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let ctx = predicate_ctx(matching_prefix(), &communities, &as_path_str, peer_ip);
+
+    let mut group = c.benchmark_group("loop_eval");
+    group.bench_function("scrub_probe", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&probe).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("scrub_loop_guard", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&loop_guard).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("scrub_loop_remove", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&loop_scrub).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("loop_free_baseline", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&loop_free).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_policy_eval,
     bench_policy_predicate_eval,
     bench_set_heavy,
-    bench_value_expr
+    bench_value_expr,
+    bench_loop_eval
 );
 criterion_main!(benches);

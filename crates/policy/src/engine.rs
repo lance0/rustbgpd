@@ -86,6 +86,15 @@ pub struct RouteContext<'a> {
     pub large_communities: &'a [LargeCommunity],
     /// String representation of the `AS_PATH` for regex matching.
     pub as_path_str: &'a str,
+    /// The typed `AS_PATH`, backing `for asn in route.as-path`
+    /// iteration (LAN-303) — wire order, prepend duplicates and
+    /// `AS_SET` members included ([`AsPath::asns`]). A free reference:
+    /// construction sites with the typed path in hand should always
+    /// pass it (no gating analysis needed, unlike the rendered
+    /// string). `None` — a site without a typed path, or a route with
+    /// no `AS_PATH` attribute — iterates zero times, exactly like an
+    /// empty path.
+    pub as_path: Option<&'a AsPath>,
     /// Number of ASNs in the `AS_PATH` (RFC 4271 length rules).
     pub as_path_len: usize,
     /// The route's origin AS: the last ASN in the rightmost non-empty
@@ -1284,6 +1293,16 @@ impl PolicyChain {
     #[must_use]
     pub fn requires_aspa_validation(&self) -> bool {
         self.compiled().requires_aspa_validation()
+    }
+
+    /// Whether evaluating this chain needs the typed `AS_PATH` on the
+    /// route context (`for asn in route.as-path` iteration, LAN-303).
+    /// Advisory: passing the typed path is free where it is in hand;
+    /// this exists for sites that would otherwise have to materialize
+    /// one.
+    #[must_use]
+    pub fn requires_as_path_asns(&self) -> bool {
+        self.compiled().requires_as_path_asns()
     }
 
     /// Whether evaluating this chain depends on any external validation cache.

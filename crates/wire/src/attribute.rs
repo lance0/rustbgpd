@@ -70,6 +70,22 @@ impl AsPath {
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
+    /// Iterate every ASN in the path in wire order: segments in
+    /// order, ASNs within each segment in their stored (wire) order,
+    /// duplicates from prepends included. `AS_SET` members are yielded
+    /// individually — unlike [`len`](Self::len), which counts a set as
+    /// 1 per RFC 4271 §9.1.2.2, iteration visits each member (the set
+    /// is unordered on the wire but this yields the received byte
+    /// order, deterministically per route).
+    pub fn asns(&self) -> impl Iterator<Item = u32> + '_ {
+        self.segments
+            .iter()
+            .flat_map(|seg| match seg {
+                AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns,
+            })
+            .copied()
+    }
+
     /// Returns true if `asn` appears in any segment (`AS_SEQUENCE` or `AS_SET`).
     /// Used for loop detection per RFC 4271 §9.1.2.
     #[must_use]

@@ -1,0 +1,9 @@
+policy stray { term t { break; accept } }
+policy deep {
+    term t {
+        for a in route.as-path { for b in route.communities { if b == 1:1 { reject } } }
+        accept
+    }
+}
+policy bad-source { term t { for x in route.large-communities { if x == 1 { reject } } accept } }
+policy apply-loop { term t { if apply(deep) { reject } accept } }

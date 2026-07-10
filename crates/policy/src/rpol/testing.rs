@@ -11,7 +11,10 @@
 
 use std::net::IpAddr;
 
-use rustbgpd_wire::{AspaValidation, ExtendedCommunity, LargeCommunity, Prefix, RpkiValidation};
+use rustbgpd_wire::{
+    AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, LargeCommunity, Prefix,
+    RpkiValidation,
+};
 
 use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteFamily, RouteType};
 use crate::sets::SetStore;
@@ -60,6 +63,9 @@ struct Fixture {
     large_communities: Vec<LargeCommunity>,
     extended_communities: Vec<ExtendedCommunity>,
     as_path_str: String,
+    /// Typed form of the fixture path, backing `for asn in
+    /// route.as-path` (LAN-303).
+    as_path: Option<AsPath>,
     as_path_len: usize,
     origin_asn: Option<u32>,
     local_pref: Option<u32>,
@@ -128,6 +134,7 @@ impl Fixture {
                     path.node.clone_into(&mut fixture.as_path_str);
                     fixture.as_path_len = path.node.split_whitespace().count();
                     fixture.origin_asn = fixture_origin_asn(&path.node);
+                    fixture.as_path = fixture_as_path(&path.node);
                 }
                 RouteField::Rpki(state) => {
                     fixture.rpki = match state.node.as_str() {
@@ -181,6 +188,7 @@ impl Fixture {
             communities: &self.communities,
             large_communities: &self.large_communities,
             as_path_str: &self.as_path_str,
+            as_path: self.as_path.as_ref(),
             as_path_len: self.as_path_len,
             origin_asn: self.origin_asn,
             validation_state: self.rpki,
@@ -217,6 +225,43 @@ fn fixture_origin_asn(path: &str) -> Option<u32> {
         }
     }
     origin
+}
+
+/// Typed `AsPath` of a fixture `as-path` string (LAN-303): plain ASNs
+/// accumulate into `AS_SEQUENCE` segments, `{...}` groups become
+/// `AS_SET` segments, in written order — the string-form equivalent of
+/// the wire representation `for asn in route.as-path` iterates.
+/// Non-numeric tokens are skipped (the fixture format is free-form by
+/// design); an empty/unparseable string yields `None` (no `AS_PATH`
+/// attribute — zero iterations).
+fn fixture_as_path(path: &str) -> Option<AsPath> {
+    let mut segments: Vec<AsPathSegment> = Vec::new();
+    let mut in_set = false;
+    for token in path.split_whitespace() {
+        let mut token = token;
+        if let Some(rest) = token.strip_prefix('{') {
+            in_set = true;
+            segments.push(AsPathSegment::AsSet(Vec::new()));
+            token = rest;
+        }
+        let closes = token.ends_with('}');
+        let token = token.trim_end_matches('}');
+        if let Ok(asn) = token.parse::<u32>() {
+            match (in_set, segments.last_mut()) {
+                (true, Some(AsPathSegment::AsSet(asns)))
+                | (false, Some(AsPathSegment::AsSequence(asns))) => asns.push(asn),
+                _ => segments.push(if in_set {
+                    AsPathSegment::AsSet(vec![asn])
+                } else {
+                    AsPathSegment::AsSequence(vec![asn])
+                }),
+            }
+        }
+        if closes {
+            in_set = false;
+        }
+    }
+    (!segments.is_empty()).then_some(AsPath { segments })
 }
 
 /// Execute every `test` block against the lowered policies.

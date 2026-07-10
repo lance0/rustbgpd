@@ -257,6 +257,43 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   initializers register peer context for update-group
   fingerprinting. (LAN-302, ADR-0103)
 
+- **`.rpol` bounded `for` loops with runtime fuel metering.** The
+  third ADR-0103 Phase B slice — and the first to activate the runtime
+  budgets. `for <var> in <source> { ... }` iterates exactly three
+  finite sources: `route.communities` (standard RFC 1997 communities
+  as raw `u32` values — the community-iteration decision that keeps
+  the u32-only value model; large/ext kinds stay probe-only),
+  `route.as-path` (every ASN in wire order, prepend duplicates and
+  `AS_SET` members included), and named `asn-set`s (canonical sorted
+  order, deterministic across compiles). The loop variable is an
+  immutable per-iteration binding on the LAN-302 slot machinery,
+  usable in comparisons and arithmetic, in `in` probes against
+  asn-sets and a community-set's standard members, and in the new
+  binding-valued `add`/`remove community <var>` actions — the
+  route-server scrub-loop idiom (`for c in route.communities { if c in
+  scrub { remove community c } }`). `break` exits the innermost loop,
+  `continue` skips to the next iteration, and body verdicts terminate
+  the policy exactly like an `if` body; iterated collections are the
+  arrived route, so staged adds can never self-extend an iteration
+  (pinned by test). Budgets per ADR-0103 Decision 3: 4,096 iterations
+  per loop (compile-checked for sets; cap-then-**error** at runtime
+  for attribute sources — an extended-message route with more
+  communities than the cap denies, never truncates), loop nesting ≤ 4
+  with multiplicative cost in the typecheck DP (nested route-attribute
+  loops exceed the 1M-step budget and are rejected at compile time),
+  and per-evaluation instruction fuel initialized at `MAX_EVAL_COST`
+  and decremented only at loop iteration steps — loop-free chains pay
+  one register write and nothing else, and exhaustion rides the
+  uniform-Deny eval-error rails (counter + rate-limited log + explain
+  error trace, with `fuel-exhausted` / `loop-limit-exceeded` reasons).
+  Explain renders bounded loop summaries (iteration count + the
+  deciding iteration, never per-iteration output); `apply` targets may
+  not contain loops (no walk to run them in); `RouteContext` gains the
+  typed `AS_PATH` so as-path iteration sees the real segments
+  everywhere policy evaluates. `while` remains excluded — the
+  finite-source grammar is what keeps every bound provable or
+  meterable. (LAN-303, ADR-0103)
+
 ### Changed
 
 - **Release publication is now fail-closed.** The binary-release and

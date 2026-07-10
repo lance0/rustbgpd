@@ -25,10 +25,26 @@ use crate::engine::{
     RouteContext, RouteModifications,
 };
 use crate::ir::{
-    ArithOp, Cmp, CompiledChain, CompiledPolicy, MatchExpr, TermAction, ValueCmpOp, ValueExpr,
-    ValueField,
+    ArithOp, Cmp, CompiledChain, CompiledPolicy, ForEachNode, LoopSource, MatchExpr, TermAction,
+    ValueCmpOp, ValueExpr, ValueField,
 };
 use crate::sets::prefix_entry_matches;
+
+/// Worst-case per-route evaluation steps (ADR-0103 Decision 3,
+/// `MAX_EVAL_COST`): the compile-time budget the typecheck cost DP
+/// enforces per policy, and the runtime fuel every evaluation starts
+/// with (LAN-303). Not operator-tunable.
+pub(crate) const MAX_EVAL_COST: u64 = 1_000_000;
+
+/// Hard per-loop iteration cap (ADR-0103 Decision 3,
+/// `MAX_LOOP_ITERATIONS`): a loop whose source still has elements
+/// after this many iterations fails the route closed
+/// ([`EvalErrorKind::LoopLimitExceeded`]) — cap-then-**error**, never
+/// silent truncation. Reachable only through pathological
+/// data-dependent input (e.g. an extended-message route carrying tens
+/// of thousands of communities); set sources larger than this are
+/// rejected at compile time.
+pub(crate) const MAX_LOOP_ITERATIONS: u32 = 4096;
 
 /// Why a route evaluation failed (LAN-299, the ADR-0103 Decision 4
 /// rails). ANY of these resolves the route as a uniform **Deny**:
@@ -65,6 +81,24 @@ pub enum EvalErrorKind {
     /// of a compiler bug, mirroring how stale hit-counter shapes
     /// degrade instead of panicking on the production path.
     UnboundLocal,
+    /// The per-evaluation instruction fuel ran out (LAN-303, ADR-0103
+    /// Decision 3): the walk executed `MAX_EVAL_COST` (1,000,000)
+    /// loop-iteration steps. The compile-time cost DP bounds each policy below the
+    /// budget, so exhaustion indicates pathological data-dependent
+    /// input compounding across a chain, or a compiler bug — both fail
+    /// closed.
+    FuelExhausted,
+    /// One loop iterated past `MAX_LOOP_ITERATIONS` (4,096) with
+    /// source elements remaining (LAN-303) — e.g. a peer-supplied route
+    /// carrying more communities than the cap. Cap-then-error: the
+    /// route is denied, never partially processed.
+    LoopLimitExceeded,
+    /// A `break`/`continue` term reached the policy-level walk
+    /// (LAN-303). Unreachable through the compiler — the typechecker
+    /// confines loop control to loop bodies — so this is the
+    /// fail-closed disposition of a compiler bug, like
+    /// [`UnboundLocal`](Self::UnboundLocal).
+    StrayLoopControl,
 }
 
 impl EvalErrorKind {
@@ -80,6 +114,9 @@ impl EvalErrorKind {
             EvalErrorKind::AbsentField(_) => "absent-operand",
             EvalErrorKind::AbsentPrependOperand(_) => "absent-prepend-operand",
             EvalErrorKind::UnboundLocal => "unbound-local",
+            EvalErrorKind::FuelExhausted => "fuel-exhausted",
+            EvalErrorKind::LoopLimitExceeded => "loop-limit-exceeded",
+            EvalErrorKind::StrayLoopControl => "stray-loop-control",
         }
     }
 }
@@ -107,30 +144,49 @@ impl fmt::Display for EvalErrorKind {
             EvalErrorKind::UnboundLocal => {
                 write!(f, "internal error: unbound `let` slot (fail closed)")
             }
+            EvalErrorKind::FuelExhausted => {
+                write!(
+                    f,
+                    "evaluation fuel exhausted ({MAX_EVAL_COST} iteration steps)"
+                )
+            }
+            EvalErrorKind::LoopLimitExceeded => {
+                write!(
+                    f,
+                    "loop exceeded {MAX_LOOP_ITERATIONS} iterations with elements remaining"
+                )
+            }
+            EvalErrorKind::StrayLoopControl => {
+                write!(
+                    f,
+                    "internal error: break/continue outside a loop (fail closed)"
+                )
+            }
         }
     }
 }
 
-/// Size of the per-evaluation `let`-binding register file (LAN-302):
-/// the language has exactly two nesting levels (a term body and one
-/// `if`/`else` body), each capped at `MAX_LOCALS` = 64 bindings per
-/// scope by the typechecker, so at most 2 × 64 slots are ever live.
-/// Slots reset per source term and sibling scopes reuse, keeping the
-/// frame this small forever (ADR-0103 Decision 3 caps the frame at
-/// 1,024 slots; we need an eighth of that).
-pub(crate) const LOCAL_FRAME_SLOTS: usize = 128;
+/// Size of the per-evaluation `let`-binding register file (LAN-302 /
+/// LAN-303): scopes are a term body, up to `MAX_LOOP_DEPTH` (4) nested
+/// loop bodies, and one `if`/`else` body — each capped at `MAX_LOCALS`
+/// = 64 bindings by the typechecker, which additionally rejects any
+/// program whose live bindings along one path exceed this frame (the
+/// slot is a `u8`, so 256 is the natural register-file size and stays
+/// well under ADR-0103 Decision 3's 1,024-slot cap). Slots reset per
+/// source term and sibling scopes reuse.
+pub(crate) const LOCAL_FRAME_SLOTS: usize = 256;
 
 /// The fixed-size evaluation frame `let` bindings live in: a stack
 /// array, allocated (and zeroed) lazily only when a policy's walk
 /// reaches its first [`TermAction::Bind`] — policies without bindings
 /// never touch it, preserving the V1 hot-path cost exactly.
-type LocalFrame = [u32; LOCAL_FRAME_SLOTS];
+pub(crate) type LocalFrame = [u32; LOCAL_FRAME_SLOTS];
 
 /// The frame as a read slice: empty when no binding has executed yet
 /// (a `Local` read against it is the fail-closed
 /// [`EvalErrorKind::UnboundLocal`] compiler-bug rail).
 #[inline]
-fn locals_slice(locals: Option<&LocalFrame>) -> &[u32] {
+pub(crate) fn locals_slice(locals: Option<&LocalFrame>) -> &[u32] {
     locals.map_or(&[], |frame| &frame[..])
 }
 
@@ -288,6 +344,84 @@ impl PolicyHitCounters {
     }
 }
 
+/// The result of one loop evaluation (LAN-303): how many iterations
+/// executed, whether (and where) a body verdict decided the policy.
+/// The extra fields are cheap scalars carried for explain rendering
+/// (loop summary + the deciding iteration — never per-iteration
+/// output).
+pub(crate) struct LoopOutcome {
+    /// Iterations entered (each paid one fuel step).
+    pub(crate) iterations: u32,
+    /// 0-based iteration index of the deciding verdict, `None` when
+    /// the loop ran to completion or exited via `break`.
+    pub(crate) decided_at: Option<u32>,
+    /// How the loop resolved.
+    pub(crate) flow: LoopFlow,
+}
+
+/// How a loop resolved (LAN-303).
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient per-decision return value, never stored or collected"
+)]
+pub(crate) enum LoopFlow {
+    /// Ran out of elements or hit `break`: the enclosing walk
+    /// continues after the loop.
+    Completed,
+    /// A body `accept` decided the policy, carrying the deciding
+    /// term's resolved modifications (the caller merges accumulated
+    /// `Continue` modifications under it, as with any permit).
+    Permit(RouteModifications),
+    /// A body `reject` decided the policy.
+    Deny,
+}
+
+/// The element stream of one loop source (LAN-303). Attribute lists
+/// and set snapshots iterate as slices; the typed `AS_PATH` flattens
+/// through `AsPath::asns` (boxed — one allocation at loop entry, on
+/// the loop path only; the loop-free hot path never constructs one).
+enum ElementIter<'a> {
+    Slice(std::slice::Iter<'a, u32>),
+    Path(Box<dyn Iterator<Item = u32> + 'a>),
+}
+
+impl Iterator for ElementIter<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        match self {
+            ElementIter::Slice(iter) => iter.next().copied(),
+            ElementIter::Path(iter) => iter.next(),
+        }
+    }
+}
+
+/// Execute a [`TermAction::CommunityVar`]: read the binding's value
+/// from the frame and stage it as a standard-community add/remove in
+/// the policy-local accumulator. A missing frame/slot is the
+/// fail-closed compiler-bug rail, like every `Local` read.
+pub(crate) fn exec_community_var(
+    add: bool,
+    slot: u8,
+    locals: Option<&LocalFrame>,
+    continued: &mut Option<RouteModifications>,
+) -> Result<(), EvalErrorKind> {
+    let value = locals_slice(locals)
+        .get(usize::from(slot))
+        .copied()
+        .ok_or(EvalErrorKind::UnboundLocal)?;
+    let mut mods = RouteModifications::default();
+    if add {
+        mods.communities_add.push(value);
+    } else {
+        mods.communities_remove.push(value);
+    }
+    continued
+        .get_or_insert_with(RouteModifications::default)
+        .merge_from(mods);
+    Ok(())
+}
+
 /// A policy's disposition of the route, borrowing the matched term's
 /// modifications (cloned only if merged). `PermitOwned` carries
 /// modifications accumulated from `Continue` terms merged with the
@@ -370,6 +504,31 @@ impl CompiledChain {
         ctx: &RouteContext<'_>,
         hits: Option<&PolicyHitCounters>,
     ) -> (PolicyResult, PolicyEvaluation) {
+        // The LAN-303 runtime fuel: one register write per evaluation.
+        // Decremented ONLY at loop iteration steps (`eval_for_each`) —
+        // straight-line code is pre-paid by the compile-time cost DP,
+        // so a loop-free walk never touches it again and the V1 hot
+        // path keeps its exact cost profile (ADR-0103 Decision 3).
+        let mut fuel: u64 = MAX_EVAL_COST;
+        self.evaluate_fueled::<COUNT, ATTR>(ctx, hits, &mut fuel)
+    }
+
+    /// [`evaluate_attributed`](Self::evaluate_attributed) against a
+    /// caller-owned fuel counter, so tests can pin fuel accounting
+    /// exactness (consumed == loop iterations) and exhaustion.
+    #[cfg(test)]
+    pub(crate) fn evaluate_measuring_fuel(&self, ctx: &RouteContext<'_>) -> (PolicyResult, u64) {
+        let mut fuel: u64 = MAX_EVAL_COST;
+        let (result, _) = self.evaluate_fueled::<false, false>(ctx, None, &mut fuel);
+        (result, MAX_EVAL_COST - fuel)
+    }
+
+    fn evaluate_fueled<const COUNT: bool, const ATTR: bool>(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: Option<&PolicyHitCounters>,
+        fuel: &mut u64,
+    ) -> (PolicyResult, PolicyEvaluation) {
         let mut accumulated = RouteModifications::default();
         for (policy_index, policy) in self.policies.iter().enumerate() {
             let policy_hits = if COUNT {
@@ -383,7 +542,7 @@ impl CompiledChain {
             } else {
                 None
             };
-            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits) {
+            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel) {
                 PolicyDecision::Deny => {
                     return (
                         PolicyResult::deny(),
@@ -469,12 +628,18 @@ impl CompiledChain {
     ///
     /// If `hits` is not shaped like `policies` (one counter per term).
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
+    )]
     pub fn evaluate_recording_hits(
         &self,
         ctx: &RouteContext<'_>,
         hits: &mut [Vec<u64>],
     ) -> PolicyResult {
         assert_eq!(hits.len(), self.policies.len(), "hits shaped like chain");
+        // LAN-303: dry runs are metered identically to the live walk.
+        let mut fuel: u64 = MAX_EVAL_COST;
         let mut accumulated = RouteModifications::default();
         for (policy, policy_hits) in self.policies.iter().zip(hits.iter_mut()) {
             assert_eq!(policy_hits.len(), policy.terms.len());
@@ -509,7 +674,10 @@ impl CompiledChain {
                             }
                             break;
                         }
-                        TermAction::Deny => {
+                        // Deny denies; stray loop control (confined
+                        // to loop bodies by the typechecker) fails
+                        // closed like the live walk — same disposition.
+                        TermAction::Deny | TermAction::Break | TermAction::ContinueLoop => {
                             denied = true;
                             break;
                         }
@@ -534,6 +702,41 @@ impl CompiledChain {
                                 break;
                             };
                             locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[*slot as usize] = value;
+                        }
+                        // LAN-303: loops run identically to the live
+                        // walk (same eval_for_each), errors fail
+                        // closed. Body terms are outside the counter
+                        // grid — the loop's own term counted above.
+                        TermAction::ForEach(node) => {
+                            let Ok(outcome) = self.eval_for_each(
+                                node,
+                                ctx,
+                                &mut locals,
+                                &mut continued,
+                                &mut fuel,
+                            ) else {
+                                denied = true;
+                                break;
+                            };
+                            match outcome.flow {
+                                LoopFlow::Completed => {}
+                                LoopFlow::Permit(mods) => {
+                                    permit_mods = Some(Some(mods));
+                                    break;
+                                }
+                                LoopFlow::Deny => {
+                                    denied = true;
+                                    break;
+                                }
+                            }
+                        }
+                        TermAction::CommunityVar { add, slot, .. } => {
+                            if exec_community_var(*add, *slot, locals.as_ref(), &mut continued)
+                                .is_err()
+                            {
+                                denied = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -573,6 +776,7 @@ impl CompiledChain {
         policy: &'a CompiledPolicy,
         ctx: &RouteContext<'_>,
         hits: Option<&[AtomicU64]>,
+        fuel: &mut u64,
     ) -> PolicyDecision<'a> {
         let mut continued: Option<RouteModifications> = None;
         // LAN-302: the `let`-binding register file, materialized (one
@@ -645,6 +849,47 @@ impl CompiledChain {
                             Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
+                    // LAN-303: a bounded loop. A body verdict decides
+                    // the policy; otherwise the walk continues after
+                    // it. Any error (fuel, iteration cap, body
+                    // evaluation) is terminal on the uniform rail,
+                    // attributed to the loop's term.
+                    TermAction::ForEach(node) => {
+                        match self.eval_for_each(node, ctx, &mut locals, &mut continued, fuel) {
+                            Ok(outcome) => match outcome.flow {
+                                LoopFlow::Completed => {}
+                                LoopFlow::Permit(mods) => {
+                                    return match continued {
+                                        Some(mut acc) => {
+                                            acc.merge_from(mods);
+                                            PolicyDecision::PermitOwned(acc)
+                                        }
+                                        None => PolicyDecision::PermitOwned(mods),
+                                    };
+                                }
+                                LoopFlow::Deny => return PolicyDecision::Deny,
+                            },
+                            Err((kind, _)) => return PolicyDecision::Error { kind, term_index },
+                        }
+                    }
+                    // Loop control at policy level is confined to loop
+                    // bodies by the typechecker; fail closed on the
+                    // compiler-bug rail rather than misinterpret it.
+                    TermAction::Break | TermAction::ContinueLoop => {
+                        return PolicyDecision::Error {
+                            kind: EvalErrorKind::StrayLoopControl,
+                            term_index,
+                        };
+                    }
+                    // LAN-303: stage the binding's value as a standard
+                    // community add/remove; accumulates like Continue.
+                    TermAction::CommunityVar { add, slot, .. } => {
+                        if let Err(kind) =
+                            exec_community_var(*add, *slot, locals.as_ref(), &mut continued)
+                        {
+                            return PolicyDecision::Error { kind, term_index };
+                        }
+                    }
                 }
             }
         }
@@ -653,6 +898,156 @@ impl CompiledChain {
             (PolicyAction::Permit, None) => PolicyDecision::Permit(None),
             (PolicyAction::Deny, _) => PolicyDecision::Deny,
         }
+    }
+
+    /// Evaluate one compiled `for` loop (LAN-303): bind each source
+    /// element into the loop variable's frame slot and walk the body
+    /// terms per iteration, with the enclosing policy's `continued`
+    /// accumulator and `let` frame — a body verdict decides the whole
+    /// policy, staged body modifications accumulate policy-locally,
+    /// `break`/`continue` are loop-local control.
+    ///
+    /// Metering (ADR-0103 Decision 3): every iteration decrements
+    /// `fuel` by exactly one (the back-edge charge — body straight-line
+    /// cost is pre-paid by the compile-time DP) and counts against the
+    /// hard per-loop cap [`MAX_LOOP_ITERATIONS`]; exhausting either
+    /// fails closed. The iterated collection is the arrived route
+    /// (staged modifications are never read back — Decision 2), so a
+    /// body `add community` cannot extend its own iteration source.
+    ///
+    /// `Err` carries the iteration index at which evaluation failed,
+    /// for explain rendering; the live walk uses only the kind.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per body term action; splitting would scatter the loop semantics"
+    )]
+    pub(crate) fn eval_for_each(
+        &self,
+        node: &ForEachNode,
+        ctx: &RouteContext<'_>,
+        locals: &mut Option<LocalFrame>,
+        continued: &mut Option<RouteModifications>,
+        fuel: &mut u64,
+    ) -> Result<LoopOutcome, (EvalErrorKind, u32)> {
+        let elements: ElementIter<'_> = match node.source {
+            LoopSource::Communities => ElementIter::Slice(ctx.communities.iter()),
+            LoopSource::AsPath => match ctx.as_path {
+                // Wire order, prepend duplicates and AS_SET members
+                // included (`AsPath::asns`); an absent path iterates
+                // zero times, like an empty one.
+                Some(path) => ElementIter::Path(Box::new(path.asns())),
+                None => ElementIter::Slice([].iter()),
+            },
+            LoopSource::AsnSet(id) => {
+                // Canonical (sorted, deduplicated) member order — the
+                // interned representation — so iteration order is
+                // deterministic across compiles and insertion orders.
+                ElementIter::Slice(self.asn_sets[id.0 as usize].asns().iter())
+            }
+        };
+        let mut iterations: u32 = 0;
+        for element in elements {
+            // Cap-then-error: the 4097th element is an evaluation
+            // error, never a silent truncation (fail closed).
+            if iterations == MAX_LOOP_ITERATIONS {
+                return Err((EvalErrorKind::LoopLimitExceeded, iterations));
+            }
+            // The back-edge fuel charge: exactly one per iteration.
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or((EvalErrorKind::FuelExhausted, iterations))?;
+            iterations += 1;
+            // The loop variable is a fresh immutable binding per
+            // iteration (the LAN-302 slot model).
+            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(node.slot)] = element;
+            let mut continue_iter = false;
+            for term in &node.body {
+                let mut err = None;
+                let matched =
+                    self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
+                if let Some(kind) = err {
+                    return Err((kind, iterations - 1));
+                }
+                if !matched {
+                    continue;
+                }
+                match &term.action {
+                    TermAction::Permit(mods) => {
+                        let resolved = self
+                            .resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
+                            .map_err(|kind| (kind, iterations - 1))?;
+                        return Ok(LoopOutcome {
+                            iterations,
+                            decided_at: Some(iterations - 1),
+                            flow: LoopFlow::Permit(resolved.unwrap_or_else(|| mods.clone())),
+                        });
+                    }
+                    TermAction::Deny => {
+                        return Ok(LoopOutcome {
+                            iterations,
+                            decided_at: Some(iterations - 1),
+                            flow: LoopFlow::Deny,
+                        });
+                    }
+                    TermAction::Continue(mods) => {
+                        let resolved = self
+                            .resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
+                            .map_err(|kind| (kind, iterations - 1))?;
+                        continued
+                            .get_or_insert_with(RouteModifications::default)
+                            .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                    }
+                    TermAction::Bind { slot, expr, .. } => {
+                        let value = eval_value(expr, ctx, locals_slice(locals.as_ref()))
+                            .map_err(|kind| (kind, iterations - 1))?;
+                        locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(*slot)] = value;
+                    }
+                    TermAction::CommunityVar { add, slot, .. } => {
+                        exec_community_var(*add, *slot, locals.as_ref(), continued)
+                            .map_err(|kind| (kind, iterations - 1))?;
+                    }
+                    // `break` exits the innermost loop: the enclosing
+                    // walk continues after it.
+                    TermAction::Break => {
+                        return Ok(LoopOutcome {
+                            iterations,
+                            decided_at: None,
+                            flow: LoopFlow::Completed,
+                        });
+                    }
+                    // `continue` skips the rest of this iteration.
+                    TermAction::ContinueLoop => {
+                        continue_iter = true;
+                    }
+                    // Nested loop: verdicts and errors propagate; a
+                    // completed (or broken) inner loop resumes this
+                    // body.
+                    TermAction::ForEach(inner) => {
+                        let outcome = self
+                            .eval_for_each(inner, ctx, locals, continued, fuel)
+                            .map_err(|(kind, _)| (kind, iterations - 1))?;
+                        match outcome.flow {
+                            LoopFlow::Completed => {}
+                            flow @ (LoopFlow::Permit(_) | LoopFlow::Deny) => {
+                                return Ok(LoopOutcome {
+                                    iterations,
+                                    decided_at: Some(iterations - 1),
+                                    flow,
+                                });
+                            }
+                        }
+                    }
+                }
+                if continue_iter {
+                    break;
+                }
+            }
+        }
+        Ok(LoopOutcome {
+            iterations,
+            decided_at: None,
+            flow: LoopFlow::Completed,
+        })
     }
 
     /// Resolve a matched term's computed operands — the LAN-296
@@ -772,6 +1167,28 @@ impl CompiledChain {
                     }
                 }
             }
+            // LAN-303: one frame load + one hash probe. A missing
+            // frame is the fail-closed compiler-bug rail, like every
+            // `Local` read.
+            MatchExpr::LocalInAsnSet { slot, set, .. } => {
+                if let Some(value) = locals.get(usize::from(*slot)) {
+                    self.asn_sets[set.0 as usize].contains(*value)
+                } else {
+                    err.get_or_insert(EvalErrorKind::UnboundLocal);
+                    false
+                }
+            }
+            // LAN-303: probe the community set's standard partition by
+            // raw u32 value (large/ext members are not u32-comparable
+            // and never match a binding).
+            MatchExpr::LocalInCommunitySet { slot, set, .. } => {
+                if let Some(value) = locals.get(usize::from(*slot)) {
+                    self.community_sets[set.0 as usize].contains_standard(*value)
+                } else {
+                    err.get_or_insert(EvalErrorKind::UnboundLocal);
+                    false
+                }
+            }
             MatchExpr::PrefixEq { prefix, ge, le } => ctx
                 .prefix
                 .is_some_and(|candidate| prefix_entry_matches(*prefix, *ge, *le, candidate)),
@@ -881,6 +1298,7 @@ mod tests {
             communities: &[],
             large_communities: &[],
             as_path_str: "",
+            as_path: None,
             as_path_len: 0,
             origin_asn: None,
             validation_state: RpkiValidation::NotFound,
@@ -1047,6 +1465,37 @@ mod tests {
         // A prefixless route (e.g. BGP-LS) never matches prefix nodes.
         let (result, _) = chain.evaluate_with_attribution(&ctx(None));
         assert_eq!(result.action, PolicyAction::Deny);
+    }
+
+    /// LAN-303: loop control reaching the policy-level walk is a
+    /// compiler bug — it must fail closed on the eval-error rail, not
+    /// be misread as a verdict or skipped.
+    #[test]
+    fn stray_loop_control_fails_closed() {
+        for action in [TermAction::Break, TermAction::ContinueLoop] {
+            let chain = CompiledChain {
+                policies: vec![CompiledPolicy {
+                    name: None,
+                    terms: vec![
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: action.clone(),
+                        },
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: TermAction::Permit(RouteModifications::default()),
+                        },
+                    ],
+                    default_action: PolicyAction::Permit,
+                    source: PolicySource::Rpol,
+                }],
+                ..CompiledChain::empty()
+            };
+            let (result, _) = chain.evaluate_with_attribution(&ctx(None));
+            assert_eq!(result.action, PolicyAction::Deny, "{action:?}");
+        }
     }
 
     /// LAN-192: a counter set shorter than the chain (a stale hot-reload

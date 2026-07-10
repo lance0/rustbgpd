@@ -2094,6 +2094,7 @@ impl RibManager {
                         communities: cand.communities(),
                         large_communities: cand.large_communities(),
                         as_path_str: &aspath_str,
+                        as_path: cand.as_path(),
                         as_path_len: aspath_len,
                         origin_asn,
                         validation_state: cand.validation_state,

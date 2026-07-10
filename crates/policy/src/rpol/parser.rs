@@ -15,10 +15,10 @@ use crate::engine::{CommunityMatch, parse_community_match};
 use crate::ir::ArithOp;
 
 use super::ast::{
-    ActionStmt, AsnSetDef, CmpOp, CommunityKind, CommunityLit, CommunitySetDef, ExpectDef, Expr,
-    FieldPath, FieldRoot, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef,
-    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, ValueExprAst,
-    WithAssertion,
+    ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
+    ExpectDef, Expr, FieldPath, FieldRoot, ForSource, ForStmt, IfStmt, NextHopArg, PeerField,
+    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt,
+    TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -514,7 +514,7 @@ impl Parser<'_> {
         self.expect(Tok::LBrace, "`{`")?;
         let mut stmts = Vec::new();
         while !self.at(Tok::RBrace) {
-            if let Ok(stmt) = self.stmt() {
+            if let Ok(stmt) = self.stmt(0) {
                 stmts.push(stmt);
             } else {
                 self.recover_to(&[Tok::Semi, Tok::RBrace, Tok::TermKw]);
@@ -527,13 +527,65 @@ impl Parser<'_> {
         Ok(TermDef { name, stmts })
     }
 
-    fn stmt(&mut self) -> PResult<Stmt> {
+    /// `depth` counts `for`-loop nesting — the only construct through
+    /// which statements recurse (LAN-303). Capped at [`MAX_EXPR_DEPTH`]
+    /// so an adversarial file cannot overflow the parse (and every
+    /// downstream) recursion; the typechecker enforces the much
+    /// smaller semantic nesting cap with a better diagnostic.
+    fn stmt(&mut self, depth: u32) -> PResult<Stmt> {
         if self.at(Tok::IfKw) {
             return Ok(Stmt::If(self.if_stmt()?));
+        }
+        // Statement-initial contextual `for` (LAN-303, ADR-0103
+        // Decision 2.2): like `let`, statement position admits no
+        // other bare identifier, so consuming it is purely additive.
+        if let Some(token) = self.peek()
+            && token.kind == Tok::Ident
+            && self.text(token) == "for"
+        {
+            return Ok(Stmt::For(self.for_stmt(depth)?));
         }
         let action = self.action()?;
         self.eat(Tok::Semi);
         Ok(Stmt::Action(action))
+    }
+
+    /// `for <var> in <source> { body }` (LAN-303); the caller has
+    /// peeked the contextual `for` identifier.
+    fn for_stmt(&mut self, depth: u32) -> PResult<ForStmt> {
+        self.check_expr_depth(depth)?;
+        let start = self.bump().expect("caller peeked `for`").span;
+        let var = self.expect_ident("a loop variable name")?;
+        self.expect(Tok::InKw, "`in` (`for <var> in <source> { ... }`)")?;
+        let source = match self.peek().map(|t| t.kind) {
+            Some(Tok::RouteKw | Tok::PeerKw) => ForSource::Field(self.field_path()?),
+            Some(Tok::Ident) => ForSource::Set(self.expect_ident("an iteration source")?),
+            _ => {
+                return Err(self.error_expected(
+                    "an iteration source (`route.communities`, `route.as-path`, or an asn-set name)",
+                ));
+            }
+        };
+        let span = start.to(source.span());
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut body = Vec::new();
+        while !self.at(Tok::RBrace) {
+            if let Ok(stmt) = self.stmt(depth + 1) {
+                body.push(stmt);
+            } else {
+                self.recover_to(&[Tok::Semi, Tok::RBrace]);
+                if self.eat(Tok::Semi).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect(Tok::RBrace, "`}`")?;
+        Ok(ForStmt {
+            var,
+            source,
+            body,
+            span,
+        })
     }
 
     fn if_stmt(&mut self) -> PResult<IfStmt> {
@@ -579,6 +631,10 @@ impl Parser<'_> {
         Ok(actions)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per action keyword; splitting would scatter the statement grammar"
+    )]
     fn action(&mut self) -> PResult<ActionStmt> {
         let Some(token) = self.peek() else {
             return Err(self.error_expected("an action"));
@@ -649,12 +705,30 @@ impl Parser<'_> {
                         return Err(Fail);
                     }
                 };
-                let lit = self.community_lit()?;
-                let span = token.span.to(lit.span);
+                // LAN-303: a lowercase identifier here is a binding
+                // reference (`remove community <loop-var>`) — well-known
+                // names (`NO_EXPORT`, …) keep their literal meaning via
+                // the same shape rule `community_lit` applies, so this
+                // is purely additive (a non-well-known identifier was a
+                // parse error before).
+                let arg = match self.peek() {
+                    Some(ident)
+                        if ident.kind == Tok::Ident && !self.is_well_known_community(ident) =>
+                    {
+                        self.bump();
+                        CommunityArg::Var(Spanned::new(self.text(ident).to_string(), ident.span))
+                    }
+                    _ => CommunityArg::Lit(self.community_lit()?),
+                };
+                let end = match &arg {
+                    CommunityArg::Lit(lit) => lit.span,
+                    CommunityArg::Var(name) => name.span,
+                };
+                let span = token.span.to(end);
                 Ok(ActionStmt::Community {
                     add,
                     kind,
-                    lit,
+                    arg,
                     span,
                 })
             }
@@ -686,10 +760,32 @@ impl Parser<'_> {
             // identifier, so consuming `let` here is purely additive —
             // sets, policies, and parameters named `let` keep working.
             Tok::Ident if self.text(token) == "let" => self.let_stmt(),
+            // Contextual loop control (LAN-303) — same additive rule;
+            // the typechecker rejects them outside loop bodies.
+            Tok::Ident if self.text(token) == "break" => {
+                self.bump();
+                Ok(ActionStmt::Break(token.span))
+            }
+            Tok::Ident if self.text(token) == "continue" => {
+                self.bump();
+                Ok(ActionStmt::Continue(token.span))
+            }
             _ => Err(self.error_expected(
-                "an action (`accept`, `reject`, `set`, `add`, `remove`, `prepend`) or `let`",
+                "an action (`accept`, `reject`, `set`, `add`, `remove`, `prepend`), `let`, \
+                 `break`, or `continue`",
             )),
         }
+    }
+
+    /// Whether an identifier token spells a well-known community name
+    /// (`NO_EXPORT`, `OV_INVALID`, …) — the same shape + alias rule
+    /// `community_lit`'s identifier arm applies, shared so the
+    /// binding-vs-literal split in community actions (LAN-303) cannot
+    /// disagree with literal parsing.
+    fn is_well_known_community(&self, token: Token) -> bool {
+        let text = self.text(token);
+        text.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            && parse_community_match(text).is_ok()
     }
 
     /// `let <name> = <value expression>` (LAN-302); the caller has
@@ -760,23 +856,43 @@ impl Parser<'_> {
         if self.at(Tok::RouteKw) || self.at(Tok::PeerKw) {
             return self.predicate_expr();
         }
-        // LAN-302: an identifier-initial condition is a value
-        // comparison whose left side starts with a binding, parameter,
-        // or builtin call (`if penalty >= route.med`). Previously a
-        // parse error here, so purely additive.
         if self.at(Tok::Ident) {
-            let name = self.expect_ident("a condition")?;
-            let atom = if self.at(Tok::LParen) {
-                self.value_call(name, depth)?
-            } else {
-                ValueExprAst::Ident(name)
-            };
-            let lhs = self.value_expr_from_atom(atom)?;
-            return self.value_cmp_tail(lhs);
+            return self.ident_condition(depth);
         }
         Err(self.error_expected(
             "a condition (`route.<field> ...`, `peer.<field> ...`, `apply(...)`, a value comparison, `!`, or `(`)",
         ))
+    }
+
+    /// An identifier-initial condition: a value comparison whose left
+    /// side starts with a binding, parameter, or builtin call
+    /// (`if penalty >= route.med`, LAN-302), or a dynamic
+    /// set-membership probe (`<binding> in <set>`, LAN-303). Both were
+    /// parse errors before those slices, so purely additive.
+    ///
+    /// A separate function on purpose — NOT inlined into
+    /// [`unary_expr`](Self::unary_expr): `unary_expr` sits on the
+    /// `expr → and_expr → unary_expr` recursion cycle whose frame is
+    /// paid once per nesting level, and in debug builds every arm's
+    /// temporaries get their own stack slots, so locals here would
+    /// enlarge that recurring frame. The `MAX_EXPR_DEPTH` guard bounds
+    /// the *depth*; keeping the cycle's frames lean is what keeps
+    /// depth × frame inside the smallest stacks compilation runs on
+    /// (pinned by the 1 MiB small-stack regression tests).
+    #[inline(never)]
+    fn ident_condition(&mut self, depth: u32) -> PResult<Expr> {
+        let name = self.expect_ident("a condition")?;
+        if self.eat(Tok::InKw).is_some() {
+            let set = self.expect_ident("a set name")?;
+            return Ok(Expr::IdentIn { ident: name, set });
+        }
+        let atom = if self.at(Tok::LParen) {
+            self.value_call(name, depth)?
+        } else {
+            ValueExprAst::Ident(name)
+        };
+        let lhs = self.value_expr_from_atom(atom)?;
+        self.value_cmp_tail(lhs)
     }
 
     fn apply_expr(&mut self) -> PResult<Expr> {
@@ -866,6 +982,19 @@ impl Parser<'_> {
             Some(Tok::Int) => {
                 let (value, span) = self.expect_u32("a u32 value")?;
                 Ok(ValueExprAst::Lit(value, span))
+            }
+            // LAN-303: a standard community literal is a u32 value —
+            // its raw RFC 1997 encoding — so `c == 65000:100` compares
+            // a communities-loop binding against one community.
+            // Un-parseable in value position before, so purely
+            // additive. Large/extended literals stay rejected (not
+            // u32-shaped).
+            Some(Tok::StdCommunityLit) => {
+                let lit = self.community_lit()?;
+                let CommunityLit::Standard(value) = lit.node else {
+                    unreachable!("StdCommunityLit tokens parse as Standard")
+                };
+                Ok(ValueExprAst::Lit(value, lit.span))
             }
             Some(Tok::Ident) => {
                 let name = self.expect_ident("a parameter or builtin")?;
