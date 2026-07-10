@@ -391,6 +391,9 @@ impl RibManager {
                     large_communities: candidate.large_communities(),
                     as_path_str: &aspath_str,
                     as_path_len: candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+                    origin_asn: candidate
+                        .as_path()
+                        .and_then(rustbgpd_wire::AsPath::origin_asn),
                     validation_state: candidate.validation_state,
                     aspa_state: candidate.aspa_state,
                     peer_address: Some(target_peer),
@@ -602,6 +605,7 @@ impl RibManager {
             String::new()
         };
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
         let ctx = RouteContext {
             prefix: Some(prefix),
             next_hop: Some(best.next_hop),
@@ -610,6 +614,7 @@ impl RibManager {
             large_communities: best.large_communities(),
             as_path_str: &aspath_str,
             as_path_len: aspath_len,
+            origin_asn,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
             peer_address: Some(target_peer),
@@ -1074,6 +1079,9 @@ impl RibManager {
             // Export policy check per-candidate
             let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let origin_asn = candidate
+                .as_path()
+                .and_then(rustbgpd_wire::AsPath::origin_asn);
             let ctx = RouteContext {
                 prefix: Some(*prefix),
                 next_hop: Some(candidate.next_hop),
@@ -1082,6 +1090,7 @@ impl RibManager {
                 large_communities: candidate.large_communities(),
                 as_path_str: aspath_str.as_deref().unwrap_or(""),
                 as_path_len: aspath_len,
+                origin_asn,
                 validation_state: candidate.validation_state,
                 aspa_state: candidate.aspa_state,
                 peer_address: Some(target_peer),
@@ -1329,6 +1338,7 @@ impl RibManager {
             .is_some_and(PolicyChain::requires_as_path_string)
             .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
         let (peer_address, peer_asn, peer_group) = target.ctx_peer();
         let ctx = RouteContext {
             prefix: Some(*prefix),
@@ -1338,6 +1348,7 @@ impl RibManager {
             large_communities: best.large_communities(),
             as_path_str: aspath_str.as_deref().unwrap_or(""),
             as_path_len: aspath_len,
+            origin_asn,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
             peer_address,
@@ -1590,6 +1601,7 @@ impl RibManager {
             .is_some_and(PolicyChain::requires_as_path_string)
             .then(|| memo.aspath_str(best));
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
         let ctx = RouteContext {
             prefix: Some(*prefix),
             next_hop: Some(best.next_hop),
@@ -1598,6 +1610,7 @@ impl RibManager {
             large_communities: best.large_communities(),
             as_path_str: aspath_str.as_deref().unwrap_or(""),
             as_path_len: aspath_len,
+            origin_asn,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
             peer_address: Some(target_peer),

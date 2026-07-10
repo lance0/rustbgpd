@@ -605,6 +605,16 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 .map_or("", |regex| regex.pattern())
         ),
         MatchExpr::AsPathLen(cmp) => render_cmp("route.as-path.len", *cmp),
+        MatchExpr::OriginAsEq(asn) => format!("route.origin-as == {asn}"),
+        MatchExpr::OriginAsNe(asn) => format!("route.origin-as != {asn}"),
+        MatchExpr::OriginAsInSet(id) => format!(
+            "route.origin-as in {}",
+            set_label(&tables.asn_set_names, id.0, "asn-set")
+        ),
+        MatchExpr::PeerAsInSet(id) => format!(
+            "peer.asn in {}",
+            set_label(&tables.asn_set_names, id.0, "asn-set")
+        ),
         MatchExpr::LocalPref(cmp) => render_cmp("route.local-pref", *cmp),
         MatchExpr::Med(cmp) => render_cmp("route.med", *cmp),
         MatchExpr::NextHopEq(addr) => format!("route.next-hop == {addr}"),

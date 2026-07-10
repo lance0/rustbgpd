@@ -23,7 +23,7 @@ use crate::engine::{AsPathRegex, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
 };
-use crate::sets::{CommunitySet, PrefixSet, SetStore};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 
 /// Compile a TOML policy chain into the IR, interning match sets and
 /// regexes through `store` (identical set data across policies — or
@@ -67,9 +67,11 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
         policies,
         prefix_sets: sets.prefix_sets,
         community_sets: sets.community_sets,
+        asn_sets: sets.asn_sets,
         as_path_regexes: sets.as_path_regexes,
         prefix_set_names: sets.prefix_set_names,
         community_set_names: sets.community_set_names,
+        asn_set_names: sets.asn_set_names,
     }
 }
 
@@ -114,6 +116,20 @@ fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> 
             MatchExpr::CommunityInSet(sets.community_set_id(
                 donor.community_sets[index].clone(),
                 donor.community_set_names.get(index).cloned().flatten(),
+            ))
+        }
+        MatchExpr::OriginAsInSet(id) => {
+            let index = id.0 as usize;
+            MatchExpr::OriginAsInSet(sets.asn_set_id(
+                donor.asn_sets[index].clone(),
+                donor.asn_set_names.get(index).cloned().flatten(),
+            ))
+        }
+        MatchExpr::PeerAsInSet(id) => {
+            let index = id.0 as usize;
+            MatchExpr::PeerAsInSet(sets.asn_set_id(
+                donor.asn_sets[index].clone(),
+                donor.asn_set_names.get(index).cloned().flatten(),
             ))
         }
         MatchExpr::AsPathMatches(id) => {
@@ -234,9 +250,11 @@ fn compile_statement(
 struct ChainSets {
     prefix_sets: Vec<Arc<PrefixSet>>,
     community_sets: Vec<Arc<CommunitySet>>,
+    asn_sets: Vec<Arc<AsnSet>>,
     as_path_regexes: Vec<Arc<AsPathRegex>>,
     prefix_set_names: Vec<Option<String>>,
     community_set_names: Vec<Option<String>>,
+    asn_set_names: Vec<Option<String>>,
 }
 
 impl ChainSets {
@@ -262,6 +280,19 @@ impl ChainSets {
                 self.community_sets.push(set);
                 self.community_set_names.push(name);
                 self.community_sets.len() - 1
+            });
+        SetId(u32::try_from(index).expect("set table fits u32"))
+    }
+
+    fn asn_set_id(&mut self, set: Arc<AsnSet>, name: Option<String>) -> SetId {
+        let index = self
+            .asn_sets
+            .iter()
+            .position(|existing| Arc::ptr_eq(existing, &set))
+            .unwrap_or_else(|| {
+                self.asn_sets.push(set);
+                self.asn_set_names.push(name);
+                self.asn_sets.len() - 1
             });
         SetId(u32::try_from(index).expect("set table fits u32"))
     }
@@ -320,6 +351,7 @@ policy bogon-filter {
             large_communities: &[],
             as_path_str,
             as_path_len: 1,
+            origin_asn: None,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             peer_address: None,

@@ -29,6 +29,7 @@ pub(super) enum Field {
     ExtCommunities,
     AsPath,
     AsPathLen,
+    OriginAs,
     LocalPref,
     Med,
     NextHop,
@@ -47,6 +48,7 @@ const ROUTE_FIELDS: &[(&str, Field)] = &[
     ("large-communities", Field::LargeCommunities),
     ("ext-communities", Field::ExtCommunities),
     ("as-path", Field::AsPath),
+    ("origin-as", Field::OriginAs),
     ("local-pref", Field::LocalPref),
     ("med", Field::Med),
     ("next-hop", Field::NextHop),
@@ -177,6 +179,7 @@ impl Checker<'_> {
             "community-set",
             self.file.community_sets.iter().map(|s| &s.name),
         );
+        self.duplicate_check("asn-set", self.file.asn_sets.iter().map(|s| &s.name));
         self.duplicate_check("policy", self.file.policies.iter().map(|p| &p.name));
         self.duplicate_check("test", self.file.tests.iter().map(|t| &t.name));
     }
@@ -455,7 +458,7 @@ impl Checker<'_> {
             Field::LocalPref | Field::Med | Field::AsPathLen => {
                 self.expect_u32_rhs(field, rhs, params);
             }
-            Field::PeerAsn => {
+            Field::PeerAsn | Field::OriginAs => {
                 eq_only(self);
                 self.expect_u32_rhs(field, rhs, params);
             }
@@ -625,6 +628,69 @@ impl Checker<'_> {
         self.diags.push(diag);
     }
 
+    /// The set kind an `in` membership test needs for a resolved field,
+    /// and a description of what mistakenly-referenced kind a name
+    /// actually is (for the wrong-kind note).
+    fn set_kind_of(&self, name: &str) -> Option<&'static str> {
+        if self.file.prefix_sets.iter().any(|s| s.name.node == name) {
+            Some("prefix-set")
+        } else if self.file.community_sets.iter().any(|s| s.name.node == name) {
+            Some("community-set")
+        } else if self.file.asn_sets.iter().any(|s| s.name.node == name) {
+            Some("asn-set")
+        } else {
+            None
+        }
+    }
+
+    /// Diagnose an `in <set>` reference that must resolve to a set of
+    /// `kind`, with wrong-kind and did-you-mean notes.
+    fn check_set_reference<'n>(
+        &mut self,
+        set: &Spanned<String>,
+        kind: &str,
+        need: &str,
+        names: impl Iterator<Item = &'n Spanned<String>>,
+    ) {
+        let mut candidates = names.map(|n| n.node.as_str());
+        if candidates.any(|name| name == set.node) {
+            return;
+        }
+        let mut diag = Diagnostic::new(
+            set.span,
+            format!("unknown {kind} `{}`", set.node),
+            format!("no {kind} with this name"),
+        );
+        if let Some(actual) = self.set_kind_of(&set.node) {
+            diag = diag.with_note(format!("`{}` is a {actual}; {need}", set.node));
+        } else if let Some(suggestion) = closest(
+            &set.node,
+            match kind {
+                "prefix-set" => self
+                    .file
+                    .prefix_sets
+                    .iter()
+                    .map(|s| s.name.node.as_str())
+                    .collect::<Vec<_>>(),
+                "community-set" => self
+                    .file
+                    .community_sets
+                    .iter()
+                    .map(|s| s.name.node.as_str())
+                    .collect(),
+                _ => self
+                    .file
+                    .asn_sets
+                    .iter()
+                    .map(|s| s.name.node.as_str())
+                    .collect(),
+            },
+        ) {
+            diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+        }
+        self.diags.push(diag);
+    }
+
     fn check_in(&mut self, field: &FieldPath, set: &Spanned<String>) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
@@ -634,71 +700,25 @@ impl Checker<'_> {
             }
         };
         match resolved {
-            Field::Prefix => {
-                if !self
-                    .file
-                    .prefix_sets
-                    .iter()
-                    .any(|s| s.name.node == set.node)
-                {
-                    let mut diag = Diagnostic::new(
-                        set.span,
-                        format!("unknown prefix-set `{}`", set.node),
-                        "no prefix-set with this name",
-                    );
-                    if self
-                        .file
-                        .community_sets
-                        .iter()
-                        .any(|s| s.name.node == set.node)
-                    {
-                        diag = diag.with_note(format!(
-                            "`{}` is a community-set; `route.prefix in` needs a prefix-set",
-                            set.node
-                        ));
-                    } else if let Some(suggestion) = closest(
-                        &set.node,
-                        self.file.prefix_sets.iter().map(|s| s.name.node.as_str()),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    }
-                    self.diags.push(diag);
-                }
-            }
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
-                if !self
-                    .file
-                    .community_sets
-                    .iter()
-                    .any(|s| s.name.node == set.node)
-                {
-                    let mut diag = Diagnostic::new(
-                        set.span,
-                        format!("unknown community-set `{}`", set.node),
-                        "no community-set with this name",
-                    );
-                    if self
-                        .file
-                        .prefix_sets
-                        .iter()
-                        .any(|s| s.name.node == set.node)
-                    {
-                        diag = diag.with_note(format!(
-                            "`{}` is a prefix-set; community membership needs a community-set",
-                            set.node
-                        ));
-                    } else if let Some(suggestion) = closest(
-                        &set.node,
-                        self.file
-                            .community_sets
-                            .iter()
-                            .map(|s| s.name.node.as_str()),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    }
-                    self.diags.push(diag);
-                }
-            }
+            Field::Prefix => self.check_set_reference(
+                set,
+                "prefix-set",
+                "`route.prefix in` needs a prefix-set",
+                self.file.prefix_sets.iter().map(|s| &s.name),
+            ),
+            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => self
+                .check_set_reference(
+                    set,
+                    "community-set",
+                    "community membership needs a community-set",
+                    self.file.community_sets.iter().map(|s| &s.name),
+                ),
+            Field::OriginAs | Field::PeerAsn => self.check_set_reference(
+                set,
+                "asn-set",
+                "ASN membership needs an asn-set",
+                self.file.asn_sets.iter().map(|s| &s.name),
+            ),
             _ => self.diags.push(
                 Diagnostic::new(
                     field.span.to(set.span),
@@ -706,7 +726,8 @@ impl Checker<'_> {
                     "`in` tests set membership",
                 )
                 .with_note(
-                    "`in` works on route.prefix (prefix-sets) and community lists (community-sets)",
+                    "`in` works on route.prefix (prefix-sets), community lists \
+                     (community-sets), and route.origin-as / peer.asn (asn-sets)",
                 ),
             ),
         }

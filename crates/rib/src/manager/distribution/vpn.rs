@@ -233,6 +233,9 @@ impl RibManager {
                         String::new()
                     };
                     let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let origin_asn = candidate
+                        .as_path()
+                        .and_then(rustbgpd_wire::AsPath::origin_asn);
                     let (peer_address, peer_asn, peer_group) = target.ctx_peer();
                     let ctx = RouteContext {
                         prefix: Some(candidate.inner_prefix()),
@@ -242,6 +245,7 @@ impl RibManager {
                         large_communities: candidate.large_communities(),
                         as_path_str: &aspath_str,
                         as_path_len: aspath_len,
+                        origin_asn,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                         peer_address,
@@ -515,6 +519,7 @@ impl RibManager {
                 String::new()
             };
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
             // Group staging passes no peer-context fields: a chain that
             // reads them disqualifies its peers from grouping, so the
             // verdict is target-independent by construction.
@@ -527,6 +532,7 @@ impl RibManager {
                 large_communities: best.large_communities(),
                 as_path_str: &aspath_str,
                 as_path_len: aspath_len,
+                origin_asn,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 peer_address,

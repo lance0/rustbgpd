@@ -2084,6 +2084,7 @@ impl RibManager {
                         String::new()
                     };
                     let aspath_len = cand.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let origin_asn = cand.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
                     let ctx = RouteContext {
                         prefix: Some(prefix),
                         next_hop: Some(cand.next_hop),
@@ -2092,6 +2093,7 @@ impl RibManager {
                         large_communities: cand.large_communities(),
                         as_path_str: &aspath_str,
                         as_path_len: aspath_len,
+                        origin_asn,
                         validation_state: cand.validation_state,
                         aspa_state: cand.aspa_state,
                         peer_address: Some(peer_addr),

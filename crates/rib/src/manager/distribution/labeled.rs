@@ -194,6 +194,9 @@ impl RibManager {
                         String::new()
                     };
                     let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let origin_asn = candidate
+                        .as_path()
+                        .and_then(rustbgpd_wire::AsPath::origin_asn);
                     let ctx = RouteContext {
                         prefix: Some(candidate.nlri.prefix),
                         next_hop: Some(candidate.next_hop),
@@ -202,6 +205,7 @@ impl RibManager {
                         large_communities: candidate.large_communities(),
                         as_path_str: &aspath_str,
                         as_path_len: aspath_len,
+                        origin_asn,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                         peer_address: Some(target_peer),
@@ -343,6 +347,7 @@ impl RibManager {
                 String::new()
             };
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
             let ctx = RouteContext {
                 prefix: Some(best.nlri.prefix),
                 next_hop: Some(best.next_hop),
@@ -351,6 +356,7 @@ impl RibManager {
                 large_communities: best.large_communities(),
                 as_path_str: &aspath_str,
                 as_path_len: aspath_len,
+                origin_asn,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 peer_address: Some(target_peer),

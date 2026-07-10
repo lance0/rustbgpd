@@ -112,7 +112,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters | `local-pref`, `med`, `as-path.len`, `peer.asn`, arguments |
+| u32 | integer literals, parameters | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -127,6 +127,7 @@ has a known type and every operator a fixed signature.
 ```rpol
 prefix-set NAME { PREFIX [ge N] [le N], ... }
 community-set NAME { COMMUNITY-LITERAL, ... }
+asn-set NAME { ASN, ... }
 ```
 
 - `ge`/`le` bounds are per member, with the same semantics as the
@@ -139,11 +140,37 @@ community-set NAME { COMMUNITY-LITERAL, ... }
   matches any member** — the set is kind-partitioned internally, and
   the field you write it against (`route.communities in tagged`)
   reads as documentation, not a kind filter.
+- ASN sets hold plain ASN literals (u32; 4-byte ASNs are first-class,
+  out-of-range literals are a compile error, duplicates deduplicate).
+  Membership is probed by `route.origin-as in NAME` and
+  `peer.asn in NAME` — one hash probe regardless of set size. Like
+  strict next-hop, this is an `.rpol`-only surface: the TOML frontend
+  has no equivalent.
 - Sets are content-interned: identical sets (in any member order)
   share one indexed structure across all policies.
 - There is no `as-path-set` in V1 — inline
   `route.as-path matches "regex"` covers the need (deliberately
   deferred; the regex engine is the existing Cisco-style matcher).
+
+Migrating an origin lock from an AS-path regex to an ASN set:
+
+```rpol
+# Before: one regex alternation, re-matched against the rendered
+# AS-path string per evaluation.
+policy customer-origins-old {
+    term match { if route.as-path matches "_(64500|64501|64502)$" { accept } }
+    term rest { reject }
+}
+
+# After: one indexed set, one O(1) probe against the typed origin;
+# reusable across policies, no regex escape gymnastics for new ASNs.
+asn-set customers { 64500, 64501, 64502 }
+
+policy customer-origins {
+    term match { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+```
 
 ## Policies, terms, and evaluation order
 
@@ -215,6 +242,9 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.as-path.len >= 3` | AS-path ASN count (RFC 4271 counting) |
 | `route.as-path contains 65001` | boundary-anchored ASN presence (sugar for `matches "_65001_"`) |
 | `route.as-path matches "^65010"` | Cisco/Quagga-style regex; `_` is a boundary anchor |
+| `route.origin-as == 64500` | origin AS — the last ASN of the rightmost non-empty `AS_SEQUENCE` (`==`/`!=` only) |
+| `route.origin-as in customers` | asn-set membership (one hash probe) |
+| `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
 | `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
@@ -232,7 +262,10 @@ comparisons against `route.local-pref` see **100** when the attribute
 is absent, `route.med` sees **0**. Prefix predicates never match a
 prefixless route (e.g. BGP-LS NLRIs); `route.next-hop`,
 `route.route-type`, and `route.evpn-route-type` never match when the
-corresponding attribute is absent.
+corresponding attribute is absent. `route.origin-as` is absent on
+empty and `AS_SET`-only paths and then matches neither `==` nor `!=`
+nor `in` (`!(... in ...)` negates plainly, matching the prefix-set
+precedent).
 
 `==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
 
@@ -294,7 +327,10 @@ Route fixture fields: `prefix`, `communities [..]`,
 `route-type`, `evpn-route-type`. Omitted fields are absent attributes
 (so `local-pref`/`med` comparisons see the implicit 100/0, `rpki`
 defaults to `not-found`, `aspa` to `unknown`). The fixture AS-path
-length is the whitespace-word count of the string form.
+length is the whitespace-word count of the string form; the fixture
+origin AS is the last plain ASN outside `{...}` AS_SET braces
+(mirroring the typed-path rule), so `as-path "65010 64500"` has
+origin 64500 and `as-path "{64500 64501}"` has none.
 
 `with` assertions check the evaluation result's **modifications**
 (the frontend has no live route to apply them to): `local-pref N`,
@@ -309,10 +345,11 @@ involvement. Testing a *candidate* policy against a live RIB is
 ## Grammar sketch
 
 ```text
-file        := (prefix-set-def | community-set-def | policy-def | test-def)*
+file        := (prefix-set-def | community-set-def | asn-set-def | policy-def | test-def)*
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
+asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"

@@ -45,6 +45,7 @@ fn route(prefix: Prefix, rpki: RpkiValidation) -> RouteContext<'static> {
         large_communities: &[],
         as_path_str: "",
         as_path_len: 0,
+        origin_asn: None,
         validation_state: rpki,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         peer_address: None,

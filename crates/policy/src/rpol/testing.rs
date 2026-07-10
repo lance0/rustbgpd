@@ -61,6 +61,7 @@ struct Fixture {
     extended_communities: Vec<ExtendedCommunity>,
     as_path_str: String,
     as_path_len: usize,
+    origin_asn: Option<u32>,
     local_pref: Option<u32>,
     med: Option<u32>,
     rpki: RpkiValidation,
@@ -122,6 +123,7 @@ impl Fixture {
                     // written) — documented in the language reference.
                     path.node.clone_into(&mut fixture.as_path_str);
                     fixture.as_path_len = path.node.split_whitespace().count();
+                    fixture.origin_asn = fixture_origin_asn(&path.node);
                 }
                 RouteField::Rpki(state) => {
                     fixture.rpki = match state.node.as_str() {
@@ -169,6 +171,7 @@ impl Fixture {
             large_communities: &self.large_communities,
             as_path_str: &self.as_path_str,
             as_path_len: self.as_path_len,
+            origin_asn: self.origin_asn,
             validation_state: self.rpki,
             aspa_state: self.aspa,
             peer_address: self.peer_address,
@@ -180,6 +183,28 @@ impl Fixture {
             med: self.med,
         }
     }
+}
+
+/// Origin AS of a fixture `as-path` string: the last plain ASN outside
+/// `{...}` `AS_SET` braces — the string-form equivalent of
+/// `AsPath::origin_asn` (last ASN of the rightmost non-empty
+/// `AS_SEQUENCE`; sets never contribute an origin). `None` for empty
+/// and `AS_SET`-only paths, mirroring evaluation semantics.
+fn fixture_origin_asn(path: &str) -> Option<u32> {
+    let mut origin = None;
+    let mut in_set = false;
+    for token in path.split_whitespace() {
+        if token.starts_with('{') {
+            in_set = true;
+        }
+        if !in_set && let Ok(asn) = token.parse::<u32>() {
+            origin = Some(asn);
+        }
+        if token.ends_with('}') {
+            in_set = false;
+        }
+    }
+    origin
 }
 
 /// Execute every `test` block against the lowered policies.

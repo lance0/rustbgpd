@@ -58,7 +58,7 @@ use crate::engine::{
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
 };
-use crate::sets::{CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
     ActionStmt, CmpOp, CommunityLit, Expr, NextHopArg, PolicyDef, Rhs, SourceFile, Stmt, U32Arg,
@@ -101,11 +101,14 @@ pub(super) struct Lowerer<'a> {
     file: &'a SourceFile,
     prefix_sets: Vec<Arc<PrefixSet>>,
     community_sets: Vec<Arc<CommunitySet>>,
+    asn_sets: Vec<Arc<AsnSet>>,
     as_path_regexes: Vec<Arc<AsPathRegex>>,
     prefix_set_names: Vec<Option<String>>,
     community_set_names: Vec<Option<String>>,
+    asn_set_names: Vec<Option<String>>,
     prefix_set_ids: HashMap<String, SetId>,
     community_set_ids: HashMap<String, SetId>,
+    asn_set_ids: HashMap<String, SetId>,
     regex_ids: HashMap<String, RegexId>,
 }
 
@@ -117,11 +120,14 @@ impl<'a> Lowerer<'a> {
             file,
             prefix_sets: Vec::new(),
             community_sets: Vec::new(),
+            asn_sets: Vec::new(),
             as_path_regexes: Vec::new(),
             prefix_set_names: Vec::new(),
             community_set_names: Vec::new(),
+            asn_set_names: Vec::new(),
             prefix_set_ids: HashMap::new(),
             community_set_ids: HashMap::new(),
+            asn_set_ids: HashMap::new(),
             regex_ids: HashMap::new(),
         };
         for def in &file.prefix_sets {
@@ -151,6 +157,14 @@ impl<'a> Lowerer<'a> {
                 .push(Some(def.name.node.clone()));
             lowerer.community_set_ids.insert(def.name.node.clone(), id);
         }
+        for def in &file.asn_sets {
+            let asns: Vec<u32> = def.entries.iter().map(|asn| asn.node).collect();
+            let set = store.asn_set(&asns);
+            let id = SetId(u32::try_from(lowerer.asn_sets.len()).expect("fits u32"));
+            lowerer.asn_sets.push(set);
+            lowerer.asn_set_names.push(Some(def.name.node.clone()));
+            lowerer.asn_set_ids.insert(def.name.node.clone(), id);
+        }
         // Regexes are interned lazily at each use site (they can be
         // parameter-dependent via `contains <param>`); `store` is
         // borrowed per call instead of held in `self` because test-run
@@ -173,9 +187,11 @@ impl<'a> Lowerer<'a> {
             policies,
             prefix_sets: self.prefix_sets.clone(),
             community_sets: self.community_sets.clone(),
+            asn_sets: self.asn_sets.clone(),
             as_path_regexes: self.as_path_regexes.clone(),
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
+            asn_set_names: self.asn_set_names.clone(),
         }
     }
 
@@ -198,9 +214,11 @@ impl<'a> Lowerer<'a> {
             policies: vec![policy],
             prefix_sets: self.prefix_sets.clone(),
             community_sets: self.community_sets.clone(),
+            asn_sets: self.asn_sets.clone(),
             as_path_regexes: self.as_path_regexes.clone(),
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
+            asn_set_names: self.asn_set_names.clone(),
         }
     }
 
@@ -328,6 +346,8 @@ impl<'a> Lowerer<'a> {
             Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env),
             Expr::In { field, set } => match resolve_field(field).expect("typechecked") {
                 Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
+                Field::OriginAs => MatchExpr::OriginAsInSet(self.asn_set_ids[&set.node]),
+                Field::PeerAsn => MatchExpr::PeerAsInSet(self.asn_set_ids[&set.node]),
                 _ => MatchExpr::CommunityInSet(self.community_set_ids[&set.node]),
             },
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
@@ -382,6 +402,18 @@ fn lower_cmp(
         Field::LocalPref => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::LocalPref),
         Field::Med => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::Med),
         Field::AsPathLen => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::AsPathLen),
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
+        // origin (empty or AS_SET-only path) must match neither `==` nor
+        // `!=` (LAN-209 class), and `Not(OriginAsEq)` would wrongly
+        // match every origin-less route.
+        Field::OriginAs => {
+            let asn = rhs_u32(rhs, env);
+            if op == CmpOp::Ne {
+                MatchExpr::OriginAsNe(asn)
+            } else {
+                MatchExpr::OriginAsEq(asn)
+            }
+        }
         // `!=` gets a dedicated Ne node rather than `Not(Eq)`: a
         // non-EVPN route (absent evpn-route-type) must match neither `==`
         // nor `!=` (LAN-209 class), and `Not(EvpnRouteTypeIs)` would

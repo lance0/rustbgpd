@@ -76,6 +76,7 @@ fn export_ctx(prefix: Prefix, aspath_str: &str) -> RouteContext<'_> {
         large_communities: &[],
         as_path_str: aspath_str,
         as_path_len: 0,
+        origin_asn: None,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         peer_address: None,

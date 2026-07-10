@@ -13,9 +13,9 @@ use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix};
 use crate::engine::{CommunityMatch, parse_community_match};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityKind, CommunityLit, CommunitySetDef, ExpectDef, Expr, FieldPath,
-    FieldRoot, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, Rhs,
-    RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, WithAssertion,
+    ActionStmt, AsnSetDef, CmpOp, CommunityKind, CommunityLit, CommunitySetDef, ExpectDef, Expr,
+    FieldPath, FieldRoot, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef,
+    Rhs, RouteField, SourceFile, Stmt, TermDef, TestDef, U32Arg, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -359,6 +359,7 @@ impl Parser<'_> {
     const TOP_LEVEL: &'static [Tok] = &[
         Tok::PrefixSetKw,
         Tok::CommunitySetKw,
+        Tok::AsnSetKw,
         Tok::PolicyKw,
         Tok::TestKw,
     ];
@@ -371,10 +372,11 @@ impl Parser<'_> {
                 Tok::CommunitySetKw => self
                     .community_set_def()
                     .map(|def| file.community_sets.push(def)),
+                Tok::AsnSetKw => self.asn_set_def().map(|def| file.asn_sets.push(def)),
                 Tok::PolicyKw => self.policy_def().map(|def| file.policies.push(def)),
                 Tok::TestKw => self.test_def().map(|def| file.tests.push(def)),
                 _ => Err(self.error_expected(
-                    "a top-level item (`prefix-set`, `community-set`, `policy`, or `test`)",
+                    "a top-level item (`prefix-set`, `community-set`, `asn-set`, `policy`, or `test`)",
                 )),
             };
             if result.is_err() {
@@ -444,6 +446,25 @@ impl Parser<'_> {
         }
         self.expect(Tok::RBrace, "`}` or `,` and another community")?;
         Ok(CommunitySetDef { name, entries })
+    }
+
+    fn asn_set_def(&mut self) -> PResult<AsnSetDef> {
+        self.expect(Tok::AsnSetKw, "`asn-set`")?;
+        let name = self.expect_ident("a set name")?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut entries = Vec::new();
+        while !self.at(Tok::RBrace) {
+            // `expect_u32` rejects out-of-range literals with an
+            // "does not fit in u32" diagnostic — ASNs are u32, never
+            // 16-bit-truncated.
+            let (asn, span) = self.expect_u32("an ASN (a u32 integer)")?;
+            entries.push(Spanned::new(asn, span));
+            if self.eat(Tok::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace, "`}` or `,` and another ASN")?;
+        Ok(AsnSetDef { name, entries })
     }
 
     // ── policies ────────────────────────────────────────────────────

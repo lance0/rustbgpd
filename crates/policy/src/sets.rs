@@ -349,6 +349,53 @@ impl PartialEq for CommunitySet {
 
 impl Eq for CommunitySet {}
 
+/// An indexed ASN set (`asn-set` in `.rpol`): membership is one hash
+/// probe regardless of member count. Probed by `route.origin-as in`
+/// and `peer.asn in` guards.
+#[derive(Debug, Clone, Default)]
+pub struct AsnSet {
+    /// Canonically sorted, deduplicated members — the set's identity.
+    asns: Vec<u32>,
+    set: FxHashSet<u32>,
+}
+
+impl AsnSet {
+    /// Build an indexed set from members. Members are canonicalized
+    /// (sorted, deduplicated), so construction order and duplicates do
+    /// not affect identity or behavior.
+    #[must_use]
+    pub fn new(asns: impl IntoIterator<Item = u32>) -> Self {
+        let mut asns: Vec<u32> = asns.into_iter().collect();
+        asns.sort_unstable();
+        asns.dedup();
+        let set = asns.iter().copied().collect();
+        Self { asns, set }
+    }
+
+    /// Whether `asn` is a member — one hash probe, no allocation.
+    #[must_use]
+    #[inline]
+    pub fn contains(&self, asn: u32) -> bool {
+        self.set.contains(&asn)
+    }
+
+    /// The canonical (sorted, deduplicated) member list.
+    #[must_use]
+    pub fn asns(&self) -> &[u32] {
+        &self.asns
+    }
+}
+
+impl PartialEq for AsnSet {
+    fn eq(&self, other: &Self) -> bool {
+        // The hash set is derived from the canonical member list, so
+        // members alone are the identity.
+        self.asns == other.asns
+    }
+}
+
+impl Eq for AsnSet {}
+
 /// Canonical ordering/interning key for a community criterion.
 fn community_key(cm: CommunityMatch) -> CommunityKey {
     match cm {
@@ -378,6 +425,7 @@ fn community_key(cm: CommunityMatch) -> CommunityKey {
 pub struct SetStore {
     prefix_sets: FxHashMap<Vec<PrefixEntryKey>, Arc<PrefixSet>>,
     community_sets: FxHashMap<Vec<CommunityKey>, Arc<CommunitySet>>,
+    asn_sets: FxHashMap<Vec<u32>, Arc<AsnSet>>,
     as_path_regexes: FxHashMap<String, Arc<AsPathRegex>>,
 }
 
@@ -411,6 +459,19 @@ impl SetStore {
             self.community_sets
                 .entry(key)
                 .or_insert_with(|| Arc::new(CommunitySet::new(criteria.iter().copied()))),
+        )
+    }
+
+    /// Intern an ASN set built from `asns`.
+    #[must_use]
+    pub fn asn_set(&mut self, asns: &[u32]) -> Arc<AsnSet> {
+        let mut key: Vec<u32> = asns.to_vec();
+        key.sort_unstable();
+        key.dedup();
+        Arc::clone(
+            self.asn_sets
+                .entry(key)
+                .or_insert_with(|| Arc::new(AsnSet::new(asns.iter().copied()))),
         )
     }
 
@@ -524,6 +585,7 @@ mod tests {
             large_communities: &large,
             as_path_str: "",
             as_path_len: 0,
+            origin_asn: None,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             peer_address: None,
@@ -543,6 +605,24 @@ mod tests {
         assert!(!set.matches(&empty_ctx));
     }
 
+    /// Membership over a large set with duplicates: canonicalization
+    /// dedupes, hits and misses are single probes (the structure is one
+    /// `FxHashSet` — O(1) by construction, no per-member scan exists).
+    #[test]
+    fn asn_set_large_with_duplicates() {
+        let members = (0..100_000u32).map(|i| 64_512 + (i % 50_000));
+        let set = AsnSet::new(members);
+        assert_eq!(set.asns().len(), 50_000, "duplicates canonicalized away");
+        assert!(set.contains(64_512));
+        assert!(set.contains(64_512 + 49_999));
+        assert!(!set.contains(64_512 + 50_000));
+        assert!(!set.contains(0));
+        // 4-byte ASNs are first-class members.
+        let wide = AsnSet::new([4_200_000_001, 64_500]);
+        assert!(wide.contains(4_200_000_001));
+        assert!(!wide.contains(1));
+    }
+
     #[test]
     fn store_dedupes_by_content_regardless_of_order() {
         let mut store = SetStore::new();
@@ -559,6 +639,12 @@ mod tests {
         assert!(Arc::ptr_eq(
             &store.community_set(&cm),
             &store.community_set(&cm)
+        ));
+
+        // Reordered + duplicated ASN members intern to the same set.
+        assert!(Arc::ptr_eq(
+            &store.asn_set(&[64_500, 64_501, 64_502]),
+            &store.asn_set(&[64_502, 64_500, 64_501, 64_500])
         ));
 
         let re = AsPathRegex::new("_65001_").unwrap();

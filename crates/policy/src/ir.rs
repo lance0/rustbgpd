@@ -26,7 +26,7 @@ use rustbgpd_wire::{AspaValidation, Prefix, RpkiValidation};
 use crate::engine::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, PolicyAction, RouteModifications, RouteType,
 };
-use crate::sets::{CommunitySet, PrefixSet};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet};
 
 /// Index of a match set within its owning [`CompiledChain`]'s table
 /// (`prefix_sets` or `community_sets`, per the referencing node).
@@ -99,6 +99,22 @@ pub enum MatchExpr {
     AsPathMatches(RegexId),
     /// Comparison against the `AS_PATH` ASN count.
     AsPathLen(Cmp),
+    /// The route's origin AS (last ASN of the rightmost non-empty
+    /// `AS_SEQUENCE`) equals this ASN. Never matches when the origin is
+    /// absent (empty or `AS_SET`-only path).
+    OriginAsEq(u32),
+    /// The route's origin AS differs from this ASN. Unlike
+    /// `Not(OriginAsEq(_))`, this never matches when the origin is
+    /// absent — `!=` mirrors `==`, so an absent origin satisfies
+    /// neither.
+    OriginAsNe(u32),
+    /// The route's origin AS is a member of an indexed ASN set. Never
+    /// matches when the origin is absent.
+    OriginAsInSet(SetId),
+    /// The evaluation peer's ASN is a member of an indexed ASN set.
+    /// Never matches when the peer ASN is unknown. Reads peer identity,
+    /// so it counts toward [`CompiledChain::requires_peer_context`].
+    PeerAsInSet(SetId),
     /// Comparison against `LOCAL_PREF` (implicit default 100).
     LocalPref(Cmp),
     /// Comparison against `MED` (implicit default 0).
@@ -164,6 +180,8 @@ impl MatchExpr {
         match self {
             MatchExpr::True
             | MatchExpr::AsPathLen(_)
+            | MatchExpr::OriginAsEq(_)
+            | MatchExpr::OriginAsNe(_)
             | MatchExpr::LocalPref(_)
             | MatchExpr::Med(_)
             | MatchExpr::NextHopEq(_)
@@ -176,9 +194,14 @@ impl MatchExpr {
             | MatchExpr::EvpnRouteTypeNe(_)
             | MatchExpr::RpkiIs(_)
             | MatchExpr::AspaIs(_) => 0,
-            MatchExpr::PrefixInSet(_) | MatchExpr::PrefixEq { .. } | MatchExpr::PrefixNe { .. } => {
-                1
-            }
+            MatchExpr::PrefixInSet(_)
+            | MatchExpr::PrefixEq { .. }
+            | MatchExpr::PrefixNe { .. }
+            // ASN-set membership is one hash probe against an indexed
+            // table — cheaper than a community scan, comparable to the
+            // prefix probe tier.
+            | MatchExpr::OriginAsInSet(_)
+            | MatchExpr::PeerAsInSet(_) => 1,
             MatchExpr::NeighborIn(_) => 2,
             MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
             MatchExpr::AsPathMatches(_) => 4,
@@ -290,6 +313,9 @@ pub struct CompiledChain {
     pub prefix_sets: Vec<Arc<PrefixSet>>,
     /// Community sets referenced by [`MatchExpr::CommunityInSet`].
     pub community_sets: Vec<Arc<CommunitySet>>,
+    /// ASN sets referenced by [`MatchExpr::OriginAsInSet`] /
+    /// [`MatchExpr::PeerAsInSet`].
+    pub asn_sets: Vec<Arc<AsnSet>>,
     /// Compiled regexes referenced by [`MatchExpr::AsPathMatches`].
     pub as_path_regexes: Vec<Arc<AsPathRegex>>,
     /// Source names of `prefix_sets` entries (same indexing), for
@@ -300,6 +326,8 @@ pub struct CompiledChain {
     pub prefix_set_names: Vec<Option<String>>,
     /// Source names of `community_sets` entries (same indexing).
     pub community_set_names: Vec<Option<String>>,
+    /// Source names of `asn_sets` entries (same indexing).
+    pub asn_set_names: Vec<Option<String>>,
 }
 
 impl CompiledChain {
@@ -310,9 +338,11 @@ impl CompiledChain {
             policies: Vec::new(),
             prefix_sets: Vec::new(),
             community_sets: Vec::new(),
+            asn_sets: Vec::new(),
             as_path_regexes: Vec::new(),
             prefix_set_names: Vec::new(),
             community_set_names: Vec::new(),
+            asn_set_names: Vec::new(),
         }
     }
 
@@ -348,9 +378,10 @@ impl CompiledChain {
 
     /// Whether evaluating this chain depends on the evaluation peer's
     /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
-    /// ASN, or peer-group matching — or a strict-next-hop
+    /// ASN, or peer-group matching — a strict-next-hop
     /// [`MatchExpr::NextHopEqPeer`] / [`MatchExpr::NextHopNePeer`]
-    /// node). Content-equal chains with
+    /// node, or a [`MatchExpr::PeerAsInSet`] membership probe).
+    /// Content-equal chains with
     /// such a guard can still yield peer-different verdicts, so
     /// update-group fingerprinting must not group peers that share one.
     /// Import chains are evaluated per-session and are unaffected by
@@ -360,7 +391,10 @@ impl CompiledChain {
         self.any_guard_node(&|expr| {
             matches!(
                 expr,
-                MatchExpr::NeighborIn(_) | MatchExpr::NextHopEqPeer | MatchExpr::NextHopNePeer
+                MatchExpr::NeighborIn(_)
+                    | MatchExpr::NextHopEqPeer
+                    | MatchExpr::NextHopNePeer
+                    | MatchExpr::PeerAsInSet(_)
             )
         })
     }
