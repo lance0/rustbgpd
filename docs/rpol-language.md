@@ -359,19 +359,15 @@ test NAME {
 Route fixture fields: `prefix`, `communities [..]`,
 `large-communities [..]`, `ext-communities [..]`, `as-path "65001
 65002"`, `next-hop`, `local-pref`, `med`, `rpki`, `aspa`,
-`route-type`, `evpn-route-type`. Omitted fields are absent attributes
-(so `local-pref`/`med` comparisons see the implicit 100/0, `rpki`
-defaults to `not-found`, `aspa` to `unknown`). The fixture AS-path
-length is the whitespace-word count of the string form; the fixture
-origin AS is the last plain ASN outside `{...}` AS_SET braces
-(mirroring the typed-path rule), so `as-path "65010 64500"` has
-origin 64500 and `as-path "{64500 64501}"` has none.
 `route-type`, `evpn-route-type`, `family`. Omitted fields are absent
 attributes (so `local-pref`/`med` comparisons see the implicit 100/0,
 `rpki` defaults to `not-found`, `aspa` to `unknown`; an omitted
 `family` matches no family predicate — it is never derived from the
-fixture's `prefix`). The fixture AS-path
-length is the whitespace-word count of the string form.
+fixture's `prefix`). The fixture AS-path length is the
+whitespace-word count of the string form; the fixture origin AS is
+the last plain ASN outside `{...}` AS_SET braces (mirroring the
+typed-path rule), so `as-path "65010 64500"` has origin 64500 and
+`as-path "{64500 64501}"` has none.
 
 `with` assertions check the evaluation result's **modifications**
 (the frontend has no live route to apply them to): `local-pref N`,
@@ -596,6 +592,98 @@ $ rbgp policy stats --peer 10.0.0.2 --direction both
   compile to one IR and mix freely in chains — so `.rpol` is a
   frontend upgrade, not a fork: named sets, parameters, composition,
   and tests on top of chain semantics that behave exactly as before.
+
+## Migrating from BIRD and FRR
+
+One worked example covering the two newest predicate surfaces
+together — an origin lock over an ASN set, branched per address
+family. This is exactly the policy shape the M80 interop lab proves
+outcome-equivalent against FRR route for route (import and export).
+
+The `.rpol` version — one policy, attached to a dual-stack peer's
+import chain:
+
+```rpol
+asn-set partners { 64999, 65100 }
+
+policy partner-in {
+    term partner-v4 {
+        if route.family == ipv4-unicast && route.origin-as in partners {
+            set local-pref 210;
+            add community 65001:604;
+            accept
+        }
+    }
+    term partner-v6 {
+        if route.family == ipv6-unicast && route.origin-as in partners {
+            set local-pref 220;
+            add community 65001:606;
+            accept
+        }
+    }
+    term rest { accept }
+}
+```
+
+The FRR route-map spelling of the same intent. The origin lock
+becomes one anchored as-path regex per member (re-matched against the
+rendered path string on every evaluation — the `.rpol` set is one
+hash probe); the family branch has no route-map keyword, so the
+classic idiom is an any-prefix match of the wanted family (a v4
+prefix-list entry never matches a v6 route and vice versa), with the
+route-map applied in both address families:
+
+```text
+bgp as-path access-list PARTNERS seq 5 permit _64999$
+bgp as-path access-list PARTNERS seq 10 permit _65100$
+ip prefix-list ANY-V4 seq 5 permit 0.0.0.0/0 le 32
+ipv6 prefix-list ANY-V6 seq 5 permit ::/0 le 128
+!
+route-map PARTNER-IN permit 10
+ match as-path PARTNERS
+ match ip address prefix-list ANY-V4
+ set local-preference 210
+ set community 65001:604 additive
+!
+route-map PARTNER-IN permit 20
+ match as-path PARTNERS
+ match ipv6 address prefix-list ANY-V6
+ set local-preference 220
+ set community 65001:606 additive
+!
+route-map PARTNER-IN permit 30
+```
+
+The BIRD filter spelling — `bgp_path.last` is the origin AS,
+`net.type` the family:
+
+```text
+define PARTNERS = [ 64999, 65100 ];
+
+filter partner_in {
+    if bgp_path.last ~ PARTNERS then {
+        if net.type = NET_IP4 then {
+            bgp_local_pref = 210;
+            bgp_community.add((65001,604));
+            accept;
+        }
+        if net.type = NET_IP6 then {
+            bgp_local_pref = 220;
+            bgp_community.add((65001,606));
+            accept;
+        }
+    }
+    accept;
+}
+```
+
+What carries over mechanically: BIRD's `bgp_path.last ~ [...]` and
+FRR's anchored `_ASN$` regexes both become `route.origin-as in
+<asn-set>`; BIRD's `net.type` checks and FRR's per-AF route-map
+application both become `route.family ==` guards on one shared
+policy. What has no equivalent to migrate: the in-file `test` blocks,
+`rbgp policy test` dry runs against the live RIB, and per-term live
+hit counters — those come free after the rewrite.
 
 ## Deliberate V1 exclusions
 

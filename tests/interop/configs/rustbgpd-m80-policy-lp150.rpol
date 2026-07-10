@@ -9,6 +9,10 @@
 prefix-set customers { 10.10.0.0/16 ge 24 le 26, 192.168.1.0/24 }
 community-set tagged { 65000:100, 65000:200 }
 community-set scrub-marks { 65000:666 }
+# Partner routes are recognized by ORIGIN (the rightmost ASN), not by
+# prefix or community — the FRR mirror is an anchored as-path regex
+# (_64999$). One set serves both the v4 and v6 partner terms.
+asn-set partners { 64999 }
 
 # Import: parameterized — the src peer instantiates customer-in(200),
 # the down peer customer-in(300).
@@ -33,6 +37,26 @@ policy customer-in(peer_lp: u32) {
             accept
         }
     }
+    # Family-branched partner terms: same origin-AS probe, different
+    # outcome purely by route.family — the interop test asserts the
+    # v4/v6 twins (identical origin 64999) diverge on LP/community,
+    # so the family predicate is provably non-vacuous.
+    # FRR: permit 32 (as-path PARTNERS + v4 prefix-list).
+    term partner-v4 {
+        if route.family == ipv4-unicast && route.origin-as in partners {
+            set local-pref 210;
+            add community 65001:604;
+            accept
+        }
+    }
+    # FRR: permit 34 (as-path PARTNERS + v6 prefix-list).
+    term partner-v6 {
+        if route.family == ipv6-unicast && route.origin-as in partners {
+            set local-pref 220;
+            add community 65001:606;
+            accept
+        }
+    }
     # FRR: permit 40 (catch-all).
     term default-accept { accept }
 }
@@ -49,6 +73,14 @@ policy src-default {
 policy edge-out {
     term no-leak {
         if route.prefix == 198.51.100.0/24 { reject }
+    }
+    # FRR: permit 15 (v6 prefix-list) — the export-side family branch.
+    term med-v6 {
+        if route.family == ipv6-unicast {
+            set med 60;
+            add community 65001:777;
+            accept
+        }
     }
     term tag-and-med {
         set med 50;
@@ -87,4 +119,24 @@ test edge-out-denies-no-leak {
 test edge-out-tags-and-sets-med {
     route { prefix 10.10.1.0/24 }
     expect edge-out == accept with med 50, community 65001:777
+}
+
+test partner-v4-origin-set-and-family {
+    route { prefix 10.20.1.0/24; as-path "65002 64999"; family ipv4-unicast }
+    expect customer-in(200) == accept with local-pref 210, community 65001:604
+}
+
+test partner-v6-branches-on-family {
+    route { prefix 2001:db8:64::/48; as-path "65002 64999"; family ipv6-unicast }
+    expect customer-in(200) == accept with local-pref 220, community 65001:606
+}
+
+test v6-non-partner-origin-falls-through {
+    route { prefix 2001:db8:99::/48; as-path "65002"; family ipv6-unicast }
+    expect customer-in(200) == accept
+}
+
+test edge-out-v6-family-med {
+    route { prefix 2001:db8:99::/48; family ipv6-unicast }
+    expect edge-out == accept with med 60, community 65001:777
 }
