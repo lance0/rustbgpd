@@ -4,7 +4,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, Safi};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
-use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
+use rustc_hash::FxHashMap as HashMap;
 use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
@@ -12,6 +12,7 @@ use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, LabeledRibRouteKey,
     Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
+use crate::slab::RouteSlab;
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -19,12 +20,17 @@ use crate::route::{
 /// In single-best mode, `path_id` is always 0.
 pub struct AdjRibOut {
     peer: IpAddr,
-    routes: HashMap<(Prefix, u32), Route>,
-    /// Secondary index: prefix → path IDs for fast per-prefix lookup, backed by
-    /// a family-split prefix trie. `SmallVec<[u32; 1]>` inlines the single-best
-    /// case (`path_id=0`) without heap allocation; Add-Path multi-path spills to
-    /// heap transparently.
-    prefix_path_ids: FamilyPrefixMap<SmallVec<[u32; 1]>>,
+    /// Unicast route bodies, stored densely behind `u32` handles (LAN-335).
+    /// The `(prefix, path_id)` identity lives on the routes themselves and in
+    /// `prefix_path_ids`; there is no separate keyed route map — this struct
+    /// also backs the group RIB-Out table (`GroupRibOut`), whose route map
+    /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
+    routes: RouteSlab<Route>,
+    /// Primary index: prefix → `(path_id, slab handle)` pairs, backed by a
+    /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
+    /// single-best case (`path_id=0`) without heap allocation; Add-Path
+    /// multi-path spills to heap transparently.
+    prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
@@ -63,7 +69,7 @@ impl AdjRibOut {
     pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {
             peer,
-            routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
+            routes: RouteSlab::with_capacity(capacity),
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
@@ -84,59 +90,66 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised route.
     pub fn insert(&mut self, route: Route) {
-        let prefix = route.prefix;
         let path_id = route.path_id;
-        self.routes.insert((prefix, path_id), route);
-        let ids = self.prefix_path_ids.entry_or_default(prefix);
-        if !ids.contains(&path_id) {
-            ids.push(path_id);
+        let ids = self.prefix_path_ids.entry_or_default(route.prefix);
+        if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
+            self.routes.set(*handle, route);
+        } else {
+            let handle = self.routes.insert(route);
+            ids.push((path_id, handle));
         }
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        if self.routes.remove(&(*prefix, path_id)).is_some() {
-            if let Some(ids) = self.prefix_path_ids.get_mut(prefix) {
-                ids.retain(|id| *id != path_id);
-                if ids.is_empty() {
-                    self.prefix_path_ids.remove(prefix);
-                }
-            }
-            true
-        } else {
-            false
+        let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
+            return false;
+        };
+        let Some(pos) = ids.iter().position(|(id, _)| *id == path_id) else {
+            return false;
+        };
+        let (_, handle) = ids.swap_remove(pos);
+        if ids.is_empty() {
+            self.prefix_path_ids.remove(prefix);
         }
+        self.routes.remove(handle).is_some()
     }
 
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
-        self.routes.get(&(*prefix, path_id))
+        let (_, handle) = self
+            .prefix_path_ids
+            .get(prefix)?
+            .iter()
+            .find(|(id, _)| *id == path_id)?;
+        self.routes.get(*handle)
     }
 
     /// Iterate over all advertised routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
-        self.routes.values()
+        self.routes.iter()
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
     pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + '_ {
-        let prefix = *prefix;
+        let routes = &self.routes;
         self.prefix_path_ids
-            .get(&prefix)
+            .get(prefix)
             .into_iter()
             .flat_map(move |ids| {
                 ids.iter()
-                    .filter_map(move |&id| self.routes.get(&(prefix, id)))
+                    .filter_map(move |&(_, handle)| routes.get(handle))
             })
     }
 
     /// Return all path IDs currently advertised for a given prefix.
     #[must_use]
-    pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> &[u32] {
+    pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> SmallVec<[u32; 1]> {
         self.prefix_path_ids
             .get(prefix)
-            .map_or(&[], SmallVec::as_slice)
+            .map(|ids| ids.iter().map(|&(id, _)| id).collect())
+            .unwrap_or_default()
     }
 
     /// Remove only the unicast routes and their secondary prefix index,
@@ -452,8 +465,8 @@ impl AdjRibOut {
                 counts.push((family, 1));
             }
         };
-        for (prefix, _) in self.routes.keys() {
-            let afi = match prefix {
+        for route in self.routes.iter() {
+            let afi = match route.prefix {
                 Prefix::V4(_) => Afi::Ipv4,
                 Prefix::V6(_) => Afi::Ipv6,
             };
@@ -708,7 +721,7 @@ mod tests {
 
         assert!(rib.path_ids_for_prefix(&p).is_empty());
         rib.insert(make_route(p, 0));
-        assert_eq!(rib.path_ids_for_prefix(&p), [0]);
+        assert_eq!(rib.path_ids_for_prefix(&p).as_slice(), [0]);
 
         assert!(rib.withdraw(&p, 0));
         assert!(rib.path_ids_for_prefix(&p).is_empty());
@@ -741,7 +754,7 @@ mod tests {
 
         rib.insert(make_route(p, 0));
         rib.insert(make_route(p, 0)); // replace, not duplicate
-        assert_eq!(rib.path_ids_for_prefix(&p), [0]);
+        assert_eq!(rib.path_ids_for_prefix(&p).as_slice(), [0]);
         assert_eq!(rib.len(), 1);
     }
 
@@ -755,7 +768,7 @@ mod tests {
         rib.insert(make_route(pb, 0));
         rib.insert(make_route(pb, 1));
 
-        assert_eq!(rib.path_ids_for_prefix(&pa), [0]);
+        assert_eq!(rib.path_ids_for_prefix(&pa).as_slice(), [0]);
         let mut ids_b = rib.path_ids_for_prefix(&pb).to_vec();
         ids_b.sort_unstable();
         assert_eq!(ids_b, [0, 1]);

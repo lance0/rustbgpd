@@ -573,6 +573,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     top-level and nested help lists are now terse one-liners with
     details moved to each subcommand's `--help`.
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
+- **Compact route storage: slab-backed route bodies behind `u32`
+  handles.** Adj-RIB-In and Adj-RIB-Out (which also backs the shared
+  update-group RIB-Out table — the largest heap component in the
+  2026-07 memory re-baseline) no longer keep ~130-byte `Route` values
+  inline in hashbrown bucket arrays. Route bodies live densely in a
+  per-table slab; the existing prefix-trie index carries
+  `(path_id, handle)` pairs, and the separate
+  `(prefix, path_id)`-keyed hash maps are gone entirely. Withdrawals
+  free slab slots onto a free list, so steady-state churn does not
+  grow the tables. The Loc-RIB best-path map deliberately keeps its
+  inline route bodies: a slab handle measurably regressed its
+  lookup-hot recompute (see the field note in `loc_rib.rs`).
+  Allocator-tracked `memory_profile` at the 2-peer × 100k-prefix
+  shape: Full-RIB 65.6 MiB → 51.8 MiB (−21.1%), RR-fanout
+  110.1 MiB → 82.5 MiB (−25.1%); `rib_ops` insert / pipeline / churn
+  benchmarks improved 18–72% from the removed per-route hashing.
+  (LAN-335)
 - **Docs reorganized by task shape (Diátaxis).** `docs/README.md` now
   indexes every doc under tutorials / how-to guides / reference /
   explanation; archived soak postmortems moved from `docs/soak-*.md`

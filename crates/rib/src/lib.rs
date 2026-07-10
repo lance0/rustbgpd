@@ -33,6 +33,8 @@ pub mod orr;
 mod prefix_map;
 /// Route and `FlowSpec` route data types.
 pub mod route;
+/// Slab storage for route bodies behind `u32` handles (LAN-335).
+mod slab;
 /// Shared unit-test fixtures (canonical test route builders).
 #[cfg(test)]
 mod test_support;

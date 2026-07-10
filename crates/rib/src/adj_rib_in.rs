@@ -30,6 +30,7 @@ use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute,
     LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
+use crate::slab::RouteSlab;
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -46,13 +47,18 @@ use crate::route::{
 #[derive(Debug)]
 pub struct AdjRibIn {
     peer: IpAddr,
-    routes: HashMap<(Prefix, u32), Route>,
-    /// Secondary index: prefix → path IDs stored for that prefix, backed by a
-    /// family-split prefix trie. `SmallVec<[u32; 1]>` inlines the single-path
-    /// case (`path_id=0`, no Add-Path) without a per-prefix heap allocation;
-    /// Add-Path multi-path spills to the heap transparently. Mirrors
-    /// `AdjRibOut::prefix_path_ids`.
-    prefix_index: FamilyPrefixMap<SmallVec<[u32; 1]>>,
+    /// Unicast route bodies, stored densely behind `u32` handles (LAN-335).
+    /// The `(prefix, path_id)` identity lives on the routes themselves and in
+    /// `prefix_index`; there is no separate keyed route map — a hashbrown
+    /// bucket array carrying inline `Route` values was the dominant heap cost
+    /// at high N (docs/perf/rebaseline-2026-07.md).
+    routes: RouteSlab<Route>,
+    /// Primary index: prefix → `(path_id, slab handle)` pairs stored for that
+    /// prefix, backed by a family-split prefix trie. `SmallVec<[(u32, u32); 1]>`
+    /// inlines the single-path case (`path_id=0`, no Add-Path) without a
+    /// per-prefix heap allocation; Add-Path multi-path spills to the heap
+    /// transparently. Mirrors `AdjRibOut::prefix_path_ids`.
+    prefix_index: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
@@ -115,7 +121,7 @@ impl AdjRibIn {
         let flowspec_capacity = flowspec_capacity.max(4);
         Self {
             peer,
-            routes: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher),
+            routes: RouteSlab::with_capacity(route_capacity),
             prefix_index: FamilyPrefixMap::default(),
             llgr_stale_local_tags: HashSet::default(),
             flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
@@ -158,12 +164,8 @@ impl AdjRibIn {
     /// `true` (see the unicast announce path in the RIB manager). A first-time
     /// insert orphans nothing, so the initial-load flood skips the GC.
     pub fn insert(&mut self, mut route: Route) -> bool {
-        let key = (route.prefix, route.path_id);
-        let ids = self.prefix_index.entry_or_default(route.prefix);
-        if !ids.contains(&route.path_id) {
-            ids.push(route.path_id);
-        }
-        self.llgr_stale_local_tags.remove(&key);
+        self.llgr_stale_local_tags
+            .remove(&(route.prefix, route.path_id));
 
         // Intern: reuse an existing Arc if one matches
         if let Some(existing) = self.attr_intern.get(&route.attributes) {
@@ -172,18 +174,44 @@ impl AdjRibIn {
             self.attr_intern.insert(route.attributes.clone());
         }
 
-        self.routes.insert(key, route).is_some()
+        let path_id = route.path_id;
+        let ids = self.prefix_index.entry_or_default(route.prefix);
+        if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
+            self.routes.set(*handle, route);
+            true
+        } else {
+            let handle = self.routes.insert(route);
+            ids.push((path_id, handle));
+            false
+        }
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        let key = (*prefix, path_id);
-        self.llgr_stale_local_tags.remove(&key);
-        let removed = self.routes.remove(&key).is_some();
-        if removed {
-            self.remove_from_prefix_index(prefix, path_id);
+        self.llgr_stale_local_tags.remove(&(*prefix, path_id));
+        self.remove_route_entry(prefix, path_id).is_some()
+    }
+
+    /// Slab handle for the route stored at `(prefix, path_id)`, if any.
+    fn route_handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
+        self.prefix_index
+            .get(prefix)?
+            .iter()
+            .find(|(id, _)| *id == path_id)
+            .map(|&(_, handle)| handle)
+    }
+
+    /// Remove a route from both the prefix index and the slab, freeing its
+    /// slot. Every unicast removal path routes through here so the index and
+    /// slab can never disagree.
+    fn remove_route_entry(&mut self, prefix: &Prefix, path_id: u32) -> Option<Route> {
+        let ids = self.prefix_index.get_mut(prefix)?;
+        let pos = ids.iter().position(|(id, _)| *id == path_id)?;
+        let (_, handle) = ids.swap_remove(pos);
+        if ids.is_empty() {
+            self.prefix_index.remove(prefix);
         }
-        removed
+        self.routes.remove(handle)
     }
 
     /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
@@ -265,32 +293,33 @@ impl AdjRibIn {
 
     /// Iterate over all stored routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
-        self.routes.values()
+        self.routes.iter()
     }
 
     /// Iterate mutably over all stored routes.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route> {
-        self.routes.values_mut()
+        self.routes.iter_mut()
     }
 
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
-        self.routes.get(&(*prefix, path_id))
+        self.routes.get(self.route_handle(prefix, path_id)?)
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
     ///
-    /// Uses a secondary prefix index for O(candidates) lookup instead of
-    /// scanning the entire RIB.
+    /// Uses the prefix index for O(candidates) lookup instead of an O(N)
+    /// full scan.
     pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
-        let path_ids = self.prefix_index.get(prefix);
-        let target = *prefix;
         let routes = &self.routes;
-        path_ids.into_iter().flat_map(move |ids| {
-            ids.iter()
-                .filter_map(move |&pid| routes.get(&(target, pid)))
-        })
+        self.prefix_index
+            .get(prefix)
+            .into_iter()
+            .flat_map(move |ids| {
+                ids.iter()
+                    .filter_map(move |&(_, handle)| routes.get(handle))
+            })
     }
 
     /// Mark all routes matching the given address family as stale
@@ -309,17 +338,16 @@ impl AdjRibIn {
         let already_stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| r.is_stale && route_matches_family(r, family))
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_stale && route_matches_family(r, family))
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut deleted = Vec::new();
         for key in &already_stale {
             deleted.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
-        for route in self.routes.values_mut() {
+        for route in self.routes.iter_mut() {
             if route_matches_family(route, family) && !route.is_llgr_stale {
                 route.is_stale = true;
             }
@@ -330,12 +358,13 @@ impl AdjRibIn {
     /// Clear the stale flag on routes matching the given address family.
     pub fn clear_stale(&mut self, family: (Afi, Safi)) {
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.routes {
+        for route in self.routes.iter_mut() {
             if route_matches_family(route, family) {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                if self.llgr_stale_local_tags.contains(key) {
-                    clear_local_llgr.push(*key);
+                let key = (route.prefix, route.path_id);
+                if self.llgr_stale_local_tags.contains(&key) {
+                    clear_local_llgr.push(key);
                 }
             }
         }
@@ -349,15 +378,14 @@ impl AdjRibIn {
         let to_remove: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| !keep.iter().any(|&fam| route_matches_family(r, fam)))
-            .map(|(k, _)| *k)
+            .filter(|r| !keep.iter().any(|&fam| route_matches_family(r, fam)))
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut prefixes = Vec::new();
         for key in &to_remove {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
         prefixes
     }
@@ -367,15 +395,14 @@ impl AdjRibIn {
         let stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| r.is_stale)
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_stale)
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
         prefixes
     }
@@ -386,15 +413,14 @@ impl AdjRibIn {
         let stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| r.is_stale && route_matches_family(r, family))
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_stale && route_matches_family(r, family))
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
         prefixes
     }
@@ -413,22 +439,21 @@ impl AdjRibIn {
         let no_llgr_keys: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| {
+            .filter(|r| {
                 r.is_stale
                     && route_matches_family(r, family)
                     && r.communities().contains(&COMMUNITY_NO_LLGR)
             })
-            .map(|(k, _)| *k)
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut affected: Vec<Prefix> = no_llgr_keys.iter().map(|(p, _)| *p).collect();
         for key in &no_llgr_keys {
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
-        for route in self.routes.values_mut() {
+        for route in self.routes.iter_mut() {
             if route.is_stale && route_matches_family(route, family) {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -460,15 +485,14 @@ impl AdjRibIn {
         let stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| r.is_llgr_stale)
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_llgr_stale)
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
         prefixes
     }
@@ -480,15 +504,14 @@ impl AdjRibIn {
         let stale: Vec<(Prefix, u32)> = self
             .routes
             .iter()
-            .filter(|(_, r)| r.is_llgr_stale && route_matches_family(r, family))
-            .map(|(k, _)| *k)
+            .filter(|r| r.is_llgr_stale && route_matches_family(r, family))
+            .map(|r| (r.prefix, r.path_id))
             .collect();
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.routes.remove(key);
-            self.remove_from_prefix_index(&key.0, key.1);
+            self.remove_route_entry(&key.0, key.1);
         }
         prefixes
     }
@@ -497,11 +520,12 @@ impl AdjRibIn {
     /// Called when `EoR` is received during LLGR phase.
     pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) {
         let mut clear_local_llgr = Vec::new();
-        for (key, route) in &mut self.routes {
+        for route in self.routes.iter_mut() {
             if route_matches_family(route, family) {
                 route.is_llgr_stale = false;
-                if self.llgr_stale_local_tags.contains(key) {
-                    clear_local_llgr.push(*key);
+                let key = (route.prefix, route.path_id);
+                if self.llgr_stale_local_tags.contains(&key) {
+                    clear_local_llgr.push(key);
                 }
             }
         }
@@ -2112,19 +2136,11 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_flowspec_community(&clear_local_llgr);
     }
 
-    /// Remove a `path_id` from the prefix index, cleaning up empty entries.
-    fn remove_from_prefix_index(&mut self, prefix: &Prefix, path_id: u32) {
-        if let Some(ids) = self.prefix_index.get_mut(prefix) {
-            ids.retain(|id| *id != path_id);
-            if ids.is_empty() {
-                self.prefix_index.remove(prefix);
-            }
-        }
-    }
-
     fn clear_local_llgr_stale_community(&mut self, keys: &[(Prefix, u32)]) {
         for key in keys {
-            if let Some(route) = self.routes.get_mut(key) {
+            if let Some(handle) = self.route_handle(&key.0, key.1)
+                && let Some(route) = self.routes.get_mut(handle)
+            {
                 remove_llgr_stale_community(route);
             }
             self.llgr_stale_local_tags.remove(key);
@@ -2744,7 +2760,7 @@ mod tests {
         assert_eq!(rib.len(), 1);
         // The secondary prefix index is maintained through the deletion.
         assert_eq!(rib.iter_prefix(&Prefix::V4(gr_prefix)).count(), 0);
-        let retained = rib.routes.get(&(Prefix::V4(llgr_prefix), 0)).unwrap();
+        let retained = rib.get(&Prefix::V4(llgr_prefix), 0).unwrap();
         assert!(retained.is_llgr_stale);
         assert!(!retained.is_stale, "LLGR-stale must not be re-marked");
         assert!(
@@ -4571,5 +4587,33 @@ mod tests {
         assert!(rib.bgpls_llgr_stale_local_tags.is_empty());
         assert!(rib.rtc_llgr_stale_local_tags.is_empty());
         assert!(rib.labeled_llgr_stale_local_tags.is_empty());
+    }
+
+    /// LAN-335 slab-storage leak gate: withdraw must free the route's slab
+    /// slot and re-insert must reuse it, so sustained insert/withdraw churn
+    /// keeps the slot vector at the steady-state size instead of growing
+    /// without bound.
+    #[test]
+    fn withdraw_reinsert_churn_reuses_slab_slots() {
+        let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let prefixes: Vec<Ipv4Prefix> = (0..100u8)
+            .map(|i| Ipv4Prefix::new(Ipv4Addr::new(10, 1, i, 0), 24))
+            .collect();
+
+        for cycle in 0..5 {
+            for p in &prefixes {
+                rib.insert(make_route(*p, Ipv4Addr::new(192, 0, 2, 1)));
+            }
+            assert_eq!(rib.len(), prefixes.len(), "cycle {cycle}");
+            assert_eq!(
+                rib.routes.slot_count(),
+                prefixes.len(),
+                "cycle {cycle}: churn must reuse freed slots, not grow the slab"
+            );
+            for p in &prefixes {
+                assert!(rib.withdraw(&Prefix::V4(*p), 0), "cycle {cycle}");
+            }
+            assert!(rib.is_empty(), "cycle {cycle}");
+        }
     }
 }
