@@ -851,6 +851,22 @@ pub enum PeerManagerCommand {
         /// Reply channel with reconciliation results.
         reply: oneshot::Sender<ReconcileResult>,
     },
+    /// LAN-341: apply a config change whose every edited field is
+    /// reload-matrix `live` (hot-applied) to an existing static peer in
+    /// place — no session-task delete/re-add, no TCP/FSM impact. The
+    /// SIGHUP reload path routes a changed neighbor here instead of
+    /// `ReconcilePeers.changed` when the changed-field set is entirely
+    /// hot-applicable (`description`, `max_prefixes`,
+    /// `gr_stale_routes_time`, `local_ipv6_nexthop`,
+    /// `remove_private_as`, `log_level`, import/export policies and
+    /// chains).
+    HotUpdatePeer {
+        /// Full replacement neighbor configuration (only hot-applicable
+        /// fields may differ from the live peer's).
+        config: PeerManagerNeighborConfig,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
+    },
     /// ADR-0073: refresh the peer manager's `[policy.explain]` snapshot
     /// (`enabled` / `cache_size`) ahead of any reload step that
     /// constructs sessions. `build_transport_config` reads these from

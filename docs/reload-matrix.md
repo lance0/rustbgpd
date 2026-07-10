@@ -4,8 +4,10 @@ Reference for every user-facing config key: what does it take to put a
 change into effect?
 
 This doc is the operator-facing index. The authoritative classification
-lives in the source — `neighbor_runtime_equal()` and `ConfigDiff` (in
-`src/config/mod.rs`), `reload.rs` (pinning helpers `pin_tcp_ao_startup_only_runtime`,
+lives in the source — `neighbor_runtime_equal()`, `config_field_impact()`,
+`neighbor_change_hot_applicable()`, and `ConfigDiff` (in
+`src/config/mod.rs`), `reload.rs` (the changed-neighbor hot/rebuild
+partition, pinning helpers `pin_tcp_ao_startup_only_runtime`,
 `pin_bfd_startup_only_runtime`, and the per-section error/warn arms), and
 the parse-time `ConfigError` family in `src/config/validation.rs`. If
 the matrix and the code disagree, the code is right and the matrix has a
@@ -24,13 +26,26 @@ bug — file an issue.
 
 ## Session-establishment caveat
 
-Several **live** fields take effect on the *next session establishment*,
-not mid-session. Examples: `md5_password`, `families`, `add_path`,
-`graceful_restart`. These are not restart-required (the daemon doesn't
-need to restart to pick them up) but they only become observable after
-the affected session is bounced — by the peer, by `rbgp neighbor
-disable`/`enable`, or by any natural flap. The matrix calls this out per
-row.
+Several **live** fields bind at session establishment (OPEN negotiation
+or socket creation), not mid-session. Examples: `md5_password`,
+`families`, `add_path`, `graceful_restart`, `hold_time`. These are not
+restart-required, but applying them takes a session reset — and on
+SIGHUP reload of a static neighbor the reconciler performs that reset
+**immediately**: any changed session-reset-class field routes the
+neighbor through the session rebuild path (delete + re-add of the
+session task), so the new value is negotiated right away rather than
+waiting for a natural flap. The matrix calls this out per row as
+"live (effective next session)"; `rustbgpd --diff` annotates these
+fields "session reset".
+
+Static-neighbor edits whose **every** changed field is hot-applied
+(`description`, `max_prefixes`, `gr_stale_routes_time`,
+`local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
+import/export policy and chain fields) are applied **in place**: the
+session task, its TCP connection, and the FSM are untouched, and policy
+edits trigger the usual Route Refresh / Adj-RIB-Out re-emit. Mixing a
+hot-applied edit with a session-reset edit on the same neighbor applies
+both through one session rebuild.
 
 ---
 
@@ -63,28 +78,31 @@ sessions.
 
 ## `[[neighbors]]`
 
-The diff key is the `(address, interface, remote_asn)` triple. Changing
-any of those three is treated as **delete + add** by the reconciler —
-the old neighbor is torn down, the new one starts fresh.
+The diff key is the `(address, interface)` pair. Changing either is
+treated as **delete + add** by the reconciler — the old neighbor is torn
+down, the new one starts fresh. `remote_asn` is *not* part of the diff
+key: an ASN edit flows through reconcile as an immediate session rebuild
+under the new ASN (the same delete + re-add semantics, applied in one
+reload).
 
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required (identity) | Part of the diff key. Edit = delete + add. To change the peer address in place, delete the old neighbor (gRPC or remove from config + reload), then add the new one. |
 | `interface` | restart-required (identity) | Part of the diff key. Same as `address`. Used by IPv6 link-local + BGP unnumbered peering. |
-| `remote_asn` | restart-required (identity) | Part of the diff key. Same as `address`. |
-| `description` | live | Metadata only; flows through reconcile. |
-| `peer_group` | live | Group inheritance resolves at reconcile time; effective fields update in place. |
-| `hold_time` | live (effective next session) | New value used in the next OPEN exchange. Existing session keeps the negotiated hold time until renegotiation. |
+| `remote_asn` | live (session reset, identity) | Not part of the diff key: on SIGHUP the reconciler rebuilds the session immediately with the new ASN. Equivalent to delete + add of the neighbor — no daemon restart needed. Annotated "session reset: peer re-established with new ASN" by `rustbgpd --diff`. |
+| `description` | live | Metadata only; hot-applied in place — session task untouched. |
+| `peer_group` | live (session reset) | A reassignment changes the peer's effective inherited config, so SIGHUP reconcile (and the transaction session-reshape executor) rebuild the session. Group *field* edits on an unchanged membership hot-apply per the `[peer_groups.<name>]` table below. |
+| `hold_time` | live (effective next session) | Negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately, so the new value is negotiated right away. |
 | `send_hold_time` | live (effective next session) | RFC 9687 send hold timer. The per-peer writer task captures the value when its TCP connection is established, so a new value (including 0 = disable) guards the next session; the existing session keeps the old timer. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
-| `md5_password` | live (effective next session) | New password is staged in the transport config; the next active-open socket installs it. **TCP-MD5 keys are per-socket**, so the running session keeps the old key until it bounces. To rotate, change the value and either wait for a natural flap or disable+enable the neighbor. |
+| `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
 | `tcp_ao` | restart-required | Pinned by `pin_tcp_ao_startup_only_runtime`. RFC 5925 MKTs are installed only when the socket is created (active-open) or when the passive listener boots. Add/remove/rotate requires a daemon restart. Logged at `ERROR` during reload. |
 | `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
 | `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
 | `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
 | `graceful_restart` | live (effective next session) | GR capability advertised in OPEN. Toggling on an established session has no in-session effect. |
 | `gr_restart_time` | live (effective next session) | Advertised in GR capability. |
-| `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Re-evaluated against existing stale routes on reconcile. |
+| `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Hot-applied in place; the new value governs the next GR peer-down event. |
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |

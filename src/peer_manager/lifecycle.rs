@@ -366,6 +366,96 @@ impl PeerManager {
         Ok(previous)
     }
 
+    /// LAN-341: apply a hot-applicable-only config change to a live static
+    /// peer in place — the counterpart to [`Self::reconfigure_peer`] for
+    /// edits whose every changed field is reload-matrix `live`
+    /// (hot-applied). The session task, its TCP connection, and the FSM
+    /// are untouched: per-session runtime knobs swap through
+    /// `PeerCommand::UpdateRuntimeConfig`, and policy chains go through
+    /// the same live-policy seam as gRPC chain edits (Route Refresh +
+    /// Adj-RIB-Out re-emit included).
+    ///
+    /// The caller (reload's changed-neighbor partition) guarantees only
+    /// hot fields differ; this function doesn't re-verify, it just never
+    /// touches anything session-bound (identity, OPEN-negotiated, or
+    /// socket-scoped fields are copied from `config` into the stored
+    /// transport config by the next rebuild path, which resolves from the
+    /// config snapshot anyway).
+    pub(super) async fn hot_update_peer(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> Result<(), PeerLifecycleError> {
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        let (knobs_changed, policies_changed) = {
+            let managed = self
+                .peers
+                .get(&peer)
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            if managed.is_dynamic {
+                return Err(PeerLifecycleError::Invalid(format!(
+                    "hot update target {peer} is a dynamic peer; reload reconciles static neighbors only"
+                )));
+            }
+            let tc = &managed.transport_config;
+            (
+                tc.max_prefixes != config.max_prefixes
+                    || tc.gr_stale_routes_time != config.gr_stale_routes_time
+                    || tc.local_ipv6_nexthop != config.local_ipv6_nexthop
+                    || tc.remove_private_as != config.remove_private_as,
+                managed.import_policy != config.import_policy
+                    || managed.export_policy != config.export_policy,
+            )
+        };
+
+        // Policy first: the live-policy seam has its own rollback, so a
+        // failure here leaves the peer fully on its prior config. A
+        // later knob failure leaves policies advanced — safe, because
+        // reload halts, keeps the OLD neighbor in its snapshot, and the
+        // next SIGHUP re-detects and re-applies both (idempotent).
+        if policies_changed {
+            self.update_runtime_policies_fatal(
+                peer.clone(),
+                config.import_policy.clone(),
+                config.export_policy.clone(),
+            )
+            .await
+            .map_err(PeerLifecycleError::Internal)?;
+        }
+
+        let managed = self
+            .peers
+            .get_mut(&peer)
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+        if knobs_changed {
+            managed
+                .handle
+                .update_runtime_config_timeout(
+                    config.max_prefixes,
+                    config.gr_stale_routes_time,
+                    config.local_ipv6_nexthop,
+                    config.remove_private_as,
+                    PEER_POLICY_UPDATE_TIMEOUT,
+                )
+                .await
+                .map_err(|error| {
+                    PeerLifecycleError::Internal(format!(
+                        "failed to hot-apply runtime knobs to {peer}: {error}"
+                    ))
+                })?;
+        }
+
+        // Manager-side bookkeeping so `rbgp neighbor list` and any later
+        // session rebuild see the new values.
+        managed.description.clone_from(&config.description);
+        managed.max_prefixes = config.max_prefixes;
+        managed.transport_config.max_prefixes = config.max_prefixes;
+        managed.transport_config.gr_stale_routes_time = config.gr_stale_routes_time;
+        managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;
+        managed.transport_config.remove_private_as = config.remove_private_as;
+        info!(%peer, "hot-applied neighbor config change in place (no session rebuild)");
+        Ok(())
+    }
+
     pub(super) async fn apply_peer_reshape_snapshot(
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,

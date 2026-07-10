@@ -1205,26 +1205,27 @@ pub(crate) async fn reload_config(
     // 5. Neighbor reconciliation. Only fires when the neighbor list
     //    itself moved; steps 1–4 already reshaped runtime state for
     //    inheritance-driven impact on existing neighbors.
+    //
+    //    LAN-341: changed neighbors are partitioned by the reload-matrix
+    //    impact of their changed-field set. A neighbor whose every
+    //    changed field is `live` (hot-applied) is updated in place via
+    //    `HotUpdatePeer` — no session-task delete/re-add, no flap. Any
+    //    session-reset or unknown-impact field keeps the neighbor on the
+    //    existing `ReconcilePeers` rebuild path.
     if !neighbors_unchanged {
-        info!(
-            added = diff.added.len(),
-            removed = diff.removed.len(),
-            changed = diff.changed.len(),
-            "reconciling neighbors after config reload"
-        );
-        for n in &diff.added {
-            info!(address = %n.address, asn = n.remote_asn, "neighbor added");
-        }
-        for addr in &diff.removed {
-            info!(address = %addr, "neighbor removed");
-        }
-        let old_map: std::collections::HashMap<&str, &config::Neighbor> = current
+        let old_map: std::collections::HashMap<(&str, Option<&str>), &config::Neighbor> = current
             .neighbors
             .iter()
-            .map(|n| (n.address.as_str(), n))
+            .map(|n| ((n.address.as_str(), n.interface.as_deref()), n))
             .collect();
+        let mut hot_changed: Vec<&config::Neighbor> = Vec::new();
+        let mut rebuild_changed: Vec<config::Neighbor> = Vec::new();
         for n in &diff.changed {
-            if let Some(old_n) = old_map.get(n.address.as_str()) {
+            let old_n = old_map
+                .get(&(n.address.as_str(), n.interface.as_deref()))
+                .copied();
+            let hot = old_n.is_some_and(|old_n| config::neighbor_change_hot_applicable(old_n, n));
+            if let Some(old_n) = old_n {
                 let changes: Vec<String> = config::describe_neighbor_changes(old_n, n)
                     .iter()
                     .map(config::FieldChange::render)
@@ -1232,9 +1233,28 @@ pub(crate) async fn reload_config(
                 info!(
                     address = %n.address,
                     changes = %changes.join(", "),
+                    apply = if hot { "hot-apply in place" } else { "session rebuild" },
                     "neighbor changed"
                 );
             }
+            if hot {
+                hot_changed.push(n);
+            } else {
+                rebuild_changed.push(n.clone());
+            }
+        }
+        info!(
+            added = diff.added.len(),
+            removed = diff.removed.len(),
+            hot_applied = hot_changed.len(),
+            rebuilt = rebuild_changed.len(),
+            "reconciling neighbors after config reload"
+        );
+        for n in &diff.added {
+            info!(address = %n.address, asn = n.remote_asn, "neighbor added");
+        }
+        for addr in &diff.removed {
+            info!(address = %addr, "neighbor removed");
         }
 
         let peer_configs = match new_config.resolved_neighbors() {
@@ -1282,83 +1302,126 @@ pub(crate) async fn reload_config(
                 .collect()
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if let Err(e) = peer_mgr_tx
-            .send(PeerManagerCommand::ReconcilePeers {
-                added: resolve(&diff.added),
-                removed: diff.removed.clone(),
-                changed: resolve(&diff.changed),
-                reply: reply_tx,
+        // Hot-applicable-only changes first: each peer is updated in
+        // place (session task untouched), and its entry in the honest
+        // working snapshot advances per peer on success. A failure halts
+        // like any other reload step — safe, because a hot update never
+        // deletes anything, and the stale snapshot entry makes the next
+        // SIGHUP re-detect and retry the same in-place update.
+        for n in hot_changed {
+            let Some(cfg) = resolve(std::slice::from_ref(n)).pop() else {
+                warn!(
+                    address = %n.address,
+                    "reload: hot-applicable neighbor missing from resolved set; skipping"
+                );
+                continue;
+            };
+            if let Err(error) = send_pm_result_step(peer_mgr_tx, |reply| {
+                PeerManagerCommand::HotUpdatePeer { config: cfg, reply }
             })
             .await
-        {
-            return halt_partial(
-                working_config,
-                &desired_config,
-                ReloadStepFailure {
-                    bucket: "neighbors.reconcile",
-                    target: String::new(),
-                    error: format!("send: {e}"),
-                },
-            );
-        }
-        match reply_rx.await {
-            Ok(reconcile) if reconcile.is_success() => {
-                working_config.neighbors = new_config.neighbors.clone();
+            {
+                return halt_partial(
+                    working_config,
+                    &desired_config,
+                    ReloadStepFailure {
+                        bucket: "neighbors.hot_update",
+                        target: n.address.clone(),
+                        error,
+                    },
+                );
             }
-            Ok(reconcile) => {
-                // Reconcile is the one step where partial failure
-                // leaves the live state genuinely ambiguous: it
-                // sequences delete-then-readd for changed peers,
-                // independent removes, and adds — any subset can
-                // succeed before the failure point, the manager
-                // doesn't update its own `current_config` during the
-                // run, and `delete_peer` / `add_peer` of the wrong
-                // ordering can leave orphaned `PeerHandle`s. Returning
-                // a guessed snapshot here would let the next reload
-                // diff against state that doesn't match live, which is
-                // worse than just bailing.
-                //
-                // Instead: return `None` so the daemon's in-memory
-                // config stays at `current` and log clearly that live
-                // state may differ. Operators investigate via
-                // `rbgp neighbor list`, fix the failing TOML,
-                // and reload again. The retry-succeeded-operations
-                // concern is bounded by the underlying ops being
-                // mostly idempotent (`delete_peer` of a missing peer
-                // returns Ok, `add_peer` of an existing peer returns
-                // a visible error rather than silent corruption); the
-                // operator gets surfaced errors on the retry rather
-                // than hidden drift.
-                for failure in &reconcile.failures {
-                    warn!(
-                        bucket = "neighbors.reconcile",
-                        target = %failure.peer,
-                        kind = ?failure.kind,
-                        error = %failure.error,
-                        "config reload step failed"
-                    );
+            if let Some(entry) = working_config
+                .neighbors
+                .iter_mut()
+                .find(|w| w.address == n.address && w.interface == n.interface)
+            {
+                *entry = n.clone();
+            }
+            info!(address = %n.address, "reload: neighbor hot-applied in place");
+        }
+
+        let needs_rebuild_pass =
+            !diff.added.is_empty() || !diff.removed.is_empty() || !rebuild_changed.is_empty();
+        if needs_rebuild_pass {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if let Err(e) = peer_mgr_tx
+                .send(PeerManagerCommand::ReconcilePeers {
+                    added: resolve(&diff.added),
+                    removed: diff.removed.clone(),
+                    changed: resolve(&rebuild_changed),
+                    reply: reply_tx,
+                })
+                .await
+            {
+                return halt_partial(
+                    working_config,
+                    &desired_config,
+                    ReloadStepFailure {
+                        bucket: "neighbors.reconcile",
+                        target: String::new(),
+                        error: format!("send: {e}"),
+                    },
+                );
+            }
+            match reply_rx.await {
+                Ok(reconcile) if reconcile.is_success() => {
+                    working_config.neighbors = new_config.neighbors.clone();
                 }
-                error!(
-                    failures = reconcile.failures.len(),
-                    "config reload halted at neighbor reconcile — live peer-manager state \
+                Ok(reconcile) => {
+                    // Reconcile is the one step where partial failure
+                    // leaves the live state genuinely ambiguous: it
+                    // sequences delete-then-readd for changed peers,
+                    // independent removes, and adds — any subset can
+                    // succeed before the failure point, the manager
+                    // doesn't update its own `current_config` during the
+                    // run, and `delete_peer` / `add_peer` of the wrong
+                    // ordering can leave orphaned `PeerHandle`s. Returning
+                    // a guessed snapshot here would let the next reload
+                    // diff against state that doesn't match live, which is
+                    // worse than just bailing.
+                    //
+                    // Instead: return `None` so the daemon's in-memory
+                    // config stays at `current` and log clearly that live
+                    // state may differ. Operators investigate via
+                    // `rbgp neighbor list`, fix the failing TOML,
+                    // and reload again. The retry-succeeded-operations
+                    // concern is bounded by the underlying ops being
+                    // mostly idempotent (`delete_peer` of a missing peer
+                    // returns Ok, `add_peer` of an existing peer returns
+                    // a visible error rather than silent corruption); the
+                    // operator gets surfaced errors on the retry rather
+                    // than hidden drift.
+                    for failure in &reconcile.failures {
+                        warn!(
+                            bucket = "neighbors.reconcile",
+                            target = %failure.peer,
+                            kind = ?failure.kind,
+                            error = %failure.error,
+                            "config reload step failed"
+                        );
+                    }
+                    error!(
+                        failures = reconcile.failures.len(),
+                        "config reload halted at neighbor reconcile — live peer-manager state \
                      may differ from the in-memory config snapshot. Inspect live state via \
                      `rbgp neighbor list` and re-edit the failing TOML before \
                      reloading again. Earlier reload steps (policy / peer-group / chain \
                      edits) DID land at the manager and remain in effect."
-                );
-                return None;
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "config reload halted: peer manager dropped reconcile reply — live \
-                     state may differ from the in-memory config snapshot. Inspect via \
-                     `rbgp neighbor list` before reloading again. Earlier reload \
-                     steps (policy / peer-group / chain edits) DID land at the manager \
-                     and remain in effect."
-                );
-                return None;
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "config reload halted: peer manager dropped reconcile reply — live \
+                         state may differ from the in-memory config snapshot. Inspect via \
+                         `rbgp neighbor list` before reloading again. Earlier reload \
+                         steps (policy / peer-group / chain edits) DID land at the manager \
+                         and remain in effect."
+                    );
+                    return None;
+                }
             }
         }
     }

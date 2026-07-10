@@ -794,6 +794,10 @@ impl PeerManager {
                             let result = self.reconcile_peers(added, removed, changed).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::HotUpdatePeer { config, reply } => {
+                            let result = self.hot_update_peer(config).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::SyncExplainConfig { enabled, cache_size, reply } => {
                             // ADR-0073: make the explain snapshot fresh before
                             // any subsequent reconcile/peer-group command on

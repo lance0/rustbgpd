@@ -153,6 +153,20 @@ impl PeerManager {
         let Some(peer_key) = self.unique_peer_key_for_address(address) else {
             return Ok(());
         };
+        self.update_runtime_policies_fatal(peer_key, import_policy, export_policy)
+            .await
+    }
+
+    /// Forward-apply resolved chains to one live peer with fatal refresh
+    /// handling — the seam LAN-341's `hot_update_peer` shares with the
+    /// gRPC chain-edit paths (session hot-apply, Route Refresh,
+    /// Adj-RIB-Out re-emit, `pending_*` retry carry).
+    pub(super) async fn update_runtime_policies_fatal(
+        &mut self,
+        peer_key: PeerKey,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+    ) -> Result<(), String> {
         self.update_runtime_policies_for_peer_key(
             peer_key,
             import_policy,

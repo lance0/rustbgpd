@@ -4893,10 +4893,48 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     // Restart-required, matching the reload matrix pins.
     assert_eq!(class("tcp_ao"), Some(RestartRequired));
     assert_eq!(class("bfd"), Some(RestartRequired));
-    // The existing classifiers disagree on these (reload matrix vs the
-    // reconcile / reshape executors), so the diff renders no annotation.
-    assert_eq!(class("remote_asn"), None);
-    assert_eq!(class("peer_group"), None);
+    // LAN-341 adjudication: both flow through the reconcile rebuild path
+    // (remote_asn is not part of the diff key; a peer_group reassignment
+    // changes the peer's effective inherited config), so both are honest
+    // session resets in the diff annotations.
+    assert_eq!(class("remote_asn"), Some(SessionReset));
+    assert_eq!(class("peer_group"), Some(SessionReset));
+}
+
+// ── LAN-341: hot-applicable partition predicate ───────────────────────
+
+#[test]
+fn neighbor_change_hot_applicable_partitions_by_impact_class() {
+    let old = test_neighbor("10.0.0.2", 65002);
+
+    // Hot-applied-only edit → in-place apply.
+    let mut hot = old.clone();
+    hot.description = Some("edge".to_string());
+    hot.max_prefixes = Some(500);
+    hot.import_policy_chain = vec!["allow-all".to_string()];
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+
+    // No change at all → not hot-applicable (nothing to apply; the
+    // caller's diff should not have flagged it).
+    assert!(!super::neighbor_change_hot_applicable(&old, &old));
+
+    // A session-reset field alone → rebuild.
+    let mut reset = old.clone();
+    reset.hold_time = Some(30);
+    assert!(!super::neighbor_change_hot_applicable(&old, &reset));
+
+    // Mixed hot + session-reset → rebuild (one bounce applies both).
+    let mut mixed = hot.clone();
+    mixed.hold_time = Some(30);
+    assert!(!super::neighbor_change_hot_applicable(&old, &mixed));
+
+    // remote_asn and peer_group edits are session resets, never hot.
+    let mut asn = old.clone();
+    asn.remote_asn = 65003;
+    assert!(!super::neighbor_change_hot_applicable(&old, &asn));
+    let mut group = old.clone();
+    group.peer_group = Some("ix".to_string());
+    assert!(!super::neighbor_change_hot_applicable(&old, &group));
 }
 
 #[test]

@@ -1135,6 +1135,131 @@ async fn reconfigure_peer_preserves_graceful_shutdown_intent() {
     assert!(managed.advertise_graceful_shutdown);
 }
 
+// ── LAN-341: hot-applicable-only edits apply in place ─────────────────
+
+#[tokio::test]
+async fn hot_update_peer_applies_in_place_without_session_rebuild() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+
+    let mut updated = make_config(addr, 65002);
+    updated.description = "hot-updated".to_string();
+    updated.max_prefixes = Some(500);
+    updated.gr_stale_routes_time = 300;
+    mgr.hot_update_peer(updated).await.unwrap();
+
+    let managed = mgr.peers.get(&key(addr)).expect("hot-updated peer");
+    // The load-bearing pin: the session task was NOT delete/re-added.
+    // Every rebuild path (`reconfigure_peer`, `reconcile_peers` changed)
+    // allocates a fresh session id; hot update must keep the same one.
+    assert_eq!(managed.session_id, session_id_before);
+    assert_eq!(managed.description, "hot-updated");
+    assert_eq!(managed.max_prefixes, Some(500));
+    assert_eq!(managed.transport_config.max_prefixes, Some(500));
+    assert_eq!(managed.transport_config.gr_stale_routes_time, 300);
+}
+
+#[tokio::test]
+async fn hot_update_peer_applies_policy_chains_in_place() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+
+    let mut updated = make_config(addr, 65002);
+    let chain = deny_policy_chain();
+    updated.import_policy = Some(chain.clone());
+    mgr.hot_update_peer(updated).await.unwrap();
+
+    let managed = mgr.peers.get(&key(addr)).expect("hot-updated peer");
+    assert_eq!(managed.session_id, session_id_before);
+    assert_eq!(managed.import_policy, Some(chain));
+}
+
+#[tokio::test]
+async fn hot_update_peer_unknown_peer_returns_not_found() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let result = mgr.hot_update_peer(make_config(addr, 65002)).await;
+    assert!(matches!(
+        result,
+        Err(rustbgpd_api::peer_types::PeerLifecycleError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn reconcile_changed_peer_still_rebuilds_session_task() {
+    // The contrast pin for LAN-341: a session-reset-class change routed
+    // through `ReconcilePeers.changed` (the reload rebuild path) must
+    // still delete/re-add the session task — observable as a fresh
+    // session id.
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+
+    let mut changed = make_config(addr, 65002);
+    changed.hold_time = Some(30);
+    let result = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![changed])
+        .await;
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+
+    let managed = mgr.peers.get(&key(addr)).expect("rebuilt peer");
+    assert_ne!(managed.session_id, session_id_before);
+    assert_eq!(managed.hold_time, Some(30));
+}
+
 #[tokio::test]
 async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
     let (_tx, rx) = mpsc::channel(16);

@@ -295,6 +295,24 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// Hot-apply reload-matrix `live` per-session runtime knobs without
+    /// tearing the session task down (LAN-341). Every carried field is
+    /// re-read from the session config on each evaluation (inbound UPDATE
+    /// for `max_prefixes`, outbound emission for `local_ipv6_nexthop` /
+    /// `remove_private_as`, GR peer-down for `gr_stale_routes_time`), so
+    /// the swap takes effect on the next evaluation.
+    UpdateRuntimeConfig {
+        /// Maximum prefixes accepted before Cease/1 (None = unlimited).
+        max_prefixes: Option<u32>,
+        /// Stale-route retention after peer restart (seconds).
+        gr_stale_routes_time: u64,
+        /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
+        local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
+        /// Private AS removal mode for outbound `AS_PATH`.
+        remove_private_as: crate::config::RemovePrivateAs,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
     /// RFC 8326 graceful-shutdown initiator: toggle attaching the
     /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
     /// session. Receiver behavior on the *other* side of the session
@@ -1265,6 +1283,49 @@ impl PeerHandle {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
                 operation: "update_export_policy",
+                deadline,
+            }),
+        }
+    }
+
+    /// Bounded hot-apply of reload-matrix `live` per-session runtime
+    /// knobs ([`PeerCommand::UpdateRuntimeConfig`]). Mirrors
+    /// [`Self::update_import_policy_timeout`]'s bounded shape for the
+    /// same reason: the peer-manager actor calls this and must not park
+    /// behind a wedged session task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, replies with one,
+    /// or doesn't acknowledge inside `deadline`.
+    pub async fn update_runtime_config_timeout(
+        &self,
+        max_prefixes: Option<u32>,
+        gr_stale_routes_time: u64,
+        local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
+        remove_private_as: crate::config::RemovePrivateAs,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::UpdateRuntimeConfig {
+                    max_prefixes,
+                    gr_stale_routes_time,
+                    local_ipv6_nexthop,
+                    remove_private_as,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "update_runtime_config",
                 deadline,
             }),
         }
