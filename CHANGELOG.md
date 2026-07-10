@@ -643,6 +643,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`unwrap()`/`expect()` audit of the transport, rpki, bmp, evpn, and
+  evpn-linux crates.** Every non-test site was reviewed: none are
+  reachable from network input or runtime IO — all remaining `expect()`
+  calls guard compile-time-certain conversions or locally provable
+  invariants, and the terse invariant messages were expanded to state
+  what guarantees them. (LAN-8)
 - **Durable config/journal writes are owner-only and symlink-safe.**
   The shared atomic-write primitive behind the config persister and the
   commit-confirm revert journal now creates its temp file with mode

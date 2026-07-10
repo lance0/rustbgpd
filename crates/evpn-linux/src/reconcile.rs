@@ -6530,7 +6530,13 @@ where
 
     let member_ids: Vec<u32> = members
         .iter()
-        .map(|ip| state.l3_groups.vtep_nh(ip).expect("just installed").id)
+        .map(|ip| {
+            state
+                .l3_groups
+                .vtep_nh(ip)
+                .expect("every member is pre-existing or was recorded by the install loop above")
+                .id
+        })
         .collect();
     let existing = state
         .l3_groups
@@ -6753,7 +6759,13 @@ where
     // Step 2: ensure group exists with the desired member set.
     let member_ids: Vec<u32> = members
         .iter()
-        .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+        .map(|ip| {
+            state
+                .groups
+                .vtep_nh(ip)
+                .expect("every member is pre-existing or was recorded by the install loop above")
+                .id
+        })
         .collect();
     // Snapshot the existing group ID + member set before the
     // mutable replace call (which re-borrows `state.groups`).
@@ -6938,7 +6950,13 @@ where
     // Compute new member-id list and REPLACE the group.
     let member_ids: Vec<u32> = members
         .iter()
-        .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+        .map(|ip| {
+            state
+                .groups
+                .vtep_nh(ip)
+                .expect("every member is pre-existing or was recorded by the install loop above")
+                .id
+        })
         .collect();
     let existing = state
         .groups
