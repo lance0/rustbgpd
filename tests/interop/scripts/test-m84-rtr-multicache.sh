@@ -35,16 +35,10 @@
 #   4. version fallback: v1-only cache, data loaded via fallback path
 #                                        → test_version_fallback
 #   5. ASPA replace + shrink-to-empty    → test_aspa_phases
-#
-# Known daemon limitation (observed while building this job, NOT
-# asserted here): after a v1-fallback session drops (e.g. StayRTR
-# restarts), the client re-probes v2 on every reconnect and — because
-# the fallback path is gated on holding no epoch — does not re-land
-# the v1 fallback until the held data expires (expire_interval later),
-# at which point validation briefly flaps before recovery. Repro:
-# `docker restart clab-m84-rtr-multicache-stayrtr` after a green run
-# and watch "RTR version mismatch: negotiated 2, received 0" repeat
-# in the daemon log at the retry interval.
+#   6. v1-fallback cache restart (LAN-312): the client reconnects at
+#      the held epoch's version — no v2 re-probe, no data drop, v1
+#      re-lands within one retry, no validation flap
+#                                        → test_v1_cache_restart
 #
 # Prerequisites: containerlab deployed, grpcurl + jq on the host.
 
@@ -228,6 +222,73 @@ test_version_fallback() {
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 6 — v1-fallback cache restart (LAN-312)
+# ---------------------------------------------------------------------------
+
+test_v1_cache_restart() {
+    log "Scenario 6: stayrtr restart — v1 re-lands within one retry, no flap"
+
+    local pre_full_tables pre_mismatches poll_file="/tmp/m84-v1-restart-poll.$$"
+    pre_full_tables=$(log_count "RTR full table received" "$STAYRTR_IP")
+    pre_mismatches=$(rlog | grep -cF "RTR version mismatch" || true)
+
+    # Continuously sample the stayrtr-backed route's validation state;
+    # any not_found/missing sample is a retention violation.
+    : > "$poll_file"
+    (
+        for _ in $(seq 1 120); do
+            route_field 198.51.100.0 24 validationState >> "$poll_file"
+            sleep 0.5
+        done
+    ) &
+    local poller_pid=$!
+
+    log "Restarting $STAYRTR..."
+    docker restart "$STAYRTR" > /dev/null
+
+    # The client must reconnect at the held epoch's version (v1) — never
+    # re-probing v2 while data is held — and land a fresh v1 full table
+    # within the retry interval, not at the end of the expire window.
+    wait_log_count "RTR full table received" "$STAYRTR_IP" \
+        $((pre_full_tables + 1)) \
+        "v1 session re-landed with a fresh full-table EoD after restart"
+
+    # The wedge signature: repeated v2 probes answered with a version-0
+    # Error Report. A fixed client never probes v2 with held v1 data.
+    local post_mismatches
+    post_mismatches=$(rlog | grep -cF "RTR version mismatch" || true)
+    if [ "$post_mismatches" -eq "$pre_mismatches" ]; then
+        ok "no v2 re-probe version mismatch across the restart"
+    else
+        fail "client re-probed v2 across the restart ($((post_mismatches - pre_mismatches)) version mismatches)"
+    fi
+
+    # Retention: the held entries were never dropped.
+    if [ "$(log_count 'cache server down — removing entries' "$STAYRTR_IP")" -eq 0 ]; then
+        ok "held stayrtr data was never dropped"
+    else
+        fail "held stayrtr data was dropped across the restart"
+    fi
+
+    # A few extra samples after recovery, then stop the poller.
+    sleep 3
+    kill "$poller_pid" 2>/dev/null || true
+    wait "$poller_pid" 2>/dev/null || true
+
+    local samples bad
+    samples=$(wc -l < "$poll_file")
+    bad=$(grep -cv '^valid$' "$poll_file" || true)
+    if [ "$samples" -ge 10 ] && [ "$bad" -eq 0 ]; then
+        ok "no validation flap across restart ($samples samples, all valid)"
+    else
+        fail "validation flapped across restart ($bad of $samples samples not valid: $(sort -u "$poll_file" | tr '\n' ' '))"
+    fi
+    rm -f "$poll_file"
+
+    assert_route_field 198.51.100.0 24 validationState valid
+}
+
+# ---------------------------------------------------------------------------
 # Scenario 2 — cache reconnect (routinator restart)
 # ---------------------------------------------------------------------------
 
@@ -374,6 +435,7 @@ main() {
 
     test_initial_load
     test_version_fallback
+    test_v1_cache_restart
     test_cache_reconnect
     test_aspa_phases
     test_serial_regression
