@@ -263,13 +263,11 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 comparisons against `route.local-pref` see **100** when the attribute
 is absent, `route.med` sees **0**. Prefix predicates never match a
 prefixless route (e.g. BGP-LS NLRIs); `route.next-hop`,
-`route.route-type`, and `route.evpn-route-type` never match when the
-corresponding attribute is absent. `route.origin-as` is absent on
-empty and `AS_SET`-only paths and then matches neither `==` nor `!=`
-nor `in` (`!(... in ...)` negates plainly, matching the prefix-set
-precedent).
 `route.route-type`, `route.evpn-route-type`, and `route.family` never
-match when the corresponding attribute is absent.
+match when the corresponding attribute is absent. `route.origin-as` is
+absent on empty and `AS_SET`-only paths and then matches neither `==`
+nor `!=` nor `in` (`!(... in ...)` negates plainly, matching the
+prefix-set precedent).
 
 `==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
 
